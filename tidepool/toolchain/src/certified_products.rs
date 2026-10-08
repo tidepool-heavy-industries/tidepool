@@ -71,7 +71,7 @@ pub enum PendingImportOwner {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ReceiptImportOwner {
     Source {
         unit: String,
@@ -99,7 +99,7 @@ pub enum ReceiptImportOwner {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct AcceptedGlobal {
     pub identity: SymbolIdentity,
     pub rep: RuntimeRep,
@@ -1402,8 +1402,9 @@ impl GlobalDictionary {
         operation: &InventoryOperation,
     ) -> CertResult<Self> {
         let rows = array(value)?;
-        let mut unique = BTreeSet::new();
-        let rows = rows
+        operation.reserve::<(AcceptedGlobal, usize)>(rows.len())?;
+        operation.reserve::<(&AcceptedGlobal, [usize; 4])>(rows.len())?;
+        let rows: Vec<_> = rows
             .iter()
             .map(|value| {
                 let row = sized(value, 5)?;
@@ -1415,22 +1416,19 @@ impl GlobalDictionary {
                     entry_signature: signature(&row[2])?,
                     required_evaluated: boolean(&row[3])?,
                 };
-                charge_global(operation, &global)?;
-                let encoded = value_global(&global);
-                operation.charge_value_copies(&encoded, 1)?;
-                let length = encoded_size(&encoded)?;
-                operation.charge(length)?;
-                let mut canonical = Vec::with_capacity(length);
-                ciborium::ser::into_writer(&encoded, &mut canonical)
-                    .map_err(|_| CertificationError::Receipt("global dictionary encoding"))?;
-                if !unique.insert(canonical) {
-                    return Err(CertificationError::Receipt(
-                        "duplicate global dictionary row",
-                    ));
-                }
-                Ok((global, length))
+                let payload_bytes = global_payload_copy_bytes(&global)?;
+                operation.charge(payload_bytes)?;
+                Ok((global, payload_bytes))
             })
             .collect::<CertResult<_>>()?;
+        let mut unique = BTreeSet::new();
+        for (global, _) in &rows {
+            if !unique.insert(global) {
+                return Err(CertificationError::Receipt(
+                    "duplicate global dictionary row",
+                ));
+            }
+        }
         Ok(Self {
             rows,
             used: BTreeSet::new(),
@@ -1453,23 +1451,85 @@ impl GlobalDictionary {
             .map(|value| {
                 let index = usize::try_from(number(value)?)
                     .map_err(|_| CertificationError::Receipt("global dictionary index"))?;
-                let (global, length) = self
+                let (global, payload_bytes) = self
                     .rows
                     .get(index)
                     .ok_or(CertificationError::Receipt("global dictionary index"))?;
-                // Canonical bytes account payload expansion; reserve structural
-                // slots separately before cloning the witness and its owner.
-                operation.charge(
-                    length
-                        .checked_mul(4)
-                        .ok_or(CertificationError::Receipt("expanded global bytes"))?,
-                )?;
+                // The dictionary already owns typed facts. Charge the payload
+                // allocations made by Clone; the vector slot is reserved above.
+                operation.charge(*payload_bytes)?;
                 operation.reserve::<(usize, usize, usize)>(1)?;
                 self.used.insert(index);
                 Ok(global.clone())
             })
             .collect()
     }
+}
+
+// Heap payload copied by AcceptedGlobal::clone. Inline fields and the owner enum
+// are covered by the caller's AcceptedGlobal slot reservation.
+fn global_payload_copy_bytes(global: &AcceptedGlobal) -> CertResult<usize> {
+    let mut bytes = 0_usize;
+    let mut add = |amount: usize| -> CertResult<()> {
+        bytes = bytes
+            .checked_add(amount)
+            .ok_or(CertificationError::Receipt("global copy size"))?;
+        Ok(())
+    };
+    let symbol_bytes = |identity: &SymbolIdentity| -> CertResult<usize> {
+        [
+            &identity.unit,
+            &identity.module,
+            &identity.namespace,
+            &identity.occurrence,
+        ]
+        .into_iter()
+        .chain(identity.record_parent.iter())
+        .try_fold(0_usize, |bytes, text| bytes.checked_add(text.len()))
+        .ok_or(CertificationError::Receipt("global copy size"))
+    };
+    add(symbol_bytes(&global.identity)?)?;
+    match &global.owner {
+        ReceiptImportOwner::Source {
+            unit,
+            module,
+            binder,
+            ..
+        }
+        | ReceiptImportOwner::Package {
+            unit,
+            module,
+            binder,
+            ..
+        }
+        | ReceiptImportOwner::RetainedPackage {
+            unit,
+            module,
+            binder,
+            ..
+        } => {
+            add(unit.len())?;
+            add(module.len())?;
+            add(symbol_bytes(binder)?)?;
+        }
+        ReceiptImportOwner::Retained { identity, .. } => add(symbol_bytes(identity)?)?,
+    }
+    if let Some(signature) = &global.entry_signature {
+        let count = signature
+            .arguments
+            .len()
+            .checked_add(
+                signature
+                    .results
+                    .returned_reps()
+                    .map_or(0, |reps| reps.len()),
+            )
+            .ok_or(CertificationError::Receipt("global copy size"))?;
+        add(count
+            .checked_mul(std::mem::size_of::<RuntimeRep>())
+            .ok_or(CertificationError::Receipt("global copy size"))?)?;
+    }
+    Ok(bytes)
 }
 
 struct EncodingSize(usize);
@@ -15291,6 +15351,161 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn dictionary_copy_accounting_tracks_owned_payloads() {
+        let identity = SymbolIdentity {
+            unit: "u".into(),
+            module: "mod".into(),
+            namespace: "v".into(),
+            occurrence: "name".into(),
+            record_parent: Some("parent".into()),
+        };
+        let global = AcceptedGlobal {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(Signature {
+                arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Word(64)],
+                results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+            }),
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Source {
+                unit: "u".into(),
+                module: "mod".into(),
+                module_version: Some(ModuleVersion([7; 32])),
+                original_ordinal: 3,
+                binder: identity,
+            },
+        };
+        // Two independent symbol payloads, source owner labels and three reps.
+        assert_eq!(
+            global_payload_copy_bytes(&global).unwrap(),
+            2 * (1 + 3 + 1 + 4 + 6) + 1 + 3 + 3 * std::mem::size_of::<RuntimeRep>()
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(original_native_index_property_config())]
+        #[test]
+        fn dictionary_typed_uniqueness_matches_full_wire_facts(
+            seed in 0_u8..8,
+            owner_kind in 0_u8..4,
+            changed_field in 0_u8..12,
+            signature_kind in 0_u8..4,
+            identical in proptest::bool::ANY,
+        ) {
+            let mut left = dictionary_test_global();
+            left.identity.occurrence = format!("value{seed}");
+            left.identity.record_parent = (seed % 2 == 0).then(|| "Parent".into());
+            left.entry_signature = match signature_kind {
+                0 => None,
+                kind => Some(Signature {
+                    arguments: vec![RuntimeRep::LiftedRef, RuntimeRep::Word(64)],
+                    results: match kind {
+                        1 => ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+                        2 => ResultContract::NoSuccess,
+                        _ => ResultContract::CallerResult,
+                    },
+                }),
+            };
+            left.owner = match owner_kind {
+                0 => ReceiptImportOwner::Source {
+                    unit: "home".into(), module: "Owner".into(),
+                    module_version: Some(ModuleVersion([seed; 32])),
+                    original_ordinal: seed.into(), binder: left.identity.clone(),
+                },
+                1 => ReceiptImportOwner::Retained { identity: left.identity.clone(), generation: seed.into() },
+                2 => ReceiptImportOwner::Package { unit: "library".into(), module: "Owner".into(),
+                    interface_digest: [seed; 32], binder: left.identity.clone() },
+                _ => ReceiptImportOwner::RetainedPackage { unit: "library".into(), module: "Owner".into(),
+                    interface_digest: [seed; 32], generation: seed.into(), binder: left.identity.clone() },
+            };
+            let mut right = left.clone();
+            if !identical {
+                match changed_field {
+                    0 => right.identity.unit.push('x'),
+                    1 => right.identity.module.push('x'),
+                    2 => right.identity.namespace.push('x'),
+                    3 => right.identity.occurrence.push('x'),
+                    4 => right.identity.record_parent = Some("Different".into()),
+                    5 => right.rep = RuntimeRep::UnliftedRef,
+                    6 => right.required_evaluated = !right.required_evaluated,
+                    7 => right.entry_signature = Some(Signature {
+                        arguments: vec![RuntimeRep::Address], results: ResultContract::CallerResult,
+                    }),
+                    8 => match &mut right.owner {
+                        ReceiptImportOwner::Source { original_ordinal, .. } => *original_ordinal += 1,
+                        ReceiptImportOwner::Retained { generation, .. }
+                        | ReceiptImportOwner::RetainedPackage { generation, .. } => *generation += 1,
+                        ReceiptImportOwner::Package { interface_digest, .. } => interface_digest[0] ^= 1,
+                    },
+                    9 => match &mut right.owner {
+                        ReceiptImportOwner::Source { module_version, .. } => *module_version = None,
+                        ReceiptImportOwner::Retained { identity, .. } => identity.module.push('x'),
+                        ReceiptImportOwner::Package { module, .. }
+                        | ReceiptImportOwner::RetainedPackage { module, .. } => module.push('x'),
+                    },
+                    10 => right.owner = ReceiptImportOwner::Retained { identity: right.identity.clone(), generation: 999 },
+                    _ => match &mut right.owner {
+                        ReceiptImportOwner::Source { binder, .. }
+                        | ReceiptImportOwner::Package { binder, .. }
+                        | ReceiptImportOwner::RetainedPackage { binder, .. } => binder.occurrence.push('x'),
+                        ReceiptImportOwner::Retained { identity, .. } => identity.occurrence.push('x'),
+                    },
+                }
+            }
+            let wire_equal = receipt_bytes(&value_global(&left)) == receipt_bytes(&value_global(&right));
+            let mut unique = BTreeSet::new();
+            unique.insert(&left);
+            let duplicate = !unique.insert(&right);
+            proptest::prop_assert_eq!(duplicate, wire_equal);
+            proptest::prop_assert_eq!(left == right, wire_equal);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an explicit retained compiler transaction"]
+    fn receipt_dictionary_replays_fourteen_retained_items_under_one_budget() {
+        let root = PathBuf::from(
+            std::env::var_os("TIDEPOOL_RETAINED_COMPILER_TRANSACTION")
+                .expect("explicit retained compiler transaction path"),
+        );
+        let operation = InventoryOperation::new(InventoryDecodeLimits::default());
+        let expected_targets = [5, 4, 10, 4, 33, 33, 28, 28, 12, 10, 10, 5, 5, 12];
+        println!(
+            "Value={} AcceptedGlobal={} RuntimeRep={}",
+            std::mem::size_of::<Value>(),
+            std::mem::size_of::<AcceptedGlobal>(),
+            std::mem::size_of::<RuntimeRep>()
+        );
+        for (index, target_count) in expected_targets.into_iter().enumerate() {
+            let item = root.join(format!("item-{}", index + 1));
+            let bytes = std::fs::read(item.join("certified-products.cbor")).unwrap();
+            let before = operation.work_usage().unwrap().0;
+            let packet =
+                decode_receipt_packet_with_operation(&bytes, Some(&item), &operation).unwrap();
+            assert_eq!(packet.receipt.modules.len(), 39);
+            assert_eq!(
+                packet
+                    .receipt
+                    .modules
+                    .iter()
+                    .flat_map(|module| &module.groups)
+                    .map(|group| group.globals.len())
+                    .sum::<usize>(),
+                19_738
+            );
+            assert_eq!(packet.receipt.targets["__prepared"].len(), target_count);
+            let after = operation.work_usage().unwrap().0;
+            println!(
+                "item={} receipt_bytes={} dictionary_rows={} work={after} increment={}",
+                index + 1,
+                bytes.len(),
+                packet.globals.len(),
+                after - before
+            );
+        }
+    }
+
+    #[test]
     fn receipt_coordinates_share_dictionary_reconstruction_work_budget() {
         let package_global = |module: &str| {
             let mut global = dictionary_test_global();
@@ -15388,7 +15603,7 @@ pub(crate) mod tests {
         let mut dictionary = test_dictionary(std::slice::from_ref(&global));
         let row_bytes = dictionary.rows[0].1;
         let one_reference_work = std::mem::size_of::<AcceptedGlobal>()
-            + row_bytes * 4
+            + row_bytes
             + std::mem::size_of::<(usize, usize, usize)>();
         let operation = InventoryOperation::new(InventoryDecodeLimits {
             max_work: one_reference_work,
