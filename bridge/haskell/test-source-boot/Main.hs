@@ -9,7 +9,7 @@ import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
 import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory)
 import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks)
-import PhysicalExecutableEpochTest (physicalExecutableEpoch)
+import PhysicalExecutableEpochTest (exactInterfaceOwnerReuse, physicalExecutableEpoch)
 
 main :: IO ()
 main = runTests tests
@@ -18,6 +18,7 @@ tests :: TestTree
 tests = testGroup "source-boot"
   [ testCase "bounded artifact reads" boundedReadChecks
   , testCase "physical native executable epoch" physicalExecutableEpoch
+  , testCase "exact interface compiler owner reuse" exactInterfaceOwnerReuse
   , testCase "finalized Core" $ finalizedCoreChecks
   , testCase "finalized frontend once" $ finalizedFrontendOnce
   , testCase "post-load provider frontend once" postloadProviderFrontendOnce
