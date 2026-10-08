@@ -1500,15 +1500,38 @@ mod tests {
                 "job <- Cmd.tryStartWith RunOwned [bash|sleep 3600|] >>= liftEither"
             }
         };
-        let response = super::super::tests::dispatch_haskell_script(
-            campaign.root_installation.policy.as_ref(),
-            source,
-        )
-        .await;
-        assert_eq!(response["status"], "committed", "{response}");
-        super::super::command_test_support::backend_request(campaign)
-            .await
-            .supply(Ok(backend.clone()));
+        let policy = campaign.root_installation.policy.clone();
+        // Run ownership commits only after backend supply captures the original
+        // principal and grants. Drive supply while the cell can still be parked.
+        tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+            tokio::join!(
+                async {
+                    let response =
+                        super::super::tests::dispatch_haskell_script(policy.as_ref(), source).await;
+                    assert_eq!(response["status"], "committed", "{response}");
+                },
+                async {
+                    let request = campaign
+                        .next_deployment(
+                            "shutdown command backend supply",
+                            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                            |event| match event {
+                                LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                                other => Err(other),
+                            },
+                        )
+                        .await;
+                    assert_eq!(
+                        request.purpose,
+                        exomonad_actor::command_jobs::CommandBackendPurpose::Command,
+                        "the shutdown fixture starts one command without source capture"
+                    );
+                    request.supply(Ok(backend.clone()));
+                }
+            );
+        })
+        .await
+        .expect("shutdown command cell and backend supply settle within the campaign budget");
         tokio::time::timeout(Duration::from_secs(30), backend.started.acquire())
             .await
             .expect("command execution was actually admitted")
@@ -1544,9 +1567,10 @@ mod tests {
     #[tokio::test]
     async fn consuming_shutdown_rejects_unknown_command_cleanup_after_hosted_join() {
         let campaign = TestCampaign::start().await;
+        let root_actor = campaign.actor.clone();
         let backend = ShutdownCommands::new(true);
         let observed = backend.clone();
-        campaign
+        let first = campaign
             .run_scenario_expecting_cleanup_failure(
                 |campaign| {
                     Box::pin(async move {
@@ -1557,11 +1581,29 @@ mod tests {
                             .await
                             .expect_err("external cleanup is initially unknown");
                         assert_eq!(first.hosted, CampaignHostedJoin::Joined);
+                        let CampaignRootRetirement::Settled(root) = &first.root else {
+                            panic!("root retirement settles independently of external cleanup");
+                        };
+                        assert_eq!(
+                            root.cleanup.hook(),
+                            &exomonad_actor::CleanupComponentOutcome::Confirmed
+                        );
+                        assert_eq!(
+                            root.cleanup.realm(),
+                            &exomonad_actor::CleanupComponentOutcome::Confirmed
+                        );
+                        assert_eq!(
+                            root.cleanup.children(),
+                            &exomonad_actor::CleanupComponentOutcome::Unconfirmed(
+                                "command stopped but external cleanup remains unknown".into()
+                            )
+                        );
                         // The external probe can later clear. The actor's already
                         // published first terminal cleanup remains authoritative.
                         backend
                             .unknown
                             .store(false, std::sync::atomic::Ordering::Release);
+                        first
                     })
                 },
                 |failure| {
@@ -1569,10 +1611,20 @@ mod tests {
                     let CampaignRootRetirement::Settled(root) = &failure.root else {
                         panic!("the actual root retired with a cleanup observation: {failure:?}");
                     };
-                    assert!(matches!(
+                    assert_eq!(
+                        root.cleanup.hook(),
+                        &exomonad_actor::CleanupComponentOutcome::Confirmed
+                    );
+                    assert_eq!(
                         root.cleanup.realm(),
-                        exomonad_actor::CleanupComponentOutcome::Unconfirmed(_)
-                    ));
+                        &exomonad_actor::CleanupComponentOutcome::Confirmed
+                    );
+                    assert_eq!(
+                        root.cleanup.children(),
+                        &exomonad_actor::CleanupComponentOutcome::Unconfirmed(
+                            "command stopped but external cleanup remains unknown".into()
+                        )
+                    );
                     assert!(
                         failure.forest.iter().any(|outcome| matches!(outcome,
                 exomonad_actor::ForestRootShutdown::Settled(root) if !root.cleanup.is_confirmed()))
@@ -1580,7 +1632,15 @@ mod tests {
                 },
             )
             .await;
-        assert_eq!(observed.backend.control_count(), 1);
+        let CampaignRootRetirement::Settled(first_root) = &first.root else {
+            panic!("initial root retirement must remain observable: {first:?}");
+        };
+        assert_eq!(
+            root_actor.terminal().cleanup(),
+            Some(first_root.cleanup.clone())
+        );
+        let controls = observed.backend.controls.lock();
+        assert!(matches!(controls.as_slice(), [exomonad_actor::command_jobs::CommandControl::Cancel, exomonad_actor::command_jobs::CommandControl::Cancel]), "post_stop cancels execution; retirement retries uncertain external cleanup: {controls:?}");
         assert!(observed
             .backend
             .cancelled
@@ -1685,20 +1745,30 @@ mod tests {
         let campaign = TestCampaign::start().await;
         let backend = ShutdownCommands::new(true);
         let observed = backend.clone();
-        campaign.run_scenario(|campaign| Box::pin(async move {
+        let controls_after_retry = campaign.run_scenario(|campaign| Box::pin(async move {
             admit_shutdown_command(campaign, backend.clone(), CommandLifetime::Run).await;
             let first = campaign.observe_shutdown().await.expect_err("run-owned cleanup initially refuses confirmation");
             assert_eq!(first.hosted, CampaignHostedJoin::Joined);
             assert!(matches!(&first.root, CampaignRootRetirement::Settled(root) if root.cleanup.is_confirmed()));
             assert!(first.forest.iter().any(|outcome| matches!(outcome,
                 exomonad_actor::ForestRootShutdown::RunResources(exomonad_actor::CleanupComponentOutcome::Unconfirmed(_)))));
+            assert_eq!(backend.backend.control_count(), 2, "job stop cancels execution and retirement retries unclean descendants");
+            let probes_before_retry = backend.cleanup_probes.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(probes_before_retry > 0, "the initial external cleanup was probed");
             backend.unknown.store(false, std::sync::atomic::Ordering::Release);
             let retried = campaign.observe_shutdown().await.expect("the actual run owner retries retained cleanup");
             assert!(retried.forest.len() > first.forest.len(), "prior refusal observations remain visible");
             assert!(retried.forest.starts_with(&first.forest));
             assert!(retried.is_confirmed());
+            let controls_after_retry = backend.backend.control_count();
+            assert!((2..=3).contains(&controls_after_retry), "retirement retries cancellation only if cleanup is still uncertain; settlement can confirm it first");
+            controls_after_retry
         })).await;
-        assert_eq!(observed.backend.control_count(), 1);
+        assert_eq!(
+            observed.backend.control_count(),
+            controls_after_retry,
+            "consuming shutdown does not recancel confirmed run cleanup"
+        );
         assert!(
             observed
                 .cleanup_probes

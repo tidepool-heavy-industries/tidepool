@@ -259,6 +259,16 @@ impl Shared {
         }
     }
 
+    fn cleanup_is_confirmed(&self) -> bool {
+        matches!(
+            &*self.phase.borrow(),
+            CommandStatus::CommandFinished(CommandResult {
+                cleanup: CommandCleanup::CommandClean,
+                ..
+            })
+        )
+    }
+
     async fn cleanup(&self, id: &str) -> CommandCleanup {
         let current = self.phase.borrow().clone();
         let CommandStatus::CommandFinished(result) = current else {
@@ -284,6 +294,34 @@ impl Shared {
             }
         });
         cleanup
+    }
+
+    async fn resource_cleanup(
+        &self,
+        id: &str,
+        mode: crate::local_actor::ResourceCleanup,
+    ) -> crate::CleanupComponentOutcome {
+        // The resource owner waits for JobActor::post_stop before retirement.
+        // Its confirmed result needs no further cancellation. An unclean
+        // terminal result can still retain external descendants, so retirement
+        // retries cancellation before asking the backend for cleanup evidence.
+        if matches!(mode, crate::local_actor::ResourceCleanup::Retire)
+            && !self.cleanup_is_confirmed()
+        {
+            let backend = self.backend.lock().clone();
+            if let Some(backend) = backend {
+                drop(backend.control(id, CommandControl::Cancel).await);
+            }
+        }
+        match self.cleanup(id).await {
+            CommandCleanup::CommandClean => crate::CleanupComponentOutcome::Confirmed,
+            CommandCleanup::CommandRetained => crate::CleanupComponentOutcome::Unconfirmed(
+                format!("command {id} retains descendants"),
+            ),
+            CommandCleanup::CommandCleanupUnknown(detail) => {
+                crate::CleanupComponentOutcome::Unconfirmed(detail)
+            }
+        }
     }
 
     async fn status(&self, caller: ActorRef, id: &str) -> CommandStatus {
@@ -485,29 +523,7 @@ impl CommandJobs {
                 move |mode| {
                     let shared = cleanup_shared.clone();
                     let id = cleanup_id.clone();
-                    Box::pin(async move {
-                        if matches!(mode, crate::local_actor::ResourceCleanup::Retire) {
-                            let backend = shared.backend.lock().clone();
-                            if let Some(backend) = backend {
-                                // best-effort: retiring a job whose backend may
-                                // have already exited; the cancel is advisory.
-                                drop(backend.control(&id, CommandControl::Cancel).await);
-                            }
-                        }
-                        match shared.cleanup(&id).await {
-                            CommandCleanup::CommandClean => {
-                                crate::CleanupComponentOutcome::Confirmed
-                            }
-                            CommandCleanup::CommandRetained => {
-                                crate::CleanupComponentOutcome::Unconfirmed(format!(
-                                    "command {id} retains descendants"
-                                ))
-                            }
-                            CommandCleanup::CommandCleanupUnknown(detail) => {
-                                crate::CleanupComponentOutcome::Unconfirmed(detail)
-                            }
-                        }
-                    })
+                    Box::pin(async move { shared.resource_cleanup(&id, mode).await })
                 },
             )
             .await
@@ -928,26 +944,12 @@ impl CommandJobs {
         }
         let finished = matches!(*shared.phase.borrow(), CommandStatus::CommandFinished(_));
         if finished {
-            if matches!(operation, CommandControl::CloseInput)
-                && matches!(
-                    &*shared.phase.borrow(),
-                    CommandStatus::CommandFinished(CommandResult {
-                        cleanup: CommandCleanup::CommandClean,
-                        ..
-                    })
-                )
-            {
+            if matches!(operation, CommandControl::CloseInput) && shared.cleanup_is_confirmed() {
                 *shared.input.lock() = CommandInput::ClosedInput;
                 return Ok(());
             }
             if matches!(operation, CommandControl::Cancel) {
-                if matches!(
-                    &*shared.phase.borrow(),
-                    CommandStatus::CommandFinished(CommandResult {
-                        cleanup: CommandCleanup::CommandClean,
-                        ..
-                    })
-                ) {
+                if shared.cleanup_is_confirmed() {
                     return Ok(());
                 }
                 let backend = shared.backend.lock().clone();
@@ -1520,17 +1522,21 @@ mod bounded_backend_tests {
     }
 
     fn finished_shared_with_hanging_backend() -> Shared {
+        test_shared(
+            CommandStatus::CommandFinished(CommandResult {
+                outcome: CommandOutcome::CommandExited(0),
+                cleanup: CommandCleanup::CommandRetained,
+            }),
+            Some(Arc::new(HangingBackend)),
+        )
+    }
+
+    fn test_shared(status: CommandStatus, backend: Option<Arc<dyn CommandBackend>>) -> Shared {
         Shared {
             cleanup_owner: Mutex::new(ResourceCleanupOwner::Actor),
             owner: Mutex::new(ActorRef::first(ActorId(1))),
-            phase: watch::channel(CommandStatus::CommandFinished(CommandResult {
-                outcome: CommandOutcome::CommandExited(0),
-                // Anything but `CommandClean` so `Shared::cleanup` does not
-                // short-circuit before reaching the backend.
-                cleanup: CommandCleanup::CommandRetained,
-            }))
-            .0,
-            backend: Mutex::new(Some(Arc::new(BoundedBackend(Arc::new(HangingBackend))))),
+            phase: watch::channel(status).0,
+            backend: Mutex::new(backend.map(|backend| Arc::new(BoundedBackend(backend)))),
             input: Mutex::new(CommandInput::ClosedInput),
             sinks: Mutex::new(Vec::new()),
             observers: Mutex::new(Default::default()),
@@ -1541,6 +1547,277 @@ mod bounded_backend_tests {
             owner_notice_armed: std::sync::atomic::AtomicBool::new(false),
             report: Mutex::new(None),
             supplied: watch::channel(false).0,
+        }
+    }
+
+    struct RetirementBackend {
+        started: tokio::sync::Semaphore,
+        finished: watch::Sender<bool>,
+        cleanup: watch::Sender<CommandCleanup>,
+        cancellations: std::sync::atomic::AtomicUsize,
+        probes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RetirementBackend {
+        fn new(cleanup: CommandCleanup) -> Arc<Self> {
+            Arc::new(Self {
+                started: tokio::sync::Semaphore::new(0),
+                finished: watch::channel(false).0,
+                cleanup: watch::channel(cleanup).0,
+                cancellations: 0.into(),
+                probes: 0.into(),
+            })
+        }
+
+        fn cancellations(&self) -> usize {
+            self.cancellations.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn probes(&self) -> usize {
+            self.probes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl CommandBackend for RetirementBackend {
+        fn execute<'a>(
+            &'a self,
+            _id: &'a str,
+            _spec: CommandSpec,
+            _phase: watch::Sender<CommandStatus>,
+        ) -> BoxFuture<'a, CommandResult> {
+            Box::pin(async move {
+                let mut finished = self.finished.subscribe();
+                self.started.add_permits(1);
+                while !*finished.borrow_and_update() {
+                    finished.changed().await.unwrap();
+                }
+                CommandResult {
+                    outcome: CommandOutcome::CommandExited(0),
+                    cleanup: self.cleanup.borrow().clone(),
+                }
+            })
+        }
+
+        fn control<'a>(
+            &'a self,
+            _id: &'a str,
+            operation: CommandControl,
+        ) -> BoxFuture<'a, Result<(), CommandError>> {
+            Box::pin(async move {
+                assert!(matches!(operation, CommandControl::Cancel));
+                self.cancellations
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.finished.send_replace(true);
+                Ok(())
+            })
+        }
+
+        fn cleanup<'a>(&'a self, _id: &'a str) -> BoxFuture<'a, CommandCleanup> {
+            Box::pin(async move {
+                self.probes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.cleanup.borrow().clone()
+            })
+        }
+
+        fn output<'a>(
+            &'a self,
+            _id: &'a str,
+            _bytes: usize,
+        ) -> BoxFuture<'a, Result<CommandOutput, CommandError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn read<'a>(
+            &'a self,
+            _id: &'a str,
+            _stream: CommandStream,
+            _position: CommandPosition,
+        ) -> BoxFuture<'a, Result<CommandPage, CommandError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    async fn spawn_retirement_job(
+        shared: Arc<Shared>,
+        backend: oneshot::Receiver<BackendResult>,
+    ) -> (RactorRef<JobMessage>, ractor::concurrency::JoinHandle<()>) {
+        Actor::spawn(
+            None,
+            JobActor,
+            JobArguments {
+                id: "retirement-job".into(),
+                spec: CommandSpec {
+                    argv: vec!["true".into()],
+                    directory: None,
+                    environment: Vec::new(),
+                    memory: 256 * 1024 * 1024,
+                    input: CommandInput::ClosedInput,
+                    source_capture: CommandSourceCapture::NoCapture,
+                },
+                shared,
+                backend,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn admitted_retirement_job(
+        backend: Arc<RetirementBackend>,
+    ) -> (
+        Arc<Shared>,
+        RactorRef<JobMessage>,
+        ractor::concurrency::JoinHandle<()>,
+    ) {
+        let shared = Arc::new(test_shared(CommandStatus::CommandQueued, None));
+        let (supply, receive) = oneshot::channel();
+        let (actor, task) = spawn_retirement_job(shared.clone(), receive).await;
+        assert!(supply.send(Ok(backend.clone())).is_ok());
+        tokio::time::timeout(Duration::from_secs(5), backend.started.acquire())
+            .await
+            .expect("execution is admitted before retirement")
+            .unwrap()
+            .forget();
+        assert_eq!(backend.cancellations(), 0);
+        (shared, actor, task)
+    }
+
+    #[tokio::test]
+    async fn resource_retirement_does_not_recancel_confirmed_job() {
+        let backend = RetirementBackend::new(CommandCleanup::CommandClean);
+        let (shared, actor, task) = admitted_retirement_job(backend.clone()).await;
+        actor.stop(None);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("job retirement completes")
+            .unwrap();
+        assert!(shared.cleanup_is_confirmed());
+        assert_eq!(backend.cancellations(), 1, "post_stop cancels execution");
+        for mode in [
+            crate::local_actor::ResourceCleanup::Observe,
+            crate::local_actor::ResourceCleanup::Retire,
+            crate::local_actor::ResourceCleanup::Retire,
+        ] {
+            assert_eq!(
+                shared.resource_cleanup("retirement-job", mode).await,
+                crate::CleanupComponentOutcome::Confirmed
+            );
+        }
+        assert_eq!(
+            backend.cancellations(),
+            1,
+            "confirmed retirement sends no further cancellation"
+        );
+        assert_eq!(
+            backend.probes(),
+            0,
+            "the completed execution supplied cleanup proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_retirement_retries_unclean_jobs_until_cleanup_is_confirmed() {
+        use crate::local_actor::ResourceCleanup::{Observe, Retire};
+        for cleanup in [
+            CommandCleanup::CommandRetained,
+            CommandCleanup::CommandCleanupUnknown("external cleanup unknown".into()),
+        ] {
+            for owner_stops in [false, true] {
+                let backend = RetirementBackend::new(cleanup.clone());
+                let (shared, actor, task) = admitted_retirement_job(backend.clone()).await;
+                if owner_stops {
+                    actor.stop(None);
+                } else {
+                    backend.finished.send_replace(true);
+                }
+                tokio::time::timeout(Duration::from_secs(5), task)
+                    .await
+                    .expect("the real job stops before its cleanup callback")
+                    .unwrap();
+                let initial_cancellations = usize::from(owner_stops);
+                assert_eq!(backend.cancellations(), initial_cancellations);
+                assert!(!shared.cleanup_is_confirmed());
+                assert!(matches!(
+                    shared.resource_cleanup("retirement-job", Observe).await,
+                    crate::CleanupComponentOutcome::Unconfirmed(_)
+                ));
+                assert_eq!(
+                    backend.cancellations(),
+                    initial_cancellations,
+                    "observation does not cancel"
+                );
+                assert!(matches!(
+                    shared.resource_cleanup("retirement-job", Retire).await,
+                    crate::CleanupComponentOutcome::Unconfirmed(_)
+                ));
+                assert_eq!(
+                    backend.cancellations(),
+                    initial_cancellations + 1,
+                    "unclean descendants receive cancellation"
+                );
+                assert_eq!(backend.probes(), 2);
+                backend.cleanup.send_replace(CommandCleanup::CommandClean);
+                assert_eq!(
+                    shared.resource_cleanup("retirement-job", Retire).await,
+                    crate::CleanupComponentOutcome::Confirmed
+                );
+                assert_eq!(backend.cancellations(), initial_cancellations + 2);
+                assert_eq!(
+                    backend.probes(),
+                    3,
+                    "the external owner must confirm cleanup"
+                );
+                for mode in [Retire, Observe] {
+                    assert_eq!(
+                        shared.resource_cleanup("retirement-job", mode).await,
+                        crate::CleanupComponentOutcome::Confirmed
+                    );
+                }
+                assert_eq!(backend.cancellations(), initial_cancellations + 2);
+                assert_eq!(backend.probes(), 3);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_retirement_confirms_never_started_jobs() {
+        for refused in [false, true] {
+            let shared = Arc::new(test_shared(CommandStatus::CommandQueued, None));
+            let (supply, receive) = oneshot::channel();
+            let (actor, task) = spawn_retirement_job(shared.clone(), receive).await;
+            if refused {
+                assert!(supply
+                    .send(Err(CommandError::CommandUnavailable(
+                        "backend refused".into()
+                    )))
+                    .is_ok());
+            } else {
+                actor.stop(None);
+            }
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("a job with no execution retires")
+                .unwrap();
+            let CommandStatus::CommandFinished(result) = shared.phase.borrow().clone() else {
+                panic!("the real job owner must publish its terminal result");
+            };
+            assert_eq!(result.cleanup, CommandCleanup::CommandClean);
+            if refused {
+                assert!(matches!(result.outcome, CommandOutcome::CommandFailed(_)));
+            } else {
+                assert_eq!(result.outcome, CommandOutcome::CommandCancelled);
+            }
+            assert!(shared.backend.lock().is_none());
+            assert_eq!(
+                shared
+                    .resource_cleanup(
+                        "retirement-job",
+                        crate::local_actor::ResourceCleanup::Retire
+                    )
+                    .await,
+                crate::CleanupComponentOutcome::Confirmed
+            );
         }
     }
 
