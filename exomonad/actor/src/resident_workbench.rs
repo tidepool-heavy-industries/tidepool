@@ -15497,6 +15497,15 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     #[tokio::test]
     async fn source_preparation_retains_actual_close_after_waiter_cancel_and_owner_retirement_observation(
     ) {
+        use tracing::instrument::WithSubscriber;
+
+        let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(log.clone())
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         let (_, _, source, _session_root) = host_mount_fixture();
         let retained = crate::RetainedActorExit::new();
         let owner = CompilerCloseOwner::Initialization(retained.clone());
@@ -15511,6 +15520,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             let calls = Arc::clone(&calls);
             move || {
                 assert_eq!(calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0);
+                tracing::info!(preparation_probe = true, "native preparation entered");
                 entered.notify_one();
                 proceed
                     .lock()
@@ -15534,10 +15544,30 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     ))
                     .await
             }
+            .instrument(tracing::info_span!(
+                "preparation_requester",
+                issuer = 73_u64
+            ))
+            .with_current_subscriber()
         });
         tokio::time::timeout(std::time::Duration::from_secs(15), entered.notified())
             .await
             .unwrap();
+        let trace = log.0.lock().unwrap().clone();
+        let probe = std::str::from_utf8(&trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|event| event["fields"]["preparation_probe"] == true)
+            .expect("shared native preparation retains its issuing scoped dispatcher");
+        assert!(
+            probe["spans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|span| { span["name"] == "preparation_requester" && span["issuer"] == 73 }),
+            "the original request owns shared preparation across async and blocking pools"
+        );
         assert!(matches!(
             retained.compiler_close_observations().as_slice(),
             [crate::termination::CompilerWorkClose::Pending]

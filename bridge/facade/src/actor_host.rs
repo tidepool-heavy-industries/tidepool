@@ -3269,7 +3269,8 @@ type CompiledRoot = (
 #[tracing::instrument(
     target = "tidepool::actor_host::startup",
     name = "compile_root",
-    skip_all
+    skip_all,
+    fields(run_root = %run_directory.path().display(), actor_path = "/root")
 )]
 fn compile_root(
     config: &ActorHostConfig,
@@ -3527,6 +3528,12 @@ fn host_workbench_source(
 /// Prepare the selected rows with the live host's actual handler and native
 /// interpreter composition. The temporary Store and idle machine admit no
 /// actors; completed entries retain only the independent source deployment.
+#[tracing::instrument(
+    target = "tidepool::actor_host::startup",
+    name = "workspace_toolsets_prepare",
+    skip_all,
+    fields(workspace = %workspace.display(), deployment = %directory.path().display())
+)]
 pub(crate) async fn prepare_workspace_toolsets(
     workspace: &Path,
     directory: &tidepool_atomic_write::DirectoryAnchor,

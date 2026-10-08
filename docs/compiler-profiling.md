@@ -42,6 +42,17 @@ execution; retain the daemon's correlated events too. Bounded stderr excerpts
 can omit compiler phases, so report that coverage separately from complete host
 span capture.
 
+Startup work uses the production `compile_root`, `workspace_toolsets_prepare`,
+and `actor_application_prepare` spans. The last carries the exact actor and
+actor path; `/root` distinguishes root activation from child installation.
+`child_launch` carries its parent actor and includes workspace admission,
+custody transfer and waiting for the child's startup. These durations overlap
+the child's own preparation. Shared toolset preparation retains the first
+issuer's span and tracing dispatcher across its async and blocking tasks;
+another waiter does not issue another physical compilation. Attribute startup
+requests using that ancestry and the exact daemon request identity, never by
+matching counts or assuming everything within a host's lifetime is startup.
+
 ## Prepare matched producers
 
 Use a separate compiler producer and fresh request cohort. Debug information

@@ -9,6 +9,7 @@ use tidepool_runtime::session::{
     resident_workbench_templates, run_turn, CompiledTurn, ImageRegistry, PreparedSourceEntry,
     TurnClassification, TurnKind, TurnRequest, TurnResult,
 };
+use tracing::{instrument::WithSubscriber, Instrument};
 
 use super::ResolvedSpec;
 
@@ -293,24 +294,28 @@ impl ToolsetPreparation {
             let key = recipe.clone();
             // This task belongs to the preparation owner, independently of any
             // actor waiting for it. Dropping a waiter cannot interrupt its peers.
-            tokio::spawn(async move {
-                let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
-                    if let Some((ticket, cancellation)) = compiler_work {
-                        ticket.run_for_workload(workload, cancellation, || {
-                            #[cfg(test)]
-                            if let Some(observer) = fresh_launch_observer {
-                                observer();
-                            }
+            tokio::spawn(
+                async move {
+                    let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
+                        if let Some((ticket, cancellation)) = compiler_work {
+                            ticket.run_for_workload(workload, cancellation, || {
+                                #[cfg(test)]
+                                if let Some(observer) = fresh_launch_observer {
+                                    observer();
+                                }
+                                compile_installer(recipe, resolved, source, registry, acquisition)
+                            })
+                        } else {
                             compile_installer(recipe, resolved, source, registry, acquisition)
-                        })
-                    } else {
-                        compile_installer(recipe, resolved, source, registry, acquisition)
-                    }
-                })
-                .await
-                .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
-                owner.settle(key, &task, outcome);
-            });
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
+                    owner.settle(key, &task, outcome);
+                }
+                .in_current_span()
+                .with_current_subscriber(),
+            );
         }
         task.wait().await
     }

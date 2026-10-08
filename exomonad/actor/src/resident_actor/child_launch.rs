@@ -275,6 +275,12 @@ impl crate::local_actor::WorkerStartupAdmission for ChildStartupAdmission {
     }
 }
 
+#[tracing::instrument(
+    target = "exomonad_actor::workbench_phase",
+    name = "child_launch",
+    skip_all,
+    fields(parent_actor = %prepared.continuation.context.actor)
+)]
 pub(super) async fn await_launch<H, O>(
     environment: ResidentEnvironment<H, O>,
     kernel: KernelContext,

@@ -7566,6 +7566,15 @@ where
             .await
     }
 
+    #[tracing::instrument(
+        target = "exomonad_actor::workbench_phase",
+        name = "actor_application_prepare",
+        skip_all,
+        fields(
+            actor = %context.actor,
+            actor_path = %self.descriptor.actor_path().map(ToString::to_string).unwrap_or_default(),
+        )
+    )]
     async fn prepare_interactive_policy_from_source(
         &mut self,
         kernel: &KernelContext,
