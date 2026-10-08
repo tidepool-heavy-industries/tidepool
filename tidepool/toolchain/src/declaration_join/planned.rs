@@ -1170,18 +1170,21 @@ mod tests {
     #[test]
     fn authored_closure_refuses_package_drift_and_zero_group_home_downgrade() {
         use crate::certified_products::{
-            fixture_finalized_product,
+            encode_home_certification, fixture_finalized_product,
             tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
             PackageInterfaceWitness, PendingImportOwner,
         };
-        use tidepool_repr::execution_schema::testing;
+        use tidepool_repr::execution_schema::{
+            testing, CachedHomeOwner, ModuleVersion, RawModuleProduct, SymbolIdentity,
+        };
 
         let root = tempfile::tempdir().unwrap();
+        let external_unit = "external-package";
         let package_path = root.path().join("External.hi");
         std::fs::write(&package_path, [0x43]).unwrap();
         let digest = Sha256::digest([0x43]).into();
         let packages = BTreeMap::from([(
-            ("fixture".into(), "External".into()),
+            (external_unit.into(), "External".into()),
             PackageInterfaceWitness {
                 selected_path: package_path.clone(),
                 sha256: digest,
@@ -1192,9 +1195,12 @@ mod tests {
             vec![(
                 7,
                 vec![PendingImportOwner::Package {
-                    unit: "fixture".into(),
+                    unit: external_unit.into(),
                     module: "External".into(),
-                    binder: testing::identity("External", "entry"),
+                    binder: SymbolIdentity {
+                        unit: external_unit.into(),
+                        ..testing::identity("External", "entry")
+                    },
                     interface_digest: digest,
                 }],
             )],
@@ -1202,21 +1208,43 @@ mod tests {
             &packages,
             vec![0x42],
         );
-        let empty = original_groups_fixture_with_interface(
-            "External",
-            vec![],
-            7,
-            &BTreeMap::new(),
-            vec![0x45],
+        let interface = vec![0x45];
+        let product_bytes =
+            tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+                unit: external_unit.into(),
+                module: "External".into(),
+                interface: interface.clone(),
+                groups: vec![],
+            }]);
+        let empty_owner = CachedHomeOwner {
+            unit: external_unit.into(),
+            module: "External".into(),
+            module_version: ModuleVersion([7; 32]),
+            skinny_iface_sha256: Sha256::digest(&interface).into(),
+            product_sha256: Sha256::digest(&product_bytes).into(),
+        };
+        let certification = encode_home_certification(&empty_owner, &[], &BTreeMap::new()).unwrap();
+        let package_bytes = crate::module_candidates::tests::package_imports_with_roots(
+            &empty_owner.unit,
+            &empty_owner.module,
+            &interface,
+            Vec::new(),
         );
-        let recovered = recovered_witness_fixtures(&[
-            fixture_finalized_product(consumer, [1; 32]),
-            fixture_finalized_product(empty, [1; 32]),
-        ]);
-        let products = recovered
-            .iter()
-            .map(|row| row.product.clone())
-            .collect::<Vec<_>>();
+        let empty = CertifiedRecoveryProduct::from_certification(
+            empty_owner,
+            interface,
+            product_bytes,
+            package_bytes,
+            certification,
+        );
+        let consumer = recovered_witness_fixtures(&[fixture_finalized_product(consumer, [1; 32])])
+            .remove(0)
+            .product;
+        let empty = recovered_witness_fixtures(&[fixture_finalized_product(empty, [1; 32])])
+            .remove(0)
+            .product;
+        issued_originals(std::slice::from_ref(&empty)).unwrap();
+        let products = vec![consumer, empty];
         let evidence = products
             .iter()
             .map(|product| crate::cache::ModuleEvidence {
