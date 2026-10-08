@@ -13,6 +13,10 @@ import sys
 
 
 PREFIX = "harness-usecase "
+EXPECTED_PHASES = (
+    "first-arithmetic", "publish-retained", "lookup-retained", "reuse-retained",
+    "repeat-retained", "async-yield-result", "reuse-async-action", "repeat-arithmetic",
+)
 
 
 def read_json(path):
@@ -140,10 +144,7 @@ def compiler_events(host_rows, daemon_rows):
             continue
         identity = request_identity(row)
         executions = {str(span.get("execution")) for span in span_fields(row)
-                      if span.get("execution") is not None}
-        # Some formatter versions include the cell execution on the current span.
-        if attr(row, "execution") is not None:
-            executions.add(str(attr(row, "execution")))
+                      if span.get("name") == "cell" and span.get("execution") is not None}
         submissions.append({"identity": identity, "executions": sorted(executions)})
 
     services = []
@@ -181,7 +182,12 @@ def analyze(record_path):
     if not isinstance(artifact_root_value, str):
         raise ValueError("runner record has no per-case artifact root")
     artifact_root = Path(artifact_root_value)
-    stdout = record.get("streams", {}).get("stdout", {})
+    streams = record.get("streams")
+    if not isinstance(streams, dict):
+        raise ValueError("runner record has no streams object")
+    stdout = streams.get("stdout")
+    if not isinstance(stdout, dict):
+        raise ValueError("runner record has no retained stdout record")
     stdout_name = stdout.get("path")
     if not isinstance(stdout_name, str) or Path(stdout_name).name != stdout_name:
         raise ValueError("runner record has no safe retained stdout path")
@@ -191,8 +197,20 @@ def analyze(record_path):
     environment = next((row for row in phases if row["phase"] == "environment"), None)
     if environment is None:
         raise ValueError("retained output has no environment phase")
-    host_path = Path(environment["host_trace"])
-    daemon_path = Path(environment["compiler_trace"])
+    host_value = environment.get("host_trace")
+    daemon_value = environment.get("compiler_trace")
+    if not isinstance(host_value, str) or not host_value:
+        raise ValueError("environment phase has no host_trace path")
+    if not isinstance(daemon_value, str) or not daemon_value:
+        raise ValueError("environment phase has no compiler_trace path")
+    host_path = Path(host_value)
+    daemon_path = Path(daemon_value)
+    if not host_path.is_file():
+        raise ValueError(f"environment host_trace does not exist: {host_path}")
+    if not daemon_path.is_file():
+        raise ValueError(f"environment compiler_trace does not exist: {daemon_path}")
+    if not artifact_root.is_dir():
+        raise ValueError(f"runner artifact root does not exist: {artifact_root}")
     host_rows = read_jsonl(host_path)
     daemon_rows = read_jsonl(daemon_path)
     dispatches, calls, submissions, services, queues = compiler_events(host_rows, daemon_rows)
@@ -200,7 +218,7 @@ def analyze(record_path):
     by_execution = {}
     for request in submissions:
         for execution_id in request["executions"]:
-            by_execution.setdefault(execution_id, []).append(request["identity"])
+            by_execution.setdefault(execution_id, []).append(request)
     services_by_identity = {}
     for service in services:
         if service["identity"] is not None:
@@ -214,41 +232,72 @@ def analyze(record_path):
             continue
         call_id = phase.get("call_id")
         execution_ids = sorted(dispatches.get(str(call_id), set())) if call_id else []
-        identity_set = set()
+        phase_submissions = []
         for execution_id in execution_ids:
-            identity_set.update(identity for identity in by_execution.get(execution_id, [])
-                                if identity is not None)
-        identities = sorted(identity_set)
+            phase_submissions.extend(by_execution.get(execution_id, []))
+        identities = sorted({request["identity"] for request in phase_submissions
+                              if request["identity"] is not None})
         digest_set = {identity[3] for identity in identities}
         service_rows = []
         for identity in identities:
             matched = services_by_identity.get(identity, [])
+            timed_record = (len(matched) == 1 and matched[0]["elapsed_ms"] is not None)
             service_rows.append({
                 "daemon_epoch": identity[0], "admission_id": identity[1],
                 "request_ordinal": identity[2], "compile_request": identity[3],
                 "service_records": matched,
-                "service_attribution": "one" if len(matched) == 1 else
-                                       "missing" if not matched else "ambiguous",
+                "service_attribution": "one_timed_record" if timed_record else
+                                       "missing" if not matched else
+                                       "incomplete_record" if len(matched) == 1 else "ambiguous",
             })
         logical = integer(phase.get("logical_compiler_requests"))
         call_timing = [item for execution_id in execution_ids for item in calls.get(execution_id, [])]
         source = phase.get("source")
         source_digest = hashlib.sha256(source.encode()).hexdigest() if isinstance(source, str) else None
         phase_queue_ids = sorted({(identity[0], identity[1]) for identity in identities})
+        matched_services = sum(row["service_attribution"] == "one_timed_record" for row in service_rows)
+        missing_services = sum(row["service_attribution"] == "missing" for row in service_rows)
+        incomplete_services = sum(row["service_attribution"] == "incomplete_record" for row in service_rows)
+        ambiguous_services = sum(row["service_attribution"] == "ambiguous" for row in service_rows)
+        missing_identities = sum(request["identity"] is None for request in phase_submissions)
+        unattributed_events = sum(not request["executions"] for request in submissions)
+        capture_complete = execution.get("diagnostic_evidence_complete") is True
+        if not phase_submissions and logical == 0 and unattributed_events == 0:
+            attribution = "zero_logical_requests_no_correlated_submission_observed"
+        elif (logical is not None and logical == len(phase_submissions)
+              and not missing_identities and len(execution_ids) == 1
+              and len(identities) == len(phase_submissions)
+              and matched_services == len(identities)
+              and not missing_services and not incomplete_services and not ambiguous_services
+              and capture_complete):
+            attribution = "complete"
+        elif phase_submissions or logical or unattributed_events:
+            attribution = "partial"
+        else:
+            attribution = "unknown"
         output_phases.append({
             "phase": phase["phase"], "sequence": phase.get("sequence"), "call_id": call_id,
+            "completed": phase.get("completed") is True,
             "invocation_execution": phase.get("invocation_execution"),
             "yielded_before_terminal": phase.get("yielded_before_terminal"),
             "wall_ns": integer(phase.get("wall_ns")),
             "first_successor_ns": integer(phase.get("first_successor_ns")),
             "logical_compiler_requests": logical,
+            "host_submission_event_count": len(phase_submissions),
+            "host_submission_identity_count": len(identities),
+            "host_submission_events_missing_identity": missing_identities,
+            "daemon_service_matched_count": matched_services,
+            "daemon_service_missing_count": missing_services,
+            "daemon_service_incomplete_count": incomplete_services,
+            "daemon_service_ambiguous_count": ambiguous_services,
+            "globally_unattributed_host_submission_event_count": unattributed_events,
             "dispatch_executions": execution_ids,
+            "dispatch_attribution": "one" if len(execution_ids) == 1 else
+                                    "missing" if not execution_ids else "ambiguous",
             "call_timing_records": call_timing,
             "host_admission_status": "not_separately_instrumented",
             "client_compiler_submissions": service_rows,
-            "compiler_attribution": "joined" if identities else
-                                    "no_correlated_submission_observed" if logical == 0 else
-                                    "incomplete_submission_trace",
+            "compiler_attribution": attribution,
             "source_sha256": source_digest,
             "same_source_seen_in_prior_phase": source_digest in prior_sources if source_digest else None,
             "compiler_request_digest_seen_before": {
@@ -269,6 +318,48 @@ def analyze(record_path):
             prior_sources.add(source_digest)
         prior_digests.update(digest_set)
 
+    workload_phases = [phase for phase in output_phases
+                       if phase["phase"] in EXPECTED_PHASES]
+    phase_counts = {name: sum(phase["phase"] == name for phase in workload_phases)
+                    for name in EXPECTED_PHASES}
+    phase_coverage = {
+        "expected_count": len(EXPECTED_PHASES),
+        "expected_order": list(EXPECTED_PHASES),
+        "observed_workload_record_count": len(workload_phases),
+        "completed_unique_phase_count": sum(
+            count == 1 and next((phase.get("completed") is True for phase in workload_phases
+                                 if phase["phase"] == name), False)
+            for name, count in phase_counts.items()),
+        "missing": [name for name, count in phase_counts.items() if count == 0],
+        "duplicates": [name for name, count in phase_counts.items() if count > 1],
+        "unexpected": sorted({phase["phase"] for phase in output_phases
+                              if phase["phase"] not in EXPECTED_PHASES}),
+        "sequence_errors": [
+            {"phase": phase["phase"], "observed": phase.get("sequence"),
+             "expected": EXPECTED_PHASES.index(phase["phase"])}
+            for phase in workload_phases
+            if phase.get("sequence") != EXPECTED_PHASES.index(phase["phase"])
+        ],
+    }
+    control_phase_counts = {name: sum(phase["phase"] == name for phase in phases)
+                            for name in ("environment", "activation")}
+    activation = next((phase for phase in phases if phase["phase"] == "activation"), None)
+    phase_coverage["control_phases"] = {
+        "counts": control_phase_counts,
+        "missing": [name for name, count in control_phase_counts.items() if count == 0],
+        "duplicates": [name for name, count in control_phase_counts.items() if count > 1],
+    }
+    observed_order = [phase["phase"] for phase in workload_phases]
+    phase_coverage["observed_order"] = observed_order
+    phase_coverage["order_matches_expected"] = observed_order == list(EXPECTED_PHASES)
+    phase_coverage["complete"] = (
+        not phase_coverage["missing"] and not phase_coverage["duplicates"]
+        and not phase_coverage["unexpected"] and not phase_coverage["sequence_errors"]
+        and phase_coverage["order_matches_expected"]
+        and phase_coverage["control_phases"]["counts"] == {"environment": 1, "activation": 1}
+        and phase_coverage["completed_unique_phase_count"] == len(EXPECTED_PHASES)
+    )
+
     queue_output = []
     phase_by_admission = {}
     for phase in output_phases:
@@ -282,6 +373,19 @@ def analyze(record_path):
             "related_phases": sorted(phase_by_admission.get((epoch, admission), set())),
             "attribution_scope": "daemon worker admission; do not add to per-request service",
         })
+    all_host_identities = {request["identity"] for request in submissions
+                           if request["identity"] is not None}
+    unattributed_host = []
+    for request in submissions:
+        if request["identity"] is None or not request["executions"]:
+            identity = request["identity"]
+            matched = services_by_identity.get(identity, []) if identity is not None else []
+            unattributed_host.append({
+                "identity": identity, "executions": request["executions"],
+                "daemon_service_records": matched,
+            })
+    orphan_services = [service for service in services
+                       if service["identity"] is None or service["identity"] not in all_host_identities]
 
     return {
         "schema": 1,
@@ -297,6 +401,8 @@ def analyze(record_path):
             "deployment": environment.get("deployment"),
             "frozen_catalog_qualification": "not_established_by_this_counted_test",
         },
+        "activation": activation,
+        "phase_coverage": phase_coverage,
         "timing_contract": {
             "phase_wall_and_first_successor_overlap_call_timing_and_compiler_spans": True,
             "compiler_service_is_per_request_and_not_added_to_phase_wall": True,
@@ -305,11 +411,8 @@ def analyze(record_path):
         },
         "queue_trace_status": ("records_observed" if queues else "no_records_observed_unknown"),
         "queue_observations": queue_output,
-        "unattributed_compiler_submissions": [
-            {"identity": item["identity"], "executions": item["executions"]}
-            for item in submissions
-            if item["identity"] is None or not item["executions"]
-        ],
+        "unattributed_compiler_submissions": unattributed_host,
+        "unmatched_daemon_service_records": orphan_services,
         "phases": output_phases,
     }
 

@@ -26,7 +26,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-    def make_case(self, *, queue=True, submissions=True):
+    def make_case(self, *, queue=True, submissions=True, service_records=1, cell_span=True):
         artifact_root = self.root / "artifacts"
         host_path = artifact_root / "host.jsonl"
         compiler_path = artifact_root / "compiler/compiler.jsonl"
@@ -34,10 +34,12 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
             {"schema": 1, "phase": "environment", "prepared_root_entry_supplied": False,
              "host_trace": str(host_path), "compiler_trace": str(compiler_path),
              "deployment": {"TIDEPOOL_COMPILER_DEPLOYMENT": "/test/compiler"}},
+            {"schema": 1, "phase": "activation", "completed": True,
+             "wall_ns": 9_000, "logical_compiler_requests": 1, "context_items": 1},
             {"schema": 1, "phase": "reuse-retained", "sequence": 3,
              "call_id": "usecase-3", "wall_ns": 20_000, "first_successor_ns": 8_000,
              "logical_compiler_requests": 1, "invocation_execution": "synchronous",
-             "source": "value <- perfAction\n_ <- display value"},
+             "completed": True, "source": "value <- perfAction\n_ <- display value"},
         ]
         stdout = self.root / "case.stdout.log"
         stdout.write_text("".join("harness-usecase " + json.dumps(row) + "\n"
@@ -57,11 +59,13 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         if submissions:
             host.append({"target": "tidepool_extract_cmd::endpoint", "fields": {
                 "message": "compiler request identified", "transport": "daemon", **request},
-                "span": {"name": "cell", "execution": "exec-3"}})
-        daemon = [{"target": "tidepool_extract_cmd::daemon", "fields": {
+                "span": ({"name": "cell", "execution": "exec-3"} if cell_span else
+                         {"name": "compile_request", "compile_request": "digest-a"})})
+        service = {"target": "tidepool_extract_cmd::daemon", "fields": {
             "message": "compiler request finished", "phase": "compiler_service",
             "elapsed_ms": 5, "exit_code": 0},
-            "span": {"name": "compile_request", **request}}]
+            "span": {"name": "compile_request", **request}}
+        daemon = [service.copy() for _ in range(service_records)]
         if queue:
             daemon.append({"target": "tidepool_extract_cmd::daemon", "fields": {
                 "message": "compiler job dequeued", "phase": "compiler_queue",
@@ -83,6 +87,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         report = reporter.analyze(self.make_case())
         phase = report["phases"][0]
         self.assertEqual(phase["dispatch_executions"], ["exec-3"])
+        self.assertEqual(phase["compiler_attribution"], "complete")
         self.assertEqual(phase["call_timing_records"][0]["checkout_wait_ms"], "2")
         self.assertEqual(phase["client_compiler_submissions"][0]["service_records"][0]["elapsed_ms"], 5)
         self.assertEqual(phase["queue_admission_ids"][0]["admission_id"], 7)
@@ -94,6 +99,11 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual(phase["wall_ns"], 20_000)
         self.assertEqual(phase["provider_model_latency_ms"], None)
         self.assertEqual(phase["store_projection_status"], "not_instrumented")
+        self.assertEqual(report["activation"]["wall_ns"], 9_000)
+        self.assertEqual(report["phase_coverage"]["expected_count"], 8)
+        self.assertEqual(report["phase_coverage"]["completed_unique_phase_count"], 1)
+        self.assertEqual(len(report["phase_coverage"]["missing"]), 7)
+        self.assertFalse(report["phase_coverage"]["complete"])
 
     def test_absent_queue_observation_stays_unknown_and_is_not_zero(self):
         report = reporter.analyze(self.make_case(queue=False))
@@ -106,7 +116,74 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         phase = report["phases"][0]
         self.assertEqual(phase["logical_compiler_requests"], 1)
         self.assertEqual(phase["client_compiler_submissions"], [])
-        self.assertEqual(phase["compiler_attribution"], "incomplete_submission_trace")
+        self.assertEqual(phase["compiler_attribution"], "partial")
+
+    def test_missing_or_ambiguous_physical_service_keeps_attribution_partial(self):
+        for count, status_key in ((0, "daemon_service_missing_count"),
+                                  (2, "daemon_service_ambiguous_count")):
+            with self.subTest(service_records=count):
+                phase = reporter.analyze(self.make_case(service_records=count))["phases"][0]
+                self.assertEqual(phase["compiler_attribution"], "partial")
+                self.assertEqual(phase[status_key], 1)
+
+    def test_full_event_join_stays_partial_when_runner_trace_capture_is_incomplete(self):
+        record = self.make_case()
+        payload = json.loads(record.read_text())
+        payload["execution"]["diagnostic_evidence_complete"] = False
+        record.write_text(json.dumps(payload))
+        phase = reporter.analyze(record)["phases"][0]
+        self.assertEqual(phase["host_submission_event_count"], 1)
+        self.assertEqual(phase["daemon_service_matched_count"], 1)
+        self.assertEqual(phase["compiler_attribution"], "partial")
+
+    def test_real_host_request_shape_without_cell_span_is_unattributed(self):
+        report = reporter.analyze(self.make_case(cell_span=False))
+        phase = report["phases"][0]
+        self.assertEqual(phase["dispatch_executions"], ["exec-3"])
+        self.assertEqual(phase["host_submission_event_count"], 0)
+        self.assertEqual(phase["compiler_attribution"], "partial")
+        self.assertEqual(len(report["unattributed_compiler_submissions"]), 1)
+        self.assertEqual(len(report["unattributed_compiler_submissions"][0]["daemon_service_records"]), 1)
+
+    def test_missing_environment_trace_path_is_a_controlled_report_error(self):
+        record = self.make_case()
+        output_path = self.root / "case.stdout.log"
+        lines = output_path.read_text().splitlines()
+        row = json.loads(lines[0][len("harness-usecase "):])
+        del row["host_trace"]
+        lines[0] = "harness-usecase " + json.dumps(row)
+        output_path.write_text("\n".join(lines) + "\n")
+        with self.assertRaisesRegex(ValueError, "no host_trace path"):
+            reporter.analyze(record)
+
+    def test_missing_activation_is_reported_in_coverage(self):
+        record = self.make_case()
+        output_path = self.root / "case.stdout.log"
+        rows = [line for line in output_path.read_text().splitlines()
+                if '"phase": "activation"' not in line]
+        output_path.write_text("\n".join(rows) + "\n")
+        report = reporter.analyze(record)
+        self.assertIsNone(report["activation"])
+        self.assertEqual(report["phase_coverage"]["control_phases"]["missing"], ["activation"])
+
+    def test_phase_coverage_reports_duplicates_and_wrong_sequence(self):
+        record = self.make_case()
+        output_path = self.root / "case.stdout.log"
+        rows = output_path.read_text().splitlines()
+        phase_index = next(index for index, line in enumerate(rows)
+                           if '"phase": "reuse-retained"' in line)
+        duplicate = json.loads(rows[phase_index][len("harness-usecase "):])
+        duplicate["sequence"] = 4
+        rows[phase_index] = "harness-usecase " + json.dumps(duplicate)
+        rows.append("harness-usecase " + json.dumps(duplicate))
+        output_path.write_text("\n".join(rows) + "\n")
+        coverage = reporter.analyze(record)["phase_coverage"]
+        self.assertEqual(coverage["duplicates"], ["reuse-retained"])
+        self.assertEqual(coverage["sequence_errors"], [
+            {"phase": "reuse-retained", "observed": 4, "expected": 3},
+            {"phase": "reuse-retained", "observed": 4, "expected": 3},
+        ])
+        self.assertFalse(coverage["complete"])
 
     def test_truncated_phase_log_is_rejected(self):
         record = self.make_case()
@@ -115,6 +192,33 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         record.write_text(json.dumps(payload))
         with self.assertRaisesRegex(ValueError, "truncated"):
             reporter.analyze(record)
+
+    def test_retained_producer_shapes_do_not_invent_execution_correlation(self):
+        # Sanitized event shapes from the retained process-cleanup host JSONL
+        # lines 190/205 documented in the private evidence README, plus the
+        # owned-daemon compiler JSONL producer. The host request has identity,
+        # but its persisted span list has no cell execution.
+        dispatch = {"target": "exomonad_actor::resident_tools", "fields": {
+            "message": "workbench cell dispatched to its actor", "context_call_id": "call-a",
+            "execution": "exec-a"}}
+        submission = {"target": "tidepool_extract_cmd::endpoint", "fields": {
+            "message": "compiler request identified", "transport": "daemon",
+            "daemon_epoch": "epoch-a", "admission_id": 6, "request_ordinal": 1,
+            "compile_request": "digest-a"}, "span": {"name": "compile_request",
+            "compile_request": "digest-a"}, "spans": [
+                {"name": "Actor"}, {"name": "actor", "message": "Workbench"},
+                {"name": "compile_request", "transport": "transaction"},
+                {"name": "compile_request", "transport": "daemon"}]}
+        physical = {"fields": {"phase": "compiler_service", "elapsed_ms": 26,
+                               "message": "compiler request finished"},
+                    "span": {"name": "compile_request", "compile_request": "digest-a",
+                             "physical_execution": "epoch-a:6:1"}}
+        dispatches, _, submissions, services, _ = reporter.compiler_events(
+            [dispatch, submission], [physical])
+        self.assertEqual(dispatches["call-a"], {"exec-a"})
+        self.assertEqual(submissions[0]["identity"], ("epoch-a", 6, 1, "digest-a"))
+        self.assertEqual(submissions[0]["executions"], [])
+        self.assertEqual(services[0]["identity"], submissions[0]["identity"])
 
 
 if __name__ == "__main__":
