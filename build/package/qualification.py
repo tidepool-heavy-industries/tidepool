@@ -762,15 +762,20 @@ def freeze_test_fixtures(source: Path, root: Path) -> dict:
     return record
 
 def verify_frozen_test_fixtures(root: Path, record: dict) -> None:
+    shared = root / "share/exomonad"
     manifest_path = root / "share/exomonad/test-fixtures.json"
+    fixture_root = root / TEST_FIXTURE_ROOT
+    if (not (root / "share").is_dir() or (root / "share").is_symlink()
+            or not shared.is_dir() or shared.is_symlink()
+            or manifest_path.is_symlink() or not manifest_path.is_file()):
+        raise ValueError("frozen fixture manifest path is missing or aliased")
+    if fixture_root.is_symlink() or not fixture_root.is_dir():
+        raise ValueError("frozen test fixture root is missing or aliased")
     manifest = json.loads(manifest_path.read_text())
     if manifest != record.get("manifest") or sha256(manifest_path) != record.get("manifest_sha256"):
         raise ValueError("frozen fixture manifest changed")
     if manifest != {"schema": 1, "kind": "haskell-test-fixtures", "files": sorted(record.get("files", {}))}:
         raise ValueError("frozen fixture inventory differs from its manifest")
-    fixture_root = root / TEST_FIXTURE_ROOT
-    if fixture_root.is_symlink() or not fixture_root.is_dir():
-        raise ValueError("frozen test fixture root is missing or aliased")
     actual = {path.relative_to(fixture_root).as_posix(): sha256(path)
               for path in fixture_root.rglob("*") if path.is_file()}
     if actual != record.get("files"):

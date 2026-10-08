@@ -122,6 +122,28 @@ class NativeQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'root is missing or aliased'):
                 qualification.verify_frozen_test_fixtures(bundle, frozen)
 
+    def test_frozen_fixture_verifier_rejects_identical_manifest_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, bundle, record = self.frozen_fixture(Path(directory))
+            manifest = bundle / 'share/exomonad/test-fixtures.json'
+            external = Path(directory) / 'external-manifest.json'
+            shutil.copyfile(manifest, external)
+            manifest.unlink()
+            manifest.symlink_to(external)
+            with self.assertRaisesRegex(ValueError, 'manifest path.*aliased'):
+                qualification.verify_frozen_test_fixtures(bundle, record)
+
+    def test_frozen_fixture_verifier_rejects_identical_exomonad_ancestor_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, _, bundle, record = self.frozen_fixture(root)
+            external_shared = root / 'external/exomonad'
+            shutil.copytree(bundle / 'share/exomonad', external_shared)
+            shutil.rmtree(bundle / 'share/exomonad')
+            (bundle / 'share/exomonad').symlink_to(external_shared)
+            with self.assertRaisesRegex(ValueError, 'manifest path.*aliased'):
+                qualification.verify_frozen_test_fixtures(bundle, record)
+
     def test_fixture_manifest_rejects_noncanonical_traversal_and_absolute_names(self):
         invalid = ('./workspace/sample.hs', 'workspace//sample.hs', '../sample.hs', '/sample.hs')
         for relative in invalid:
