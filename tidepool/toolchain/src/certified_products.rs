@@ -8293,6 +8293,20 @@ pub(crate) mod tests {
                 .all(|product| product.module_interface().is_some()),
             "recovery fixtures require canonical finalized module interfaces",
         );
+        let mut canonical_packages = BTreeMap::new();
+        for product in products {
+            let interface = product.module_interface().unwrap();
+            if let Some(previous) = canonical_packages.insert(
+                interface.interface_sha256(),
+                interface.package_imports_bytes(),
+            ) {
+                assert_eq!(
+                    previous,
+                    interface.package_imports_bytes(),
+                    "recovery fixtures sharing canonical interface bytes must share package sidecars",
+                );
+            }
+        }
         let root = tempfile::tempdir().unwrap();
         let producer = products
             .first()
@@ -9501,9 +9515,18 @@ pub(crate) mod tests {
             original_ordinal: 7,
         };
         let packages = BTreeMap::new();
-        let a = original_witness_fixture("A", Some(source(inherited_owner("B"))), 7, &packages);
-        let b = original_witness_fixture("B", Some(source(a.owner().clone())), 7, &packages);
-        let a = original_witness_fixture("A", Some(source(b.owner().clone())), 7, &packages);
+        let fixture = |module: &str, import| {
+            original_groups_fixture_with_interface(
+                module,
+                vec![(7, vec![import])],
+                7,
+                &packages,
+                format!("{module} interface").into_bytes(),
+            )
+        };
+        let a = fixture("A", source(inherited_owner("B")));
+        let b = fixture("B", source(a.owner().clone()));
+        let a = fixture("A", source(b.owner().clone()));
         let a = fixture_finalized_product(a, [1; 32]);
         let b = fixture_finalized_product(b, [1; 32]);
         let before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
@@ -9949,8 +9972,14 @@ pub(crate) mod tests {
             },
             interface_digest: sha(&[0x43]),
         };
-        let consumer = original_witness_fixture("Consumer", Some(import), 7, &packages);
-        let interface = vec![0x42];
+        let consumer = original_groups_fixture_with_interface(
+            "Consumer",
+            vec![(7, vec![import])],
+            7,
+            &packages,
+            b"Consumer interface".to_vec(),
+        );
+        let interface = b"External interface".to_vec();
         let product_bytes =
             tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
                 unit: external_unit.into(),
