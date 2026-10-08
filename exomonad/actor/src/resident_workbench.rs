@@ -12785,6 +12785,42 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
+    async fn cleanup_scope_captures_compiler_owner_when_polled() {
+        let workbench = ResidentActorWorkbench::<frunk::HNil, tidepool_mcp::CapturedOutput>::new(
+            Arc::new(crate::ActorMachineRegistry::new()),
+            ActorWorkbenchSource::new("", Vec::new()),
+            None,
+        );
+        let descriptor = crate::ActorDescriptor::new(
+            "lazy cleanup scope",
+            crate::ActorPlacement {
+                session: SessionId(991),
+                resource_scope: RealmId::ROOT,
+                lexical_scope: ScopeId::ROOT,
+            },
+        );
+        let guard = workbench.actor_initialization_cleanup(
+            descriptor.session_context(crate::ActorRef::first(crate::ActorId(991))),
+        );
+        let registration = guard.registration();
+        let retained = crate::RetainedActorExit::new();
+        let operation = registration.scope(async { register_compiler_work().unwrap() });
+        assert!(retained.compiler_close_observations().is_empty());
+        let guard = guard.with_compiler_owner(CompilerCloseOwner::Initialization(retained.clone()));
+        let ticket = operation.await;
+        assert!(CompilerCloseOwner::current().is_err());
+        assert!(matches!(
+            retained.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Pending]
+        ));
+        ticket.consume(tidepool_runtime::CompilerTransactionOutcome {
+            action: (),
+            close: tidepool_runtime::CompilerTransactionClose::NotStarted,
+        });
+        guard.disarm();
+    }
+
+    #[tokio::test]
     async fn compiler_obligation_survives_waiter_loss_and_actor_stop_until_late_close() {
         let retained = crate::RetainedActorExit::new();
         let owner = CompilerCloseOwner::Initialization(retained.clone());
