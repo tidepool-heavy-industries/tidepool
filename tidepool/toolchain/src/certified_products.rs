@@ -6947,6 +6947,7 @@ mod home_self_issuer_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod artifact_view_group_index_properties;
     mod issued_interface_selection_history;
     mod promotion_import_history;
     mod sparse_interface_selection_properties;

@@ -5484,29 +5484,36 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
     let metadata = view.metadata_snapshot();
     let entries = metadata.artifacts.values().cloned().collect::<Vec<_>>();
     let available = original_products_by_id(&entries);
+    let mut original_ids = BTreeMap::new();
+    for (artifact, product) in &available {
+        original_ids
+            .entry(product.owner())
+            .and_modify(|artifact| *artifact = None)
+            .or_insert(Some(*artifact));
+    }
     let selected_key = |group: &PendingCertifiedGroup| {
-        let mut exact = available
-            .iter()
-            .filter(|(_, product)| product.owner() == group.owner());
-        let (artifact, _) = exact
-            .next()
-            .ok_or_else(|| failure("certified group has no exact original artifact"))?;
-        if exact.next().is_some() {
-            return Err(failure(
-                "certified group has ambiguous exact original artifacts",
-            ));
-        }
+        let artifact = match original_ids.get(group.owner()) {
+            Some(Some(artifact)) => *artifact,
+            Some(None) => {
+                return Err(failure(
+                    "certified group has ambiguous exact original artifacts",
+                ));
+            }
+            None => return Err(failure("certified group has no exact original artifact")),
+        };
         Ok(crate::artifact_inventory::NativeGroupKey {
-            artifact: *artifact,
+            artifact,
             original_ordinal: group.group().original_ordinal(),
         })
     };
     let mut current = Vec::new();
+    let mut current_positions = BTreeMap::new();
     for group in candidates {
-        if metadata
-            .selected_native_groups
-            .contains(&selected_key(group)?)
-        {
+        let key = selected_key(group)?;
+        if metadata.selected_native_groups.contains(&key) {
+            // Baseline comparison uses the first candidate; certification below
+            // retains responsibility for duplicate-current refusal.
+            current_positions.entry(key).or_insert(current.len());
             current.push(group.clone());
         }
     }
@@ -5518,14 +5525,13 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
                 "artifact view removed or duplicated a previously selected group",
             ));
         }
-        if let Some(candidate) = current.iter().find(|candidate| {
-            candidate.owner() == group.owner()
-                && candidate.group().original_ordinal() == group.group().original_ordinal()
-        }) {
+        if let Some(position) = current_positions.get(&key) {
+            let candidate = &current[*position];
             if candidate.group() != group.group() || candidate.imports() != group.imports() {
                 return Err(failure("artifact view changed a previously selected group"));
             }
         } else {
+            current_positions.insert(key, current.len());
             current.push(group.clone());
         }
     }
