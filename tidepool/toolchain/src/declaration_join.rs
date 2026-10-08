@@ -2046,14 +2046,14 @@ mod authored_tests {
         std::fs::write(interface, b"changed after preparation").unwrap();
         assert!(
             request
-                .context
+                .context()
                 .validate_artifacts(&request.artifacts)
                 .is_err(),
             "the preparation snapshot does not authorize changed post-worker artifacts"
         );
         std::fs::write(interface, saved).unwrap();
         request
-            .context
+            .context()
             .validate_artifacts(&request.artifacts)
             .unwrap();
     }
