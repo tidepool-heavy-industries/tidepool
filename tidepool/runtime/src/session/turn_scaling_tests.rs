@@ -2723,6 +2723,119 @@ fn complete_cell_consumes_native_items_without_compiler_requests() {
 }
 
 #[test]
+fn generic_program_admission_preserves_delayed_capture_prefix() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let lib = SessionLib::open(
+        SessionId(1014),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    try_execute_cell_with_template_imports_expectation_observed(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "delayed_capture_prefix",
+        include_str!("fixtures/compiled-cell-delayed-capture.hs"),
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::new(),
+        Some(29),
+        |program| {
+            use tidepool_toolchain::artifact_inventory::NativeRequirementRoot;
+            assert_eq!(program.typed_segments().len(), 1);
+            assert_eq!(program.items().len(), 7);
+            let captures = program.items()[..6]
+                .iter()
+                .map(|item| {
+                    let DecodedTurnOut::Bind { bound, .. } =
+                        decode_turn_out(item.native_turn_bytes().unwrap()).unwrap()
+                    else {
+                        panic!("action must have a bind recipe")
+                    };
+                    bound
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                captures.iter().map(Vec::len).collect::<Vec<_>>(),
+                [1, 0, 0, 1, 0, 1]
+            );
+            assert_eq!(captures[3][0].name, "delayed");
+            assert_eq!(captures[3][0].module, "Tidepool.Session.Val.G4");
+            for index in [0, 1, 2, 5] {
+                let item = &program.items()[index];
+                let native = item.native().unwrap();
+                let (table, _) =
+                    tidepool_repr::serial::read_metadata(item.native_metadata_bytes().unwrap())
+                        .unwrap();
+                let turn: ciborium::value::Value =
+                    ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
+                let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+                let sites =
+                    tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+                let context = native
+                    .original_execution_context(&native.target_owned(), &table, &sites)
+                    .unwrap();
+                let entry = native.typed_entry().unwrap();
+                let requirements = context
+                    .artifact_view()
+                    .native_binding_requirements_from_roots(&[entry.native_requirement_root()])
+                    .unwrap();
+                if index < 3 {
+                    assert!(
+                        requirements.is_empty(),
+                        "early independent item demanded a future capture"
+                    );
+                    let NativeRequirementRoot::Group { artifact, .. } =
+                        entry.native_requirement_root()
+                    else {
+                        panic!("typed entry must select one exact group")
+                    };
+                    assert!(
+                        context
+                            .artifact_view()
+                            .native_binding_requirements_from_roots(&[
+                                NativeRequirementRoot::AllGroups(artifact)
+                            ],)
+                            .is_err(),
+                        "whole scaffold demand must still refuse unavailable later groups"
+                    );
+                } else {
+                    let delayed = &captures[3][0];
+                    assert!(
+                        requirements.iter().any(|requirement| {
+                            requirement.identity.unit == entry.entry().unit
+                                && requirement.identity.module == delayed.module
+                                && requirement.identity.occurrence == delayed.name
+                                && requirement.generation
+                                    == program.items()[3].native().unwrap().generation()
+                        }),
+                        "later reader lost the exact prior compiler-issued capture"
+                    );
+                }
+            }
+        },
+    )
+    .expect("generic sealing must admit independent items before their delayed capture");
+    assert_eq!(
+        resident.binding_names_in(public),
+        ["delayed", "first", "later"]
+    );
+}
+
+#[test]
 fn following_declaration_retains_original_native_binding_inventory() {
     tidepool_testing::eval_harness::require_extract();
     let root = tempfile::tempdir().unwrap();
