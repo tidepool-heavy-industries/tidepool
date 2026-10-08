@@ -96,12 +96,9 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
             identity.actor.clone(),
             Some(request),
             "haskell".into(),
-            harness::item::ToolInput::Custom(
-                tidepool_testing::fixture_source(
-                    "bridge/facade/src/actor_host/embedded_cancelled_prefix.hs",
-                )
-                .into(),
-            ),
+            harness::item::ToolInput::Custom(tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/embedded_cancelled_prefix.hs",
+            )),
         )
         .await
         .unwrap();

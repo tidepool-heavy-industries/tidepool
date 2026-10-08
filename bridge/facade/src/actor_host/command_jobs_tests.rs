@@ -1562,12 +1562,9 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
             Some("haskell".into()),
         )),
         name: exomonad_actor::HASKELL_TOOL.into(),
-        arguments: ToolArguments::Raw(
-            tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host/command_wait_continuation.hs",
-            )
-            .into(),
-        ),
+        arguments: ToolArguments::Raw(tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/command_wait_continuation.hs",
+        )),
     };
     let policy = campaign.root_installation.policy.clone();
     let first = invocation();
