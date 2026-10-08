@@ -7751,10 +7751,16 @@ mod program_support_tests {
     #[test]
     fn continuation_support_refuses_backedges_to_its_exact_generated_owner() {
         use crate::certified_products::tests::{
-            original_groups_fixture, recovered_witness_fixtures,
+            original_groups_fixture_with_interface, recovered_witness_fixtures,
         };
         let generated = certified_products::fixture_finalized_product(
-            original_groups_fixture("Generated", vec![(3, vec![])], 7, &BTreeMap::new()),
+            original_groups_fixture_with_interface(
+                "Generated",
+                vec![(3, vec![])],
+                7,
+                &BTreeMap::new(),
+                b"Generated interface".to_vec(),
+            ),
             [1; 32],
         );
         let generated = recovered_witness_fixtures(&[generated]).remove(0).product;
@@ -7771,7 +7777,7 @@ mod program_support_tests {
         };
         for backedge in [false, true] {
             let support = certified_products::fixture_finalized_product(
-                original_groups_fixture(
+                original_groups_fixture_with_interface(
                     "Support",
                     vec![(
                         3,
@@ -7783,8 +7789,13 @@ mod program_support_tests {
                     )],
                     7,
                     &BTreeMap::new(),
+                    b"Support interface".to_vec(),
                 ),
                 [1; 32],
+            );
+            assert_ne!(
+                generated.owner().skinny_iface_sha256,
+                support.owner().skinny_iface_sha256,
             );
             let products = recovered_witness_fixtures(&[generated.clone(), support])
                 .into_iter()

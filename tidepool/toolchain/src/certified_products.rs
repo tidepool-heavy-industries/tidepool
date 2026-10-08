@@ -10178,7 +10178,18 @@ pub(crate) mod tests {
         );
 
         let probe_name = crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE;
-        let probe = full_native_fixture(probe_name, vec![(3, vec![])], 7);
+        let probe = recovered_witness_fixtures(&[fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                probe_name,
+                vec![(3, vec![])],
+                7,
+                &BTreeMap::new(),
+                b"Authored probe interface".to_vec(),
+            ),
+            [1; 32],
+        )])
+        .remove(0)
+        .product;
         let authored = full_native_fixture("Authored", vec![(3, vec![])], 7);
         let backedge = PendingImportOwner::Source {
             owner: probe.owner().clone(),
@@ -10187,7 +10198,14 @@ pub(crate) mod tests {
         };
         let invalid = full_native_fixture("Authored", vec![(3, vec![backedge])], 9);
         for (product, allowed) in [(authored, true), (invalid, false)] {
-            let products = [product.clone(), probe.clone()];
+            assert_ne!(
+                product.owner().skinny_iface_sha256,
+                probe.owner().skinny_iface_sha256,
+            );
+            let products = recovered_witness_fixtures(&[product.clone(), probe.clone()])
+                .into_iter()
+                .map(|row| row.product)
+                .collect::<Vec<_>>();
             let mut validation = PackageInterfaceValidation::default();
             let inventory = ArtifactInventory::default();
             let mut entries = Vec::new();

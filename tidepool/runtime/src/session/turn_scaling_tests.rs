@@ -2831,7 +2831,7 @@ fn generic_program_admission_preserves_delayed_capture_prefix() {
     .expect("generic sealing must admit independent items before their delayed capture");
     assert_eq!(
         resident.binding_names_in(public),
-        ["delayed", "first", "later"]
+        ["delayed", "first", "later", "observation7"]
     );
 }
 

@@ -6573,7 +6573,15 @@ mod tests {
                 .is_err(),
             "same-named other native version cannot satisfy the exact issued role"
         );
-        let foreign = support_product_in_unit("foreign", "Consumer");
+        let foreign = support_product_with_interface(
+            "foreign",
+            "Consumer",
+            b"foreign:Consumer interface".to_vec(),
+        );
+        assert_ne!(
+            generated.owner().skinny_iface_sha256,
+            foreign.owner().skinny_iface_sha256,
+        );
         let issued = support_offer(&[generated, hidden.clone(), foreign.clone()]);
         let private =
             OriginalCompilerInputs::from_selection(&selection(&issued), &issued.artifacts).unwrap();
