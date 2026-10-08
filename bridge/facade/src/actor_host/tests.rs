@@ -390,7 +390,7 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
     let files = tempfile::tempdir().unwrap();
     let settings = test_campaign::hosted_test_settings(&files, 1);
     let (provider, _requests) = test_campaign::hosted_script_provider();
-    let configure = |config: &mut ActorHostConfig, spec| {
+    let configure = |config: &mut ActorHostConfig, spec: &str| {
         write_bootstrap_workspace(&config.workspace, spec);
         test_campaign::commit_workspace(&config.workspace);
         config.workspace_inputs = Some(
