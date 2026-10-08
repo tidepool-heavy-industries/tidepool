@@ -3270,7 +3270,7 @@ type CompiledRoot = (
     target = "tidepool::actor_host::startup",
     name = "compile_root",
     skip_all,
-    fields(run_root = %run_directory.path().display(), actor_path = "/root")
+    fields(run_root = %run_directory.path().display(), actor_path = %root_declaration_recovery::root_path())
 )]
 fn compile_root(
     config: &ActorHostConfig,

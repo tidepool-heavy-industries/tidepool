@@ -44,7 +44,7 @@ span capture.
 
 Startup work uses the production `compile_root`, `workspace_toolsets_prepare`,
 and `actor_application_prepare` spans. The last carries the exact actor and
-actor path; `/root` distinguishes root activation from child installation.
+actor path; the canonical path `root` distinguishes root activation from child installation.
 `child_launch` carries its parent actor and includes workspace admission,
 custody transfer and waiting for the child's startup. These durations overlap
 the child's own preparation. Shared toolset preparation retains the first
