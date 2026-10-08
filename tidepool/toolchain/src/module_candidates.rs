@@ -12,6 +12,8 @@ pub(crate) mod deployment;
 #[cfg(test)]
 mod fixture_packets;
 mod inventory;
+#[cfg(test)]
+mod product_decode_observer;
 pub(crate) mod shared_evidence;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -280,6 +282,8 @@ impl CandidateProduct {
         requirements: &tidepool_repr::execution_schema::ProgramRequirements,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Option<RawModuleProduct>, tidepool_repr::execution_schema::ParseError> {
+        #[cfg(test)]
+        product_decode_observer::record();
         let mut products = operation.parse_module_products(bytes, requirements)?;
         if products.len() != 1 {
             return Ok(None);
@@ -449,6 +453,43 @@ struct Record {
     evidence: shared_evidence::SharedEvidence,
     module_interface_proof: Option<crate::certified_products::CertifiedModuleInterface>,
     execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+}
+
+/// A deployment record carries the product decoded by its owning loader.
+/// Ordinary durable records still decode at candidate acquisition.
+enum CandidateRecord {
+    Encoded(Record),
+    Deployment(deployment::DecodedDeploymentRecord),
+}
+
+enum CandidateProductInput {
+    Encoded,
+    Decoded(RawModuleProduct),
+}
+
+impl From<Record> for CandidateRecord {
+    fn from(record: Record) -> Self {
+        Self::Encoded(record)
+    }
+}
+
+impl CandidateRecord {
+    fn record(&self) -> &Record {
+        match self {
+            Self::Encoded(record) => record,
+            Self::Deployment(record) => record.record(),
+        }
+    }
+
+    fn into_parts(self) -> (Record, CandidateProductInput) {
+        match self {
+            Self::Encoded(record) => (record, CandidateProductInput::Encoded),
+            Self::Deployment(record) => {
+                let (record, product) = record.into_parts();
+                (record, CandidateProductInput::Decoded(product))
+            }
+        }
+    }
 }
 
 impl std::ops::Deref for Record {
@@ -1802,14 +1843,14 @@ fn select_configured_inner(
     };
     let deployed: std::collections::BTreeSet<_> = records
         .iter()
-        .map(|(r, _)| (r.unit.clone(), r.module.clone()))
+        .map(|(r, _)| (r.record().unit.clone(), r.record().module.clone()))
         .collect();
     records.extend(
         ordinary_records(endpoint_identity, include, context.is_some())
             .unwrap_or_default()
             .into_iter()
             .filter(|r| !deployed.contains(&(r.unit.clone(), r.module.clone())))
-            .map(|r| (r, CandidateOrigin::Ordinary)),
+            .map(|r| (CandidateRecord::Encoded(r), CandidateOrigin::Ordinary)),
     );
     let selected = select_records_inner(endpoint_identity, include, scratch, records, context);
     tracing::info!(target: "tidepool_toolchain::module_candidates",
@@ -1834,11 +1875,11 @@ fn select_records(
     select_records_inner(endpoint_identity, include, scratch, records, None)
 }
 
-fn select_records_inner(
+fn select_records_inner<R: Into<CandidateRecord>>(
     endpoint_identity: &[u8],
     include: &[PathBuf],
     scratch: &Path,
-    records: Vec<(Record, CandidateOrigin)>,
+    records: Vec<(R, CandidateOrigin)>,
     context: Option<&ExactCandidateContext>,
 ) -> Option<CandidateSet> {
     let include = context_paths(include)?;
@@ -1855,7 +1896,8 @@ fn select_records_inner(
         BTreeMap::<[u8; 32], Arc<crate::execution_source::CertifiedExecutionSourceGraph>>::new();
     let mut graph_bytes = 0usize;
     let mut selection_omissions = CacheOfferDiagnostics::default();
-    for (mut record, origin) in records {
+    for (record, origin) in records {
+        let (mut record, product_input) = record.into().into_parts();
         if record.tag != "TPMCAN"
             || record.version != RECORD_VERSION
             || record.endpoint != endpoint_identity
@@ -1907,12 +1949,17 @@ fn select_records_inner(
             continue;
         }
         let decode_started = std::time::Instant::now();
-        decoded_bytes += record.products.len() as u64;
-        let parsed = CandidateProduct::decode_product_with_operation(
-            &record.products,
-            &requirements,
-            &package_validation.inventory,
-        );
+        let parsed = match product_input {
+            CandidateProductInput::Encoded => {
+                decoded_bytes += record.products.len() as u64;
+                CandidateProduct::decode_product_with_operation(
+                    &record.products,
+                    &requirements,
+                    &package_validation.inventory,
+                )
+            }
+            CandidateProductInput::Decoded(product) => Ok(Some(product)),
+        };
         decode_elapsed += decode_started.elapsed();
         let product = match parsed {
             Ok(Some(product)) => product,
