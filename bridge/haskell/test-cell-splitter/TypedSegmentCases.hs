@@ -4,6 +4,7 @@ module TypedSegmentCases
   ) where
 
 import Control.Exception (SomeException, bracket, evaluate, fromException, try)
+import Control.Concurrent.MVar (readMVar)
 import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (intercalate, isPrefixOf)
@@ -13,7 +14,7 @@ import qualified Data.Map.Strict as Map
 import GHC
 import GHC.Core (bindersOfBinds)
 import GHC.Driver.Session (PackageDBFlag(..), PkgDbRef(..))
-import GHC.Driver.Env.Types (hsc_unit_env)
+import GHC.Driver.Env.Types (HscEnv, hsc_NC, hsc_unit_env)
 import GHC.Data.FastString (fsLit)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
@@ -22,11 +23,13 @@ import GHC.Unit.Module (moduleUnit)
 import GHC.Unit.Types (unitIdString, unitString, GenUnit(RealUnit), Definite(Definite))
 import GHC.Builtin.Types (intTy, doubleTy)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Types.Name (getOccString, nameModule_maybe, nameOccName)
+import GHC.Types.Name (getOccString, nameModule_maybe, nameOccName, nameUnique)
+import GHC.Types.Name.Cache (NameCache(..), lookupOrigNameCache)
 import GHC.Types.Name.Occurrence (OccName)
 import GHC.Types.Avail (availNames)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Var (varName)
+import GHC.Types.Unique (getKey)
 import GHC.Iface.Syntax (IfaceConDecl(..), IfaceConDecls(..), IfaceDecl(..))
 import GHC.Types.FieldLabel (FieldSelectors(..), flHasFieldSelector, flSelector)
 import GHC.Unit.Module.ModDetails (md_types)
@@ -52,6 +55,7 @@ import Tidepool.Test.Runner (requiredInput)
 import Tidepool.TurnSource (preambleDefaultDeclaration)
 import qualified Tidepool.TypedSegment as TypedSegment
 import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot)
+import Tidepool.TypedSegment.Types (PendingTypedSegment(pendingSegmentValue))
 import Unsafe.Coerce (unsafeCoerce)
 
 -- The owning selector performs the actual whole-source frontend, typed
@@ -202,6 +206,7 @@ typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive 
       let path = root </> owner ++ ".hs"
           plan = preparedTypedSegmentPlan source
           prepare environment admissions segment = do
+            assertTypedSegmentRootsRegistered environment segment
             batch <- prepareTypedSegmentSessionBindings environment admissions segment
               (root </> "metadata-stage" ++ show index)
             pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
@@ -310,7 +315,11 @@ typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive 
       unless (all (`elem` ifaceIdNames) exportedNames)
         (fail (owner ++ ": a finalized export lacks its exact finalized IfaceId Name"))
       unless (all (`elem` finalizedIdNames) exportedNames)
-        (fail (owner ++ ": a finalized export lacks its exact finalized md_types Id Name"))
+        (fail (owner ++ ": a finalized export lacks its exact finalized md_types Id Name"
+          ++ "\n  issued roots:\n    " ++ renderNameList (map varName issued)
+          ++ "\n  finalized exports:\n    " ++ renderNameList exportedNames
+          ++ "\n  finalized IfaceIds:\n    " ++ renderNameList ifaceIdNames
+          ++ "\n  finalized md_types Ids:\n    " ++ renderNameList finalizedIdNames))
       unless (Set.size (Set.fromList exportedIdentities) == length exportedIdentities
             && Set.size (Set.fromList issuedIdentities) == length issuedIdentities
             && length exportedIdentities == length issuedIdentities
@@ -438,7 +447,8 @@ metadataFieldOwners index shape selectors = case shape of
 renderModuleIdentity :: Module -> String
 renderModuleIdentity owner = unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner)
 
--- Published roots use module and OccName; internal GHC Uniques are local to a compiler representation.
+-- SymbolIdentity serializes module, namespace and occurrence, not GHC Uniques.
+-- A same-HscEnv cache lookup must still preserve the exact Name.
 publishedNameIdentity :: Name -> (Maybe Module, OccName)
 publishedNameIdentity name = (nameModule_maybe name, nameOccName name)
 
@@ -446,6 +456,28 @@ renderPublishedNameIdentity :: Name -> String
 renderPublishedNameIdentity name =
   maybe "<no-module>" renderModuleIdentity (nameModule_maybe name)
     ++ "." ++ showSDocUnsafe (ppr (nameOccName name))
+
+renderNameList :: [Name] -> String
+renderNameList = intercalate "\n    " . map renderNameWithUnique
+
+renderNameWithUnique :: Name -> String
+renderNameWithUnique name = renderPublishedNameIdentity name
+  ++ " unique=" ++ show (getKey (nameUnique name))
+
+assertTypedSegmentRootsRegistered :: HscEnv -> PendingTypedSegment -> IO ()
+assertTypedSegmentRootsRegistered environment pending = do
+  let roots = bindersOfBinds
+        (TypedSegment.typedSegmentRoots (pendingSegmentValue pending))
+  names <- readMVar (nsNames (hsc_NC environment))
+  forM_ roots $ \root -> do
+    let name = varName root
+    case nameModule_maybe name of
+      Nothing -> fail ("typed segment root has no module-owned Name: " ++ renderNameWithUnique name)
+      Just owner -> case lookupOrigNameCache names owner (nameOccName name) of
+        Just cached | cached == name -> pure ()
+        found -> fail ("typed segment root Name is not the exact cached module/OccName Name: "
+          ++ renderNameWithUnique name ++ "; cached="
+          ++ maybe "<missing>" renderNameWithUnique found)
 
 data PreparationExpected = PrepareAccepted | PrepareTypedRefusal | PrepareSourceRefusal
 
