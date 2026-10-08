@@ -10902,13 +10902,17 @@ pub(crate) mod tests {
     }
 
     fn empty_package_bundle_for(module: &str) -> Vec<u8> {
+        empty_package_bundle_for_interface(module, &[0x42])
+    }
+
+    fn empty_package_bundle_for_interface(module: &str, interface: &[u8]) -> Vec<u8> {
         let roots = Value::Array(vec![
             Value::Text("TPPKGROOTS".into()),
             Value::Text("2".into()),
             Value::Array(vec![
                 Value::Text("main".into()),
                 Value::Text(module.into()),
-                Value::Text(hex(&sha(&[0x42]))),
+                Value::Text(hex(&sha(interface))),
             ]),
             Value::Array(vec![]),
             Value::Array(vec![]),

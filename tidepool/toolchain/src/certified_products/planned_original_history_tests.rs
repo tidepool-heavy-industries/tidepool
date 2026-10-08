@@ -30,6 +30,29 @@ pub(super) struct IssuedOriginal {
     pub(super) certified: CertifiedProducts,
 }
 
+fn planned_interface(module: &str) -> Vec<u8> {
+    format!("planned-interface:main:{module}").into_bytes()
+}
+
+fn assert_canonical_materialization_premises(context: &ExactDeclarationContext) {
+    let products = context.recovery_products();
+    let mut interfaces = BTreeMap::new();
+    for product in &products {
+        let interface = product.module_interface().unwrap();
+        let key = interface.interface_sha256();
+        let value = (
+            (&product.owner().unit, &product.owner().module),
+            interface.package_imports_bytes(),
+        );
+        if let Some(previous) = interfaces.insert(key, value) {
+            assert_eq!(
+                previous, value,
+                "fixture modules sharing interface bytes must have the same canonical owner and package sidecar"
+            );
+        }
+    }
+}
+
 fn planned_product_sidecar(module: &str, body_tag: u8) -> Vec<u8> {
     let groups = [7, 11]
         .into_iter()
@@ -58,7 +81,7 @@ fn planned_product_sidecar(module: &str, body_tag: u8) -> Vec<u8> {
     tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
         unit: "main".into(),
         module: module.into(),
-        interface: vec![0x42],
+        interface: planned_interface(module),
         groups,
     }])
 }
@@ -118,7 +141,7 @@ pub(super) fn planned_product_sidecar_with_historical_child(
     tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
         unit: "main".into(),
         module: module.into(),
-        interface: vec![0x42],
+        interface: planned_interface(module),
         groups,
     }])
 }
@@ -164,6 +187,7 @@ pub(super) fn issue_planned_original_with_historical_child(
         candidates: vec![child_source_path.to_path_buf()],
     });
     let normalized = CompletedSourceEvidence::from_normalized(admitted.clone(), &source).unwrap();
+    assert_canonical_materialization_premises(context);
     let context = Arc::new(context.clone());
     let request = context
         .prepare_compilation(
@@ -223,7 +247,8 @@ pub(super) fn issue_planned_original_with_historical_child(
         child_occurrence,
         9,
     );
-    let package_bytes = empty_package_bundle_for(&module_name);
+    let package_bytes =
+        empty_package_bundle_for_interface(&module_name, &planned_interface(&module_name));
     let parsed = ParsedModuleProducts::decode(&bytes, &package_bytes).unwrap();
     let binder = SymbolIdentity {
         unit: child.unit.clone(),
@@ -234,6 +259,7 @@ pub(super) fn issue_planned_original_with_historical_child(
     };
     let mut accepted = receipt(&bytes, &admitted, &source);
     accepted.module = module_name.clone();
+    accepted.skinny_iface_sha256 = sha(&planned_interface(&module_name));
     accepted.groups = vec![
         AcceptedGroup {
             original_ordinal: 7,
@@ -378,10 +404,12 @@ pub(super) fn issue_planned_original_with_source_value(
         source: &source_admission,
     };
     let bytes = planned_product_sidecar(&module_name, body_tag);
-    let package_bytes = empty_package_bundle_for(&module_name);
+    let package_bytes =
+        empty_package_bundle_for_interface(&module_name, &planned_interface(&module_name));
     let parsed = ParsedModuleProducts::decode(&bytes, &package_bytes).unwrap();
     let mut accepted = receipt(&bytes, &admitted, &source);
     accepted.module = module_name.clone();
+    accepted.skinny_iface_sha256 = sha(&planned_interface(&module_name));
     accepted.groups = [7, 11]
         .into_iter()
         .map(|original_ordinal| AcceptedGroup {
