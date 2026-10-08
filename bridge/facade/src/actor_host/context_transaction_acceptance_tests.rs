@@ -3,11 +3,11 @@ use super::*;
 use async_trait::async_trait;
 use harness::{
     engine::ResponsesTransport,
-    item::Item,
+    item::{Item, ToolExecution},
     model::AgentPath,
     transport::{ResponsesRequest, ResponsesTurn, TransportError},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
@@ -26,21 +26,24 @@ impl RequestedRound {
     }
 
     fn cell(self, call_id: &str, source: &str) {
-        self.cell_named("haskell_sync", call_id, source);
+        self.cell_named("haskell_sync", call_id, source, ToolExecution::Synchronous);
     }
 
     fn async_cell(self, call_id: &str, source: &str) {
-        self.cell_named("haskell", call_id, source);
+        self.cell_named("haskell", call_id, source, ToolExecution::Asynchronous);
     }
 
-    fn cell_named(self, name: &str, call_id: &str, source: &str) {
+    fn cell_named(self, name: &str, call_id: &str, source: &str, execution: ToolExecution) {
+        let call = Item(json!({
+            "type": "custom_tool_call", "call_id": call_id,
+            "name": name, "input": source,
+            "async": execution == ToolExecution::Asynchronous,
+        }));
+        assert_eq!(call.tool_call().unwrap().unwrap().execution, execution);
         self.reply
             .send(ResponsesTurn {
                 response_id: format!("response-{call_id}"),
-                items: vec![Item(json!({
-                    "type": "custom_tool_call", "call_id": call_id,
-                    "name": name, "input": source,
-                }))],
+                items: vec![call],
                 usage: Default::default(),
             })
             .expect("resident Engine still awaits its scripted reply");
@@ -88,6 +91,20 @@ impl RequestedRound {
             })
             .expect("resident Engine still awaits its scripted reply");
     }
+
+    fn wait_for_pending(self) {
+        let call_id = uuid::Uuid::new_v4().simple().to_string();
+        self.reply
+            .send(ResponsesTurn {
+                response_id: format!("wait-{call_id}"),
+                items: vec![Item(json!({
+                    "type": "function_call", "call_id": call_id,
+                    "name": "yield", "arguments": "{}",
+                }))],
+                usage: Default::default(),
+            })
+            .expect("resident Engine still awaits its scripted reply");
+    }
 }
 
 struct ScriptedProvider {
@@ -118,6 +135,26 @@ async fn next_round(rounds: &mut mpsc::UnboundedReceiver<RequestedRound>) -> Req
         .await
         .expect("real resident cell did not reach the next model request")
         .expect("scripted provider closed")
+}
+
+async fn next_round_with_output(
+    rounds: &mut mpsc::UnboundedReceiver<RequestedRound>,
+    call_id: &str,
+) -> RequestedRound {
+    tokio::time::timeout(CELL_TIMEOUT, async {
+        loop {
+            let round = next_round(rounds).await;
+            assert!(round.is_root(), "expected root output for {call_id}");
+            if output_item(&round.request.input, call_id).is_some() {
+                return round;
+            }
+            // The built-in wait observes the real settlement wake, including a
+            // completion that races this already-issued provider request.
+            round.wait_for_pending();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("native cell {call_id} did not publish its actual terminal output"))
 }
 
 async fn next_round_with_state(
@@ -173,11 +210,27 @@ fn retained_output(request: &ResponsesRequest, call_id: &str) -> Value {
 async fn root_and_child_rounds(
     rounds: &mut mpsc::UnboundedReceiver<RequestedRound>,
     fixture: &mut HostedTestRuntime,
+    child: Option<RequestedRound>,
+) -> (RequestedRound, RequestedRound) {
+    root_and_child_rounds_with_output(rounds, fixture, child, None).await
+}
+
+async fn root_and_child_rounds_with_output(
+    rounds: &mut mpsc::UnboundedReceiver<RequestedRound>,
+    fixture: &mut HostedTestRuntime,
     mut child: Option<RequestedRound>,
+    root_output: Option<&str>,
 ) -> (RequestedRound, RequestedRound) {
     let mut root = None;
     while root.is_none() || child.is_none() {
         let round = next_round_with_state(rounds, fixture).await;
+        if round.is_root()
+            && root_output
+                .is_some_and(|call_id| output_item(&round.request.input, call_id).is_none())
+        {
+            round.wait_for_pending();
+            continue;
+        }
         let slot = if round.is_root() {
             &mut root
         } else {
@@ -191,10 +244,12 @@ async fn root_and_child_rounds(
 
 fn assert_before_call_prefix(request: &ResponsesRequest, raw: &[Item], call_id: &str) {
     assert!(raw.iter().all(|item| item.0["call_id"] != call_id));
-    assert!(request
-        .input
-        .iter()
-        .all(|item| item.0["call_id"] != call_id));
+    assert!(
+        request
+            .input
+            .iter()
+            .all(|item| item.0["call_id"] != call_id)
+    );
     assert!(has_user_text(request, "parent-original"));
     assert!(!has_user_text(request, "must-not-publish"));
 }
@@ -249,15 +304,17 @@ fn retained_output_items(items: &[Item], call_id: &str) -> Value {
 }
 
 fn retained_output_item<'a>(items: &'a [Item], call_id: &str) -> &'a Item {
-    items
-        .iter()
-        .find(|item| {
-            matches!(
-                item.0["type"].as_str(),
-                Some("custom_tool_call_output" | "function_call_output")
-            ) && item.0["call_id"] == call_id
-        })
+    output_item(items, call_id)
         .unwrap_or_else(|| panic!("next inference omitted terminal output for {call_id}"))
+}
+
+fn output_item<'a>(items: &'a [Item], call_id: &str) -> Option<&'a Item> {
+    items.iter().find(|item| {
+        matches!(
+            item.0["type"].as_str(),
+            Some("custom_tool_call_output" | "function_call_output")
+        ) && item.0["call_id"] == call_id
+    })
 }
 
 fn successful_output(request: &ResponsesRequest, call_id: &str) -> Value {
@@ -612,7 +669,7 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
          let asyncAction = (do { value <- notebookAction; pure (value + asyncValue) } :: Eff effects Int)\n\
          asyncAction",
     );
-    let following = next_round(&mut rounds).await;
+    let following = next_round_with_output(&mut rounds, "async-publication").await;
     let output = successful_output(&following.request, "async-publication");
     assert_eq!(
         output["items"].as_array().unwrap().last().unwrap()["output"],
@@ -630,7 +687,7 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
         "43"
     );
     following.async_cell("async-reuse", "syncAction >>= \\value -> pure (value + 1)");
-    let following = next_round(&mut rounds).await;
+    let following = next_round_with_output(&mut rounds, "async-reuse").await;
     let output = successful_output(&following.request, "async-reuse");
     assert_eq!(
         output["items"].as_array().unwrap().last().unwrap()["output"],
@@ -739,10 +796,12 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
         .expect("spawn has installed its conversation");
     let child_path = conversation.identity().actor.clone();
     let installation = fixture.context.observer.installation(child.actor).await;
-    assert!(installation
-        .tools
-        .iter()
-        .any(|tool| tool.name() == "haskell_sync"));
+    assert!(
+        installation
+            .tools
+            .iter()
+            .any(|tool| tool.name() == "haskell_sync")
+    );
     // The real spawn call has completed and its installation is observable;
     // the only provider invocations so far are the two root rounds we hold.
     assert_eq!(installed.provider_calls.load(Ordering::SeqCst), 2);
@@ -760,10 +819,12 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
         !activated.is_root(),
         "parent must await the typed child response"
     );
-    assert!(activated
-        .request
-        .session_id
-        .contains(&format!(":{}:", child_path.0)));
+    assert!(
+        activated
+            .request
+            .session_id
+            .contains(&format!(":{}:", child_path.0))
+    );
     assert_eq!(user_text_occurrences(&activated.request, SEED), 1);
     assert!(!has_user_text(&activated.request, "parent-original"));
     let child_session = activated.request.session_id.clone();
@@ -809,10 +870,12 @@ async fn resident_sync_native_trim_commits_atomically_and_children_reuse_capture
         .find(|(_, _, item)| item == &original_output)
         .expect("setup result has canonical history")
         .1;
-    assert!(original_output.0["output"]
-        .as_str()
-        .unwrap()
-        .contains("native-trim-result-tail"));
+    assert!(
+        original_output.0["output"]
+            .as_str()
+            .unwrap()
+            .contains("native-trim-result-tail")
+    );
     let before = root_context_state(&fixture);
     parent.cell_with_reasoning(
         "native-trim-parent",
@@ -999,16 +1062,20 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
         "initial input: {:?}",
         first.request.input
     );
-    assert!(first
-        .request
-        .tools
-        .iter()
-        .any(|tool| tool["name"] == "haskell"));
-    assert!(first
-        .request
-        .tools
-        .iter()
-        .any(|tool| tool["name"] == "haskell_sync"));
+    assert!(
+        first
+            .request
+            .tools
+            .iter()
+            .any(|tool| tool["name"] == "haskell")
+    );
+    assert!(
+        first
+            .request
+            .tools
+            .iter()
+            .any(|tool| tool["name"] == "haskell_sync")
+    );
     assert!(first.request.tools.iter().any(|tool| {
         tool["name"] == "curate" && tool["type"] == "function" && tool["strict"] == true
     }));
@@ -1167,9 +1234,11 @@ async fn resident_sync_context_failure_rolls_back_edits_and_keeps_activated_chil
         tidepool_toolchain::failclass::Phase::Run.tag(),
         "{terminal}"
     );
-    assert!(terminal
-        .to_string()
-        .contains("intentional context transaction failure"));
+    assert!(
+        terminal
+            .to_string()
+            .contains("intentional context transaction failure")
+    );
     // Context edits roll back, while the admitted actor-owned child and its
     // explicit request survive the enclosing invocation's failure.
     prove_child_survives(
@@ -1196,7 +1265,7 @@ async fn resident_async_failure_keeps_bindings_and_activated_child() {
             "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
         ),
     );
-    let parent = next_round(&mut rounds).await;
+    let parent = next_round_with_output(&mut rounds, "async-failure-setup").await;
     assert!(parent.is_root());
     successful_output(&parent.request, "async-failure-setup");
     let original_setup = retained_output_item(&parent.request.input, "async-failure-setup").clone();
@@ -1208,7 +1277,13 @@ async fn resident_async_failure_keeps_bindings_and_activated_child() {
         ),
     );
 
-    let (failed, child) = root_and_child_rounds(&mut rounds, &mut fixture, None).await;
+    let (failed, child) = root_and_child_rounds_with_output(
+        &mut rounds,
+        &mut fixture,
+        None,
+        Some("async-parent-failure"),
+    )
+    .await;
     assert_eq!(failed.request.session_id, session);
     assert_eq!(failed.request.model, "test-model");
     let terminal = retained_output(&failed.request, "async-parent-failure");
@@ -1262,7 +1337,7 @@ async fn resident_async_failure_keeps_bindings_and_activated_child() {
             "bridge/facade/src/actor_host/fixtures/context_acceptance_after_failure.hs",
         ),
     );
-    let reused = next_round(&mut rounds).await;
+    let reused = next_round_with_output(&mut rounds, "async-failure-reuse").await;
     assert!(reused.is_root());
     assert_eq!(reused.request.session_id, session);
     let output = successful_output(&reused.request, "async-failure-reuse");
