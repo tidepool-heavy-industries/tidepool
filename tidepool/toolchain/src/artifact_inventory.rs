@@ -2109,6 +2109,70 @@ impl ArtifactView {
             )
         }
     }
+    /// Reuse only this view's exact completed native carrier. Demand and graph
+    /// closure remain the admission owner's responsibility for each consumer.
+    pub(crate) fn retained_original_entry_with_validation(
+        &self,
+        producer: [u8; 32],
+        product: &CertifiedRecoveryProduct,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<Option<Arc<ArtifactEntry>>, CompileError> {
+        let Some(native) = product.original_native() else {
+            return Ok(None);
+        };
+        if !native.matches_original(product) {
+            return Ok(None);
+        }
+        let descriptor = ArtifactEntry::original_descriptor(producer, product);
+        let existing = {
+            let state = self.lease.inventory.0.lock().expect("inventory lock");
+            self.read_projection(&state)
+                .entries
+                .iter()
+                .find(|entry| entry.descriptor.id == descriptor.id)
+                .cloned()
+        };
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        let ArtifactPayload::Original(previous) = &existing.payload else {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::MetadataConflict {
+                    artifact: descriptor.id,
+                },
+            ));
+        };
+        if existing.descriptor != descriptor || !previous.same_durable_artifact(product) {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::MetadataConflict {
+                    artifact: descriptor.id,
+                },
+            ));
+        }
+        // Inventory equality deliberately excludes the fresh source witness.
+        // A different source admission follows ordinary construction instead.
+        if previous.source_sha256() != product.source_sha256() {
+            return Ok(None);
+        }
+        let Some(previous_native) = previous.original_native() else {
+            return Ok(None);
+        };
+        if !Arc::ptr_eq(native, previous_native) || !previous_native.matches_original(previous) {
+            return Ok(None);
+        }
+        if product
+            .module_interface()
+            .is_none_or(|interface| interface.producer_sha256() != producer)
+        {
+            return Err(failure("native product has another canonical producer"));
+        }
+        crate::certified_products::original_execution_source_digest_with_validation(
+            product, validation,
+        )
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        Ok(Some(existing))
+    }
+
     pub(crate) fn entries(&self) -> Vec<Arc<ArtifactEntry>> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);

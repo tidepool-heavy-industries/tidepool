@@ -5639,29 +5639,32 @@ pub(crate) fn certified_product_artifact_view_with_validation(
         .iter()
         .cloned()
         .map(ArtifactEntry::canonical)
+        .map(Arc::new)
         .collect::<Vec<_>>();
     for value in values {
         if value.interface().toolchain_identity_sha256() != producer {
             return Err(failure("captured value has another compiler producer"));
         }
-        entries.push(ArtifactEntry::interface(
+        entries.push(Arc::new(ArtifactEntry::interface(
             value.interface().clone(),
             JoinedInterfaceRole::ValueInterface,
             value.requirements().to_vec(),
-        ));
+        )));
     }
     for product in products {
-        entries.push(ArtifactEntry::original_with_validation(
-            producer,
-            product.clone(),
-            validation,
-        )?);
+        let entry =
+            match view.retained_original_entry_with_validation(producer, product, validation)? {
+                Some(entry) => entry,
+                None => Arc::new(ArtifactEntry::original_with_validation(
+                    producer,
+                    product.clone(),
+                    validation,
+                )?),
+            };
+        entries.push(entry);
     }
-    view.inventory().admit_shared_with_demand(
-        &view,
-        entries.into_iter().map(Arc::new).collect(),
-        demand,
-    )
+    view.inventory()
+        .admit_shared_with_demand(&view, entries, demand)
 }
 
 /// Admit only the inventory's selected dependency closure. Original byte custody

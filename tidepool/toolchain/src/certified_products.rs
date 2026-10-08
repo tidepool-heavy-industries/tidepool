@@ -9172,11 +9172,50 @@ pub(crate) mod tests {
                 "segment original package selection"
             ))
         ));
+        let view = crate::declaration_context::certified_product_artifact_view_with_validation(
+            [1; 32],
+            std::slice::from_ref(&product),
+            &[],
+            &[],
+            None,
+            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let reused = view
+            .retained_original_entry_with_validation(
+                [1; 32],
+                &product,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap()
+            .unwrap();
+        let original_entry = view
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                matches!(
+                    &entry.payload,
+                    crate::artifact_inventory::ArtifactPayload::Original(_)
+                )
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&reused, &original_entry));
         std::fs::write(&path, [0x44]).unwrap();
         assert!(matches!(
             check(&packages),
             Err(CertificationError::StaleEvidence)
         ));
+        let refusal = view.retained_original_entry_with_validation(
+            [1; 32],
+            &product,
+            &mut PackageInterfaceValidation::default(),
+        );
+        assert!(
+            matches!(refusal,
+            Err(crate::CompileError::CompilerEvidence(error)) if matches!(*error, CertificationError::StaleEvidence)),
+            "retained artifact entry rechecks package bytes"
+        );
     }
 
     proptest::proptest! {
@@ -15843,7 +15882,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires an explicit retained compiler transaction"]
+    #[ignore = "requires the original 029d retained compiler transaction with 19,738 module global facts"]
     fn receipt_dictionary_replays_fourteen_retained_items_under_one_budget() {
         let root = PathBuf::from(
             std::env::var_os("TIDEPOOL_RETAINED_COMPILER_TRANSACTION")

@@ -804,6 +804,104 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         "another admission issues its own proof"
     );
 
+    let originals = [current_a.clone(), current_b.clone()];
+    let mut first_entry_validation = PackageInterfaceValidation::default();
+    let entry_work_start = first_entry_validation.inventory.work_usage().unwrap().0;
+    let original_view =
+        crate::declaration_context::certified_product_artifact_view_with_validation(
+            canonical_producer,
+            &originals,
+            &[],
+            &[],
+            None,
+            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
+            &mut first_entry_validation,
+        )
+        .unwrap();
+    let original_entry_work =
+        first_entry_validation.inventory.work_usage().unwrap().0 - entry_work_start;
+    let original_entries = original_view
+        .entries()
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                &entry.payload,
+                crate::artifact_inventory::ArtifactPayload::Original(_)
+            )
+        })
+        .map(|entry| (entry.descriptor.id, entry))
+        .collect::<BTreeMap<_, _>>();
+    for item in 1..14 {
+        let mut repeated_validation = PackageInterfaceValidation::default();
+        let reused = crate::declaration_context::certified_product_artifact_view_with_validation(
+            canonical_producer,
+            &originals,
+            &[],
+            &[],
+            Some(&original_view),
+            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
+            &mut repeated_validation,
+        )
+        .unwrap();
+        assert_eq!(
+            reused.selected_native_groups(),
+            original_view.selected_native_groups()
+        );
+        for entry in reused.entries().iter().filter(|entry| {
+            matches!(
+                &entry.payload,
+                crate::artifact_inventory::ArtifactPayload::Original(_)
+            )
+        }) {
+            assert!(
+                Arc::ptr_eq(entry, &original_entries[&entry.descriptor.id]),
+                "item {item} shares exact original entry"
+            );
+        }
+        let repeated_work = repeated_validation.inventory.work_usage().unwrap().0;
+        if item == 1 {
+            println!("artifact_entry_work first={original_entry_work} repeated={repeated_work}");
+        }
+        assert!(repeated_work < original_entry_work,
+            "item {item} avoids rebuilding native requirement maps: first={original_entry_work} repeated={repeated_work}");
+    }
+    let changed_source_product = current_a.clone().with_source_sha256([99; 32]);
+    assert!(
+        original_view
+            .retained_original_entry_with_validation(
+                canonical_producer,
+                &changed_source_product,
+                &mut PackageInterfaceValidation::default()
+            )
+            .unwrap()
+            .is_none(),
+        "changed source admission does not share artifact-entry proof custody"
+    );
+    assert!(
+        crate::declaration_context::certified_product_artifact_view_with_validation(
+            [99; 32],
+            &originals,
+            &[],
+            &[],
+            Some(&original_view),
+            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
+            &mut PackageInterfaceValidation::default()
+        )
+        .is_err()
+    );
+    let mut independent_entry_validation = PackageInterfaceValidation::default();
+    let distinct_proof = original_view
+        .retained_original_entry_with_validation(
+            canonical_producer,
+            independent_a,
+            &mut independent_entry_validation,
+        )
+        .unwrap();
+    assert!(
+        distinct_proof.is_none(),
+        "different issuer proof requires ordinary metadata admission"
+    );
+
     let mut changed_import = promoted_packet.clone();
     let a_receipt = changed_import
         .modules
