@@ -9121,6 +9121,25 @@ pub(crate) mod tests {
                 for (key, value) in &expected {
                     assert_eq!(sources.get(key), Some(value));
                     assert!(sources.contains_module(&key.0.unit, &key.0.module));
+                    assert_eq!(
+                        resolve_receipt_owner(
+                            ReceiptImportOwner::Source {
+                                unit: key.0.unit.clone(),
+                                module: key.0.module.clone(),
+                                module_version: Some(key.0.module_version.clone()),
+                                original_ordinal: key.1,
+                                binder: key.2.clone(),
+                            },
+                            sources,
+                            &BTreeMap::new(),
+                        )
+                        .unwrap(),
+                        PendingImportOwner::Source {
+                            owner: value.0.clone(),
+                            original_ordinal: key.1,
+                            binder: key.2.clone(),
+                        }
+                    );
                 }
             };
         check(&sources, &current);
@@ -13518,9 +13537,32 @@ pub(crate) mod tests {
                 )
                 .unwrap();
                 assert_eq!(
-                    available.groups.keys().cloned().collect::<BTreeSet<_>>(),
+                    available
+                        .iter()
+                        .map(|(key, _)| key.clone())
+                        .collect::<BTreeSet<_>>(),
                     expected_keys
                 );
+                let selected_keys = subset
+                    .iter()
+                    .flat_map(|group| {
+                        group.group().binders().iter().map(move |binder| {
+                            (
+                                group.owner().clone(),
+                                group.group().original_ordinal(),
+                                binder.clone(),
+                            )
+                        })
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(
+                    available.groups.keys().cloned().collect::<BTreeSet<_>>(),
+                    selected_keys
+                );
+                assert!(available
+                    .groups
+                    .values()
+                    .all(|(_, origin)| *origin == ProductOrigin::RetainedCore));
             }
             let mut duplicate = packet.clone();
             let duplicated = duplicate.modules[0].groups[0].clone();
