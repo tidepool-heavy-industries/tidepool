@@ -10642,11 +10642,6 @@ where
         if boundary.hosted().is_none() {
             return Ok(());
         }
-        let children = self
-            .workbench_executions
-            .lock()
-            .provider_children(boundary)?;
-        let retirement = workbench_ledger::provider_child_retirement_batch(kernel, children)?;
         let work = self
             .workbench_executions
             .lock()
@@ -10656,13 +10651,6 @@ where
             if let Some(detail) = cleanup.uncertainty() {
                 return Err(KernelBehaviorError::new(detail));
             }
-        }
-        for (child, terminal) in retirement.into_actors() {
-            let identity = child.identity();
-            workbench_ledger::settle_provider_child_owner(child, terminal).await?;
-            self.workbench_executions
-                .lock()
-                .provider_child_released(boundary, identity)?;
         }
         Ok(())
     }
@@ -10696,20 +10684,8 @@ where
                     (session == context.placement.session).then_some(scope)
                 })
                 .collect();
-            workbench_ledger::BoundaryAbortCleanup {
-                children: Vec::new(),
-                scopes,
-            }
+            workbench_ledger::BoundaryAbortCleanup { scopes }
         });
-        let retirement = workbench_ledger::provider_child_retirement_batch(
-            kernel,
-            cleanup.children.iter().rev().copied().collect(),
-        )?;
-        for (child, terminal) in retirement.into_actors() {
-            workbench_ledger::settle_provider_child_owner(child, terminal).await?;
-            cleanup.children.pop();
-            owner.retain_cleanup(cleanup.clone());
-        }
         self.environment
             .runner
             .retire_context_scopes(context, cleanup.scopes.clone())

@@ -1,79 +1,5 @@
 use super::*;
 
-#[cfg(test)]
-async fn settle_provider_child(
-    kernel: &KernelContext,
-    child: ActorRef,
-) -> Result<(), KernelBehaviorError> {
-    let child_owner = kernel.resolve(child).ok_or_else(|| {
-        KernelBehaviorError::new(format!(
-            "provider child {child:?} lacks retained cleanup ownership"
-        ))
-    })?;
-    settle_provider_child_owner(child_owner, provider_child_terminal()).await
-}
-
-fn provider_child_terminal() -> ActorTerminal {
-    ActorTerminal {
-        kind: ActorExitKind::Cancelled,
-        summary: "enclosing provider boundary released incomplete child".into(),
-        diagnostic: None,
-    }
-}
-
-pub(super) async fn settle_provider_child_owner(
-    child_owner: LocalActorRef,
-    terminal: ActorTerminal,
-) -> Result<(), KernelBehaviorError> {
-    let child = child_owner.identity();
-    let shutdown = child_owner
-        .shutdown_with_cleanup(terminal)
-        .await
-        .map_err(KernelInvocationFailure::into_behavior_error)?;
-    if !shutdown.cleanup.is_confirmed() {
-        return Err(KernelBehaviorError::new(format!(
-            "provider child {child:?} cleanup is unconfirmed"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-pub(super) async fn settle_provider_children(
-    journal: &Arc<Mutex<WorkbenchExecutions>>,
-    kernel: &KernelContext,
-    boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
-) -> Result<(), KernelBehaviorError> {
-    let children = journal.lock().provider_children(boundary)?;
-    let batch = provider_child_retirement_batch(kernel, children)?;
-    for (owner, terminal) in batch.into_actors() {
-        let child = owner.identity();
-        settle_provider_child_owner(owner, terminal).await?;
-        journal.lock().provider_child_released(boundary, child)?;
-    }
-    Ok(())
-}
-
-pub(super) fn provider_child_retirement_batch(
-    kernel: &KernelContext,
-    children: Vec<ActorRef>,
-) -> Result<crate::kernel::RetirementBatch, KernelBehaviorError> {
-    let owners = children
-        .into_iter()
-        .map(|child| {
-            kernel
-                .resolve(child)
-                .map(|owner| (owner, provider_child_terminal()))
-                .ok_or_else(|| {
-                    KernelBehaviorError::new(format!(
-                        "provider child {child:?} lacks retained cleanup ownership"
-                    ))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(crate::kernel::RetirementBatch::issue(owners))
-}
-
 #[derive(Clone)]
 struct WorkbenchExecutionRecord {
     request: WorkbenchRequest,
@@ -84,12 +10,10 @@ struct WorkbenchExecutionRecord {
     display_settlements: Arc<DisplayExecutionSettlement>,
     provider_finalization: Option<Arc<crate::resident_tools::ProviderFinalization>>,
     provider_owner: Option<crate::HostedOperationSettlement>,
-    provider_children: Vec<ActorRef>,
 }
 
 #[derive(Clone, Default)]
 pub(super) struct BoundaryAbortCleanup {
-    pub children: Vec<ActorRef>,
     pub scopes: Vec<tidepool_codegen::scope::ScopeId>,
 }
 
@@ -348,7 +272,6 @@ impl WorkbenchExecutions {
                 display_settlements: Arc::new(DisplayExecutionSettlement::new(execution.clone())),
                 provider_finalization: None,
                 provider_owner: None,
-                provider_children: Vec::new(),
             },
         );
     }
@@ -379,11 +302,6 @@ impl WorkbenchExecutions {
             .get(&key)
             .map(|record| record.display_settlements.clone())
             .unwrap_or_else(|| Arc::new(DisplayExecutionSettlement::new(execution.clone())));
-        let provider_children = self
-            .0
-            .get(&key)
-            .map(|record| record.provider_children.clone())
-            .unwrap_or_default();
         let provider_owner = self
             .0
             .get(&key)
@@ -406,7 +324,6 @@ impl WorkbenchExecutions {
                 display_settlements,
                 provider_finalization,
                 provider_owner,
-                provider_children,
             },
         );
     }
@@ -475,7 +392,7 @@ impl WorkbenchExecutions {
         };
         if !exact {
             return Err(KernelBehaviorError::new(
-                "provider child cleanup lacks one exact original journal owner",
+                "provider invocation cleanup lacks one exact original journal owner",
             ));
         }
         Ok(self
@@ -494,45 +411,6 @@ impl WorkbenchExecutions {
             .clone())
     }
 
-    #[cfg(test)]
-    pub(super) fn retain_provider_children(
-        &mut self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
-        children: Vec<ActorRef>,
-    ) -> Result<(), KernelBehaviorError> {
-        if children.is_empty() {
-            return Ok(());
-        }
-        let record = self.provider_cleanup_record(boundary)?;
-        for child in children {
-            if !record.provider_children.contains(&child) {
-                record.provider_children.push(child);
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn provider_children(
-        &mut self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
-    ) -> Result<Vec<ActorRef>, KernelBehaviorError> {
-        Ok(self
-            .provider_cleanup_record(boundary)?
-            .provider_children
-            .clone())
-    }
-
-    pub(super) fn provider_child_released(
-        &mut self,
-        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
-        child: ActorRef,
-    ) -> Result<(), KernelBehaviorError> {
-        self.provider_cleanup_record(boundary)?
-            .provider_children
-            .retain(|pending| *pending != child);
-        Ok(())
-    }
-
     pub(super) fn finalize_provider_boundary(
         &self,
         boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
@@ -549,10 +427,14 @@ impl WorkbenchExecutions {
         let exact = matches!(records.as_slice(), [(WorkbenchReplayKey::Hosted(invocation), _)] if invocation.is_original_invocation());
         for (_, record) in records {
             if let Some(owner) = &record.provider_finalization {
+                let cleanup_unconfirmed = record.invocation_work.as_ref().is_some_and(|work| {
+                    work.cleanup_observation()
+                        .is_none_or(|cleanup| cleanup.uncertainty().is_some())
+                });
                 owner.finish(if !exact {
                     Err("nested or multiple native cells do not prove the original provider boundary".into())
-                } else if result.is_ok() && !record.provider_children.is_empty() {
-                    Err("provider child cleanup remains unconfirmed".into())
+                } else if result.is_ok() && cleanup_unconfirmed {
+                    Err("provider invocation cleanup remains unconfirmed".into())
                 } else { result.clone() });
             }
         }
@@ -732,6 +614,7 @@ mod tests {
 
     use futures_util::future::BoxFuture;
     use serde_json::Value;
+    use std::time::Duration;
     struct CleanupProbe {
         context: Arc<std::sync::OnceLock<KernelContext>>,
         fail_cleanup: bool,
@@ -834,144 +717,192 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_child_cleanup_preserves_partial_obligations_and_refuses_false_completion() {
-        let context = Arc::new(std::sync::OnceLock::new());
-        let (parent, task) = crate::spawn_local_actor(
-            None,
-            CleanupProbe {
-                context: context.clone(),
-                fail_cleanup: false,
-            },
-        )
-        .await
-        .unwrap();
-        let kernel = context.get().unwrap().clone();
-        let good = kernel
-            .spawn_child(
-                None,
-                CleanupProbe {
-                    context: Arc::default(),
-                    fail_cleanup: false,
+    async fn invocation_worker_cleanup_controls_original_provider_acknowledgement() {
+        for fail_cleanup in [false, true] {
+            let fixture = super::super::invocation_work::tests::Fixture::start().await;
+            let actor = fixture.actor.identity();
+            let descriptor = ActorDescriptor::new(
+                "provider cleanup fixture",
+                crate::ActorPlacement {
+                    session: tidepool_repr::SessionId(1),
+                    resource_scope: RealmId::fresh(),
+                    lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
                 },
+            );
+            let mut behavior = ResidentKernelBehavior::with_boot(
+                descriptor,
+                fixture.environment.clone(),
+                ResidentBoot::Workbench,
+                Vec::new(),
+            );
+            let invocation = exomonad_tool::ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+                Some("call".into()),
+                None,
+            );
+            let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
+            let key = control.invocation.as_ref().unwrap();
+            let execution = control.execution_id(actor);
+            let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+            );
+            let request = WorkbenchRequest::from_cell_input("current operation")
+                .with_execution_id(execution.clone())
+                .with_checkpoint_boundary(boundary.clone());
+            let publications = fixture.actor.hosted_cell();
+            publications.publish_provider_transport(actor, control.clone());
+            publications.accept(&control);
+            let work = InvocationWork::new(actor, control.reservation_owner(actor).unwrap());
+            {
+                let mut journal = behavior.workbench_executions.lock();
+                journal.begin(&execution, request.clone(), Some(key));
+                journal.bind_provider_finalization(&execution, Some(key), Some(&control));
+                journal.retain_invocation_work(work.clone(), Some(&execution), Some(key));
+            }
+            // Admit both workers through the same startup owner used by Green
+            // and scoped actor calls, including a nested invocation scope.
+            let scope = work.new_scope().unwrap();
+            let mut children = Vec::new();
+            for failed in [false, fail_cleanup] {
+                let child = fixture
+                    .kernel
+                    .spawn_worker_scoped(
+                        None,
+                        CleanupProbe {
+                            context: Arc::default(),
+                            fail_cleanup: failed,
+                        },
+                        crate::WorkerLifetime::InvocationOwned,
+                        scope.clone(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(scope.owns_worker(child.identity()));
+                children.push(child);
+            }
+            let reply = WorkbenchResponse {
+                status: WorkbenchRunStatus::Completed,
+                summary: None,
+                items: Vec::new(),
+                next_index: 0,
+                total: 0,
+                publication: None,
+            };
+            let exit = control.finish_cell(
+                execution.clone(),
+                &Ok(KernelStep::Continue(reply.clone())),
+                !fail_cleanup,
+            );
+            control.settle(Ok(reply.clone()));
+            publications.complete(&control);
+            {
+                let mut journal = behavior.workbench_executions.lock();
+                journal.record(
+                    execution.clone(),
+                    request,
+                    Ok(reply.clone()),
+                    control.cancellation_outcome(execution.clone(), Ok(reply)),
+                    Some(key),
+                );
+                journal.retain_cell_terminal(&execution, Some(key), exit);
+            }
+            let owner = publications.retained_boundary(&boundary).unwrap();
+            assert!(matches!(
+                owner.finalization(),
+                crate::HostedOperationFinalization::Pending
+            ));
+            assert!(work.cleanup_observation().is_none());
+            // Invoke the actual production consumer. An unclean cell takes
+            // its abort path, which still must clean the retained scope tree.
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                behavior.tool_completed(&fixture.kernel, boundary.clone()),
             )
             .await
             .unwrap();
-        let bad = kernel
-            .spawn_child(
-                None,
-                CleanupProbe {
-                    context: Arc::default(),
-                    fail_cleanup: true,
-                },
-            )
-            .await
-            .unwrap();
-        let invocation = exomonad_tool::ToolInvocationContext::external(
-            "thread".into(),
-            "turn".into(),
-            "call".into(),
-            Some("call".into()),
-            None,
-        );
-        let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
-        let key = control.invocation.as_ref().unwrap();
-        let execution = control.execution_id(parent.identity());
-        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
-            "thread".into(),
-            "turn".into(),
-            "call".into(),
-        );
-        let request = WorkbenchRequest::from_cell_input("current operation")
-            .with_execution_id(execution.clone())
-            .with_checkpoint_boundary(boundary.clone());
-        let publications = crate::kernel::HostedCellPublications::default();
-        publications.publish_provider_transport(parent.identity(), control.clone());
-        publications.accept(&control);
-        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
-        journal.lock().begin(&execution, request, Some(key));
-        journal
-            .lock()
-            .bind_provider_finalization(&execution, Some(key), Some(&control));
-        journal
-            .lock()
-            .retain_provider_children(&boundary, vec![good.identity(), bad.identity()])
-            .unwrap();
-        let result = settle_provider_children(&journal, &kernel, &boundary).await;
-        assert!(result.is_err());
-        assert!(good.terminal().cleanup().unwrap().is_confirmed());
-        assert!(!bad.terminal().cleanup().unwrap().is_confirmed());
-        assert_eq!(
-            journal.lock().provider_children(&boundary).unwrap(),
-            vec![bad.identity()]
-        );
-        assert!(
-            settle_provider_children(&journal, &kernel, &boundary)
+            assert!(children[0].terminal().cleanup().unwrap().is_confirmed());
+            assert_eq!(
+                children[1].terminal().cleanup().unwrap().is_confirmed(),
+                !fail_cleanup
+            );
+            assert_eq!(
+                work.cleanup_observation().unwrap().uncertainty().is_some(),
+                fail_cleanup
+            );
+            if fail_cleanup {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("injected child cleanup failure"), "{error}");
+                assert!(matches!(
+                    owner.finalization(),
+                    crate::HostedOperationFinalization::Settled(Err(_))
+                ));
+                assert!(owner.acknowledge().await.is_err());
+                assert!(
+                    owner.control().is_some(),
+                    "uncertainty retains native custody"
+                );
+                assert_eq!(
+                    behavior
+                        .workbench_executions
+                        .lock()
+                        .pending_provider_boundaries(),
+                    vec![boundary.clone()]
+                );
+                assert!(fixture.kernel.forget_terminal_actor(children[1].identity()));
+                assert!(fixture.kernel.resolve(children[1].identity()).is_none());
+                // The scope's retained LocalActorRef, not a fresh directory
+                // lookup, carries the same failed cleanup across retries.
+                assert!(behavior
+                    .tool_aborted(&fixture.kernel, boundary.clone())
+                    .await
+                    .is_err());
+                assert!(owner.acknowledge().await.is_err());
+                assert!(scope.owns_worker(children[1].identity()));
+                // An erroneous success caller also cannot overwrite the
+                // finalizer's first retained cleanup refusal.
+                behavior
+                    .workbench_executions
+                    .lock()
+                    .finalize_provider_boundary(
+                        &boundary,
+                        Ok(crate::ProviderFinalizationKind::Completed),
+                    );
+                assert!(matches!(
+                    owner.finalization(),
+                    crate::HostedOperationFinalization::Settled(Err(_))
+                ));
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    owner.acknowledge().await.unwrap(),
+                    crate::ProviderFinalizationKind::Completed
+                );
+                assert_eq!(
+                    owner.acknowledge().await.unwrap(),
+                    crate::ProviderFinalizationKind::Completed
+                );
+                assert!(owner.control().is_none());
+                assert!(behavior
+                    .workbench_executions
+                    .lock()
+                    .pending_provider_boundaries()
+                    .is_empty());
+            }
+            let other = tidepool_runtime::session::ContextCheckpointBoundary::external(
+                "thread".into(),
+                "turn".into(),
+                "other".into(),
+            );
+            assert!(behavior
+                .settle_provider_resources(&fixture.kernel, &other)
                 .await
-                .is_err(),
-            "repeat uses the same unconfirmed child owner"
-        );
-        assert_eq!(
-            journal.lock().provider_children(&boundary).unwrap(),
-            vec![bad.identity()]
-        );
-        assert!(kernel.forget_terminal_actor(bad.identity()));
-        assert!(kernel.resolve(bad.identity()).is_none());
-        assert!(settle_provider_child(&kernel, bad.identity())
-            .await
-            .is_err());
-        assert!(settle_provider_children(&journal, &kernel, &boundary)
-            .await
-            .is_err());
-        assert_eq!(
-            journal.lock().provider_children(&boundary).unwrap(),
-            vec![bad.identity()]
-        );
-        let abort_owner = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || false)
-            .unwrap()
-            .unwrap();
-        let abort_cleanup = abort_owner.collect_cleanup(|| BoundaryAbortCleanup {
-            children: vec![bad.identity()],
-            scopes: Vec::new(),
-        });
-        assert!(settle_provider_child(&kernel, abort_cleanup.children[0])
-            .await
-            .is_err());
-        assert_eq!(
-            abort_owner
-                .collect_cleanup(|| panic!("lost child remains owned"))
-                .children,
-            vec![bad.identity()]
-        );
-        // The finalization owner itself prevents a caller from asserting
-        // Completed while its actual child cleanup obligation remains retained.
-        journal
-            .lock()
-            .finalize_provider_boundary(&boundary, Ok(crate::ProviderFinalizationKind::Completed));
-        assert!(matches!(
-            publications
-                .retained_boundary(&boundary)
-                .unwrap()
-                .finalization(),
-            crate::HostedOperationFinalization::Settled(Err(_))
-        ));
-        assert!(!journal.lock().pending_provider_boundaries().is_empty());
-        let other = tidepool_runtime::session::ContextCheckpointBoundary::external(
-            "thread".into(),
-            "turn".into(),
-            "other".into(),
-        );
-        assert!(settle_provider_children(&journal, &kernel, &other)
-            .await
-            .is_err());
-        parent
-            .shutdown(ActorTerminal {
-                kind: ActorExitKind::Cancelled,
-                summary: "cleanup history complete".into(),
-                diagnostic: None,
-            })
-            .await
-            .unwrap();
-        task.await.unwrap();
+                .is_err());
+            fixture.finish().await;
+        }
     }
 
     #[test]
@@ -1300,7 +1231,6 @@ mod tests {
                 "checkpoint extraction must run unlocked"
             );
             BoundaryAbortCleanup {
-                children: Vec::new(),
                 scopes: checkpoints
                     .settle_checkpoints(actor, &boundary, false)
                     .into_iter()
