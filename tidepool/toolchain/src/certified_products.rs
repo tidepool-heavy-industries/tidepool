@@ -516,11 +516,12 @@ impl CertifiedSegmentOriginals {
             ));
         }
         for (owner, witness) in &item.packages {
-            if self.package_availability.contains_key(owner) {
-                return Err(CertificationError::Mismatch(
-                    "item repeats an original package selection",
-                ));
-            }
+            check_segment_package_addition(
+                owner,
+                witness,
+                &self.receipt.packages,
+                &self.package_availability,
+            )?;
             let imported = item.globals.iter().any(|global| match &global.owner {
                 ReceiptImportOwner::Package {
                     unit,
@@ -631,6 +632,30 @@ impl CertifiedSegmentOriginals {
         };
         Ok((products, item.globals, item.packages))
     }
+}
+
+fn check_segment_package_addition(
+    owner: &(String, String),
+    witness: &PackageInterfaceWitness,
+    receipt_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    available_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+) -> CertResult<()> {
+    // The producer computes item deltas against its emitted receipt. An
+    // inherited native witness can independently retain the same package.
+    if receipt_packages.contains_key(owner) {
+        return Err(CertificationError::Mismatch(
+            "item repeats an original package selection",
+        ));
+    }
+    if available_packages
+        .get(owner)
+        .is_some_and(|previous| previous != witness)
+    {
+        return Err(CertificationError::Mismatch(
+            "item replaces an inherited package selection",
+        ));
+    }
+    Ok(())
 }
 
 /// Assembly authority issued only after complete native promotion certification.
@@ -6669,18 +6694,20 @@ pub(crate) fn certify_products_with_validation(
         .validate_owners(&receipt.modules, &receipt.packages)?;
     let evidence_start = std::time::Instant::now();
     let normalized = match exact {
-        None => CompletedSourceEvidence::from_worker(
-            fresh_evidence_bytes,
-            fresh_input_path,
-            final_target_source,
-        )
-        .ok_or(CertificationError::StaleEvidence)?,
+        None => std::borrow::Cow::Owned(
+            CompletedSourceEvidence::from_worker(
+                fresh_evidence_bytes,
+                fresh_input_path,
+                final_target_source,
+            )
+            .ok_or(CertificationError::StaleEvidence)?,
+        ),
         Some(admission) => {
             admission
                 .source
                 .validate_ineligible_evidence(fresh_evidence_bytes)
                 .map_err(|_| CertificationError::Mismatch("exact fresh evidence"))?;
-            admission.source.evidence.clone()
+            std::borrow::Cow::Borrowed(admission.source.evidence.as_ref())
         }
     };
     if serde_json::to_vec(&normalized)
@@ -11666,6 +11693,28 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(selected, expected);
+        let (owner, witness) = selected.iter().next().unwrap();
+        check_segment_package_addition(owner, witness, &BTreeMap::new(), &selected).unwrap();
+        assert!(matches!(
+            check_segment_package_addition(owner, witness, &selected, &selected),
+            Err(CertificationError::Mismatch(
+                "item repeats an original package selection"
+            ))
+        ));
+        let mut conflicting = witness.clone();
+        conflicting.sha256[0] ^= 1;
+        assert!(matches!(
+            check_segment_package_addition(owner, &conflicting, &BTreeMap::new(), &selected),
+            Err(CertificationError::Mismatch(
+                "item replaces an inherited package selection"
+            ))
+        ));
+        let mut another_path = witness.clone();
+        another_path.selected_path = root.path().join("AnotherExternal.hi");
+        assert!(
+            check_segment_package_addition(owner, &another_path, &BTreeMap::new(), &selected,)
+                .is_err()
+        );
         assert_eq!(
             HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
             before

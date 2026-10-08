@@ -1519,6 +1519,7 @@ impl ModuleCandidateOffer {
             None,
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )?;
+        let admissions = exact.validate_outputs_with_planned(root, planned.as_ref())?;
         crate::checked_cell::admit_checked_cell(
             root,
             &self.producer,
@@ -1527,7 +1528,7 @@ impl ModuleCandidateOffer {
             self.checked_projections.clone(),
             &exact.request_sha256,
             specification,
-            exact.validate_outputs_with_planned(root, planned.as_ref())?,
+            &admissions,
             &self.include,
             planned,
             self.checked_values.clone().ok_or_else(|| {
@@ -1581,7 +1582,7 @@ impl ModuleCandidateOffer {
         // outputs. The next admission starts a fresh filesystem observation.
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let mut declarations = BTreeMap::new();
-        let mut admissions = Vec::new();
+        let mut pending_segments = Vec::new();
         let mut outputs = BTreeMap::new();
         let mut segment = 0usize;
         let mut index = 0usize;
@@ -1771,9 +1772,7 @@ impl ModuleCandidateOffer {
                     outputs.insert(index, output);
                     index += 1;
                 }
-                segment_offer
-                    .publish_segment_original_products(&source_segment, &mut validation)?;
-                admissions.extend(source_segment.into_admissions());
+                pending_segments.push((segment_offer, source_segment));
             }
             segment += 1;
         }
@@ -1785,7 +1784,9 @@ impl ModuleCandidateOffer {
             self.checked_projections.clone(),
             &initial.request_sha256,
             specification,
-            admissions,
+            pending_segments
+                .iter()
+                .flat_map(|(_, segment)| segment.admissions()),
             &self.include,
             None,
             values.clone(),
@@ -1880,12 +1881,16 @@ impl ModuleCandidateOffer {
                 "program contains unowned prepared targets".into(),
             ));
         }
-        Ok(Arc::new(CellProgram {
+        let program = Arc::new(CellProgram {
             checked: cell,
             parsed: planned.parsed_plan.clone(),
             slots: planned.slots.clone(),
             items,
-        }))
+        });
+        for (offer, segment) in pending_segments {
+            offer.publish_segment_original_products(&segment, &mut validation)?;
+        }
+        Ok(program)
     }
 
     fn program_offer(&self, exact: crate::declaration_context::ExactCompilationRequest) -> Self {
@@ -2777,7 +2782,7 @@ fn seal_turn_outputs_with_validation(
         None
     };
     let evidence = exact_source
-        .map(|source| &source.evidence)
+        .map(|source| source.evidence.as_ref())
         .or(ordinary_evidence.as_ref());
     let fresh_products = segment_originals
         .map(|originals| originals.raw())
@@ -2787,7 +2792,7 @@ fn seal_turn_outputs_with_validation(
         || offer.exact.is_some()
         || !fresh_products.products().is_empty()
         || !prepared.globals().is_empty()
-        || evidence.is_some_and(has_ready_home_module);
+        || evidence.is_some_and(|evidence| has_ready_home_module(evidence));
     if receipt_bytes.is_empty() {
         if needs_certificate {
             return Err(CompileError::ExtractFailed(
@@ -4266,7 +4271,7 @@ fn compile_invocation_inner(
                 },
             );
         let evidence = match exact_source.as_ref() {
-            Some(source) => Some(source.evidence.clone()),
+            Some(source) => Some((*source.evidence).clone()),
             None => cache::CompletedSourceEvidence::from_worker(
                 &evidence_bytes,
                 &input_path,
@@ -7205,7 +7210,7 @@ mod module_product_tests {
                 // does not issue a replay recipe or a hermetic build artifact.
                 let consumer = root.path().join("QuotedConsumer.hs");
                 std::fs::write(&consumer, source).unwrap();
-                let mut observations = admission.evidence.clone().into_evidence();
+                let mut observations = (*admission.evidence).clone().into_evidence();
                 for consumed in &mut observations.sources {
                     if consumed.path == Path::new(cache::GENERATED_SOURCE) {
                         consumed.path = consumer.clone();

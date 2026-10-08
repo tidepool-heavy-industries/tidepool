@@ -465,7 +465,7 @@ pub struct ExactCheckedCell {
     retained_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     receipt_digest: [u8; 32],
     checked_source: String,
-    evidence: Vec<(String, crate::cache::CompletedSourceEvidence)>,
+    evidence: Vec<(String, Arc<crate::cache::CompletedSourceEvidence>)>,
     observations: Vec<u8>,
     items: Vec<CheckedItem>,
     include: Vec<std::path::PathBuf>,
@@ -3839,7 +3839,7 @@ pub(crate) fn read_program_typed_segments(
     )?;
     decode_typed_segment_plans(&header[11], program)
 }
-pub(crate) fn admit_checked_cell(
+pub(crate) fn admit_checked_cell<'a>(
     root: &Path,
     producer: &[u8],
     context: [u8; 32],
@@ -3847,7 +3847,7 @@ pub(crate) fn admit_checked_cell(
     retained_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     request_digest: &str,
     specification: &CheckedCellSpecification,
-    admissions: Vec<ExactSourceAdmission>,
+    admissions: impl IntoIterator<Item = &'a ExactSourceAdmission>,
     include: &[std::path::PathBuf],
     planned_declaration: Option<PlannedCheckedDeclaration>,
     value_inputs: Arc<CheckedValueInputs>,
@@ -3912,7 +3912,7 @@ pub(crate) fn admit_checked_cell(
                 {
                     return Err(failure("compiled program source evidence changed"));
                 }
-                Ok((source, admitted.evidence))
+                Ok((source, admitted.evidence.clone()))
             })
             .collect::<Result<Vec<_>, CompileError>>()?
     } else {
@@ -3923,7 +3923,7 @@ pub(crate) fn admit_checked_cell(
                     == &<[u8; 32]>::from(Sha256::digest(checked_source.as_bytes()))
             })
             .ok_or_else(|| failure("cell has no exact final source witness"))?;
-        vec![(checked_source.clone(), source.evidence)]
+        vec![(checked_source.clone(), source.evidence.clone())]
     };
     let signatures = list(&header[8], 65536)?
         .iter()

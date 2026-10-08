@@ -1828,7 +1828,7 @@ impl ExactSourceWitness {
 
 pub(crate) struct ExactSourceAdmission {
     pub(crate) witness: ExactSourceWitness,
-    pub(crate) evidence: crate::cache::CompletedSourceEvidence,
+    pub(crate) evidence: Arc<crate::cache::CompletedSourceEvidence>,
     pub(crate) evidence_bytes: Vec<u8>,
     pub(crate) exact_imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
     // Roots accepted by each retained typed protected-recipe authority.
@@ -1951,9 +1951,6 @@ impl ExactProgramSegmentAdmission {
 
     pub(crate) fn admissions(&self) -> &[ExactSourceAdmission] {
         &self.admissions
-    }
-    pub(crate) fn into_admissions(self) -> Vec<ExactSourceAdmission> {
-        self.admissions
     }
 }
 
@@ -3453,7 +3450,7 @@ impl ExactCompilationRequest {
                 source_path,
                 source_sha256,
             },
-            evidence,
+            evidence: Arc::new(evidence),
             evidence_bytes,
             exact_imports,
             scaffold_roots,
@@ -6759,7 +6756,7 @@ mod tests {
                 source_sha256: Sha256::digest(source.as_bytes()).into(),
             },
             evidence_bytes,
-            evidence,
+            evidence: Arc::new(evidence),
             exact_imports: BTreeMap::new(),
             scaffold_roots: BTreeMap::new(),
             exact_source_imports: BTreeMap::new(),
@@ -8653,7 +8650,7 @@ mod tests {
         let path = root.join("Ref.hs");
         std::fs::write(&path, source).unwrap();
         let mut admission = support_admission(root);
-        let mut evidence = admission.evidence.into_evidence();
+        let mut evidence = Arc::unwrap_or_clone(admission.evidence).into_evidence();
         evidence
             .sources
             .retain(|source| source.path == Path::new(crate::cache::GENERATED_SOURCE));
@@ -8675,7 +8672,8 @@ mod tests {
             evidence,
             "module Target where\n",
         )
-        .unwrap();
+        .unwrap()
+        .into();
         admission
     }
 
@@ -8900,7 +8898,7 @@ mod tests {
         assert!(retained.recovery_products().is_empty());
         assert!(hidden.lexical_graph().is_empty());
         let uncaptured = interface_only_agent_ref_admission(directory.path(), "main");
-        let mut uncaptured = uncaptured.evidence.into_evidence();
+        let mut uncaptured = Arc::unwrap_or_clone(uncaptured.evidence).into_evidence();
         uncaptured.modules[0].source = directory.path().join("uncaptured.hs");
         assert!(crate::cache::CompletedSourceEvidence::from_normalized(
             uncaptured,
@@ -9065,7 +9063,7 @@ mod tests {
             )
             .is_err());
         let original = support_admission(directory.path());
-        let mut forged = original.evidence.into_evidence();
+        let mut forged = Arc::unwrap_or_clone(original.evidence).into_evidence();
         forged.modules[0].source = directory.path().join("AnotherOwner.hs");
         assert!(crate::cache::CompletedSourceEvidence::from_normalized(
             forged,
@@ -9081,13 +9079,14 @@ mod tests {
         let mut request = program_request(directory.path(), empty.clone());
         let original = support_admission(directory.path());
         let mut changed = support_admission(directory.path());
-        let mut evidence = changed.evidence.into_evidence();
+        let mut evidence = Arc::unwrap_or_clone(changed.evidence).into_evidence();
         evidence.modules[1].imports.clear();
         changed.evidence = crate::cache::CompletedSourceEvidence::from_normalized(
             evidence,
             "module Target where\n",
         )
-        .unwrap();
+        .unwrap()
+        .into();
         assert!(request
             .admit_fixture_support(
                 empty,
@@ -9411,7 +9410,7 @@ mod tests {
         let path = directory.path().join("Additional.hs");
         std::fs::write(&path, b"module Additional where\n").unwrap();
         let mut later = support_admission(directory.path());
-        let mut evidence = later.evidence.into_evidence();
+        let mut evidence = Arc::unwrap_or_clone(later.evidence).into_evidence();
         evidence.modules = vec![crate::cache::ModuleEvidence {
             unit: "fixture".into(),
             module: "Additional".into(),
@@ -9435,7 +9434,8 @@ mod tests {
             &path,
             "module Additional where\n",
         )
-        .unwrap();
+        .unwrap()
+        .into();
         later.exact_imports.insert(
             identity("fixture", "Additional"),
             vec![identity("fixture", "InstanceRelay")],
@@ -9598,7 +9598,7 @@ mod tests {
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(directory.path(), baseline.clone());
         let mut admission = support_admission(directory.path());
-        let mut evidence = admission.evidence.into_evidence();
+        let mut evidence = Arc::unwrap_or_clone(admission.evidence).into_evidence();
         evidence.modules.truncate(1);
         let source = &mut evidence.modules[0];
         source.unit = "main".into();
@@ -9608,7 +9608,8 @@ mod tests {
             evidence,
             "module Target where\n",
         )
-        .unwrap();
+        .unwrap()
+        .into();
         let context = request
             .admit_fixture_support(
                 baseline,
@@ -9678,7 +9679,7 @@ mod tests {
     fn program_support_refuses_ambiguous_selected_source_owner() {
         let directory = tempfile::tempdir().unwrap();
         let admission = support_admission(directory.path());
-        let mut evidence = admission.evidence.into_evidence();
+        let mut evidence = Arc::unwrap_or_clone(admission.evidence).into_evidence();
         evidence.modules.push(evidence.modules[0].clone());
         assert!(consumed_source_home_imports(&evidence, &admission.exact_imports).is_err());
         assert!(crate::cache::CompletedSourceEvidence::from_normalized(
@@ -10281,7 +10282,7 @@ mod tests {
                 .product_admission(&foreign, &source_path, source, &evidence)
                 .is_err());
         }
-        assert_eq!(segment.into_admissions().len(), 2);
+        assert_eq!(segment.admissions().len(), 2);
     }
 
     #[test]

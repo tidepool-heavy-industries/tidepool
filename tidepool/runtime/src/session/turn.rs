@@ -2640,6 +2640,7 @@ fn compile_cell_program_admitted_receipt_controls(
 enum CellProgramAudit<'a> {
     None,
     Receipts,
+    PublicationRefusal(&'a Path),
     WorkCounts(Option<scaling_tests::SegmentWorkShape>),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
 }
@@ -2901,9 +2902,20 @@ fn compile_cell_program_admitted_inner(
     if matches!(audit, CellProgramAudit::Receipts) {
         audit_compiler_issued_item_receipts(&offer, scratch.path());
     }
+    #[cfg(test)]
+    if let CellProgramAudit::PublicationRefusal(cache) = audit {
+        audit_compiler_publication_refusal(&offer, scratch.path(), cache);
+    }
     let program = offer.admit_cell_program(scratch.path()).map_err(|error| {
         offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
     })?;
+    #[cfg(test)]
+    if let CellProgramAudit::PublicationRefusal(cache) = audit {
+        assert!(
+            count_candidate_records(cache) > 0,
+            "valid follow-up must publish ordinary support suggestions"
+        );
+    }
     #[cfg(test)]
     if let CellProgramAudit::NativeEmissionOwnersAbsent(old_owners) = audit {
         audit_current_native_emission(&program, scratch.path(), old_owners);
@@ -3215,6 +3227,75 @@ fn decode_cell_program_turn(
             "complete native cell output has another item kind".into(),
         )),
     }
+}
+
+#[cfg(test)]
+fn count_candidate_records(directory: &Path) -> usize {
+    use std::io::Read;
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                count_candidate_records(&path)
+            } else {
+                let mut prefix = [0; 8];
+                usize::from(
+                    std::fs::File::open(path)
+                        .unwrap()
+                        .read_exact(&mut prefix)
+                        .is_ok()
+                        && &prefix == b"TPCRE10\n",
+                )
+            }
+        })
+        .sum()
+}
+
+#[cfg(test)]
+fn audit_compiler_publication_refusal(offer: &ModuleCandidateOffer, root: &Path, cache: &Path) {
+    assert!(
+        std::fs::read_dir(cache).unwrap().next().is_none(),
+        "publication refusal requires an empty candidate store"
+    );
+    assert!(!offer.has_candidates());
+    let path = root.join("item-0/turn.cbor");
+    let original = std::fs::read(&path).unwrap();
+    struct RestoreTurn<'a> {
+        path: &'a Path,
+        bytes: &'a [u8],
+    }
+    impl Drop for RestoreTurn<'_> {
+        fn drop(&mut self) {
+            std::fs::write(self.path, self.bytes).expect("restore producer-issued turn");
+        }
+    }
+    let restore = RestoreTurn {
+        path: &path,
+        bytes: &original,
+    };
+    let mut turn: CborValue = ciborium::de::from_reader(original.as_slice()).unwrap();
+    let fields = turn.as_array_mut().unwrap();
+    assert_eq!(fields[0].as_text(), Some("Bind"));
+    let payload = fields[1].as_array_mut().unwrap();
+    assert_eq!(payload.len(), 5);
+    payload[0] = CborValue::Array(vec![CborValue::Text("foreign_bound_name".into())]);
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&turn, &mut bytes).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    let before = tidepool_extract_cmd::extract_spawn_count();
+    let error = offer
+        .admit_cell_program(root)
+        .expect_err("wrong boundNames must refuse the final checked item seal");
+    assert!(error
+        .to_string()
+        .contains("compiled bind has another authored verdict or wrapper"));
+    assert!(
+        std::fs::read_dir(cache).unwrap().next().is_none(),
+        "refused native item must leave the candidate store empty"
+    );
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+    drop(restore);
 }
 
 #[cfg(test)]
@@ -6919,6 +7000,100 @@ mod tests {
             .begin_checked_prefix(admission, legitimate)
             .expect("refused alternate original owner must not claim the one-shot prefix");
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn program_bound_names_refusal_preserves_empty_candidate_store() {
+        use crate::session::{
+            resident_cell_check_template, resident_workbench_templates, ModuleEnv,
+            PersistentSession, SessionLib, SourceImports,
+        };
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::SessionId;
+        use tidepool_testing::effect_surface::TestEffectSurface;
+        tidepool_testing::eval_harness::require_extract();
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let cache = tempfile::tempdir().unwrap();
+        let _cache = TestEnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("CheckedTiny.hs"),
+            include_str!("fixtures/checked-tiny-support.hs"),
+        )
+        .unwrap();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let lib = SessionLib::open(
+            SessionId(1029),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let view = execution.view();
+        let imports = view.turn_imports(&SourceImports::from_specs(["qualified CheckedTiny"]));
+        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
+        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let source = "let tiny = CheckedTiny.tinyValue";
+        let specification = CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: template.clone(),
+            turn_templates: templates
+                .iter()
+                .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+                .collect(),
+            injected_modules: view.injected_module_names(),
+            reserved_declaration_modules: Vec::new(),
+        };
+        let mut roots = effects.include_paths().to_vec();
+        roots.insert(0, root.path().to_owned());
+        let include = view.include_paths(&roots);
+        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
+            Arc::new(specification.clone()),
+            &include,
+        )
+        .unwrap();
+        let admission = session
+            .admit_planned_cell_for_execution(
+                execution,
+                plan,
+                Arc::new(specification.clone()),
+                specification.specification_digest(),
+                [1; 32],
+                include,
+                None,
+            )
+            .unwrap();
+        let view = admission.view();
+        let include = admission
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let injected = view.injected_module_names();
+        let (_, program) = compile_cell_program_admitted_inner(
+            CellCheckRequest {
+                exact_context: view.exact_compile_context(),
+                session_id: Some(view.session()),
+                cell_text: source,
+                template: &template,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                compile_generation: admission.initial_value_generation().0,
+                compile_view_evidence: "",
+            },
+            admission.clone(),
+            &templates,
+            CellProgramAudit::PublicationRefusal(cache.path()),
+        )
+        .unwrap();
+        assert_eq!(program.items().len(), 1);
+        assert!(program.items()[0].native().is_some());
     }
 
     #[test]
