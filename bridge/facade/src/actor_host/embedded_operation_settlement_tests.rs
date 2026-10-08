@@ -280,6 +280,58 @@ impl harness::transport::Auth for Offline {
     }
 }
 
+// Immutable schema declarations need no compiled installation for a refused
+// input. Valid dispatch is forbidden: only the actual native client's
+// NotAdmitted issuance and acknowledgement are exercised by this fixture.
+#[derive(Clone)]
+struct ValidationOnlyEndpoint(Arc<dyn ResidentToolEndpoint>);
+impl ResidentToolEndpoint for ValidationOnlyEndpoint {
+    fn snapshot_for_request(&self) -> Result<Arc<dyn ResidentToolEndpoint>, ResidentToolError> {
+        Ok(Arc::new(self.clone()))
+    }
+    fn tools(&self) -> &[HostedTool] {
+        self.0.tools()
+    }
+    fn instructions(&self) -> Option<&str> {
+        None
+    }
+    fn dispatch_boxed(&self, _: ToolInvocation) -> exomonad_actor::ResidentToolDispatchFuture {
+        panic!("the schema-only fixture must not admit valid input")
+    }
+    fn dispatch_validated_with_context_boxed(
+        &self,
+        invocation: ToolInvocation,
+        arguments: Result<ToolArguments, ResidentToolError>,
+        capture: Option<Arc<dyn HostedCheckpointCapture>>,
+        context: Option<Arc<dyn exomonad_actor::HostedContextBinding>>,
+    ) -> exomonad_actor::ResidentToolDispatchFuture {
+        assert!(matches!(
+            &arguments,
+            Err(ResidentToolError::InvalidInvocation(_))
+        ));
+        self.0
+            .dispatch_validated_with_context_boxed(invocation, arguments, capture, context)
+    }
+    fn retained_operation(
+        &self,
+        invocation: ToolInvocationContext,
+    ) -> Result<exomonad_actor::HostedOperationSettlement, ResidentToolError> {
+        self.0.retained_operation(invocation)
+    }
+    fn complete_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        self.0.complete_boxed(boundary)
+    }
+    fn abort_boxed(
+        &self,
+        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+    ) -> ResidentToolFuture {
+        self.0.abort_boxed(boundary)
+    }
+}
+
 #[derive(Clone)]
 struct SchemaRefusalTransport(Arc<std::sync::atomic::AtomicUsize>);
 #[async_trait::async_trait]
@@ -415,9 +467,11 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
         output_schema: None,
         kind: exomonad_tool::ToolKind::Call,
     })];
-    let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(
+    let native_policy: Arc<dyn ResidentToolEndpoint> = Arc::new(
         exomonad_actor::ResidentInteractivePolicy::local_with_tools(actor.clone(), tools),
     );
+    assert!(native_policy.snapshot_for_request().is_err());
+    let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(ValidationOnlyEndpoint(native_policy));
     let installation = Arc::new(EmbeddedPolicyInstallation::new(
         actor.identity(),
         policy.clone(),
@@ -444,6 +498,7 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
     });
     let conversation =
         harness::embedding::Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    host.inner.tool_surface().unwrap();
     let scheduler = Arc::new(harness::turn::JobScheduler::new(1).unwrap());
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let engine = conversation
