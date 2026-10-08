@@ -981,7 +981,10 @@ mod tests {
         );
         assert_eq!(summary.phases["compiler_service"].count, 1);
         assert_eq!(summary.phases["compiler_service"].total_ms, 830);
-        assert_eq!(summary.phases["compiler_diagnostic_processing"].total_ms, 21);
+        assert_eq!(
+            summary.phases["compiler_diagnostic_processing"].total_ms,
+            21
+        );
         assert_eq!(summary.phases["compiler_response_handoff"].total_ms, 4);
         assert_eq!(summary.host_tools["haskell"].total_ms, 2000);
         assert_eq!(summary.compile_requests.total_ms, 122);

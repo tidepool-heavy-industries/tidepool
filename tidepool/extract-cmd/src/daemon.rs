@@ -4647,8 +4647,7 @@ tidepool-target phase=desugar module=Execute\n",
     fn raw_compiler_detail_filter_preserves_request_errors_and_reuse_rows() {
         let detailed = CapturedWriter::default();
         let trace = CapturedWriter::default();
-        let raw_filter =
-            "debug,tidepool_extract_cmd::daemon::compiler_detail=off";
+        let raw_filter = "debug,tidepool_extract_cmd::daemon::compiler_detail=off";
         let subscriber = tracing_subscriber_with_trace_filter(
             detailed.clone(),
             CapturedWriter::default(),
@@ -4695,7 +4694,9 @@ tidepool-reuse-error: witness failed\n",
         assert!(retained_lines.contains(&"tidepool-timing phase=cycle_modules_wall ms=7"));
         assert!(retained_lines.contains(&"tidepool-reuse {\"decision\":\"hit\"}"));
         assert!(retained_lines.contains(&"tidepool-reuse-error: witness failed"));
-        assert!(retained_lines.iter().all(|line| !is_raw_compiler_detail(line)));
+        assert!(retained_lines
+            .iter()
+            .all(|line| !is_raw_compiler_detail(line)));
         assert!(events.iter().any(|event| {
             event["fields"]["message"] == "compiler request started"
                 && event["fields"]["run_id"] == "run-filter"
