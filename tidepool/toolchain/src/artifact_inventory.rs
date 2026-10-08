@@ -2126,11 +2126,17 @@ impl ArtifactView {
         let descriptor = ArtifactEntry::original_descriptor(producer, product);
         let existing = {
             let state = self.lease.inventory.0.lock().expect("inventory lock");
-            self.read_projection(&state)
+            state.view_queries.fetch_add(1, Ordering::Relaxed);
+            let retained = self
+                .read_projection(&state)
                 .entries
                 .iter()
                 .find(|entry| entry.descriptor.id == descriptor.id)
-                .cloned()
+                .cloned();
+            if retained.is_some() {
+                state.entry_handle_copies.fetch_add(1, Ordering::Relaxed);
+            }
+            retained
         };
         let Some(existing) = existing else {
             return Ok(None);
