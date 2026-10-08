@@ -15,6 +15,12 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
 - Compiler evidence owns consumed bytes and import-resolution witnesses.
   Missing, incomplete, or incompatible evidence cannot yield a cache hit.
   CPP, TH and other untracked inputs remain uncacheable until proven complete.
+- `CertifiedSourceSelection` owns compiler roles. Full artifact custody and
+  `recovery_products` may retain several native versions of one module;
+  authored consumers use the issued `SelectedOriginalClosure`. Validate its
+  native dependencies through exact artifact/group edges, including historical
+  children, rather than flattening custody into a module map. History tests
+  must carry certification through the production consumer that needs selection.
 - `tidepool-extract-cmd` stays the small invocation builder. Do not move cache
   or runtime policy into that dependency leaf.
 - Cache tests must cover invalidation, relocation, warnings, and uncacheable
