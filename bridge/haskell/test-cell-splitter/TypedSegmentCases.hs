@@ -57,7 +57,6 @@ import Tidepool.Test.Runner (requiredInput)
 import Tidepool.TurnSource (preambleDefaultDeclaration)
 import qualified Tidepool.TypedSegment as TypedSegment
 import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot)
-import Tidepool.TypedSegment.Types (PendingTypedSegment(pendingSegmentValue))
 import Unsafe.Coerce (unsafeCoerce)
 
 -- The owning selector performs the actual whole-source frontend, typed
@@ -208,7 +207,7 @@ typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive 
       let path = root </> owner ++ ".hs"
           plan = preparedTypedSegmentPlan source
           prepare environment admissions segment = do
-            assertTypedSegmentRootsRegistered environment segment
+            assertTypedSegmentItemRootsRegistered environment segment
             batch <- prepareTypedSegmentSessionBindings environment admissions segment
               (root </> "metadata-stage" ++ show index)
             pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
@@ -466,27 +465,26 @@ renderNameWithUnique :: Name -> String
 renderNameWithUnique name = renderPublishedNameIdentity name
   ++ " unique=" ++ show (getKey (nameUnique name))
 
-assertTypedSegmentRootsRegistered :: HscEnv -> PendingTypedSegment -> IO ()
-assertTypedSegmentRootsRegistered environment pending = do
-  let roots = bindersOfBinds
-        (TypedSegment.typedSegmentRoots (pendingSegmentValue pending))
+assertTypedSegmentItemRootsRegistered :: HscEnv -> TypedSegment.PendingTypedSegment -> IO ()
+assertTypedSegmentItemRootsRegistered environment pending = do
+  let roots = map TypedSegment.typedItemRoot (TypedSegment.pendingSegmentItems pending)
   names <- readMVar (nsNames (hsc_NC environment))
   forM_ roots $ \root -> do
     let name = varName root
     case nameModule_maybe name of
-      Nothing -> fail ("typed segment root has no module-owned Name: " ++ renderNameWithUnique name)
+      Nothing -> fail ("typed segment item root has no module-owned Name: " ++ renderNameWithUnique name)
       Just owner -> case lookupOrigNameCache names owner (nameOccName name) of
         Just cached | cached == name -> pure ()
-        found -> fail ("typed segment root Name is not the exact cached module/OccName Name: "
+        found -> fail ("typed segment item root Name is not the exact cached module/OccName Name: "
           ++ renderNameWithUnique name ++ "; cached="
           ++ maybe "<missing>" renderNameWithUnique found)
   forM_ roots $ \root -> do
     let name = varName root
-    owner <- maybe (fail ("typed segment root has no module-owned Name: "
+    owner <- maybe (fail ("typed segment item root has no module-owned Name: "
       ++ renderNameWithUnique name)) pure (nameModule_maybe name)
     repeated <- allocateGlobalBinder (hsc_NC environment) owner (nameOccName name) noSrcSpan
     unless (repeated == name) $ fail
-      ("repeated typed segment root allocation changed its exact Name: "
+      ("repeated typed segment item root allocation changed its exact Name: "
         ++ renderNameWithUnique name ++ "; returned=" ++ renderNameWithUnique repeated)
 
 data PreparationExpected = PrepareAccepted | PrepareTypedRefusal | PrepareSourceRefusal
