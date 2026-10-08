@@ -1,15 +1,18 @@
 {-# LANGUAGE QuasiQuotes #-}
 import Tidepool.Effects.Core (GitRef (..))
-let campaign = campaignName :: CampaignLabel
-let task = Task (batch campaign "component") "plans/component.md" sourceHead
-      "Implement one component" "Exercise effectful review routing"
-      ["review-flow.txt"] "Read exact committed source" []
-(worker, _updates) <- unfold (taskGroup task)
-  (childWithProgress @WorkProgress @(Outcome Candidate)
-    (withLifetime ActorOwned $ withContext (selected taskContext) $ coding (atRef (GitRef (renderGitOid sourceHead))) (assignment [label|implement|] task)))
+import Tidepool.Worktree (workspaceFor)
+let work = (task "implement" "Implement one component" ["review-flow.txt"] "Read exact committed source" sourceHead)
+      { planPath = "plans/component.md", rationale = "Exercise effectful review routing" }
+Right workerAgent <- spawnSubagent (FreshCtx (taskContext work))
+  (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
+Right (worker, _updates) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions
 Right coordinatorTree <- createWorktree
   (fromRef (GitRef (renderGitOid sourceHead)) coordinatorName)
-flow <- R.start (R.withWorktree (worktreeId coordinatorTree)
-  (reviewFlowWith me task defaultReviewFlowPolicy worker
+Right coordinatorWorkspace <- workspaceFor coordinatorTree
+flow <- R.start (R.withWorkspace coordinatorWorkspace
+  (reviewFlowWith me work defaultReviewFlowPolicy worker
     (\_ -> pure (ReviewRouteResult
       (EscalateReview "owner must decide this scope change") DeterministicRoute))))

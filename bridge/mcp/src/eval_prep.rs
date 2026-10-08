@@ -119,14 +119,19 @@ pub fn effects_core_module_source() -> String {
 /// both import this facade, so private request constructors cannot leak merely
 /// because an effect is absent from one actor's row.
 pub fn effects_authored_module_source() -> String {
-    let hidden = crate::generated::AUTHORED_HIDDEN_BY_EFFECT
-        .iter()
-        .flat_map(|(_, names)| names.iter().copied())
-        .collect::<Vec<_>>();
+    let abstract_import = if crate::generated::AUTHORED_ABSTRACT_TYPES.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "import Tidepool.Effects.Core ({})\n",
+            crate::generated::AUTHORED_ABSTRACT_TYPES.join(", ")
+        )
+    };
     format!(
-        "{}\nmodule Tidepool.Effects.Authored (module Tidepool.Effects.Core) where\n\nimport Tidepool.Effects.Core hiding ({})\n",
+        "{}\nmodule Tidepool.Effects.Authored (module Tidepool.Effects.Core) where\n\nimport Tidepool.Effects.Core hiding ({})\n{}",
         tidepool_runtime::session::generated_support_pragmas(),
-        hidden.join(", ")
+        crate::generated::AUTHORED_HIDING_IMPORTS.join(", "),
+        abstract_import
     )
 }
 
@@ -1049,11 +1054,21 @@ mod tests {
         );
         assert!(!facade.contains("import Tidepool.Effects.Core"), "{facade}");
         assert!(!facade.contains("DeliberateWith"), "{facade}");
-        assert!(!facade.contains("AskUserWith"), "{facade}");
+        assert!(!facade.contains("FormOpenWith"), "{facade}");
         assert!(crate::authored_name_is_hidden("Actor", "ActorStartWith"));
         assert!(crate::authored_name_is_hidden("Actor", "ActorCallWith"));
         assert!(crate::authored_name_is_hidden("Actor", "ActorCastWith"));
-        assert!(!crate::authored_name_is_hidden("AskUser", "AskUserWith"));
+        assert!(crate::authored_name_is_hidden("AskUser", "FormOpenWith"));
+        assert!(authored.contains("WorkspaceHandle(..)"), "{authored}");
+        assert!(authored.contains("Scope(..)"), "{authored}");
+        assert!(
+            authored.contains("import Tidepool.Effects.Core (WorkspaceHandle)"),
+            "{authored}"
+        );
+        assert!(crate::authored_name_is_hidden(
+            "ResourceScopes",
+            "ScopeToken"
+        ));
     }
 
     /// Dedup by `type_name`: the same effect listed twice in the vocabulary

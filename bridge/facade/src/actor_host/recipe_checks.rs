@@ -163,7 +163,6 @@ impl Driver {
             tmux_session: "unused-in-recipe-check".into(),
             model: defaults.defaults.model,
             effort: defaults.defaults.effort.into(),
-            research_policy: defaults.research,
 
             pane_environment: BTreeMap::new(),
             jev: None,
@@ -301,7 +300,7 @@ impl Driver {
         // Complete the actual admitting tool boundary before another actor is driven.
         let completion = self
             .pump(endpoint.complete_boxed(
-                tidepool_runtime::session::WorkbenchForkBoundary::external(
+                tidepool_runtime::session::ContextCheckpointBoundary::external(
                     "recipe-check".into(),
                     call_id.clone(),
                     call_id,
@@ -439,38 +438,49 @@ impl Driver {
         match event {
             LocalResidentDeployment::PolicyInstalled(installation) => {
                 let session = self.session()?;
-                if let [worktree] = installation.launch_worktrees.as_slice() {
-                    let tree = session
-                        .worktrees
-                        .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree))?
-                        .ok_or("admitted check worktree missing")?;
-                    let principal = WorktreePrincipal::exact_actor(
-                        &runtime_namespace(session.session_root.path()),
-                        installation.actor.identity().id.0,
-                        installation.actor.identity().incarnation.0,
-                    );
-                    if session
-                        .bindings
-                        .lock()
-                        .current(tree.id())
-                        .map(|row| row.agent())
-                        != Some(&principal)
-                        || installation.worktree_custody.is_none()
-                    {
-                        return Err(runtime_error(
-                            "recipe actor lacks exact admitted worktree custody",
-                        ));
+                let workspace_ready = (|| -> Result<()> {
+                    if let [worktree] = installation.launch_worktrees.as_slice() {
+                        let tree = session
+                            .worktrees
+                            .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree))?
+                            .ok_or("admitted check worktree missing")?;
+                        let principal = WorktreePrincipal::exact_actor(
+                            &runtime_namespace(session.session_root.path()),
+                            installation.actor.identity().id.0,
+                            installation.actor.identity().incarnation.0,
+                        );
+                        if session
+                            .bindings
+                            .lock()
+                            .membership(tree.id(), &principal)
+                            .is_none()
+                            || installation.worktree_custody.is_none()
+                        {
+                            return Err(runtime_error(
+                                "recipe actor lacks exact admitted worktree custody",
+                            ));
+                        }
                     }
+                    Ok(())
+                })();
+                if let Err(error) = workspace_ready {
+                    if let Some(admission) = &installation.spawn_admission {
+                        admission.fail(error.to_string());
+                    }
+                    return Err(error);
                 }
-                session.authority.install_grant(
-                    installation.actor.identity().into(),
-                    worktree_grant(installation.effective_role.role()),
-                );
-                if let Some(gate) = &installation.fork_gate {
-                    gate.mark_ready()?;
+                if installation.creator.is_none() {
+                    session.authority.install_grant(
+                        installation.actor.identity().into(),
+                        ActorWorktreeGrant::Repository,
+                    );
                 }
-                self.installations
-                    .insert(installation.actor.identity(), *installation);
+                let actor = installation.actor.identity();
+                let admission = installation.spawn_admission.clone();
+                self.installations.insert(actor, *installation);
+                if let Some(admission) = admission {
+                    admission.acknowledge(actor)?;
+                }
                 Ok(None)
             }
             LocalResidentDeployment::CommandBackend(request) => {
@@ -611,7 +621,6 @@ impl Driver {
         let defaults = selected.config()?;
         self.config.model = defaults.defaults.model;
         self.config.effort = defaults.defaults.effort.into();
-        self.config.research_policy = defaults.research;
         self.config.workspace_inputs = Some(selected);
         let session = ModelFreeSession::start(&self.config, |admission| admission).await?;
         self.installations

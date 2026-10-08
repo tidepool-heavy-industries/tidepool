@@ -14,7 +14,6 @@ async fn committed(
 #[tokio::test]
 async fn notebook_failed_cells_preserve_completed_native_prefix() {
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |_| {},
     )

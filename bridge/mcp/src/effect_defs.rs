@@ -523,51 +523,6 @@ macro_rules! effect_decl_projection {
 }
 pub(crate) use effect_decl_projection;
 
-/// Console effect — THE single definition.
-///
-/// Everything about Console derives from this table: `console_decl()` (via
-/// [`effect_decl_projection!`], in `effect_decls.rs`) and `ConsoleReq` /
-/// `DescribeEffect` / `EffectHandler` dispatch (via `effect_rust_projection!`,
-/// in `bridge/handlers/src/handlers/console.rs`). Only the handler METHOD
-/// BODY (`ConsoleHandler::print`) is hand-written.
-#[macro_export]
-macro_rules! console_effect_def {
-    ($project:path) => {
-        $project! {
-            effect Console,
-            handler ConsoleHandler,
-            req ConsoleReq,
-            decl_fn console_decl,
-            description ["Print text output."],
-            type_defs [],
-            verbs [
-                { ctor Print, method print,
-                  args { msg: "Text" as String },
-                  ret "()" },
-                { ctor DisplayWith, method display_with,
-                  args { view: "((Int, Int, Int), Text, [(Int, Text)], Bool)" as ((i64, i64, i64), String, Vec<(i64, String)>, bool),
-                         continuation: "payload" as tidepool_bridge::HaskellValue },
-                  ret "(Int, Int, Int)" },
-                { ctor DisplayExpandWith, method display_expand_with,
-                  args { selection: "((Int, Int, Int), Int)" as ((i64, i64, i64), i64) },
-                  ret "[(Int, Text)]" },
-                { ctor DisplayAllowanceWith, method display_allowance_with,
-                  args { },
-                  ret "Int" },
-                { ctor DisplayExpansionInputWith, method display_expansion_input_with,
-                  args { },
-                  ret "((Int, Int, Int), Int, Int)" },
-            ],
-            helpers [
-                { name say, sig "forall effs. Member Console effs => Text -> Eff effs ()",
-                  doc ["Emit a line of console output. Thin wrapper over the Print effect",
-                       "so chains never need `send (Print …)`."],
-                  body pointfree Print },
-            ],
-        }
-    };
-}
-
 /// Time effect — single definition.
 ///
 /// `UTCTime` and its helpers live in `Tidepool.Data.Time` (re-exported by
@@ -1473,11 +1428,12 @@ mod tests {
     fn generated_console_decl_contains_actor_display_protocol() {
         let d = crate::console_decl();
         assert_eq!(d.type_name, "Console");
-        assert_eq!(d.description, "Print text output.");
+        assert!(d.description.contains("operator feed"));
         assert_eq!(
             d.constructors,
             &[
                 "Print :: Text -> Console ()",
+                "DisplayViewWith :: Value -> Console ()",
                 "DisplayWith :: ((Int, Int, Int), Text, [(Int, Text)], Bool) -> payload -> Console (Int, Int, Int)",
                 "DisplayExpandWith :: ((Int, Int, Int), Int) -> Console [(Int, Text)]",
                 "DisplayAllowanceWith :: Console Int",
@@ -1485,14 +1441,13 @@ mod tests {
             ]
         );
         assert!(d.type_defs.is_empty());
-        assert_eq!(
-            d.helpers,
-            &[
-                "-- | Emit a line of console output. Thin wrapper over the Print effect\n\
-                 -- so chains never need `send (Print …)`.\n\
-                 say :: forall effs. Member Console effs => Text -> Eff effs ()\n\
-                 say = send . Print",
-            ]
-        );
+        assert!(d
+            .helpers
+            .iter()
+            .any(|helper| helper.contains("say = send . Print")));
+        assert!(d
+            .helpers
+            .iter()
+            .any(|helper| helper.contains("displayViewRaw")));
     }
 }

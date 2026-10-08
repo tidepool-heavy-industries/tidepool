@@ -498,10 +498,16 @@ EXTERNAL_SOURCE_LABELS = {
     ".exomonad/workspace/skills/exomonad-workbench/SKILL.md": "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md",
     "exomonad/examples/workspace/.exomonad/prompts/task.md": "//exomonad/examples/workspace:facade_task_prompt",
     "exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md": "//exomonad/examples/workspace:facade_workbench_skill",
+    '.exomonad/workspace/skills/exomonad-agent-work/SKILL.md': '//:facade_doc__exomonad_workspace_skills_exomonad_agent_work_SKILL_md',
+    'exomonad/prompts/agent.md': '//exomonad/prompts:agent_prompt',
+    'exomonad/prompts/docs/agents.md': '//exomonad/prompts:doc_agents',
 }
 
 def source_inputs(package, target, features=(), test_target=False):
     directory = ROOT / CURRENT_DIR
+    generated_paths = [path for path in protocol_output_paths()
+                       if path.startswith(CURRENT_DIR + "/src/generated/")
+                       and path.endswith(".rs")]
     source_root = pathlib.Path(target["src_path"]).resolve()
     sources = {directory / "Cargo.toml"}
     external = {}
@@ -546,6 +552,11 @@ def source_inputs(package, target, features=(), test_target=False):
             sources.update(graph)
         else:
             sources.add(source_root)
+    # Snapshot contents cannot contribute sources or include dependencies to a
+    # native action. The producer roster owns this directory's complete closure.
+    if generated_paths:
+        sources = {source for source in sources
+                   if not source.is_relative_to(directory / "src/generated")}
     includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = EXTERNAL_SOURCE_LABELS
@@ -625,14 +636,11 @@ def source_inputs(package, target, features=(), test_target=False):
     # Schema output paths define the source closure, including outputs that do
     # not yet exist in the checkout. Checked-in generated copies are not inputs
     # to native Rust compilation.
-    if package["name"] in {
-        "tidepool-mcp", "tidepool-handlers", "tidepool-bridge-effects",
-        "tidepool-runtime", "exomonad-actor", "exomonad-tool", "tidepool",
-    }:
-        for path in protocol_output_paths():
-            if path.startswith(CURRENT_DIR + "/src/generated/") and path.endswith(".rs"):
-                mapped.pop(path.removeprefix(CURRENT_DIR + "/"), None)
-                mapped[generated_protocol_label(path)] = path
+    if generated_paths:
+        # The producer roster is complete. A removed generated effect must not
+        # survive as an ordinary source input through an obsolete snapshot.
+        for path in generated_paths:
+            mapped[generated_protocol_label(path)] = path
     return dict(sorted(mapped.items(), key=lambda item: item[1]))
 
 
@@ -727,6 +735,10 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         env["EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY"] = "$(location :inbox_directory_fault_shared)"
         resources.append(":inbox_directory_fault_shared")
     if package_name == "exomonad-actor" and unit:
+        env["TIDEPOOL_JEV_SOURCE_DIR"] = "$(location toolchains//:jev_sources)"
+        resources.append("toolchains//:jev_sources")
+        env["TIDEPOOL_JEV_WORKSPACE_DIR"] = "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad"
+        resources.append("//exomonad/examples/workspace:facade_test_sources")
         env["EXOMONAD_WORKSPACE_GITLINK"] = "$(location //build/rust:workspace_gitlink)"
         env["EXOMONAD_WORKSPACE_GIT_BUNDLE"] = "$(location //build/rust:workspace_git_bundle)"
         env["TIDEPOOL_WORKSPACE_TEST_GIT"] = "$(location toolchains//:exomonad_runtime_tools)/bin/git"
@@ -777,6 +789,8 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_GENERATED_SURFACE_FIXTURES",
     "TIDEPOOL_GHC",
     "TIDEPOOL_HASKELL_ACTORS_DIR",
+    "TIDEPOOL_JEV_SOURCE_DIR",
+    "TIDEPOOL_JEV_WORKSPACE_DIR",
     "TIDEPOOL_M3_FIXTURE_DIR",
     "TIDEPOOL_NATIVE_JSON_SOURCE_DIR",
     "TIDEPOOL_PREPARED_FIXTURE_COMPILER",

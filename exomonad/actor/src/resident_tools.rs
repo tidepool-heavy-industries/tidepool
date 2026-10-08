@@ -458,6 +458,21 @@ impl WorkbenchExecutionControl {
         (claimed, publication)
     }
 
+    /// Human interaction publication shares the original cell cancellation
+    /// cutoff. A winning durable operation is retained even if cancellation
+    /// subsequently prevents its Haskell continuation from running.
+    pub(crate) fn admit_interaction<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
+        let terminal = self.cell_terminal.lock();
+        if terminal.is_some()
+            || self
+                .native_cancel
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        Some(operation())
+    }
+
     pub(crate) fn request_cancellation(&self) -> bool {
         self.admit_cancellation().0
     }
@@ -752,7 +767,7 @@ pub trait HostedCheckpointCapture: Send + Sync {
     fn capture(
         &self,
         name: &str,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError>;
 }
 
@@ -873,7 +888,7 @@ pub trait ResidentToolEndpoint: Send + Sync {
     }
     fn reconcile_workbench_boxed(
         &self,
-        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<WorkbenchBoundaryReconciliation, ResidentToolError>>
@@ -891,14 +906,14 @@ pub trait ResidentToolEndpoint: Send + Sync {
     /// Discard an exact call's deferred publication after failed Store settlement.
     fn abort_boxed(
         &self,
-        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         Box::pin(async { Err(ResidentToolError::CancellationUnsupported) })
     }
     /// Acknowledge the real, durable result of an enclosing model-visible call.
     fn complete_boxed(
         &self,
-        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         Box::pin(async { Ok(serde_json::Value::Null) })
     }
@@ -941,7 +956,7 @@ impl WorkbenchCallKey {
 
     pub(crate) fn matches_boundary(
         &self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> bool {
         self.0
             .model_operation()
@@ -1204,7 +1219,7 @@ impl ResidentToolClient {
 
     pub(crate) async fn reconcile_workbench(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<WorkbenchBoundaryReconciliation, ResidentToolError> {
         if boundary.hosted().is_some() {
             let owner = self
@@ -1265,14 +1280,14 @@ impl ResidentToolClient {
 
     pub(crate) async fn abort(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<serde_json::Value, ResidentToolError> {
         self.finalize_provider_operation(boundary, false).await
     }
 
     pub(crate) async fn complete(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<serde_json::Value, ResidentToolError> {
         self.finalize_provider_operation(boundary, true).await
     }
@@ -1283,7 +1298,7 @@ impl ResidentToolClient {
     // owner. An arbitrary unissued operation must still refuse.
     async fn finalize_provider_operation(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
         completed: bool,
     ) -> Result<serde_json::Value, ResidentToolError> {
         let retained = if boundary.hosted().is_some() {
@@ -1459,8 +1474,8 @@ impl ResidentToolClient {
         }
         if let Some(operation) = &issued.control.invocation {
             if let Some(original) = operation.invocation().model_operation() {
-                request = request.with_fork_boundary(
-                    tidepool_runtime::session::WorkbenchForkBoundary::Hosted(original.clone()),
+                request = request.with_checkpoint_boundary(
+                    tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone()),
                 );
             }
             let execution = issued.control.execution_id(self.actor.identity());
@@ -1755,7 +1770,7 @@ mod tests {
         fn capture(
             &self,
             _name: &str,
-            _boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+            _boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
         ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
             Ok(HostedCheckpointAttachment::new(Arc::new(())))
         }
@@ -1844,7 +1859,7 @@ mod tests {
     #[test]
     fn local_invocations_share_only_the_exact_original_operation_boundary() {
         use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolInvocationOrigin};
-        use tidepool_runtime::session::WorkbenchForkBoundary;
+        use tidepool_runtime::session::ContextCheckpointBoundary;
 
         let original = OriginalOperation {
             origin: ConversationOrigin::Embedded {
@@ -1864,7 +1879,7 @@ mod tests {
             call_id: "nested-2".into(),
             ..first.0.clone()
         });
-        let boundary = WorkbenchForkBoundary::Hosted(original.clone());
+        let boundary = ContextCheckpointBoundary::Hosted(original.clone());
         let owner = WorkbenchCallKey::original(&original);
         assert!(owner.is_original_invocation());
         assert!(owner.matches_boundary(&boundary));
@@ -1879,13 +1894,13 @@ mod tests {
 
         let mut reused = original.clone();
         reused.request_id = "request-2".into();
-        assert!(!first.matches_boundary(&WorkbenchForkBoundary::Hosted(reused)));
+        assert!(!first.matches_boundary(&ContextCheckpointBoundary::Hosted(reused)));
         let mut successor = original;
         let ConversationOrigin::Embedded { incarnation, .. } = &mut successor.origin else {
             unreachable!();
         };
         *incarnation = "second".into();
-        assert!(!first.matches_boundary(&WorkbenchForkBoundary::Hosted(successor)));
+        assert!(!first.matches_boundary(&ContextCheckpointBoundary::Hosted(successor)));
     }
 
     fn terminal_reply() -> crate::KernelWorkbenchReply {
@@ -2163,6 +2178,37 @@ mod tests {
         let decision = sibling.publication_decision();
         assert!(!decision.claim_commit().unwrap().published());
         assert_eq!(decision.phase(), PublicationPhase::Published);
+    }
+
+    #[test]
+    fn human_interaction_commit_and_cancellation_share_original_cutoff() {
+        let control = WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let finish = Arc::new(std::sync::Barrier::new(2));
+        let committing = {
+            let control = control.clone();
+            let entered = entered.clone();
+            let finish = finish.clone();
+            std::thread::spawn(move || {
+                control.admit_interaction(|| {
+                    entered.wait();
+                    finish.wait();
+                    "durably answered"
+                })
+            })
+        };
+        entered.wait();
+        let cancelling = {
+            let control = control.clone();
+            std::thread::spawn(move || control.request_cancellation())
+        };
+        finish.wait();
+        assert_eq!(committing.join().unwrap(), Some("durably answered"));
+        assert!(cancelling.join().unwrap());
+        assert!(control
+            .admit_interaction(|| panic!("cancelled owner must not commit a later answer"))
+            .is_none());
     }
 
     #[tokio::test]

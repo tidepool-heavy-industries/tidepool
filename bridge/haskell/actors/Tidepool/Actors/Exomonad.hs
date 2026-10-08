@@ -14,24 +14,16 @@ module Tidepool.Actors.Exomonad
   , (:-), State, Call, NoReply, Event
   , Shape, Definition, Client, Self, Private
   , ActorState, Handler, ActorSpec, ActorHandle, Message
-  , Send, Request, EventHandler, EventSource
+  , Send, EventHandler, EventSource
   , get, gets, put, modify'
-  , definition, client, start, finish, progress, settlement, lifecycle, self, sender
+  , definition, client, start, finish, progress, lifecycle, self, sender
   , ActorInputOrigin (..)
   , LocalEffects, Forwarding, forwardResult, forwardingExit
   , inspectFull
   , FullInspection
-  , CoreEffects
-  , ResearchEffects
-  , ResearchLeafEffects
-  , CodingEffects
-  , IntegrationEffects
   , ActorContext
   , ActorContextInfo (..)
   , ActivationKind (..)
-  , ActorContextRole (..)
-  , ActorNativeTools (..)
-  , ActorWorkspaceAccess (..)
   , AgentLaunch
   , AgentInspection
   , AgentControl
@@ -50,7 +42,6 @@ module Tidepool.Actors.Exomonad
   , Journal
   , record
   , trace
-  , Forks
   , Reflect
   , reflect
   , ConversationTurn (..)
@@ -61,96 +52,21 @@ module Tidepool.Actors.Exomonad
   , KnownEffect
   , KnownEffects (knownEffects)
   , Subset
-  , CampaignLabel
-  , ForkGroupLabel
-  , Label
-  , label
-  , NameError (..)
-  , Assignment (..)
   , SettlementReporting (..)
-  , assignment
-  , labelFromText
-  , ActorPath
-  , GitBranchPrefix
-  , actorGitBranchPrefix
-  , ForkGroupPath
   , WorktreeSeed
   , projectHead
   , currentCheckout
   , existingWorktree
   , atRef
-  , snapshotDirty
-  , campaignLabel
-  , forkGroupLabel
-  , batch
-  , subgroup
-  , Branch
-  , withInstructions
-  , withLifetime
   , WorkerLifetime (..)
   , ForkEffort (..)
   , Model (..)
-  , withEffort
-  , withReport
-  , withModel
-  , WorkerContext
   , ContextCheckpoint
   , checkpoint
   , releaseCheckpoint
-  , fromCheckpoint
-  , inherited
-  , selected
-  , withContext
-  , RolePolicy
-  , inspectionPolicy
-  , codingPolicy
-  , narrowed
-  , ForkRole (..)
-  , ForkWorkspaceAccess (..)
-  , ForkBudget (..)
-  , ForkAllowance (..)
-  , WorkerLaunchPreview (..)
-  , ForkContext (..)
   , CheckpointRefusal (..)
-  , BranchPreview (..)
-  , DelegationAuthority (..)
-  , withForkBudget
-  , previewBranch
-  , researching
-  , researchingLeaf
-  , coding
-  , scaffolding
-  , integrating
-  , Unfold
-  , child
-  , childWithProgress
-  , AdmissionReceipt (..)
-  , admittedAgent
-  , ForkGroupHandle
-  , forkGroupHandle
-  , forkGroupGitBranchPrefix
-  , ForkGroupSnapshot (..)
-  , observeForkGroup
-  , CleanupPlan (..)
-  , CleanupActorPlan (..)
-  , CleanupActorState (..)
-  , CleanupReceipt (..)
-  , CleanupStepReceipt (..)
   , AgentStopControlOutcome (..)
-  , planCleanup
-  , planCleanupFor
-  , executeCleanup
   , responseActor
-  , responseAdmission
-  , UnfoldError (..)
-  , renderUnfoldError
-  , attemptUnfold
-  , attemptUnfoldDeferred
-  , unfold
-  , unfoldDeferred
-  , spawnWatched
-  , errand
-  , AgentLaunchSpec
   , AgentRef
   , AgentState (..)
   , AgentObservation (..)
@@ -187,11 +103,6 @@ module Tidepool.Actors.Exomonad
   , usageDelta
   , AgentForgetOutcome (..)
   , forgetAgent
-  , Response
-  , codingAgent
-  , readonlyAgent
-  , withAgentLifetime
-  , startAgent
   , request
   , Duration
   , milliseconds
@@ -205,6 +116,8 @@ module Tidepool.Actors.Exomonad
   , pollProgress
   , StopOutcome (..)
   , stopAgent
+  , retainAgent
+  , AgentRetentionError (..)
   , RequestId
   , Reply
   , Replies
@@ -225,31 +138,18 @@ module Tidepool.Actors.Exomonad
   , requestId
   , pollResponse
   , cancelRequest
-  , detachRequest
+  , retainRequest
   , abandonResponse
   , forgetResponse
   , acknowledgeCancellation
   , Await
   , Watch
   , WatchId
-  , WatchLabel
-  , WatchLabelError (..)
-  , watchLabel
   , Watches
-  , WatchFailure (..)
   , WatchState (..)
-  , Settlement (..)
-  , settledValue
-  , awaitResponse
-  , awaitValue
-  , awaitSettled
-  , awaitProgressAfter
-  , awaitAnyProgress
-  , awaitAnySettled
+  , after
   , watch
   , pollWatch
-  , awaitWatch
-  , waitFor
   , Route
   , RouteState (..)
   , route
@@ -292,6 +192,42 @@ module Tidepool.Actors.Exomonad
   , HeadState (..)
   , WorkingState (..)
   , SubmissionObservation (..)
+  , Request
+  , RequestOptions (..)
+  , defaultRequestOptions
+  , RequestError (..)
+  , SpawnContext (..)
+  , Workspace (..)
+  , WorkspaceHandle
+  , currentWorkspace
+  , SpawnLimits (..)
+  , DescendantDepth
+  , ActiveDescendants
+  , SpawnLimitError (..)
+  , descendantDepth
+  , activeDescendants
+  , SpawnOptions (..)
+  , defaultSpawnOptions
+  , SpawnError (..)
+  , SpawnRetainedResources (..)
+  , SpawnCleanup (..)
+  , spawnSubagent
+  , SpecReplacementError (..)
+  , replaceSpec
+  , ResourceScopes
+  , Scope
+  , ScopeFailure (..)
+  , CleanupError (..)
+  , ScopeOutcome (..)
+  , withScope
+  , observed
+  , AwaitError (..)
+  , response
+  , settledResponse
+  , result
+  , settlement
+  , eitherOf
+  , await
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -301,69 +237,31 @@ import Tidepool.Actor (EffectProfile, ActorExit, ActorLifecycle)
 import Tidepool.Inspection (FullInspection, inspectFull)
 
 import Tidepool.Agent.Reply
-import Tidepool.QQ.Label (label)
 import Tidepool.Actor.Record
   ( (:-), State, Call, NoReply, Event
   , Shape, Definition, Client, Self, Private
   , ActorState, Handler, ActorSpec, ActorHandle, Message
-  , Send, Request, EventHandler, EventSource
+  , Send, EventHandler, EventSource
   , get, gets, put, modify'
-  , definition, client, start, finish, progress, settlement, lifecycle, self, sender
+  , definition, client, start, finish, progress, lifecycle, self, sender
   , ActorInputOrigin (..)
   , LocalEffects, Forwarding, forwardResult, forwardingExit
   )
 import Tidepool.Agent.Watch
+import Tidepool.Scope
 import Tidepool.Actors.Internal.Agent
-  ( AgentRef
-  , AgentObservation (..)
-  , AgentLaunchSpec
-  , AgentState (..)
-  , Response
-  , codingAgent
-  , agentBoundWorktree
-  , agentIdentity
-  , observeAgent
-  , listAgents
-  , listAgentsFull
-  , AgentSummary (..)
-  , agentSummary
-  , findAgentsByLabel
-  , AgentForgetOutcome (..)
-  , forgetAgent
-  , readonlyAgent
-  , request
-  , Assignment (..)
-  , Label
-  , SettlementReporting (..)
-  , assignment
-  , labelFromText
-  , Duration
-  , milliseconds
-  , seconds
-  , minutes
-  , requestWithProgress
-  , requestWithProgressInto
-  , StopOutcome (..)
-  , withAgentLifetime
-  , startAgent
-  , stopAgent
-  , sendMessage
-  , parentAgent
-  , pollNotification
-  , NotificationReceipt
-  , NotificationError (..)
-  , NotificationState (..)
-  )
 import Tidepool.Actors.Role
 import Tidepool.Actors.Observe
-import Tidepool.Actors.Unfold
+import Tidepool.Actors.Spawn
 import Tidepool.Actors.Worktree
 import Tidepool.Effects.Core
-  ( ActorContextInfo (..)
+  ( ResourceScopes
+  , WorkerLifetime (..)
+  , ForkEffort (..)
+  , Model (..)
+  , CheckpointRefusal (..)
+  , ActorContextInfo (..)
   , ActivationKind (..)
-  , ActorContextRole (..)
-  , ActorNativeTools (..)
-  , ActorWorkspaceAccess (..)
   , AgentRosterEntry (..)
   , AgentRosterState (..)
   , AgentDisposition (..)

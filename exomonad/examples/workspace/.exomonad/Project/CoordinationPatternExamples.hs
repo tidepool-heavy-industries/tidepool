@@ -21,7 +21,7 @@ import Project.CoordinationPattern
 -- | The original response remains available for distributions, model, usage,
 -- and diagnostics. A policy doubt stays separate from Jev transport failure.
 data ComparisonRun = ComparisonRun
-  { runResponse :: J.Response ComparisonPacket
+  { runResponse :: J.Response (ComparisonPacket J.Answers)
   , runVerdict :: Either J.Doubt (J.Settled J.Careful ComparisonResult)
   }
 
@@ -30,7 +30,7 @@ instance Show ComparisonRun where
     <> ", usage = " <> show (J.usage (runResponse run))
     <> ", verdict = " <> (case runVerdict run of
       Left doubt -> show doubt <> " }"
-      Right (J.Settled verdict) -> show verdict <> " }")
+      Right settled -> let verdict = J.settledValue settled in show verdict <> " }")
 
 reviewedCandidateInput
   :: Text -> Text -> [SourceFact] -> [HandledFact] -> ComparisonInput
@@ -67,20 +67,20 @@ consumerCheckpointCriteria = ComparisonCriteria
 assessReviewedCandidate
   :: Member Jev effects
   => Text -> Text -> [SourceFact] -> [HandledFact]
-  -> Eff effects (Either ComparisonResult (Either J.JevError ComparisonRun))
+  -> Eff effects (Either ComparisonResult (Either (J.JevError J.JevCallError) ComparisonRun))
 assessReviewedCandidate candidate episode incoming handled =
   assessComparison reviewedCandidateCriteria (reviewedCandidateInput candidate episode incoming handled)
 
 assessConsumerCheckpoint
   :: Member Jev effects
   => Text -> Text -> Text -> [SourceFact] -> [HandledFact]
-  -> Eff effects (Either ComparisonResult (Either J.JevError ComparisonRun))
+  -> Eff effects (Either ComparisonResult (Either (J.JevError J.JevCallError) ComparisonRun))
 assessConsumerCheckpoint sourceCommit consumer episode incoming handled =
   assessComparison consumerCheckpointCriteria (consumerCheckpointInput sourceCommit consumer episode incoming handled)
 
 assessComparison
   :: Member Jev effects => ComparisonCriteria -> ComparisonInput
-  -> Eff effects (Either ComparisonResult (Either J.JevError ComparisonRun))
+  -> Eff effects (Either ComparisonResult (Either (J.JevError J.JevCallError) ComparisonRun))
 assessComparison criteria input = case prepareComparison input of
   Left unresolved -> pure (Left unresolved)
   Right ready -> do

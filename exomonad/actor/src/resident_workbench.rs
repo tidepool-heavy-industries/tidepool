@@ -20,8 +20,7 @@ use structured_introspection::StructuredIntrospectionAnswer;
 #[cfg(test)]
 use to_haskell::visit_usage_summary;
 use to_haskell::{
-    ActorContextProjection, CallStatus, ForkCleanupAnswer, LifecycleAnswer, ProgressAnswer,
-    RouteStateAnswer,
+    ActorContextProjection, CallStatus, LifecycleAnswer, ProgressAnswer, RouteStateAnswer,
 };
 
 use serde::Serialize;
@@ -261,8 +260,10 @@ impl ActorWorkbenchSource {
 }
 
 fn actor_preamble(preamble: &str, context: &crate::ActorSessionContext) -> String {
-    let preamble =
-        insert_preamble_imports(preamble, "qualified Tidepool.Agent.Ref as TidepoolAgentRef");
+    let preamble = insert_preamble_imports(
+        preamble,
+        "qualified Tidepool.Agent.Ref.Internal as TidepoolAgentRef",
+    );
     format!(
         "{preamble}\nme :: TidepoolAgentRef.AgentRef\nme = TidepoolAgentRef.internalAgentRef {} {}\n",
         context.actor.id.0, context.actor.incarnation.0
@@ -511,7 +512,6 @@ pub struct ActorWorkbenchSource {
     toolset_support_manifests:
         Arc<std::sync::OnceLock<Vec<tidepool_toolchain::cache::SourceRootManifest>>>,
     toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
-    preparation_rows: Arc<[Vec<crate::ActorEffectKey>]>,
 }
 
 /// Immutable installer readiness. It owns source and native code, while each
@@ -758,7 +758,6 @@ impl ActorWorkbenchSource {
             request_evidence: None,
             request_helper_recipe: Default::default(),
             toolset_preparation: Default::default(),
-            preparation_rows: Arc::from([]),
         }
     }
 
@@ -768,22 +767,6 @@ impl ActorWorkbenchSource {
     pub fn with_toolset_support_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.toolset_support = roots.into();
         self.toolset_support_manifests = Default::default();
-        self
-    }
-
-    /// Exact public child requests to warm after the root's required installer.
-    #[must_use]
-    pub fn with_preparation_profiles(
-        mut self,
-        profiles: impl IntoIterator<Item = exomonad_tool::PublicActorProfile>,
-    ) -> Self {
-        let mut rows = Vec::new();
-        for profile in profiles {
-            if !rows.iter().any(|row| row == profile.effect_keys()) {
-                rows.push(profile.effect_keys().to_vec());
-            }
-        }
-        self.preparation_rows = rows.into();
         self
     }
 
@@ -868,41 +851,6 @@ impl ActorWorkbenchSource {
     }
 }
 
-#[cfg(test)]
-mod preparation_profile_tests {
-    use super::ActorWorkbenchSource;
-    use exomonad_tool::{ActorEffectKey, PublicActorProfile};
-
-    #[test]
-    fn warming_keeps_distinct_rows_and_reuses_shared_coding_profile() {
-        let source = ActorWorkbenchSource::new("", Vec::new()).with_preparation_profiles([
-            PublicActorProfile::Research,
-            PublicActorProfile::ResearchLeaf,
-            PublicActorProfile::Coding,
-            PublicActorProfile::Scaffolding,
-        ]);
-        assert_eq!(source.preparation_rows.len(), 3);
-        assert_eq!(
-            source.preparation_rows[0],
-            PublicActorProfile::Research.effect_keys()
-        );
-        assert_eq!(
-            source.preparation_rows[1],
-            PublicActorProfile::ResearchLeaf.effect_keys()
-        );
-        assert_eq!(
-            source.preparation_rows[2],
-            PublicActorProfile::Coding.effect_keys()
-        );
-        assert!(source.preparation_rows[0].contains(&ActorEffectKey::Forks));
-        assert!(!source.preparation_rows[1].contains(&ActorEffectKey::Forks));
-        assert!(source
-            .preparation_rows
-            .iter()
-            .all(|row| !row.contains(&ActorEffectKey::Sleep)));
-    }
-}
-
 /// One installed spec: the surface it declares, the retained value every call
 /// and every slot is an application of, and the identity of this install.
 pub(crate) struct ResidentWorkbenchTools {
@@ -911,7 +859,7 @@ pub(crate) struct ResidentWorkbenchTools {
     /// Installer source roots belong to the installed implementation, not the
     /// actor's published declaration and value surface.
     _installation_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    _prepared: Arc<crate::agent_spec::preparation::PreparedToolset>,
+    code: InstalledToolCode,
     /// Exact installer row retained with its rooted dispatcher.
     pub(crate) dispatcher_effects: String,
     /// Which slots the installed record fills, by name, as the same compile
@@ -919,7 +867,7 @@ pub(crate) struct ResidentWorkbenchTools {
     pub(crate) slots: Vec<String>,
     /// How the spec was found, and where. Reported in status and in every
     /// reload receipt.
-    pub(crate) resolved: crate::agent_spec::ResolvedSpec,
+    pub(crate) origin: crate::agent_spec::SpecOrigin,
     /// Which install this record is, counting from one within this actor
     /// incarnation. A completed call names it, so a receipt says which record
     /// served the call and not merely which record is active now.
@@ -932,6 +880,54 @@ pub(crate) struct ResidentWorkbenchTools {
     /// reachable through the call belongs to one revision, which would be a
     /// different and possibly false claim.
     pub(crate) revision: Option<String>,
+}
+
+/// A public application's receiver retains its source domain independently of tool reloads.
+pub(crate) struct PreparedRequestReceiver {
+    pub(crate) entry: RootCustody,
+    pub(crate) scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+}
+
+#[derive(Clone, Copy)]
+enum ToolInstallationPurpose {
+    ToolsOnly,
+    SpawnApplication,
+}
+
+struct PreparedToolInstallation {
+    tools: ResidentWorkbenchTools,
+    receiver: Option<PreparedRequestReceiver>,
+}
+
+/// Code and values retained by the installation's real producer.
+enum InstalledToolCode {
+    SourcePrepared(Arc<crate::agent_spec::preparation::PreparedToolset>),
+    ExplicitLive(Arc<RootCustody>),
+}
+
+impl InstalledToolCode {
+    fn prepared(&self) -> Option<&Arc<crate::agent_spec::preparation::PreparedToolset>> {
+        match self {
+            Self::SourcePrepared(prepared) => Some(prepared),
+            Self::ExplicitLive(_) => None,
+        }
+    }
+}
+
+/// Captured installer sent through the target actor's ordinary mailbox.
+pub struct SpecReplacementDefinition {
+    pub(crate) caller: crate::ActorRef,
+    pub(crate) installer: RootCustody,
+    pub(crate) session: tidepool_repr::SessionId,
+    pub(crate) effects: Vec<crate::ActorEffectKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecReplacementError {
+    Unavailable,
+    Unauthorized,
+    SurfaceChanged,
+    Failed(String),
 }
 
 /// Authority over one actor's installed handler and immutable source revision.
@@ -989,7 +985,7 @@ impl InstalledToolLease {
     pub fn toolset_acquisition(&self) -> Option<&crate::ToolsetAcquisition> {
         self.tools
             .as_ref()
-            .map(|tools| &tools._prepared.acquisition)
+            .and_then(|tools| tools.code.prepared().map(|prepared| &prepared.acquisition))
     }
 
     pub(crate) fn tools_arc(&self) -> Option<Arc<ResidentWorkbenchTools>> {
@@ -1079,6 +1075,38 @@ impl InstalledToolsState {
         staged.commit(publication, Box::new(|| *current = Some(replacement)))
     }
 
+    /// Publish against the exact admitted implementation. Accepted calls retain
+    /// their immutable lease, including when this actor replaces its own tools.
+    pub(crate) fn replace_explicit(
+        &self,
+        expected: &InstalledToolLease,
+        tools: Arc<ResidentWorkbenchTools>,
+    ) -> Result<(), SpecReplacementError> {
+        let mut current = self.0.lock();
+        let active = current.as_ref().ok_or(SpecReplacementError::Unavailable)?;
+        if active.actor() != expected.actor()
+            || active.source().semantic_digest() != expected.source().semantic_digest()
+            || !active
+                .tools_arc()
+                .zip(expected.tools_arc())
+                .is_some_and(|(active, expected)| Arc::ptr_eq(&active, &expected))
+        {
+            return Err(SpecReplacementError::Unavailable);
+        }
+        let old = active.tools().ok_or(SpecReplacementError::Unavailable)?;
+        if !exomonad_tool::surface::compare_surfaces(&old.declarations, &tools.declarations)
+            .is_empty()
+        {
+            return Err(SpecReplacementError::SurfaceChanged);
+        }
+        *current = Some(InstalledToolLease::new(
+            expected.actor(),
+            expected.source().clone(),
+            Some(tools),
+        ));
+        Ok(())
+    }
+
     pub(crate) fn clear(&self) {
         *self.0.lock() = None;
     }
@@ -1094,7 +1122,7 @@ impl ResidentWorkbenchTools {
             "install={} revision={} {}",
             self.install,
             self.revision.as_deref().unwrap_or("(run)"),
-            self.resolved.describe()
+            self.origin.describe()
         )
     }
 }
@@ -2211,6 +2239,48 @@ where
     }
 }
 
+fn capture_request_receiver_entry<H, O>(
+    session: &mut ResidentSession<H, O>,
+    hole: &ResidentHole,
+    site: i64,
+    actor_realm: RealmId,
+) -> Result<RootCustody, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let site = u64::try_from(site).map_err(|_| {
+        ResidentActorWorkbenchError::ActorProtocol(
+            "request receiver registration carried an invalid site id".into(),
+        )
+    })?;
+    if session.parked_realm(hole) != Some(actor_realm) {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "request receiver registration escaped its actor realm".into(),
+        ));
+    }
+    if !session
+        .parked_program_provenance(hole)
+        .is_some_and(|provenance| {
+            provenance
+                .sites()
+                .iter()
+                .any(|evidence| evidence.site == site && evidence.inputs.is_empty())
+        })
+    {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "request receiver registration has no compiler-issued completion site".into(),
+        ));
+    }
+    session
+        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "request receiver registration has no live entry".into(),
+            )
+        })
+}
+
 fn require_tool_installation_completion<H, O>(
     session: &mut ResidentSession<H, O>,
     registration: &ParkedHoleAbortRegistration,
@@ -2392,20 +2462,10 @@ pub(crate) struct ExecutionPrivateScope {
     pub admission: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
 }
 
-#[derive(Clone)]
-pub(crate) struct PublishedForkSource {
-    pub(crate) lexical: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    pub(crate) session: tidepool_repr::SessionId,
-    pub(crate) public_scope: ScopeId,
-    pub(crate) public_epoch: u64,
-    pub(crate) machine_incarnation: Option<tidepool_repr::SessionId>,
-}
-
 pub(crate) enum PrivateExecutionPublication {
     Manifest {
         commit: tidepool_runtime::session::PublicManifestCommit,
         native_bindings: Vec<String>,
-        fork_source: Option<PublishedForkSource>,
     },
     Rejected {
         reason: tidepool_toolchain::declaration_join::JoinRejection,
@@ -2504,48 +2564,6 @@ pub(crate) enum AgentStopProjection {
     Failed(String),
 }
 
-#[derive(Clone)]
-pub(crate) struct CleanupActorProjection {
-    pub actor: crate::ActorRef,
-    pub label: String,
-    pub terminal: bool,
-    pub revision: u64,
-}
-
-#[derive(Clone)]
-pub(crate) struct CleanupPlanProjection {
-    pub group: crate::ForkGroupId,
-    pub actors: Vec<CleanupActorProjection>,
-    pub pending_responses: Vec<crate::RequestId>,
-    pub pending_watches: Vec<crate::WatchId>,
-    pub refusal: Option<String>,
-}
-
-pub(crate) enum CleanupStepProjection {
-    ForgotResponses(Vec<crate::RequestId>),
-    ForgotWatches(Vec<crate::WatchId>),
-    StoppedActor(crate::ActorRef, AgentStopProjection),
-    ForgotActor(crate::ActorRef),
-    ActorRetained {
-        actor: crate::ActorRef,
-        requests: Vec<crate::RequestId>,
-        watches: Vec<crate::WatchId>,
-    },
-    ActorOutputPending {
-        actor: crate::ActorRef,
-        displays: usize,
-    },
-    GroupRetired(crate::ForkGroupId),
-    Blocked(String),
-    StalePlan,
-}
-
-pub(crate) struct CleanupReceiptProjection {
-    pub plan: CleanupPlanProjection,
-    pub steps: Vec<CleanupStepProjection>,
-    pub complete: bool,
-}
-
 /// One fully captured boundary reached by an installed actor program.
 /// Variants own every linear runtime value needed to service that boundary;
 /// downstream orchestration never re-decodes the suspended request.
@@ -2554,6 +2572,17 @@ pub(crate) struct CleanupReceiptProjection {
     reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
 )]
 pub(crate) enum ResidentActorBoundary {
+    ScopeResumed {
+        outcome: ResidentOutcome,
+    },
+    ScopeRun {
+        continuation: ResidentHole,
+        callback: RootCustody,
+    },
+    ScopeDone {
+        continuation: ResidentHole,
+        token: i64,
+    },
     External {
         continuation: ResidentHole,
         work: tidepool_effect::DeferredEffect,
@@ -2561,6 +2590,17 @@ pub(crate) enum ResidentActorBoundary {
     Console {
         continuation: ResidentHole,
         text: String,
+    },
+    Green(crate::resident_actor::green::GreenBoundary),
+    Form {
+        continuation: ResidentHole,
+        operation: crate::resident_actor::forms::FormOperation,
+        publication: crate::FormPublication,
+    },
+    RichView {
+        continuation: ResidentHole,
+        view: serde_json::Value,
+        publication: crate::FormPublication,
     },
     DisplayAllowance {
         continuation: ResidentHole,
@@ -2634,8 +2674,13 @@ pub(crate) enum ResidentActorBoundary {
         owner: crate::ActorRef,
         source: crate::request::sources::SourceBinding,
     },
-    ForkGroup(ForkGroupBoundary),
+    ContextCheckpoint(ContextCheckpointBoundary),
     Start(crate::ResidentActorStart),
+    ReplaceSpec {
+        continuation: ResidentHole,
+        target: crate::ActorRef,
+        definition: SpecReplacementDefinition,
+    },
     Outbound(ResidentOutbound),
     Wait(ResidentWaitRequest),
     Poll(crate::wait::ResidentPollRequest),
@@ -2671,22 +2716,18 @@ pub(crate) enum ResidentActorBoundary {
         recipient: crate::ActorRef,
         scope: crate::ActorRef,
     },
-    AgentGroupList {
-        continuation: ResidentHole,
-        group: crate::ForkGroupId,
-    },
     AgentForget(AgentInspectionBoundary),
     AgentStop(AgentInspectionBoundary),
-    CleanupPlan {
+    AgentRetention {
         continuation: ResidentHole,
-        group: crate::ForkGroupId,
-    },
-    CleanupExecute {
-        continuation: ResidentHole,
-        group: crate::ForkGroupId,
-        inspected: Vec<(crate::ActorRef, u64)>,
+        target: crate::ActorRef,
+        lifetime: crate::WorkerLifetime,
     },
     RequestReservation(RequestReservation),
+    RequestAdmissionRejected {
+        continuation: ResidentHole,
+        error: crate::request_effect::RequestError,
+    },
     CurrentRequest {
         continuation: ResidentHole,
         site: Option<u64>,
@@ -2712,16 +2753,25 @@ pub(crate) enum ResidentActorBoundary {
     WatchProgressPoll {
         continuation: ResidentHole,
         watch: crate::WatchId,
+        path: Vec<usize>,
         request: crate::RequestId,
         after: u64,
     },
+    WatchDecisionPoll {
+        continuation: ResidentHole,
+        watch: crate::WatchId,
+        path: Vec<usize>,
+    },
     CommandReportPoll {
         continuation: ResidentHole,
+        watch: crate::WatchId,
+        path: Vec<usize>,
         job: String,
     },
-    RequestDetachment {
+    RequestRetention {
         continuation: ResidentHole,
         request: crate::RequestId,
+        lifetime: crate::WorkerLifetime,
     },
     RequestCancellation(RequestCancellation),
     ResponseAbandonment(ResponseAbandonment),
@@ -2738,63 +2788,10 @@ pub(crate) enum ResidentActorBoundary {
     WatchPoll(WatchPoll),
     WatchAwait(WatchPoll),
     WatchForget(WatchForget),
+    WatchRelease(WatchForget),
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum ForkReply {
-    Actor,
-    Forks,
-}
-
-pub(crate) struct ForkContinuation {
-    pub(crate) hole: ResidentHole,
-    reply: ForkReply,
-}
-
-impl ForkContinuation {
-    pub(crate) fn for_reply(hole: ResidentHole, reply: ForkReply) -> Self {
-        Self { hole, reply }
-    }
-
-    fn actor(hole: ResidentHole) -> Self {
-        Self {
-            hole,
-            reply: ForkReply::Actor,
-        }
-    }
-
-    pub(crate) fn forks(hole: ResidentHole) -> Self {
-        Self {
-            hole,
-            reply: ForkReply::Forks,
-        }
-    }
-
-    fn resume<H, O, T>(
-        self,
-        session: &mut ResidentSession<H, O>,
-        result: Result<T, String>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError>
-    where
-        H: DispatchEffect<O> + Send,
-        O: OutputSink + Sync,
-        T: tidepool_bridge::ToHaskell + Send + 'static,
-    {
-        match (self.reply, result) {
-            (ForkReply::Actor, Ok(value)) => session
-                .resume_classified(self.hole, value)
-                .map_err(classify_resumption),
-            (ForkReply::Actor, Err(detail)) => session
-                .abort(self.hole.cont_id(), detail)
-                .map_err(ResidentActorWorkbenchError::Resident),
-            (ForkReply::Forks, result) => session
-                .resume_classified(self.hole, result)
-                .map_err(classify_resumption),
-        }
-    }
-}
-
-pub(crate) enum ForkGroupBoundary {
+pub(crate) enum ContextCheckpointBoundary {
     CheckCheckpoint {
         continuation: ResidentHole,
         token: String,
@@ -2806,39 +2803,6 @@ pub(crate) enum ForkGroupBoundary {
     Checkpoint {
         continuation: ResidentHole,
         name: String,
-    },
-    Preview {
-        continuation: ResidentHole,
-        role: crate::ActorLaunchRoleWire,
-        effect_keys: Vec<crate::ActorEffectKeyWire>,
-        budget: Option<(i64, i64)>,
-        model: Option<crate::Model>,
-        effort: Option<crate::ForkEffort>,
-        context: crate::ForkContext,
-        instructions: Option<String>,
-        lifetime: crate::WorkerLifetime,
-    },
-    Begin {
-        continuation: ForkContinuation,
-        relative: bool,
-        group: String,
-        branches: Vec<String>,
-    },
-    Commit {
-        continuation: ForkContinuation,
-        group: crate::ForkGroupId,
-    },
-    CommitCaptured {
-        continuation: ForkContinuation,
-        group: crate::ForkGroupId,
-    },
-    Abort {
-        continuation: ForkContinuation,
-        group: crate::ForkGroupId,
-    },
-    Cleanup {
-        continuation: ResidentHole,
-        group: crate::ForkGroupId,
     },
 }
 
@@ -2878,6 +2842,9 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
+            Self::ScopeRun { .. } => "withScope",
+            Self::ScopeResumed { .. } => "scope resumed",
+            Self::ScopeDone { .. } => "scope completion",
             Self::External { .. } => "external effect",
             Self::Sleep { .. } => "sleep",
             Self::Jev { .. } => "jev",
@@ -2885,6 +2852,9 @@ impl ResidentActorBoundary {
             Self::Context { .. } => "context transformation",
             Self::Command { .. } => "command job",
             Self::Console { .. } => "print",
+            Self::Form { .. } => "human form",
+            Self::Green(boundary) => boundary.operation(),
+            Self::RichView { .. } => "rich display",
             Self::DisplayPublish { .. } | Self::DisplayPublished { .. } => "display",
             Self::DisplayExpand { .. } | Self::DisplayExpanded { .. } => "expand",
             Self::DisplayAllowance { .. } | Self::DisplayAllowanceGranted { .. } => {
@@ -2895,23 +2865,18 @@ impl ResidentActorBoundary {
             Self::ActorContext(_) => "actorContext",
             Self::ActorLocalContext(_) => "actor local context",
             Self::AttachSource { .. } => "attach source",
-            Self::ForkGroup(ForkGroupBoundary::Preview { .. }) => "preview context-fork policy",
-            Self::ForkGroup(ForkGroupBoundary::Checkpoint { .. }) => "capture context checkpoint",
-            Self::ForkGroup(ForkGroupBoundary::CheckCheckpoint { .. }) => {
+            Self::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { .. }) => {
+                "capture context checkpoint"
+            }
+            Self::ContextCheckpoint(ContextCheckpointBoundary::CheckCheckpoint { .. }) => {
                 "check context checkpoint"
             }
-            Self::ForkGroup(ForkGroupBoundary::ReleaseCheckpoint { .. }) => {
+            Self::ContextCheckpoint(ContextCheckpointBoundary::ReleaseCheckpoint { .. }) => {
                 "release context checkpoint"
             }
-            Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
-            Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
-            Self::ForkGroup(ForkGroupBoundary::CommitCaptured { .. }) => {
-                "commit captured context-fork group"
-            }
-            Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
-            Self::ForkGroup(ForkGroupBoundary::Cleanup { .. }) => "cleanup context-fork group",
             Self::Start(_) => "startActor",
             Self::Replace { .. } => "replaceActor",
+            Self::ReplaceSpec { .. } => "replaceSpec",
             Self::Outbound(ResidentOutbound::Call { .. }) => "call",
             Self::Outbound(ResidentOutbound::TryCall { .. }) => "tryCall",
             Self::Outbound(ResidentOutbound::Cast { .. }) => "cast",
@@ -2934,12 +2899,11 @@ impl ResidentActorBoundary {
             Self::AgentList(_) => "listAgents",
             Self::ReflectConversation { .. } => "reflect",
             Self::AgentShareObservation { .. } => "shareObservation",
-            Self::AgentGroupList { .. } => "observeForkGroup",
             Self::AgentForget(_) => "forgetAgent",
             Self::AgentStop(_) => "stopAgent",
-            Self::CleanupPlan { .. } => "planCleanup",
-            Self::CleanupExecute { .. } => "executeCleanup",
+            Self::AgentRetention { .. } => "retainAgent",
             Self::RequestReservation(_) => "request",
+            Self::RequestAdmissionRejected { .. } => "request admission rejected",
             Self::CurrentRequest { .. } => "currentRequest",
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
@@ -2949,8 +2913,9 @@ impl ResidentActorBoundary {
             Self::RequestUpdate { .. } => "updateRequest",
             Self::RequestUpdatePoll { .. } => "pollRequestUpdate",
             Self::WatchProgressPoll { .. } => "pollWatch progress",
+            Self::WatchDecisionPoll { .. } => "observed decision",
             Self::CommandReportPoll { .. } => "pollWatch command",
-            Self::RequestDetachment { .. } => "detachRequest",
+            Self::RequestRetention { .. } => "retainRequest",
             Self::RequestCancellation(_) => "cancelRequest",
             Self::ResponseAbandonment(_) => "abandonResponse",
             Self::ResponseForget(_) => "forgetResponse",
@@ -2963,6 +2928,7 @@ impl ResidentActorBoundary {
             Self::WatchPoll(_) => "pollWatch",
             Self::WatchAwait(_) => "awaitWatch",
             Self::WatchForget(_) => "forgetWatch",
+            Self::WatchRelease(_) => "release watch observation",
         }
     }
 }
@@ -3040,6 +3006,9 @@ macro_rules! resident_request_roster {
 }
 
 resident_request_roster! {
+    ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::ResourceScopes)),
+    Green(crate::generated::green::GreenReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Green)),
+    AskUser(crate::generated::ask_user::AskUserReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AskUser)),
     Console(crate::generated::console::ConsoleReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Console)),
     Sleep(crate::generated::sleep::SleepReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Sleep)),
     Commands(crate::generated::commands::CommandsReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Commands)),
@@ -3054,7 +3023,6 @@ resident_request_roster! {
     Lookup(crate::generated::lookup::LookupReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Lookup)),
     Introspection(crate::generated::introspection::IntrospectionReq) => None,
     AgentLaunch(crate::generated::agent_launch::AgentLaunchReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::AgentLaunch)),
-    Forks(crate::generated::forks::ForksReq) => Some(exomonad_tool::ToolEffectKey::Actor(exomonad_tool::ActorEffectKey::Forks)),
     ActorKernel(crate::generated::actor_kernel::ActorKernelReq) => None,
     ActorLocal(crate::generated::actor_local::ActorLocalReq) => None,
     AgentTools(crate::generated::agent_tools::AgentToolsReq) => None,
@@ -3098,6 +3066,8 @@ impl ResidentRequest {
         try_member!(Self::Context, crate::ContextReq);
         try_member!(Self::Commands, crate::generated::commands::CommandsReq);
         try_member!(Self::Console, crate::generated::console::ConsoleReq);
+        try_member!(Self::AskUser, crate::generated::ask_user::AskUserReq);
+        try_member!(Self::Green, crate::generated::green::GreenReq);
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
         try_member!(
             Self::ActorContext,
@@ -3120,7 +3090,6 @@ impl ResidentRequest {
             Self::AgentLaunch,
             crate::generated::agent_launch::AgentLaunchReq
         );
-        try_member!(Self::Forks, crate::generated::forks::ForksReq);
         try_member!(
             Self::ActorKernel,
             crate::generated::actor_kernel::ActorKernelReq
@@ -3137,6 +3106,10 @@ impl ResidentRequest {
             Self::AgentSession,
             crate::generated::agent_session::AgentSessionReq
         );
+        try_member!(
+            Self::ResourceScopes,
+            crate::generated::resource_scopes::ResourceScopesReq
+        );
         try_member!(Self::Reflect, crate::generated::reflect::ReflectReq);
         try_member!(Self::Replies, RepliesReq);
         try_member!(Self::Watches, WatchesReq);
@@ -3151,18 +3124,18 @@ impl ResidentRequest {
             Self::Sleep(crate::generated::sleep::SleepReq::SleepWith(..)) => "sleep",
             Self::Jev(crate::generated::jev::JevReq::JevAskWith(..)) => "jev",
             Self::Model(_) => "model call",
+            Self::ResourceScopes(_) => "withScope",
             Self::Context(_) => "context transformation",
             Self::Commands(_) => "command job",
             Self::Console(_) => "console output",
+            Self::AskUser(_) => "human form",
+            Self::Green(_) => "green thread",
             Self::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(
                 ..,
             )) => "notify",
             Self::Notifications(
                 crate::generated::notifications::NotificationsReq::PollNotificationWith(..),
             ) => "pollNotification",
-            Self::Actor(crate::generated::actor::ActorReq::ActorBeginForkGroupWith(..)) => {
-                "begin context-fork group"
-            }
             Self::ActorContext(
                 crate::generated::actor_context::ActorContextReq::ActorContextWith,
             ) => "actorContext",
@@ -3170,14 +3143,9 @@ impl ResidentRequest {
             Self::AgentControl(
                 crate::generated::agent_control::AgentControlReq::AgentControlStopWith(..),
             ) => "stopAgent",
-            Self::AgentInspection(
-                crate::generated::agent_inspection::AgentInspectionReq::AgentInspectCleanupWith(..),
-            ) => "planCleanup",
             Self::AgentControl(
-                crate::generated::agent_control::AgentControlReq::AgentControlExecuteCleanupWith(
-                    ..,
-                ),
-            ) => "executeCleanup",
+                crate::generated::agent_control::AgentControlReq::AgentControlRetainWith(..),
+            ) => "retainAgent",
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentInspectWith(..),
             ) => "observeAgent",
@@ -3190,9 +3158,6 @@ impl ResidentRequest {
                 ),
             ) => "shareObservation",
             Self::AgentInspection(
-                crate::generated::agent_inspection::AgentInspectionReq::AgentGroupListWith(..),
-            ) => "observeForkGroup",
-            Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(..),
             ) => "forgetAgent",
             Self::Lookup(_) => "lookup",
@@ -3202,43 +3167,24 @@ impl ResidentRequest {
             Self::Introspection(
                 crate::generated::introspection::IntrospectionReq::IntrospectionTypeOfWith(..),
             ) => "structured type",
-            Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
-                ..,
-            )) => "startAgent",
-            Self::Forks(crate::generated::forks::ForksReq::ForksBeginWith(..)) => {
-                "begin context-fork group"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksStartWith(..)) => "context fork",
-            Self::Forks(crate::generated::forks::ForksReq::ForksCheckpointWith(..)) => "checkpoint",
-            Self::Forks(crate::generated::forks::ForksReq::ForksCheckCheckpointWith(..)) => {
-                "checkCheckpoint"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksReleaseCheckpointWith(..)) => {
-                "releaseCheckpoint"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(..)) => {
-                "preview context-fork policy"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksCommitWith(..)) => {
-                "commit context-fork group"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksCommitCapturedWith(..)) => {
-                "commit captured context-fork group"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksAbortWith(..)) => {
-                "abort context-fork group"
-            }
-            Self::Forks(crate::generated::forks::ForksReq::ForksCleanupWith(..)) => {
-                "cleanup context-fork group"
-            }
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReplaceSpecWith(..),
+            ) => "replaceSpec",
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(..),
+            ) => "spawnSubagent",
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(..),
+            ) => "checkpoint",
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(..),
+            ) => "checkCheckpoint",
+            Self::AgentLaunch(
+                crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReleaseCheckpointWith(
+                    ..,
+                ),
+            ) => "releaseCheckpoint",
             Self::Actor(crate::generated::actor::ActorReq::ActorStartWith(..)) => "startActor",
-            Self::Actor(crate::generated::actor::ActorReq::ActorForkWith(..)) => "context fork",
-            Self::Actor(crate::generated::actor::ActorReq::ActorCommitForkGroupWith(..)) => {
-                "commit context-fork group"
-            }
-            Self::Actor(crate::generated::actor::ActorReq::ActorAbortForkGroupWith(..)) => {
-                "abort context-fork group"
-            }
             Self::Actor(crate::generated::actor::ActorReq::ActorWaitWith(..)) => "awaitExit",
             Self::Actor(crate::generated::actor::ActorReq::ActorPollWith(..)) => "pollExit",
             Self::Actor(crate::generated::actor::ActorReq::ActorCallWith(..)) => "call",
@@ -3312,6 +3258,9 @@ impl ResidentRequest {
             Self::AgentTools(
                 crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallWith(..),
             ) => "agent tool installation",
+            Self::AgentTools(
+                crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallReceiverWith(..),
+            ) => "agent request receiver installation",
             Self::AgentTools(crate::generated::agent_tools::AgentToolsReq::AgentToolsInputWith) => {
                 "agent tool input"
             }
@@ -3338,7 +3287,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::ReplyWith(..)) => "reply",
             Self::Replies(RepliesReq::ObserveResponseWith(..)) => "pollResponse",
             Self::Replies(RepliesReq::CancelRequestWith(..)) => "cancelRequest",
-            Self::Replies(RepliesReq::DetachRequestWith(..)) => "detachRequest",
+            Self::Replies(RepliesReq::RetainRequestWith(..)) => "retainRequest",
             Self::Replies(RepliesReq::AbandonResponseWith(..)) => "abandonResponse",
             Self::Replies(RepliesReq::ForgetResponseWith(..)) => "forgetResponse",
             Self::Replies(RepliesReq::ObserveReplyWith(..)) => "pollReply",
@@ -3347,16 +3296,16 @@ impl ResidentRequest {
             }
             Self::Replies(RepliesReq::AcknowledgeCancellationWith(..)) => "acknowledgeCancellation",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
-            Self::Watches(WatchesReq::RegisterWatchGroupsWith(..)) => "watch",
-            Self::Watches(WatchesReq::RegisterAwaitWith(..)) => "waitFor",
+            Self::Watches(WatchesReq::RegisterAwaitWith(..)) => "await",
+            Self::Watches(WatchesReq::ReleaseAwaitWith(..)) => "release watch observation",
             Self::Watches(WatchesReq::RegisterRouteWith(..)) => "route",
-            Self::Watches(WatchesReq::RegisterRouteGroupsWith(..)) => "route",
             Self::Watches(WatchesReq::ObserveRouteWith(..)) => "pollRoute",
             Self::Watches(WatchesReq::ListRoutesWith) => "listRoutes",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
             Self::Watches(WatchesReq::AwaitWatchWith(..)) => "awaitWatch",
             Self::Watches(WatchesReq::ObserveWatchProgressWith(..)) => "pollWatch progress",
-            Self::Watches(WatchesReq::ObserveCommandWith(..)) => "pollWatch command",
+            Self::Watches(WatchesReq::ObserveWatchDecisionWith(..)) => "observed decision",
+            Self::Watches(WatchesReq::ObserveWatchCommandWith(..)) => "pollWatch command",
             Self::Watches(WatchesReq::ForgetWatchWith(..)) => "forgetWatch",
         }
     }
@@ -4022,6 +3971,8 @@ pub enum ResidentActorWorkbenchError {
     },
     #[error("actor retired before machine admission: {0:?}")]
     RetiredBeforeAdmission(crate::ActorTerminal),
+    #[error("resident invocation cancelled")]
+    InvocationCancelled,
     #[error(transparent)]
     CompileView(#[from] ActorCompileViewError),
     #[error("resident machine checkout failed: {0}")]
@@ -4133,6 +4084,7 @@ impl ResidentActorWorkbenchError {
         &self,
     ) -> Option<tidepool_toolchain::failclass::FailureEnvelope> {
         match self {
+            Self::InvocationCancelled => None,
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.failure_diagnostic(),
             Self::Compile(error) => Some(activation_compile_diagnostic(error)),
@@ -4509,17 +4461,31 @@ where
         &self,
         context: crate::ActorSessionContext,
     ) -> ParkedHoleAbortGuard {
-        // Inline actor admission must never borrow the creating cell's observer.
-        ParkedHoleAbortGuard::with_retained_latest(
-            &self.access,
+        self.actor_invocation_cleanup(
             context,
-            None,
             "actor initialization abandoned before standing custody".into(),
-            None,
         )
     }
 
+    pub(crate) fn actor_invocation_cleanup(
+        &self,
+        context: crate::ActorSessionContext,
+        reason: String,
+    ) -> ParkedHoleAbortGuard {
+        // Actor invocation custody never borrows the calling cell's observer.
+        ParkedHoleAbortGuard::with_retained_latest(&self.access, context, None, reason, None)
+    }
+
     pub(crate) async fn settle_initialization_custody(
+        &self,
+        context: crate::ActorSessionContext,
+        registration: ParkedHoleAbortRegistration,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.settle_actor_invocation_custody(context, registration)
+            .await
+    }
+
+    pub(crate) async fn settle_actor_invocation_custody(
         &self,
         context: crate::ActorSessionContext,
         registration: ParkedHoleAbortRegistration,
@@ -4528,20 +4494,20 @@ where
             .with_machine(context, move |session, context, _| {
                 if registration.0.owner != Some((context.actor, context.placement)) {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "initialization custody differs from its original actor placement".into(),
+                        "invocation custody differs from its original actor placement".into(),
                     ));
                 }
                 let mut state = registration.0.state.lock();
                 let ParkedHoleState::Owned(current) = &*state else {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "actor initialization lost its continuation custody".into(),
+                        "actor invocation lost its continuation custody".into(),
                     ));
                 };
                 for cont_id in current {
                     if session.parked_realm_named(cont_id) != Some(context.placement.resource_scope)
                     {
                         return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "actor initialization frame {cont_id} differs from owning realm {:?}",
+                            "actor invocation frame {cont_id} differs from owning realm {:?}",
                             context.placement.resource_scope,
                         )));
                     }
@@ -4695,10 +4661,6 @@ where
         }
     }
 
-    pub(crate) fn preparation_rows(&self) -> &[Vec<crate::ActorEffectKey>] {
-        &self.access.source.preparation_rows
-    }
-
     /// Execute one prepared installer in an actor-owned lexical scope. Its
     /// declarations and dispatcher come from the same installation suspension.
     pub(crate) fn prepare_tools<'a>(
@@ -4711,71 +4673,236 @@ where
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
     > {
         let span = tracing::info_span!(target: "exomonad_actor::workbench_phase", "agent_spec_prepare", actor = %context.actor, install);
-        Box::pin(async move {
-            let ready = self.prepare_toolset_only(
-                context.clone(),
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                granted_effects.clone(),
-            ).await?;
-            let admitted_base = ready.effects;
-            let prepared = ready.prepared;
-            let installation = crate::agent_spec::installation_expression(&prepared.entry_name, &admitted_base);
-            let dispatcher_effects = installation.dispatcher_effect_row();
-            let revision = Some(prepared.source_revision.clone());
-            let publication_resolved = prepared.resolved.clone();
-            let mut compile_context = context.clone();
-            compile_context.haskell_effects_alias = dispatcher_effects.clone();
-            let installation_scope = self
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    // Each installation has an independent CAF/source domain even
-                    // when actors share the surrounding machine and native images.
-                    let isolated = session.mint_isolated_scope();
-                    let retained = session.retain_lexical_scope(isolated)?;
-                    session.retire_scope(isolated);
-                    Ok(retained)
-                })
-                .await?;
-            compile_context.placement.lexical_scope = installation_scope.scope();
-            let abort_guard = ParkedHoleAbortGuard::with_retained_latest(
-                &self.access,
-                compile_context.clone(),
-                None,
-                "tool installation was abandoned before settlement".into(),
-                Some(installation_scope.clone()),
-            );
-            let registration = abort_guard.registration();
-            let installed_effect_support = self.access.source.installed_effect_support().to_vec();
-            let handler_effect_support = self.access.handler_effect_support.clone();
-            let prepared_entry = Arc::clone(&prepared);
-            let installer_source = installation.expression;
-            let step = registration.scope(self.access.with_machine(
-                compile_context.clone(), move |session, context, _| {
-                    session.set_image_registry(Arc::clone(prepared_entry.entry.image_registry()));
-                    let entry = session.prepare_startup_entry(prepared_entry.entry.compiled().code())?;
-                    let outcome = session.run_startup_entry(entry);
-                    start_fragment_settlement(
-                        session, context, 1, installer_source, WorkbenchDisplay::Discard,
-                        prepared_entry.entry.compiled().warnings.warnings.clone(), outcome,
+        Box::pin(
+            async move {
+                let ready = self
+                    .prepare_toolset_only(
+                        context.clone(),
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        granted_effects.clone(),
                     )
-                },
-            )).await?;
-            let ResidentWorkbenchStep::Running { outcome, .. } = step else {
-                let detail = match step {
-                    ResidentWorkbenchStep::Rejected(detail) => detail.output,
-                    _ => "installer completed without publishing its handler".into(),
+                    .await?;
+                self.install_tools_action(
+                    context,
+                    install,
+                    granted_effects,
+                    ready.effects,
+                    InstalledToolCode::SourcePrepared(ready.prepared),
+                    ToolInstallationPurpose::ToolsOnly,
+                )
+                .await
+                .map(|installation| installation.tools)
+            }
+            .instrument(span),
+        )
+    }
+
+    /// Run an already compiled installer and preserve its exact closure dependencies.
+    /// The caller imports the rooted action into this machine before admission.
+    pub(crate) fn prepare_explicit_tools<'a>(
+        &'a self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        installer: Arc<RootCustody>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
+        Box::pin(async move {
+            self.prepare_explicit_installation(
+                context,
+                install,
+                granted_effects,
+                installer,
+                ToolInstallationPurpose::ToolsOnly,
+            )
+            .await
+            .map(|installation| installation.tools)
+        })
+    }
+
+    pub(crate) async fn prepare_explicit_application(
+        &self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        installer: Arc<RootCustody>,
+    ) -> Result<(ResidentWorkbenchTools, PreparedRequestReceiver), ResidentActorWorkbenchError>
+    {
+        let prepared = self
+            .prepare_explicit_installation(
+                context,
+                install,
+                granted_effects,
+                installer,
+                ToolInstallationPurpose::SpawnApplication,
+            )
+            .await?;
+        let receiver = prepared.receiver.ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "public spawn installer did not register its request receiver".into(),
+            )
+        })?;
+        Ok((prepared.tools, receiver))
+    }
+
+    fn prepare_explicit_installation<'a>(
+        &'a self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        installer: Arc<RootCustody>,
+        purpose: ToolInstallationPurpose,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<PreparedToolInstallation, ResidentActorWorkbenchError>,
+    > {
+        // Source and live installers use the same heap boundary: nested child
+        // startup must not embed the installation's machine futures in its caller.
+        let span = tracing::info_span!(
+            target: "exomonad_actor::workbench_phase",
+            "compiled_spec_install",
+            origin = "explicit_live",
+            actor = %context.actor,
+            installation = install
+        );
+        Box::pin(
+            async move {
+                let support = self.access.source.installed_effect_support().to_vec();
+                let observer = self.access.handler_effect_support.clone();
+                let requested = granted_effects.clone();
+                let admitted_base = self
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        let mut support = support;
+                        support.extend(observer(session.handlers()));
+                        if requested.iter().any(|key| {
+                            !support.contains(&exomonad_tool::ToolEffectKey::Actor(*key))
+                        }) {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "compiled spec requires unavailable interpreter support".into(),
+                            ));
+                        }
+                        Ok(requested)
+                    })
+                    .await?;
+                self.install_tools_action(
+                    context,
+                    install,
+                    granted_effects,
+                    admitted_base,
+                    InstalledToolCode::ExplicitLive(installer),
+                    purpose,
+                )
+                .await
+            }
+            .instrument(span),
+        )
+    }
+
+    async fn install_tools_action(
+        &self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        admitted_base: Vec<crate::ActorEffectKey>,
+        code: InstalledToolCode,
+        purpose: ToolInstallationPurpose,
+    ) -> Result<PreparedToolInstallation, ResidentActorWorkbenchError> {
+        let installation = crate::agent_spec::installation_expression("", &admitted_base);
+        let dispatcher_effects = installation.dispatcher_effect_row();
+        let (revision, origin) = match &code {
+            InstalledToolCode::SourcePrepared(prepared) => (
+                Some(prepared.source_revision.clone()),
+                crate::agent_spec::SpecOrigin::SourcePrepared(prepared.resolved.clone()),
+            ),
+            InstalledToolCode::ExplicitLive(_) => {
+                (None, crate::agent_spec::SpecOrigin::ExplicitLive)
+            }
+        };
+        let mut compile_context = context.clone();
+        compile_context.haskell_effects_alias = dispatcher_effects.clone();
+        let installation_scope = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                // Each installation has an independent CAF/source domain even
+                // when actors share the surrounding machine and native images.
+                let isolated = session.mint_isolated_scope();
+                let retained = session.retain_lexical_scope(isolated)?;
+                session.retire_scope(isolated);
+                Ok(retained)
+            })
+            .await?;
+        compile_context.placement.lexical_scope = installation_scope.scope();
+        let abort_guard = ParkedHoleAbortGuard::with_retained_latest(
+            &self.access,
+            compile_context.clone(),
+            None,
+            "tool installation was abandoned before settlement".into(),
+            Some(installation_scope.clone()),
+        );
+        let registration = abort_guard.registration();
+        let installed_effect_support = self.access.source.installed_effect_support().to_vec();
+        let handler_effect_support = self.access.handler_effect_support.clone();
+        let step = registration
+            .scope(self.access.with_machine(compile_context.clone(), {
+                let prepared = code.prepared().cloned();
+                let installer = match &code {
+                    InstalledToolCode::ExplicitLive(installer) => Some(Arc::clone(installer)),
+                    InstalledToolCode::SourcePrepared(_) => None,
                 };
-                return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                    "tool installation: {detail}"
-                )));
+                move |session, context, _| {
+                    let (outcome, warnings) = match (prepared, installer) {
+                        (Some(prepared), None) => {
+                            session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
+                            let entry =
+                                session.prepare_startup_entry(prepared.entry.compiled().code())?;
+                            (
+                                session.run_startup_entry(entry),
+                                prepared.entry.compiled().warnings.warnings.clone(),
+                            )
+                        }
+                        (None, Some(installer)) => (
+                            session.run_rooted_entry_borrowed(
+                                "agent_spec_installer",
+                                &installer,
+                                0,
+                                context.placement.resource_scope,
+                                None,
+                            ),
+                            Vec::new(),
+                        ),
+                        _ => unreachable!("one installation producer"),
+                    };
+                    start_fragment_settlement(
+                        session,
+                        context,
+                        1,
+                        "agent spec installation".into(),
+                        WorkbenchDisplay::Discard,
+                        warnings,
+                        outcome,
+                    )
+                }
+            }))
+            .await?;
+        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
+            let detail = match step {
+                ResidentWorkbenchStep::Rejected(detail) => detail.output,
+                _ => "installer completed without publishing its handler".into(),
             };
-            // The registration observes either parked state before this
-            // checkout is awaited. Its armed guard retains the installation
-            // scope and aborts the exact hole if this future is dropped.
-            // Deferred work remains unstarted until the checkout rejects and
-            // aborts it; successful publication alone disarms the guard.
-            let resumption_registration = registration.clone();
-            let publication = registration.scope(self
+            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "tool installation: {detail}"
+            )));
+        };
+        // The registration observes either parked state before this
+        // checkout is awaited. Its armed guard retains the installation
+        // scope and aborts the exact hole if this future is dropped.
+        // Deferred work remains unstarted until the checkout rejects and
+        // aborts it; successful publication alone disarms the guard.
+        let resumption_registration = registration.clone();
+        let publication = registration.scope(self
                 .access
                 .with_machine(compile_context, move |session, context, _| {
                     let (hole, request) = tool_installation_request(
@@ -4861,28 +4988,54 @@ where
                         .resume_classified(hole, ())
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
+                    let (settled, receiver) = match purpose {
+                        ToolInstallationPurpose::ToolsOnly => (settled, None),
+                        ToolInstallationPurpose::SpawnApplication => {
+                            let ResidentOutcome::Suspended { hole, request, .. } = settled else {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "public spawn installer must register its request receiver after tools".into(),
+                                ));
+                            };
+                            let ResidentRequest::AgentTools(
+                                crate::generated::agent_tools::AgentToolsReq::AgentToolsInstallReceiverWith(site, _),
+                            ) = ResidentRequest::decode(&request, session.data_con_table())? else {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "public spawn installer crossed an unexpected receiver registration boundary".into(),
+                                ));
+                            };
+                            let entry = capture_request_receiver_entry(session, &hole, site, context.placement.resource_scope)?;
+                            let receiver = PreparedRequestReceiver { entry, scope: Arc::clone(&installation_scope) };
+                            let settled = session.resume_classified(hole, ()).map_err(classify_resumption)?;
+                            resumption_registration.replace_in_checkout(session, &settled);
+                            (settled, Some(receiver))
+                        }
+                    };
                     require_tool_installation_completion(session, &resumption_registration, &settled)?;
-                    let acquisition = serde_json::to_string(&prepared.acquisition)
-                        .expect("toolset acquisition fields serialize to JSON");
-                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", source_revision = %prepared.source_revision, acquisition = %acquisition, prepared_owner = Arc::as_ptr(&prepared) as usize, image_registry = Arc::as_ptr(prepared.entry.image_registry()) as usize, installation_scope = ?installation_scope.scope(), resource_scope = ?context.placement.resource_scope, requested_effects = ?granted_effects, effective_effects = ?admitted_base, "actor phase");
-                    Ok(ResidentWorkbenchTools {
-                        declarations,
-                        dispatch: Arc::new(dispatch),
-                        _installation_scope: installation_scope,
-                        _prepared: prepared,
-                        dispatcher_effects,
-                        slots,
-                        resolved: publication_resolved,
-                        install,
-                        revision,
+                    if let Some(prepared) = code.prepared() {
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
+                    } else {
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "explicit_toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), install, "actor phase");
+                    }
+                    Ok(PreparedToolInstallation {
+                        tools: ResidentWorkbenchTools {
+                            declarations,
+                            dispatch: Arc::new(dispatch),
+                            _installation_scope: installation_scope,
+                            code,
+                            dispatcher_effects,
+                            slots,
+                            origin,
+                            install,
+                            revision,
+                        },
+                        receiver,
                     })
                 }))
                 .await;
-            if publication.is_ok() {
-                abort_guard.disarm();
-            }
-            publication
-        }.instrument(span))
+        if publication.is_ok() {
+            abort_guard.disarm();
+        }
+        publication
     }
 
     /// Apply the retained handler with invocation data. No source compiler is involved.
@@ -7287,9 +7440,9 @@ mod activation_preview_tests {
     #[test]
     fn activation_renders_a_whole_task_and_names_the_cap_past_it() {
         let task = format!(
-            "Task {{taskGroup = ForkGroupPath False \"wave/lane\", planPath = \"plans/x.md\", \
+            "Task {{taskName = \"wave/lane\", planPath = \"plans/x.md\", \
              taskSource = GitOid \"3454b78\", obligation = \"{}\", rationale = \"r\", \
-             ownedPaths = [\"src/a.rs\"], acceptance = [\"tests pass\"], decisions = []}}",
+             ownedPaths = [\"src/a.rs\"], acceptance = \"tests pass\", acceptedDecisions = []}}",
             "o".repeat(4 * 1024)
         );
         assert_eq!(
@@ -7465,8 +7618,8 @@ where
         Ok(Some(target))
     }
 
-    /// Establish the exact durable public surface before root readiness.
-    pub(crate) async fn bind_durable_root_public_owner(
+    /// Establish this exact actor scope before application readiness.
+    pub(crate) async fn initialize_durable_public_owner(
         &self,
         context: crate::ActorSessionContext,
         owner: tidepool_runtime::session::RecoveryPublicOwner,
@@ -7483,35 +7636,6 @@ where
                     session.durable_public_readiness(&owner, scope)
                 })
             })
-            .await
-    }
-
-    /// Consume the child's original retained placement under the same
-    /// checkout that initializes its canonical durable public surface.
-    pub(crate) async fn initialize_fork_child_public_owner(
-        &self,
-        context: crate::ActorSessionContext,
-        owner: tidepool_runtime::session::RecoveryPublicOwner,
-        lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-        retirement: crate::RetainedActorExit,
-    ) -> Result<NativePublicOwnerPublication, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine_wait(
-                context,
-                MachineCheckoutAdmission::UntilRetirement(retirement),
-                move |session, context, _| {
-                    let scope = context.placement.lexical_scope;
-                    session.validate_lexical_scope_lease(scope, &lease)?;
-                    let outcome = session
-                        .initialize_durable_public_scope(owner.clone(), scope)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                        })?;
-                    NativePublicOwnerPublication::capture(outcome, || {
-                        session.durable_public_readiness(&owner, scope)
-                    })
-                },
-            )
             .await
     }
 
@@ -7577,25 +7701,6 @@ where
                 other => Ok(other),
             }
         }).await
-    }
-
-    pub(crate) async fn validate_fork_child_scope(
-        &self,
-        context: crate::ActorSessionContext,
-        lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, context, _| {
-                session.validate_lexical_scope_lease(context.placement.lexical_scope, &lease)?;
-                if let Some(captured) = context.source_imports.inherited_scope()? {
-                    session.validate_initial_lexical_scope(
-                        &captured,
-                        context.placement.lexical_scope,
-                    )?;
-                }
-                Ok(())
-            })
-            .await
     }
 
     /// Transfer only the journal-certified durable predecessor to this exact
@@ -7847,7 +7952,6 @@ where
         &self,
         context: crate::ActorSessionContext,
         execution: Arc<ExecutionPrivateScope>,
-        retain_fork_source: bool,
     ) -> Result<PrivateExecutionPublication, ResidentActorWorkbenchError> {
         if context.placement.lexical_scope != execution.private_scope {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -7894,7 +7998,6 @@ where
                 return Ok(PrivateExecutionPublication::Manifest {
                     commit: tidepool_runtime::session::PublicManifestCommit::Cancelled,
                     native_bindings,
-                    fork_source: None,
                 });
             }
             let owner = execution.owner.clone();
@@ -7946,35 +8049,17 @@ where
             match prepared {
                 PreparedExecutionPublication::Manifest(ticket) => {
                     let decision = execution.decision.clone();
-                    let public_scope = execution.public_scope;
-                    let source_session = context.placement.session;
-                    let (outcome, fork_source) = self
+                    let outcome = self
                         .access
                         .with_machine(context.clone(), move |session, _, _| {
                             let outcome = session
                                 .publish_staged_public_manifest(ticket, &decision)
                                 .map_err(|error| {
-                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                                        error,
+                                    ))
                                 })?;
-                            // Capture under the same checkout as the visible commit. A
-                            // later independent publication must not change this boundary.
-                            let fork_source = if retain_fork_source && matches!(outcome,
-                                tidepool_runtime::session::PublicManifestCommit::Durable
-                                | tidepool_runtime::session::PublicManifestCommit::Ephemeral
-                                | tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
-                            ) {
-                                let visible = session.public_visibility_snapshot_in(public_scope).ok_or_else(|| {
-                                    ResidentActorWorkbenchError::ActorProtocol("published fork source has no public compile view".into())
-                                })?;
-                                Some(PublishedForkSource {
-                                    lexical: session.retain_lexical_scope(public_scope).map_err(ResidentActorWorkbenchError::Resident)?,
-                                    session: source_session,
-                                    public_scope,
-                                    public_epoch: visible.epoch,
-                                    machine_incarnation: visible.machine_incarnation,
-                                })
-                            } else { None };
-                            Ok((outcome, fork_source))
+                            Ok(outcome)
                         })
                         .await
                         .map_err(|error| {
@@ -7987,7 +8072,6 @@ where
                     return Ok(PrivateExecutionPublication::Manifest {
                         commit: outcome,
                         native_bindings,
-                        fork_source,
                     });
                 }
                 PreparedExecutionPublication::Rejected(rejected) => {
@@ -8186,7 +8270,7 @@ where
             .await
     }
 
-    pub(crate) async fn retire_fork_scopes(
+    pub(crate) async fn retire_context_scopes(
         &self,
         context: crate::ActorSessionContext,
         scopes: Vec<tidepool_codegen::scope::ScopeId>,
@@ -8325,124 +8409,41 @@ where
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),
                     ResidentRequest::AgentLaunch(
-                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
-                            label,
-                            _,
-                            unbound_label,
-                            role,
-                            profile,
-                            worktrees,
-                            lifetime,
+                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReplaceSpecWith(
+                            (id, incarnation), _, effects,
                         ),
-                    ) => crate::ResidentActorStart::capture_decoded(
-                        session,
-                        hole,
-                        crate::start::ActorStartRequest {
-                            label, role, profile, launch_worktrees: worktrees,
-                            fork_group: None, fork_workspace: None, effect_keys: None,
-                            fork_effort: None, fork_budget: None, model: None, instructions: None, context: crate::ForkContext::SelectedContext,
-                            checkpoint: None,
-                            lifetime,
-                            session_id: context.placement.session, parent_actor: context.actor,
-                            unbound_label,
-                        },
-                    )
-                    .map(ResidentActorBoundary::Start)
-                    .map_err(ResidentActorWorkbenchError::StartCapture),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksStartWith(
-                        label,
-                        _,
-                        unbound_label,
-                        group,
-                        role,
-                        profile,
-                        worktrees,
-                        worktree_spec,
-                        bound_dirty_policy,
-                        effect_keys,
-                        effort,
-                        budget,
-                        model, fork_context, checkpoint, instructions, lifetime,
-                    )) => {
-                        let group = u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid fork group id {group}"
-                            ))
-                        })?;
-                        crate::ResidentActorStart::capture_decoded(
-                            session,
-                            hole,
-                            crate::start::ActorStartRequest {
-                                label, role, profile, launch_worktrees: worktrees,
-                                fork_group: Some(crate::ForkGroupId(group)),
-                                fork_workspace: Some(match worktree_spec {
-                                    Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
-                                    None => crate::ForkWorkspaceSeed::CurrentCheckout(bound_dirty_policy),
-                                }),
-                                effect_keys: Some(effect_keys), fork_effort: effort, fork_budget: budget, model, instructions, context: fork_context, checkpoint, lifetime,
-                                session_id: context.placement.session, parent_actor: context.actor,
-                                unbound_label,
+                    ) => {
+                        let target = crate::ActorRef {
+                            id: crate::ActorId(u64::try_from(id).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid replacement actor id".into()))?),
+                            incarnation: crate::Incarnation(u64::try_from(incarnation).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid replacement incarnation".into()))?),
+                        };
+                        let installer = session.live_payload_handle_owned_by(
+                            hole.cont_id(), context.placement.resource_scope,
+                        )?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol(
+                            "spec replacement did not retain its compiled installer".into(),
+                        ))?;
+                        Ok(ResidentActorBoundary::ReplaceSpec {
+                            continuation: hole, target,
+                            definition: SpecReplacementDefinition {
+                                caller: context.actor, installer,
+                                session: context.placement.session,
+                                effects: effects.into_iter().map(Into::into).collect(),
                             },
-                        )
-                        .map(ResidentActorBoundary::Start)
-                        .map_err(ResidentActorWorkbenchError::StartCapture)
+                        })
                     }
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksPreviewWith(role, effect_keys, budget, model, effort, context, instructions, lifetime)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview { continuation: hole, role, effect_keys, budget, model, effort, context, instructions, lifetime })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCheckpointWith(name)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Checkpoint { continuation: hole, name })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CheckCheckpoint { continuation: hole, token })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksReleaseCheckpointWith(token)) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::ReleaseCheckpoint { continuation: hole, token })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksBeginWith(
-                        relative,
-                        group,
-                        branches,
-                    )) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
-                        continuation: ForkContinuation::forks(hole),
-                        relative,
-                        group,
-                        branches,
-                    })),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCommitWith(
-                        group,
-                    )) => Ok(ResidentActorBoundary::ForkGroup(
-                        ForkGroupBoundary::Commit {
-                            continuation: ForkContinuation::forks(hole),
-                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                    "invalid fork group id {group}"
-                                ))
-                            })?),
-                        },
-                    )),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCommitCapturedWith(group)) => Ok(ResidentActorBoundary::ForkGroup(
-                        ForkGroupBoundary::CommitCaptured {
-                            continuation: ForkContinuation::forks(hole),
-                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!("invalid fork group id {group}"))
-                            })?),
-                        },
-                    )),
-                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksAbortWith(
-                        group,
-                    )) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
-                        continuation: ForkContinuation::forks(hole),
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid fork group id {group}"
-                            ))
-                        })?),
-                    })),
-                    ResidentRequest::Forks(
-                        crate::generated::forks::ForksReq::ForksCleanupWith(group),
-                    ) => Ok(ResidentActorBoundary::ForkGroup(
-                        ForkGroupBoundary::Cleanup {
-                            continuation: hole,
-                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                    "invalid fork group id {group}"
-                                ))
-                            })?),
-                        },
-                    )),
+                    ResidentRequest::AgentLaunch(
+                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchSpawnWith(
+                            spawn_context, _, workspace, effects, label, model, effort,
+                            instructions, lifetime, limits,
+                        ),
+                    ) => crate::ResidentActorStart::capture_spawn(
+                        session, hole, spawn_context, workspace, effects, label, model,
+                        effort, instructions, lifetime, limits, context.placement.session, context.actor,
+                    ).map(ResidentActorBoundary::Start)
+                        .map_err(ResidentActorWorkbenchError::StartCapture),
+                    ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(name)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { continuation: hole, name })),
+                    ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::CheckCheckpoint { continuation: hole, token })),
+                    ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchReleaseCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::ReleaseCheckpoint { continuation: hole, token })),
                     ResidentRequest::Notifications(crate::generated::notifications::NotificationsReq::NotifyWith(target, message)) => {
                         Ok(ResidentActorBoundary::NotificationSend { continuation: hole, target: crate::wait::decode_address(target.0, target.1)?, message })
                     }
@@ -8501,14 +8502,6 @@ where
                         scope: crate::wait::decode_address(scope.0, scope.1)?,
                     }),
                     ResidentRequest::AgentInspection(
-                        crate::generated::agent_inspection::AgentInspectionReq::AgentGroupListWith(group),
-                    ) => Ok(ResidentActorBoundary::AgentGroupList {
-                        continuation: hole,
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!("invalid fork group id {group}"))
-                        })?),
-                    }),
-                    ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(
                             target,
                         ),
@@ -8518,6 +8511,31 @@ where
                             continuation: hole,
                         },
                     )),
+                    ResidentRequest::Green(request) => {
+                        use crate::generated::green::GreenReq::*;
+                        use crate::resident_actor::green::GreenBoundary;
+                        let boundary = match request {
+                            AsyncSpawnWith(_, _) => {
+                                let realm = session.parked_realm(&hole).ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("green spawn continuation is no longer parked".into()))?;
+                                if realm != actor_realm { return Err(ResidentActorWorkbenchError::ActorProtocol("green spawn differs from executing continuation scope".into())); }
+                                let callback = session.live_payload_handle_owned_by(hole.cont_id(), realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("green spawn has no retained callback".into()))?;
+                                GreenBoundary::Spawn { continuation: hole, callback }
+                            }
+                            AsyncDoneWith(token) => GreenBoundary::Done { continuation: hole, token },
+                            AsyncJoinAnyWith(threads) => GreenBoundary::JoinAny { continuation: hole, threads },
+                            AsyncStatusWith(thread) => GreenBoundary::Status { continuation: hole, thread },
+                            AsyncCancelWith(thread) => GreenBoundary::Cancel { continuation: hole, thread },
+                        };
+                        Ok(ResidentActorBoundary::Green(boundary))
+                    }
+                    ResidentRequest::AskUser(request) => {
+                        let operation = crate::resident_actor::forms::FormOperation::decode(request, session.data_con_table());
+                        Ok(ResidentActorBoundary::Form { continuation: hole, operation, publication: crate::FormPublication { actor: context.actor, operation: None } })
+                    }
+                    ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayViewWith(view)) => {
+                        let view = tidepool_runtime::value_to_json(&view, session.data_con_table(), 0);
+                        Ok(ResidentActorBoundary::RichView { continuation: hole, view, publication: crate::FormPublication { actor: context.actor, operation: None } })
+                    }
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::Print(text)) => Ok(ResidentActorBoundary::Console { continuation: hole, text }),
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((identity, text, expansions, unavailable), _)) => {
                         let callback = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
@@ -8532,6 +8550,8 @@ where
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayAllowanceWith) => Ok(ResidentActorBoundary::DisplayAllowance { continuation: hole }),
                     ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpansionInputWith) => Err(ResidentActorWorkbenchError::ActorProtocol("display expansion input requires a retained callback invocation".into())),
                     ResidentRequest::Commands(request) => Ok(ResidentActorBoundary::Command { continuation: hole, request }),
+                    ResidentRequest::AgentControl(crate::generated::agent_control::AgentControlReq::AgentControlRetainWith(target, lifetime)) =>
+                        Ok(ResidentActorBoundary::AgentRetention { continuation: hole, target: crate::wait::decode_address(target.0, target.1)?, lifetime }),
                     ResidentRequest::AgentControl(
                         crate::generated::agent_control::AgentControlReq::AgentControlStopWith(
                             target,
@@ -8540,38 +8560,8 @@ where
                         target: crate::wait::decode_address(target.0, target.1)?,
                         continuation: hole,
                     })),
-                    ResidentRequest::AgentInspection(
-                        crate::generated::agent_inspection::AgentInspectionReq::AgentInspectCleanupWith(
-                            group,
-                        ),
-                    ) => Ok(ResidentActorBoundary::CleanupPlan {
-                        continuation: hole,
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid cleanup group id {group}"
-                            ))
-                        })?),
-                    }),
-                    ResidentRequest::AgentControl(
-                        crate::generated::agent_control::AgentControlReq::AgentControlExecuteCleanupWith(
-                            group, inspected,
-                        ),
-                    ) => Ok(ResidentActorBoundary::CleanupExecute {
-                        continuation: hole,
-                        inspected: inspected.into_iter().map(|(id, incarnation, revision)| {
-                            Ok((crate::wait::decode_address(id, incarnation)?, u64::try_from(revision).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol("invalid cleanup revision".into())
-                            })?))
-                        }).collect::<Result<_, ResidentActorWorkbenchError>>()?,
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid cleanup group id {group}"
-                            ))
-                        })?),
-                    }),
                     ResidentRequest::Actor(
-                        crate::generated::actor::ActorReq::ActorStartWith(..)
-                        | crate::generated::actor::ActorReq::ActorForkWith(..),
+                        crate::generated::actor::ActorReq::ActorStartWith(..),
                     ) => {
                         let table = session.data_con_table().clone();
                         crate::ResidentActorStart::capture(
@@ -8585,40 +8575,6 @@ where
                         .map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }
-                    ResidentRequest::Actor(
-                        crate::generated::actor::ActorReq::ActorBeginForkGroupWith(
-                            relative,
-                            group,
-                            branches,
-                        ),
-                    ) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
-                        continuation: ForkContinuation::actor(hole),
-                        relative,
-                        group,
-                        branches,
-                    })),
-                    ResidentRequest::Actor(
-                        crate::generated::actor::ActorReq::ActorCommitForkGroupWith(group),
-                    ) => Ok(ResidentActorBoundary::ForkGroup(
-                        ForkGroupBoundary::Commit {
-                            continuation: ForkContinuation::actor(hole),
-                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                    "invalid fork group id {group}"
-                                ))
-                            })?),
-                        },
-                    )),
-                    ResidentRequest::Actor(
-                        crate::generated::actor::ActorReq::ActorAbortForkGroupWith(group),
-                    ) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
-                        continuation: ForkContinuation::actor(hole),
-                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "invalid fork group id {group}"
-                            ))
-                        })?),
-                    })),
                     ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorCallWith(
                         target,
                         _,
@@ -8792,12 +8748,17 @@ where
                         .map(ResidentActorBoundary::AgentSession)
                         .map_err(ResidentActorWorkbenchError::InteractiveSessionCapture)
                     }
-                    ResidentRequest::Replies(RepliesReq::ReserveRequestWith(label, address, notify_owner)) => Ok(
+                    ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeRunWith(site, _)) =>
+                        capture_scope_boundary(session, hole, site, actor_realm),
+                    ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeDoneWith(token)) =>
+                        Ok(ResidentActorBoundary::ScopeDone { continuation: hole, token }),
+                    ResidentRequest::Replies(RepliesReq::ReserveRequestWith(label, address, notify_owner, lifetime)) => Ok(
                         ResidentActorBoundary::RequestReservation(RequestReservation {
                             continuation: hole,
                             target: crate::wait::decode_address(address.0, address.1)?,
                             label,
                             notify_owner,
+                            lifetime,
                         }),
                     ),
                     ResidentRequest::Replies(RepliesReq::CurrentRequestWith(site)) => Ok(
@@ -8812,6 +8773,13 @@ where
                         address,
                         deadline,
                     )) => {
+                        let deadline = match deadline.map(crate::request_effect::RequestDuration::checked).transpose() {
+                            Ok(deadline) => deadline,
+                            Err(detail) => return Ok(ResidentActorBoundary::RequestAdmissionRejected {
+                                continuation: hole,
+                                error: crate::request_effect::RequestError::RequestInvalidDeadline(detail),
+                            }),
+                        };
                         let custody = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
                             ?
@@ -8829,10 +8797,7 @@ where
                                     context.placement.session,
                                     custody,
                                 ),
-                                deadline: deadline
-                                    .map(crate::request_effect::RequestDuration::checked)
-                                    .transpose()
-                                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                                deadline,
                             },
                         ))
                     }
@@ -8896,10 +8861,11 @@ where
                             update: crate::RequestUpdateId { request: crate::request_effect::request_id(request)?,
                                 sequence: u64::try_from(sequence).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid update sequence".into()))? } })
                     }
-                    ResidentRequest::Replies(RepliesReq::DetachRequestWith(request_id)) => Ok(
-                        ResidentActorBoundary::RequestDetachment {
+                    ResidentRequest::Replies(RepliesReq::RetainRequestWith(request_id, lifetime)) => Ok(
+                        ResidentActorBoundary::RequestRetention {
                             continuation: hole,
                             request: crate::request_effect::request_id(request_id)?,
+                            lifetime,
                         },
                     ),
                     ResidentRequest::Replies(RepliesReq::CancelRequestWith(request_id)) => Ok(
@@ -8944,65 +8910,22 @@ where
                             recoverable: false,
                         },
                     )),
-                    ResidentRequest::Watches(WatchesReq::RegisterRouteWith(label, callback, dependencies)) => {
-                        drop(callback); // Custody is claimed from the suspension, not the decoded value.
-                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)?
-                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
-                        let dependencies = dependencies.into_iter().map(|dependency| {
-                            Ok(vec![crate::request_effect::AwaitDependency::checked(dependency)?])
-                        }).collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
+                    ResidentRequest::Watches(WatchesReq::RegisterRouteWith(label, callback, plan)) => {
+                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no live callback".into()))?;
+                        let _ = callback;
                         Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { transient: false, continuation: hole, label, dependencies }, entry,
+                            registration: WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
+                            entry,
                         })
                     }
-                    ResidentRequest::Watches(WatchesReq::RegisterRouteGroupsWith(label, callback, groups)) => {
-                        drop(callback); // Custody is claimed from the suspension, not the decoded value.
-                        let entry = session.live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)?
-                            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("route has no retained callback".into()))?;
-                        let dependencies = groups.into_iter().map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect()).collect::<Result<Vec<Vec<_>>, _>>()?;
-                        Ok(ResidentActorBoundary::RouteRegistration {
-                            registration: WatchRegistration { transient: false, continuation: hole, label, dependencies }, entry,
-                        })
-                    }
-                    ResidentRequest::Watches(WatchesReq::ListRoutesWith) => Ok(ResidentActorBoundary::RouteList(hole)),
-                    ResidentRequest::Watches(WatchesReq::ObserveRouteWith(id)) => Ok(ResidentActorBoundary::RoutePoll(WatchPoll {
-                        continuation: hole, watch: crate::request_effect::watch_id(id)?,
-                    })),
-                    ResidentRequest::Watches(WatchesReq::RegisterWatchWith(
-                        label,
-                        dependencies,
-                    )) => {
-                        let dependencies = dependencies
-                            .into_iter()
-                            .map(|dependency| {
-                                Ok(vec![crate::request_effect::AwaitDependency::checked(dependency)?])
-                            })
-                            .collect::<Result<Vec<Vec<_>>, tidepool_bridge::BridgeError>>()?;
+                    ResidentRequest::Watches(WatchesReq::RegisterWatchWith(label, plan)) => {
                         Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration {
-                                transient: false,
-                                continuation: hole,
-                                dependencies,
-                                label,
-                            },
+                            WatchRegistration { transient: false, continuation: hole, dependencies: plan.checked()?, label },
                         ))
                     }
-                    ResidentRequest::Watches(WatchesReq::RegisterWatchGroupsWith(label, groups)) => {
-                        let dependencies = groups
-                            .into_iter()
-                            .map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect())
-                            .collect::<Result<Vec<Vec<_>>, _>>()?;
+                    ResidentRequest::Watches(WatchesReq::RegisterAwaitWith(plan)) => {
                         Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { transient: false, continuation: hole, dependencies, label },
-                        ))
-                    }
-                    ResidentRequest::Watches(WatchesReq::RegisterAwaitWith(groups)) => {
-                        let dependencies = groups
-                            .into_iter()
-                            .map(|dependencies| dependencies.into_iter().map(crate::request_effect::AwaitDependency::checked).collect())
-                            .collect::<Result<Vec<Vec<_>>, _>>()?;
-                        Ok(ResidentActorBoundary::WatchRegistration(
-                            WatchRegistration { transient: true, continuation: hole, dependencies, label: "wait-for".into() },
+                            WatchRegistration { transient: true, continuation: hole, dependencies: plan.checked()?, label: "await".into() },
                         ))
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {
@@ -9017,16 +8940,23 @@ where
                             watch: crate::request_effect::watch_id(watch_id)?,
                         }))
                     }
-                    ResidentRequest::Watches(WatchesReq::ObserveWatchProgressWith(_, watch, request, after)) => {
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchProgressWith(_, watch, path, request, after)) => {
                         Ok(ResidentActorBoundary::WatchProgressPoll {
                             continuation: hole,
                             watch: crate::request_effect::watch_id(watch)?,
+                            path: crate::request_effect::projection_path(path)?,
                             request: crate::request_effect::request_id(request)?,
                             after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
                         })
                     }
-                    ResidentRequest::Watches(WatchesReq::ObserveCommandWith(job)) => {
-                        Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, job })
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchDecisionWith(watch, path)) => {
+                        Ok(ResidentActorBoundary::WatchDecisionPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)? })
+                    }
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchCommandWith(watch, path, job)) => {
+                        Ok(ResidentActorBoundary::CommandReportPoll { continuation: hole, watch: crate::request_effect::watch_id(watch)?, path: crate::request_effect::projection_path(path)?, job })
+                    }
+                    ResidentRequest::Watches(WatchesReq::ReleaseAwaitWith(watch_id)) => {
+                        Ok(ResidentActorBoundary::WatchRelease(WatchForget { continuation: hole, watch: crate::request_effect::watch_id(watch_id)? }))
                     }
                     ResidentRequest::Watches(WatchesReq::ForgetWatchWith(watch_id)) => {
                         Ok(ResidentActorBoundary::WatchForget(WatchForget {
@@ -9100,21 +9030,22 @@ where
             .await
     }
 
-    /// Admit the original child entry only while its retained lexical grant
-    /// still belongs to this runtime epoch and exact installed scope.
-    pub(crate) async fn run_fork_child_rooted_entry(
+    pub(crate) async fn run_owned_scope_callback(
         &self,
         context: crate::ActorSessionContext,
-        entry: RootCustody,
+        callback: RootCustody,
         realm: RealmId,
-        lease: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+        token: i64,
+        work: Arc<crate::resident_actor::invocation_work::InvocationWork>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, context, _| {
-                session.validate_lexical_scope_lease(context.placement.lexical_scope, &lease)?;
-                session
-                    .run_rooted_entry("actor_program", entry, 0, realm, None)
-                    .map_err(ResidentActorWorkbenchError::Resident)
+            .with_machine(context, move |session, _, _| {
+                work.with_admission(|| {
+                    session
+                        .run_rooted_entry("scope_callback", callback, token, realm, None)
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                })
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?
             })
             .await
     }
@@ -9670,21 +9601,6 @@ where
             .await
     }
 
-    pub(crate) async fn resume_group_roster(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        roster: Option<Vec<AgentRosterProjection>>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, roster)
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
     pub(crate) async fn resume_agent_observation(
         &self,
         context: crate::ActorSessionContext,
@@ -9771,6 +9687,42 @@ where
         settled
     }
 
+    pub(crate) async fn form_continuation_realm(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+    ) -> Result<RealmId, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session.parked_realm(&hole).ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "form continuation is no longer parked".into(),
+                    )
+                })
+            })
+            .await
+    }
+
+    pub(crate) async fn retain_form_lease(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        lease: Arc<crate::forms::MountedForm>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                if session.parked_realm(&hole) != Some(lease.realm) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "form lease differs from native continuation scope".into(),
+                    ));
+                }
+                session
+                    .retain_continuation_resource_owner(&hole, lease)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
     pub(crate) async fn resume_value<T: ToHaskell + Send + 'static>(
         &self,
         context: crate::ActorSessionContext,
@@ -9797,56 +9749,6 @@ where
                 session
                     .resume_classified(hole, outcome)
                     .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_cleanup_plan(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        plan: CleanupPlanProjection,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, plan)
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_cleanup_receipt(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        receipt: CleanupReceiptProjection,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, receipt)
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_fork_group(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ForkContinuation,
-        group: crate::ForkGroupId,
-        group_path: String,
-        paths: Vec<String>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let group = i64::try_from(group.0).map_err(|_| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "fork group identity exceeds Haskell Int".into(),
-                    )
-                })?;
-                hole.resume(session, Ok((group, group_path, paths)))
             })
             .await
     }
@@ -9976,6 +9878,21 @@ where
                         hole,
                         crate::request_effect::ReplyResult(outcome.map(|_| ())),
                     )
+                    .map_err(classify_resumption)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_spec_replacement(
+        &self,
+        context: crate::ActorSessionContext,
+        continuation: ResidentHole,
+        result: Result<(), SpecReplacementError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .resume_classified(continuation, result)
                     .map_err(classify_resumption)
             })
             .await
@@ -10571,53 +10488,6 @@ where
             .await
     }
 
-    /// Retain the committed fork's exact lexical surface before replacing
-    /// its provisional child placement. The lease's detached scope is the
-    /// mutable child target; token release cannot retire it prematurely.
-    pub(crate) async fn retain_fork_release_scope(
-        &self,
-        session_id: tidepool_repr::SessionId,
-        scope: ScopeId,
-    ) -> Result<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, ResidentActorWorkbenchError>
-    {
-        self.access
-            .with_host_machine(
-                "retain-fork-release-scope",
-                session_id,
-                None,
-                move |session, _| session.retain_lexical_scope(scope).map_err(Into::into),
-            )
-            .await
-    }
-
-    /// Derive a mutable child from the publication's immutable final source
-    /// seed, while retaining the already admitted entry's exact dependencies.
-    pub(crate) async fn retain_deferred_child_scope(
-        &self,
-        session_id: tidepool_repr::SessionId,
-        original: ScopeId,
-        capture: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
-    ) -> Result<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>, ResidentActorWorkbenchError>
-    {
-        self.access
-            .with_host_machine(
-                "retain-deferred-child-scope",
-                session_id,
-                None,
-                move |session, _| {
-                    session.validate_lexical_scope_lease(capture.scope(), &capture)?;
-                    let lexical = session.retain_lexical_scope(capture.scope())?;
-                    if !session.retain_scope_dependencies(original, lexical.scope()) {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "deferred child entry dependencies were unavailable".into(),
-                        ));
-                    }
-                    Ok(lexical)
-                },
-            )
-            .await
-    }
-
     pub(crate) async fn close_realm(
         &self,
         context: crate::ActorSessionContext,
@@ -10645,6 +10515,24 @@ where
             .await
     }
 
+    pub(crate) async fn resume_spawn_parent(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        result: Result<
+            (i64, i64, Option<tidepool_bridge_effects::WtWorktreeHandle>),
+            crate::start::SpawnError,
+        >,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .resume_classified(hole, result)
+                    .map_err(classify_resumption)
+            })
+            .await
+    }
+
     pub async fn resume_starting_parent(
         &self,
         context: crate::ActorSessionContext,
@@ -10663,71 +10551,6 @@ where
                             allocated_label,
                         ),
                     )
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub async fn resume_fork_starting_parent(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        actor: crate::ActorRef,
-        allocated_label: String,
-        worktree: tidepool_bridge_effects::WtWorktreeHandle,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(
-                        hole,
-                        Ok::<_, String>((
-                            (
-                                actor.id.0 as i64,
-                                actor.incarnation.0 as i64,
-                                allocated_label,
-                            ),
-                            worktree,
-                        )),
-                    )
-                    .map_err(classify_resumption)
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_fork_failure(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ForkContinuation,
-        detail: String,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                hole.resume(session, Err::<(), _>(detail))
-            })
-            .await
-    }
-
-    pub(crate) async fn resume_fork_unit(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ForkContinuation,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| hole.resume(session, Ok(())))
-            .await
-    }
-
-    pub(crate) async fn resume_fork_cleanup(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        outcome: Result<crate::ForkGroupCleanupOutcome, crate::ForkGroupError>,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_classified(hole, ForkCleanupAnswer(outcome))
                     .map_err(classify_resumption)
             })
             .await
@@ -10846,6 +10669,52 @@ where
             request,
         },
     }))
+}
+
+fn capture_scope_boundary<H, O>(
+    session: &mut ResidentSession<H, O>,
+    hole: ResidentHole,
+    site: i64,
+    actor_realm: RealmId,
+) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let site = u64::try_from(site).map_err(|_| {
+        ResidentActorWorkbenchError::ActorProtocol(format!(
+            "scope callback carried invalid site id {site}"
+        ))
+    })?;
+    if session.parked_realm(&hole) != Some(actor_realm) {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+            "scope callback escaped its owning realm {actor_realm:?}"
+        )));
+    }
+    let issued = session
+        .parked_program_provenance(&hole)
+        .is_some_and(|provenance| {
+            provenance
+                .sites()
+                .iter()
+                .any(|evidence| evidence.site == site && evidence.inputs.is_empty())
+        });
+    if !issued {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "scope callback has no compiler-issued status reply site".into(),
+        ));
+    }
+    let callback = session
+        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)?
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "scope callback has no retained payload".into(),
+            )
+        })?;
+    Ok(ResidentActorBoundary::ScopeRun {
+        continuation: hole,
+        callback,
+    })
 }
 
 fn capture_receiver_boundary<H, O>(
@@ -12320,9 +12189,8 @@ pub(crate) mod request_tests {
             let workbench = ActorWorkbenchSource::new(String::new(), Vec::new());
             let source = crate::CheckpointSourceLayer::default();
             let before = tidepool_extract_cmd::extract_spawn_count();
-            for row in exomonad_tool::PublicActorEffectRow::ALL {
+            for requested in [exomonad_tool::DEFAULT_ACTOR_EFFECTS] {
               for selected_mask in [0, u64::MAX, mask] {
-                let requested = row.effect_keys();
                 let members = requested.iter().enumerate()
                     .filter(|(index, _)| selected_mask & (1_u64 << *index) != 0)
                     .map(|(_, key)| *key)
@@ -12351,7 +12219,7 @@ pub(crate) mod request_tests {
         }
     }
 
-    fn fixture_include_roots(effects: &tidepool_mcp::EffectsModuleDirs) -> Vec<PathBuf> {
+    pub(crate) fn fixture_include_roots(effects: &tidepool_mcp::EffectsModuleDirs) -> Vec<PathBuf> {
         // Native resource locations can be relative to the runner's CWD.
         // Resolve only the source roots selected by the owning producers.
         let prelude = tidepool_testing::eval_harness::prelude_path()
@@ -13414,7 +13282,7 @@ pub(crate) mod request_tests {
             .unwrap();
         let execution = workbench.private_execution.as_ref().unwrap().clone();
         let selected = workbench_runner_for_test(&workbench)
-            .publish_private_execution(private.clone(), execution, false)
+            .publish_private_execution(private.clone(), execution)
             .await
             .unwrap();
         let PrivateExecutionPublication::Manifest {
@@ -13463,156 +13331,6 @@ pub(crate) mod request_tests {
             unaccepted.accept().is_err(),
             "a sealed cell refuses late effect acceptance"
         );
-    }
-
-    #[tokio::test]
-    async fn deferred_children_use_publication_scope_after_later_independent_publication() {
-        with_test_compiler_owner(deferred_children_use_publication_scope_after_later_independent_publication_with_compiler_owner()).await;
-    }
-
-    async fn deferred_children_use_publication_scope_after_later_independent_publication_with_compiler_owner(
-    ) {
-        let (machines, public, source, _root) = actor_registry_fixture();
-        let initial = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-        let original_child = workbench_runner_for_test(&initial)
-            .retain_fork_release_scope(public.placement.session, public.placement.lexical_scope)
-            .await
-            .unwrap();
-        let (first, private) = initial
-            .admit_private_cell_for_test(public.clone())
-            .await
-            .unwrap();
-        first
-            .execute_cell_for_test(
-                private.clone(),
-                "deferredHelper value = value + 3 :: Int\ndeferredValue <- pure (40 :: Int)",
-            )
-            .await
-            .unwrap();
-        let published = workbench_runner_for_test(&first)
-            .publish_private_execution(
-                private,
-                first.private_execution.as_ref().unwrap().clone(),
-                true,
-            )
-            .await
-            .unwrap();
-        let PrivateExecutionPublication::Manifest {
-            commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
-            fork_source: Some(capture),
-            ..
-        } = published
-        else {
-            panic!("successful publication must retain its exact fork source")
-        };
-        let first_epoch = capture.public_epoch;
-        let capture = capture.lexical;
-        let first_value = first
-            .access
-            .with_machine(public.clone(), {
-                let capture = Arc::clone(&capture);
-                move |session, context, _| {
-                    session.validate_initial_lexical_scope(
-                        &capture,
-                        context.placement.lexical_scope,
-                    )?;
-                    assert!(session
-                        .current_decl_heads_in(capture.scope())
-                        .iter()
-                        .any(|(name, _)| name == "deferredHelper"));
-                    Ok(session
-                        .current_binding_in(capture.scope(), "deferredValue")
-                        .unwrap()
-                        .0)
-                }
-            })
-            .await
-            .unwrap();
-
-        // A later owned cell advances the same public tip before A's children
-        // release. The producer's retained boundary must still select A.
-        let (later, private) = ResidentActorWorkbench::new(machines, source, None)
-            .admit_private_cell_for_test(public.clone())
-            .await
-            .unwrap();
-        later
-            .execute_cell_for_test(
-                private.clone(),
-                "laterHelper value = value + 7 :: Int\ndeferredValue <- pure (99 :: Int)",
-            )
-            .await
-            .unwrap();
-        let later_published = workbench_runner_for_test(&later)
-            .publish_private_execution(
-                private,
-                later.private_execution.as_ref().unwrap().clone(),
-                false,
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            later_published,
-            PrivateExecutionPublication::Manifest {
-                commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
-                fork_source: None,
-                ..
-            }
-        ));
-        let runner = workbench_runner_for_test(&later);
-        let mut children = Vec::new();
-        for _ in 0..2 {
-            children.push(
-                runner
-                    .retain_deferred_child_scope(
-                        public.placement.session,
-                        original_child.scope(),
-                        Arc::clone(&capture),
-                    )
-                    .await
-                    .unwrap(),
-            );
-        }
-        assert_ne!(children[0].scope(), children[1].scope());
-        assert_ne!(children[0].scope(), capture.scope());
-        later
-            .access
-            .with_machine(public, move |session, context, _| {
-                assert!(
-                    session
-                        .public_visibility_snapshot_in(context.placement.lexical_scope)
-                        .unwrap()
-                        .epoch
-                        > first_epoch
-                );
-                assert_ne!(
-                    session
-                        .current_binding_in(context.placement.lexical_scope, "deferredValue")
-                        .unwrap()
-                        .0,
-                    first_value
-                );
-                assert!(session
-                    .validate_initial_lexical_scope(&capture, context.placement.lexical_scope)
-                    .is_err());
-                for child in children {
-                    session.validate_initial_lexical_scope(&capture, child.scope())?;
-                    assert_eq!(
-                        session
-                            .current_binding_in(child.scope(), "deferredValue")
-                            .unwrap()
-                            .0,
-                        first_value
-                    );
-                    let declarations = session.current_decl_heads_in(child.scope());
-                    assert!(declarations
-                        .iter()
-                        .any(|(name, _)| name == "deferredHelper"));
-                    assert!(!declarations.iter().any(|(name, _)| name == "laterHelper"));
-                }
-                Ok(())
-            })
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
@@ -13695,7 +13413,7 @@ pub(crate) mod request_tests {
         .await
         .expect("unaccepted mount guard retires its exact binding");
         let outcome = workbench_runner_for_test(&workbench)
-            .publish_private_execution(private, execution, false)
+            .publish_private_execution(private, execution)
             .await
             .unwrap();
         assert!(matches!(
@@ -13987,7 +13705,6 @@ pub(crate) mod request_tests {
             (120, "AgentForgetRetained", 2),
             (121, "AgentForgotten", 0),
             (122, "AgentForgetOutputPending", 1),
-            (123, "CleanupActorOutputPending", 3),
         ] {
             table.insert(DataCon {
                 id: DataConId(id),
@@ -14018,15 +13735,6 @@ pub(crate) mod request_tests {
             HaskellValue::Con(DataConId(122), ref fields) if fields.len() == 1
                 && <i64 as tidepool_bridge::FromHaskell>::from_value(&fields[0], &table).unwrap() == 2
         ));
-        assert!(matches!(
-            CleanupStepProjection::ActorOutputPending {
-                actor: crate::ActorRef::first(crate::ActorId(37)), displays: 2,
-            }.to_value(&table).unwrap(),
-            HaskellValue::Con(DataConId(123), ref fields)
-                if fields.iter().map(|field| <i64 as tidepool_bridge::FromHaskell>::from_value(field, &table).unwrap())
-                    .collect::<Vec<_>>() == vec![37, 1, 2]
-        ));
-
         let error = AgentForgetProjection::Retained {
             requests: vec![crate::RequestId(u64::MAX)],
             watches: Vec::new(),
@@ -14598,7 +14306,7 @@ pub(crate) mod request_tests {
                 .as_ref()
                 .expect("admitted private cell");
             let published = workbench_runner_for_test(self)
-                .publish_private_execution(context.clone(), Arc::clone(execution), false)
+                .publish_private_execution(context.clone(), Arc::clone(execution))
                 .await?;
             assert!(matches!(
                 published,
@@ -16543,7 +16251,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .prepare_tools(context.clone(), 1, vec![])
             .await
             .unwrap();
-        assert!(Arc::ptr_eq(&warmed.prepared, &first._prepared));
+        assert!(Arc::ptr_eq(
+            &warmed.prepared,
+            &first.code.prepared().expect("source-prepared installation")
+        ));
         let completed_executions =
             std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
         assert!(
@@ -16555,7 +16266,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             "the actual installation reuses immutable readiness without another compiler turn"
         );
         let proof = first
-            ._prepared
+            .code
+            .prepared()
+            .expect("source-prepared installation")
             .entry
             .compiled()
             .original_compile_input()
@@ -16572,7 +16285,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .prepare_tools(context.clone(), 2, vec![])
             .await
             .unwrap();
-        assert!(Arc::ptr_eq(&first._prepared, &second._prepared));
+        assert!(Arc::ptr_eq(
+            &first.code.prepared().expect("source-prepared installation"),
+            &second
+                .code
+                .prepared()
+                .expect("source-prepared installation")
+        ));
         assert_ne!(
             first._installation_scope.scope(),
             second._installation_scope.scope()
@@ -16583,7 +16302,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         assert_eq!(first.declarations, second.declarations);
         crate::agent_spec::preparation::tests::ready_bound_preserves_installed_lease(Arc::clone(
-            &first._prepared,
+            &first.code.prepared().expect("source-prepared installation"),
         ))
         .await;
         let original_identity = proof.original_input_identity().to_owned();
@@ -16651,7 +16370,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_ne!(original_source, successor.original_source());
         assert_ne!(original_identity, successor.original_input_identity());
         let retained = second
-            ._prepared
+            .code
+            .prepared()
+            .expect("source-prepared installation")
             .entry
             .compiled()
             .original_compile_input()
@@ -16687,7 +16408,11 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             original_session,
             original_context,
             source.clone(),
-            &first._prepared.entry,
+            &first
+                .code
+                .prepared()
+                .expect("source-prepared installation")
+                .entry,
             "41",
         )
         .await;
@@ -16708,6 +16433,394 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .count()
                 > completed_executions.lines().count()
         );
+    }
+
+    async fn wait_for_explicit_installation_cleanup<H, O>(
+        workbench: &ResidentActorWorkbench<H, O>,
+        context: crate::ActorSessionContext,
+        expected_handles: usize,
+        expected_custody: usize,
+        producer_bindings: Vec<(String, tidepool_repr::SessionVarId)>,
+        stage: &'static str,
+    ) where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        let mut last_counts = None;
+        let cleanup = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let producer_bindings = producer_bindings.clone();
+                let counts = workbench
+                    .access
+                    .with_machine(context.clone(), move |session, context, _| {
+                        for (name, identity) in producer_bindings {
+                            let retained = session.retain_binding_custody_in(
+                                context.placement.lexical_scope,
+                                &name,
+                                identity,
+                            )?;
+                            assert!(
+                                retained.is_some(),
+                                "producer binding retains its exact live handle"
+                            );
+                            drop(retained);
+                        }
+                        Ok((
+                            session.parked_count(),
+                            session.stowed_roots_count(),
+                            session.persistent_roots_count(),
+                            session.value_handle_count(),
+                            session.outstanding_custody(),
+                        ))
+                    })
+                    .await
+                    .expect("inspect explicit installer cleanup");
+                last_counts = Some(counts);
+                // Native program root blocks can retire between preparations.
+                // Affine payload handles and custody must return exactly to the
+                // surviving producer baseline, with no parked continuation.
+                if (counts.0, counts.1, counts.3, counts.4)
+                    == (0, 0, expected_handles, expected_custody)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            cleanup.is_ok(),
+            "explicit installer cleanup after {stage}: expected parked/stowed/handles/custody (0, 0, {expected_handles}, {expected_custody}); last parked/stowed/persistent/handles/custody={last_counts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_installer_keeps_capture_and_replacement_leases_without_recompiling() {
+        with_test_compiler_owner(async {
+            let (mut session, context, mut source, root) = host_mount_fixture();
+            let authored = tempfile::tempdir().unwrap();
+            std::fs::write(authored.path().join("CapturedSpecInstaller.hs"),
+                include_str!("fixtures/captured-spec-installer.hs")).unwrap();
+            let mut include_roots = source.base_include.to_vec();
+            include_roots.push(authored.path().to_path_buf());
+            source.base_include = include_roots.into();
+            let preamble = insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller");
+            let templates = resident_workbench_templates(&preamble, &context.haskell_effects_alias, "");
+            let include = source.base_include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            let turn = run_turn(TurnRequest {
+                exact_context: None, session_id: Some(context.placement.session),
+                turn_text: "installer <- pure (CapturedSpecInstaller.installer \"retained notebook value\")",
+                templates: &templates, include: &include, session_root: root.path(),
+                inject_modules: &[], gen: 1, verdict: None, target: None, retained_imports: &[],
+            }).unwrap();
+            let TurnResult::Bind { bound, compiled, .. } = turn else { panic!("installer bind") };
+            assert!(matches!(session.run_bind_with_sites("installer_capture", compiled.code(), &bound[0], tidepool_repr::Generation(1)).unwrap(), ResidentOutcome::Completed { .. }));
+            let installer = Arc::new(session.retain_binding_custody_in(
+                context.placement.lexical_scope,
+                &bound[0].name,
+                tidepool_repr::SessionVarId::from_extract(bound[0].var_id),
+            ).unwrap().unwrap());
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let before = tidepool_extract_cmd::extract_spawn_count();
+            let first = Arc::new(workbench.prepare_explicit_tools(context.clone(), 1, vec![], installer.clone()).await.unwrap());
+            let second = Arc::new(workbench.prepare_explicit_tools(context.clone(), 2, vec![], installer.clone()).await.unwrap());
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+            assert!(first.origin.is_explicit());
+            let expected = InstalledToolLease::new(context.actor, crate::CheckpointSourceLayer::default(), Some(first));
+            assert!(expected.toolset_acquisition().is_none(), "live values do not claim source-cache acquisition");
+            let state = InstalledToolsState::default();
+            state.publish(expected.clone());
+            state.replace_explicit(&expected, second.clone()).unwrap();
+            assert_eq!(state.current().unwrap().tools().unwrap().install, 2);
+            assert_eq!(expected.tools().unwrap().install, 1);
+            assert_eq!(state.replace_explicit(&expected, second), Err(SpecReplacementError::Unavailable));
+            let active = state.current().unwrap();
+            let mut changed = workbench.prepare_explicit_tools(context.clone(), 3, vec![], installer).await.unwrap();
+            changed.declarations.clear();
+            assert_eq!(state.replace_explicit(&active, Arc::new(changed)), Err(SpecReplacementError::SurfaceChanged));
+            assert_eq!(state.current().unwrap().tools().unwrap().install, 2);
+            for lease in [expected, state.current().unwrap()] {
+                let step = workbench.begin_tool(context.clone(), lease.tools().unwrap().dispatch.clone(), "probe".into(), serde_json::json!("input")).await.unwrap();
+                let step = match step {
+                    ResidentWorkbenchStep::Running { fragment, outcome } => workbench.settle_item(context.clone(), *fragment, (*outcome).into()).await.unwrap(),
+                    other => other,
+                };
+                let ResidentWorkbenchStep::Committed { output, .. } = step else { panic!("captured tool did not complete") };
+                assert!(output.contains("retained notebook value"), "{output}");
+            }
+            state.clear();
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_spawn_installer_requires_exactly_one_request_receiver() {
+        with_test_compiler_owner(async {
+            let (mut session, context, mut source, root) = host_mount_fixture();
+            let authored = tempfile::tempdir().unwrap();
+            std::fs::write(
+                authored.path().join("CapturedSpecInstaller.hs"),
+                include_str!("fixtures/captured-spec-installer.hs"),
+            )
+            .unwrap();
+            let mut include_roots = source.base_include.to_vec();
+            include_roots.push(authored.path().to_path_buf());
+            source.base_include = include_roots.into();
+            let preamble =
+                insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller");
+            let templates =
+                resident_workbench_templates(&preamble, &context.haskell_effects_alias, "");
+            let include = source
+                .base_include
+                .iter()
+                .map(PathBuf::as_path)
+                .collect::<Vec<_>>();
+            let turn = run_turn(TurnRequest {
+                exact_context: None,
+                session_id: Some(context.placement.session),
+                turn_text: include_str!("fixtures/captured-spec-installer-bind.hs"),
+                templates: &templates,
+                include: &include,
+                session_root: root.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: None,
+                target: None,
+                retained_imports: &[],
+            })
+            .unwrap();
+            let TurnResult::Bind {
+                bound, compiled, ..
+            } = turn
+            else {
+                panic!("captured installer variants bind")
+            };
+            assert_eq!(bound.len(), 3, "capture each installer from one compile");
+            assert!(matches!(
+                session.run_projected_bind_with_sites(
+                    "captured_installer_variants",
+                    compiled.code(),
+                    &bound,
+                    tidepool_repr::Generation(1),
+                ),
+                Ok(ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. })
+            ));
+            let installer = Arc::new(
+                session
+                    .retain_binding_custody_in(
+                        context.placement.lexical_scope,
+                        "installer",
+                        tidepool_repr::SessionVarId::from_extract(
+                            bound
+                                .iter()
+                                .find(|binder| binder.name == "installer")
+                                .expect("compiler-issued installer binder")
+                                .var_id,
+                        ),
+                    )
+                    .unwrap()
+                    .unwrap(),
+            );
+            let application_installer = Arc::new(
+                session
+                    .retain_binding_custody_in(
+                        context.placement.lexical_scope,
+                        "applicationInstaller",
+                        tidepool_repr::SessionVarId::from_extract(
+                            bound
+                                .iter()
+                                .find(|binder| binder.name == "applicationInstaller")
+                                .expect("compiler-issued applicationInstaller binder")
+                                .var_id,
+                        ),
+                    )
+                    .unwrap()
+                    .unwrap(),
+            );
+            let duplicate_installer = Arc::new(
+                session
+                    .retain_binding_custody_in(
+                        context.placement.lexical_scope,
+                        "duplicateReceiverInstaller",
+                        tidepool_repr::SessionVarId::from_extract(
+                            bound
+                                .iter()
+                                .find(|binder| binder.name == "duplicateReceiverInstaller")
+                                .expect("compiler-issued duplicateReceiverInstaller binder")
+                                .var_id,
+                        ),
+                    )
+                    .unwrap()
+                    .unwrap(),
+            );
+            let baseline_roots = session.persistent_roots_count();
+            let baseline_handles = session.value_handle_count();
+            let baseline_custody = session.outstanding_custody();
+            let producer_bindings = bound
+                .iter()
+                .map(|binder| {
+                    (
+                        binder.name.clone(),
+                        tidepool_repr::SessionVarId::from_extract(binder.var_id),
+                    )
+                })
+                .collect::<Vec<_>>();
+            eprintln!(
+                "explicit installer baseline persistent/handles/custody={:?}",
+                (baseline_roots, baseline_handles, baseline_custody),
+            );
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let before_preparations = tidepool_extract_cmd::extract_spawn_count();
+
+            // The same captured application value is accepted only by public
+            // spawn preparation and yields both the tool lease and receiver.
+            let (tools, receiver) = workbench
+                .prepare_explicit_application(
+                    context.clone(),
+                    1,
+                    vec![],
+                    application_installer.clone(),
+                )
+                .await
+                .expect("one registered receiver completes application preparation");
+            assert!(tools.origin.is_explicit());
+            let receiver_scope = receiver.scope.scope();
+            let receiver_scope_lease = Arc::downgrade(&receiver.scope);
+            drop(receiver);
+            drop(tools);
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context.clone(),
+                baseline_handles,
+                baseline_custody,
+                producer_bindings.clone(),
+                "accepted application",
+            )
+            .await;
+            assert!(
+                receiver_scope_lease.upgrade().is_none(),
+                "receiver source lease releases with its installation"
+            );
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    assert!(
+                        session.compile_view_in(receiver_scope).is_none(),
+                        "released receiver source scope retires"
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+
+            let missing = workbench
+                .prepare_explicit_application(context.clone(), 2, vec![], installer.clone())
+                .await;
+            let Some(missing) = missing.err() else {
+                panic!("a tools-only installer must be refused for public spawn")
+            };
+            assert!(
+                matches!(missing, ResidentActorWorkbenchError::ActorProtocol(_)),
+                "a tools-only installer must be refused for public spawn: {missing:?}"
+            );
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context.clone(),
+                baseline_handles,
+                baseline_custody,
+                producer_bindings.clone(),
+                "missing receiver refusal",
+            )
+            .await;
+
+            let duplicate = workbench
+                .prepare_explicit_application(
+                    context.clone(),
+                    3,
+                    vec![],
+                    duplicate_installer.clone(),
+                )
+                .await;
+            let Some(duplicate) = duplicate.err() else {
+                panic!("a second receiver registration must be refused")
+            };
+            assert!(
+                matches!(duplicate, ResidentActorWorkbenchError::ActorProtocol(_)),
+                "a second receiver registration must be refused: {duplicate:?}"
+            );
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context.clone(),
+                baseline_handles,
+                baseline_custody,
+                producer_bindings.clone(),
+                "duplicate receiver refusal",
+            )
+            .await;
+
+            let replacement = workbench
+                .prepare_explicit_tools(context.clone(), 4, vec![], application_installer.clone())
+                .await;
+            let Some(replacement) = replacement.err() else {
+                panic!("tools-only preparation must refuse a receiver-bearing installer")
+            };
+            assert!(
+                matches!(replacement, ResidentActorWorkbenchError::ActorProtocol(_)),
+                "tools-only preparation must refuse a receiver-bearing installer: {replacement:?}"
+            );
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context.clone(),
+                baseline_handles,
+                baseline_custody,
+                producer_bindings.clone(),
+                "tools-only receiver refusal",
+            )
+            .await;
+            let tools = workbench
+                .prepare_explicit_tools(context.clone(), 5, vec![], installer.clone())
+                .await
+                .expect("original retained installer remains callable after refusals");
+            let step = workbench
+                .begin_tool(
+                    context.clone(),
+                    tools.dispatch.clone(),
+                    "probe".into(),
+                    serde_json::json!("input"),
+                )
+                .await
+                .unwrap();
+            let step = match step {
+                ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                    .settle_item(context.clone(), *fragment, (*outcome).into())
+                    .await
+                    .unwrap(),
+                other => other,
+            };
+            let ResidentWorkbenchStep::Committed { output, .. } = step else {
+                panic!("original captured tool remains callable after refusals")
+            };
+            assert!(output.contains("captured value"), "{output}");
+            drop(tools);
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context,
+                baseline_handles,
+                baseline_custody,
+                producer_bindings,
+                "original producer liveness probe",
+            )
+            .await;
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                before_preparations,
+                "explicit preparation applies retained closures without another extractor turn"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -17752,6 +17865,209 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     }
 
     #[tokio::test]
+    async fn compiled_observed_watch_projects_original_nested_decisions_after_source_forget() {
+        with_test_compiler_owner(compiled_named_watch_fixture_with_compiler_owner(
+            "nestedNamed",
+            2,
+            2,
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn compiled_poll_watch_retains_an_inflight_read_after_root_forget() {
+        with_test_compiler_owner(compiled_named_watch_fixture_with_compiler_owner(
+            "pollNamed",
+            1,
+            1,
+        ))
+        .await;
+    }
+
+    async fn compiled_named_watch_fixture_with_compiler_owner(
+        entry: &str,
+        source_count: usize,
+        projection_count: usize,
+    ) {
+        use crate::request::{ReadinessDependency, RequestRegistry};
+        use crate::request_effect::{ReplyResult, WatchSubject};
+        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+        tidepool_testing::eval_harness::require_extract();
+        let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let session_id = tidepool_repr::SessionId(0xCA03);
+        let (mut session, root) = bare_session_at(session_id);
+        std::fs::write(
+            root.path().join("AwaitRuntime.hs"),
+            include_str!("fixtures/AwaitRuntime.hs"),
+        )
+        .unwrap();
+        let preamble = insert_preamble_imports(
+            surface.preamble(),
+            "qualified AwaitRuntime\nimport qualified Tidepool.Agent.Watch as AwaitW",
+        );
+        let templates = resident_workbench_templates(
+            &preamble,
+            "'[AwaitW.Watches]",
+            "qualified Tidepool.Agent.Watch as AwaitW",
+        );
+        let mut include = surface.include_path_refs();
+        include.push(root.path());
+        let statement = format!("projected <- AwaitRuntime.{entry}");
+        let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
+            exact_context: None,
+            session_id: None,
+            turn_text: &statement,
+            templates: &templates,
+            include: &include,
+            session_root: root.path(),
+            inject_modules: &[],
+            gen: 1,
+            verdict: None,
+            target: None,
+            retained_imports: &[],
+        })
+        .unwrap() else {
+            panic!("named-watch fixture must compile a bind");
+        };
+        session.set_effect_execution(
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        );
+        let mut outcome = session
+            .run_with_sites("nested-named", compiled.code())
+            .unwrap();
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(session_id, Box::new(session));
+        let source = ActorWorkbenchSource::new(preamble, surface.include_paths().to_vec());
+        let runner = ResidentActorRunner::new(machines, source);
+        let owner = crate::ActorRef::first(crate::ActorId(0xCA03));
+        let mut context = crate::ActorDescriptor::new(
+            "named-observer",
+            crate::ActorPlacement {
+                session: session_id,
+                resource_scope: RealmId::ROOT,
+                lexical_scope: ScopeId::ROOT,
+            },
+        )
+        .session_context(owner);
+        context.effect_policy = EffectRunPolicy::SuspendAll;
+        context.haskell_effects_alias = "'[AwaitW.Watches]".into();
+        let registry = RequestRegistry::default();
+        let mut sources = Vec::new();
+        let mut projections = 0;
+        for _ in 0..16 {
+            let boundary = runner
+                .capture_boundary(context.clone(), outcome, RealmId::ROOT)
+                .await
+                .unwrap();
+            outcome = match boundary {
+                ResidentActorBoundary::WatchRegistration(registration) => {
+                    let plan = registration
+                        .dependencies
+                        .try_map(|(subject, requirement)| {
+                            Ok(match subject {
+                                WatchSubject::Watch(watch) => ReadinessDependency::Watch(watch),
+                                WatchSubject::Request(request) => {
+                                    ReadinessDependency::Request(request, requirement)
+                                }
+                                WatchSubject::Command(_) => panic!("fixture has no commands"),
+                            })
+                        })
+                        .unwrap();
+                    if registration.transient {
+                        let watch = registry.register_transient_watch(owner, plan).unwrap();
+                        for source in &sources {
+                            assert_eq!(
+                                registry.forget_watch(owner, *source),
+                                Ok(crate::ForgetWatchOutcome::Forgotten)
+                            );
+                        }
+                        runner
+                            .resume_value(
+                                context.clone(),
+                                registration.continuation,
+                                ReplyResult(Ok::<i64, crate::ReplyError>(watch.0 as i64)),
+                            )
+                            .await
+                            .unwrap()
+                    } else {
+                        let watch = registry
+                            .register_watch_plan(owner, registration.label, plan)
+                            .unwrap()
+                            .0;
+                        sources.push(watch);
+                        runner
+                            .resume_int(context.clone(), registration.continuation, watch.0)
+                            .await
+                            .unwrap()
+                    }
+                }
+                ResidentActorBoundary::WatchPoll(poll) => runner
+                    .resume_watch_observation(
+                        context.clone(),
+                        poll.continuation,
+                        registry.observe_watch(owner, poll.watch),
+                    )
+                    .await
+                    .unwrap(),
+                ResidentActorBoundary::WatchRelease(release) => {
+                    registry
+                        .release_transient_watch(owner, release.watch)
+                        .unwrap();
+                    runner
+                        .resume_value(
+                            context.clone(),
+                            release.continuation,
+                            ReplyResult(Ok::<(), crate::ReplyError>(())),
+                        )
+                        .await
+                        .unwrap()
+                }
+                ResidentActorBoundary::WatchAwait(poll) => runner
+                    .resume_watch_observation(
+                        context.clone(),
+                        poll.continuation,
+                        registry.observe_watch(owner, poll.watch),
+                    )
+                    .await
+                    .unwrap(),
+                ResidentActorBoundary::WatchDecisionPoll {
+                    continuation,
+                    watch,
+                    path,
+                } => {
+                    projections += 1;
+                    let decision = registry
+                        .observe_watch_snapshot_decision(watch, &path)
+                        .unwrap();
+                    runner
+                        .resume_value(context.clone(), continuation, decision)
+                        .await
+                        .unwrap()
+                }
+                ResidentActorBoundary::WatchForget(forget) => runner
+                    .resume_watch_forget(
+                        context.clone(),
+                        forget.continuation,
+                        registry.forget_watch(owner, forget.watch),
+                    )
+                    .await
+                    .unwrap(),
+                ResidentActorBoundary::Completed => {
+                    assert_eq!(sources.len(), source_count);
+                    assert_eq!(projections, projection_count);
+                    return;
+                }
+                other => panic!(
+                    "unexpected named-watch fixture boundary: {}",
+                    other.operation()
+                ),
+            };
+        }
+        panic!("named-watch fixture exceeded its finite effect trace");
+    }
+
+    #[tokio::test]
     async fn progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots() {
         with_test_compiler_owner(
             progress_nominal_type_mismatch_preserves_snapshot_wakes_and_roots_with_compiler_owner(),
@@ -18200,6 +18516,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         assert!(source_events.try_recv().is_err());
 
+        let correct_observer = Arc::new(correct_observer);
+        let retained_observer = correct_observer.clone();
         let correct_hole = runner
             .access
             .with_host_machine(
@@ -18314,6 +18632,32 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             verify_message(closed_message).await.unwrap(),
             ResidentOutcome::Completed { .. }
         ));
+        registry.forget_response(owner, request).unwrap();
+        for (identity, cursor, revision) in [(watch, 0, 1), (later_watch, 1, 2)] {
+            let captured = registry
+                .observe_watch_progress(owner, identity, request, cursor)
+                .unwrap();
+            assert_eq!(captured.0.as_ref().unwrap().revision, revision);
+            let retained_observer = retained_observer.clone();
+            let observed = runner
+                .access
+                .with_host_machine(
+                    "project-released-watch-snapshot",
+                    observer_id,
+                    None,
+                    move |session, _| {
+                        session
+                            .run_with_sites("captured-note", retained_observer.code())
+                            .map_err(Into::into)
+                    },
+                )
+                .await
+                .unwrap();
+            runner
+                .resume_progress_observation(context.clone(), suspend(observed), Ok(captured))
+                .await
+                .unwrap();
+        }
         drop(sources);
         assert!(registry.finish_reply(request, None).is_empty());
         assert_eq!(
@@ -18323,10 +18667,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_eq!(
             registry.forget_watch(owner, later_watch).unwrap(),
             crate::request::ForgetWatchOutcome::Forgotten
-        );
-        assert_eq!(
-            registry.forget_response(owner, request).unwrap().0,
-            crate::request::ForgetResponseOutcome::Forgotten
         );
         assert!(matches!(
             registry.observe_progress(owner, request),
@@ -19151,7 +19491,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .publish_private_execution(
                 context,
                 workbench.private_execution.as_ref().unwrap().clone(),
-                false,
             )
             .await
             .unwrap();
@@ -19472,6 +19811,143 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     }
 
     #[tokio::test]
+    async fn scope_live_closure_survives_body_realm_retirement() {
+        with_test_compiler_owner(
+            scope_live_closure_survives_body_realm_retirement_with_compiler_owner(),
+        )
+        .await;
+    }
+
+    async fn scope_live_closure_survives_body_realm_retirement_with_compiler_owner() {
+        let (session, context, mut source, _root) = host_mount_fixture_with_effects(
+            |_| {},
+            &[tidepool_mcp::resource_scopes_decl()],
+            "'[ResourceScopes]",
+        );
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Scope as Scope");
+        let machines = Arc::new(ActorMachineRegistry::new());
+        machines.insert_idle(context.placement.session, Box::new(session));
+        let workbench = ResidentActorWorkbench::new(machines, source, None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
+        let runner = workbench_runner_for_test(&workbench);
+        let code = include_str!("fixtures/scope-live-result.hs");
+        let (checked, prepared) = workbench
+            .prepare_cell(context.clone(), code.into())
+            .await
+            .unwrap();
+        assert_eq!(checked.items.len(), 1);
+        let PreparedCell {
+            mut items,
+            dependencies: _dependencies,
+        } = prepared;
+        let step = workbench
+            .begin_prepared_cell_item(
+                context.clone(),
+                ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: code.into(),
+                },
+                items.remove(0),
+            )
+            .await
+            .unwrap();
+        let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
+            panic!("scope body suspends")
+        };
+        let outcome: ResidentOutcome = (*outcome).into();
+        let ResidentOutcome::Suspended { hole, request, .. } = &outcome else {
+            panic!("scope delimiter suspends")
+        };
+        let hole = hole.clone();
+        let request = request.clone();
+        let parent_realm = context.placement.resource_scope;
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                let ResidentRequest::ResourceScopes(
+                    crate::generated::resource_scopes::ResourceScopesReq::ScopeRunWith(site, _),
+                ) = ResidentRequest::decode(&request, session.data_con_table())?
+                else {
+                    panic!("scope callback follows the generated request schema")
+                };
+                let custody = session.outstanding_custody();
+                for (invalid_site, realm) in [
+                    (-1, parent_realm),
+                    (i64::MAX, parent_realm),
+                    (site, RealmId::fresh()),
+                ] {
+                    assert!(matches!(
+                        capture_scope_boundary(session, hole.clone(), invalid_site, realm),
+                        Err(ResidentActorWorkbenchError::ActorProtocol(_))
+                    ));
+                    assert_eq!(session.outstanding_custody(), custody);
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let boundary = runner
+            .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
+            .await
+            .unwrap();
+        let ResidentActorBoundary::ScopeRun {
+            continuation,
+            callback,
+        } = boundary
+        else {
+            panic!("scope delimiter captures live callback")
+        };
+        let body_realm = RealmId::fresh();
+        let body = runner
+            .run_rooted_entry(context.clone(), callback, body_realm)
+            .await
+            .unwrap();
+        let boundary = runner
+            .capture_boundary(context.clone(), body, body_realm)
+            .await
+            .unwrap();
+        assert!(matches!(
+            boundary,
+            ResidentActorBoundary::ScopeDone { token: 0, .. }
+        ));
+        runner
+            .close_realm(context.clone(), body_realm)
+            .await
+            .unwrap();
+        assert!(
+            runner
+                .resume_value(context.clone(), continuation.clone(), ())
+                .await
+                .is_err(),
+            "scope status site rejects a reply with another shape before consuming its continuation"
+        );
+        let resumed = runner
+            .resume_value(
+                context.clone(),
+                continuation,
+                (
+                    Ok::<(), tidepool_bridge_effects::ScopeFailure>(()),
+                    Ok::<(), tidepool_bridge_effects::CleanupError>(()),
+                ),
+            )
+            .await
+            .unwrap();
+        let settled = workbench
+            .settle_item(context, *fragment, resumed)
+            .await
+            .unwrap();
+        let ResidentWorkbenchStep::Committed { .. } = settled else {
+            panic!("parent applies the returned live closure and commits after scope retirement")
+        };
+    }
+
+    #[tokio::test]
     async fn current_request_cell_compiles_closed_site_evidence() {
         with_test_compiler_owner(
             current_request_cell_compiles_closed_site_evidence_with_compiler_owner(),
@@ -19644,8 +20120,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         for import in [
             "Tidepool.Agent.Reply (Replies)",
             "Tidepool.Agent.Watch (Watches)",
-            "Tidepool.Agent.Ref (AgentProtocol(..))",
-            "qualified Tidepool.Agent.Ref as Ref",
+            "Tidepool.Agent.Ref.Internal (AgentProtocol(..))",
+            "qualified Tidepool.Agent.Ref.Internal as Ref",
             "qualified Tidepool.Actors.Internal.Agent as Agents",
             "qualified Tidepool.Effects.Core as Core",
         ] {
@@ -21094,262 +21570,6 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert_eq!(declared.bindings, bound.bindings);
     }
 
-    fn fork_reply_fixture() -> (
-        Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
-        crate::ActorSessionContext,
-        ActorWorkbenchSource,
-        tempfile::TempDir,
-    ) {
-        let (session, context, source, root) = host_mount_fixture_with_effects(
-            |_| {},
-            &[tidepool_mcp::actor_decl(), tidepool_mcp::forks_decl()],
-            "'[Core.Actor, Core.Forks]",
-        );
-        let fixture_dir = root.path().join("fork-reply-fixtures");
-        std::fs::create_dir(&fixture_dir).expect("fixture directory");
-        std::fs::write(
-            fixture_dir.join("ForkReplyContracts.hs"),
-            &tidepool_testing::fixture_source("exomonad/actor/src/fixtures/ForkReplyContracts.hs"),
-        )
-        .expect("fork reply contract fixture");
-        let mut include = source.base_include.to_vec();
-        include.push(fixture_dir);
-        let source = ActorWorkbenchSource::new(
-            insert_preamble_imports(
-                &source.preamble,
-                "qualified Tidepool.Effects.Core as Core\nqualified ForkReplyContracts as Contracts",
-            ),
-            include,
-        );
-        let machines = Arc::new(ActorMachineRegistry::new());
-        machines.insert_idle(context.placement.session, Box::new(session));
-        (machines, context, source, root)
-    }
-
-    async fn fork_reply_boundary(
-        workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
-        runner: &ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>,
-        context: &crate::ActorSessionContext,
-        source: &ActorWorkbenchSource,
-        text: &str,
-    ) -> ForkGroupBoundary {
-        let step = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source.clone(),
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: text.into(),
-                },
-                None,
-            )
-            .await
-            .expect("authentic fork request suspends");
-        let ResidentWorkbenchStep::Running { outcome, .. } = step else {
-            panic!("expected a suspended fork request");
-        };
-        let ResidentActorBoundary::ForkGroup(boundary) = runner
-            .capture_boundary(
-                context.clone(),
-                (*outcome).into(),
-                context.placement.resource_scope,
-            )
-            .await
-            .expect("fork request decodes through its production owner")
-        else {
-            panic!("expected a fork-group boundary");
-        };
-        boundary
-    }
-
-    #[tokio::test]
-    async fn fork_group_replies_preserve_actor_and_forks_answer_contracts() {
-        with_test_compiler_owner(async {
-            let (machines, context, source, _root) = fork_reply_fixture();
-            let workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-            let runner = ResidentActorRunner::new(machines, source.clone());
-            for text in [
-                "Contracts.actorBegin",
-                "Contracts.actorCommit",
-                "Contracts.actorAbort",
-                "Contracts.forksBegin",
-                "Contracts.forksCommit",
-                "Contracts.forksAbort",
-            ] {
-                let boundary =
-                    fork_reply_boundary(&workbench, &runner, &context, &source, text).await;
-                let completed = match boundary {
-                    ForkGroupBoundary::Begin { continuation, .. } => {
-                        runner
-                            .resume_fork_group(
-                                context.clone(),
-                                continuation,
-                                crate::ForkGroupId(7),
-                                "group".into(),
-                                vec!["branch".into()],
-                            )
-                            .await
-                    }
-                    ForkGroupBoundary::Commit { continuation, .. }
-                    | ForkGroupBoundary::Abort { continuation, .. } => {
-                        runner.resume_fork_unit(context.clone(), continuation).await
-                    }
-                    _ => panic!("unexpected fork boundary"),
-                }
-                .expect("the declared answer shape resumes its exact continuation");
-                assert!(
-                    matches!(completed, ResidentOutcome::Completed { .. }),
-                    "{text}"
-                );
-            }
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn forks_refusal_resumes_the_declared_left_answer() {
-        with_test_compiler_owner(async {
-            let (machines, context, source, _root) = fork_reply_fixture();
-            let workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-            let runner = ResidentActorRunner::new(machines, source.clone());
-            let boundary = fork_reply_boundary(
-                &workbench,
-                &runner,
-                &context,
-                &source,
-                "Contracts.forksRefusal",
-            )
-            .await;
-            let ForkGroupBoundary::Begin { continuation, .. } = boundary else {
-                panic!("expected a fallible begin request");
-            };
-            let completed = runner
-                .resume_fork_failure(context, continuation, "admission refused".into())
-                .await
-                .expect("the fallible fork answer remains an in-band Left");
-            assert!(matches!(completed, ResidentOutcome::Completed { .. }));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn actor_fork_refusal_consumes_once_and_keeps_prior_group_admission() {
-        with_test_compiler_owner(async {
-            let (machines, context, source, _root) = fork_reply_fixture();
-            let workbench =
-                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
-            let runner = ResidentActorRunner::new(machines, source.clone());
-            let first = fork_reply_boundary(
-                &workbench,
-                &runner,
-                &context,
-                &source,
-                "Contracts.actorTwoBegins",
-            )
-            .await;
-            let ForkGroupBoundary::Begin {
-                continuation,
-                group,
-                branches,
-                ..
-            } = first
-            else {
-                panic!("first begin")
-            };
-            let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
-            let (admitted, reservations) = groups
-                .begin(
-                    context.actor,
-                    crate::ActorPath::parse(&group).unwrap(),
-                    branches
-                        .into_iter()
-                        .map(|branch| crate::ActorPathSegment::new(branch).unwrap())
-                        .collect(),
-                    Some(1),
-                )
-                .expect("first external group admission commits");
-            let next = runner
-                .resume_fork_group(
-                    context.clone(),
-                    continuation,
-                    admitted,
-                    group,
-                    reservations
-                        .into_iter()
-                        .map(|reservation| reservation.allocated.to_string())
-                        .collect(),
-                )
-                .await
-                .expect("first admission reaches the second request");
-            let ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
-                continuation,
-                group,
-                branches,
-                ..
-            }) = runner
-                .capture_boundary(context.clone(), next, context.placement.resource_scope)
-                .await
-                .unwrap()
-            else {
-                panic!("second begin")
-            };
-            let refusal = groups
-                .begin(
-                    context.actor,
-                    crate::ActorPath::parse(&group).unwrap(),
-                    branches
-                        .into_iter()
-                        .map(|branch| crate::ActorPathSegment::new(branch).unwrap())
-                        .collect(),
-                    Some(1),
-                )
-                .expect_err("the earlier admission exhausts the coordinator descendant budget");
-            assert!(matches!(
-                refusal,
-                crate::ForkGroupError::DescendantBudgetExceeded {
-                    coordinator,
-                    requested: 1,
-                    active: 1,
-                    maximum: 1,
-                } if coordinator == context.actor
-            ));
-            let retry = ForkContinuation::actor(continuation.hole.clone());
-            let id = continuation.hole.cont_id().to_owned();
-            let failure = runner
-                .resume_fork_failure(context.clone(), continuation, refusal.to_string())
-                .await;
-            assert!(matches!(
-                failure,
-                Err(ResidentActorWorkbenchError::Resident(ResidentError::Run(_)))
-            ));
-            runner
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    assert!(!session.parked_holes().contains(&id.as_str()));
-                    Ok(())
-                })
-                .await
-                .unwrap();
-            let retried = runner
-                .resume_fork_failure(context.clone(), retry, "repeated refusal".into())
-                .await;
-            assert!(matches!(
-                retried,
-                Err(ResidentActorWorkbenchError::Resident(
-                    ResidentError::WrongContinuation { .. }
-                ))
-            ));
-            assert!(
-                groups.completion_boundary(admitted, context.actor).is_ok(),
-                "the earlier external admission survives fragment failure"
-            );
-        })
-        .await;
-    }
-
     #[tokio::test]
     async fn answered_haskell_effect_reports_later_continuation_failure_as_delivered() {
         with_test_compiler_owner(answered_haskell_effect_reports_later_continuation_failure_as_delivered_with_compiler_owner()).await;
@@ -21430,16 +21650,16 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .expect("capture independently owned parent Haskell environment");
         let retained_scope = retained.scope();
-        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let admissions = crate::ActorAdmissionRegistry::new();
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "unfinished-parent".into(),
             "unfinished-parent".into(),
         );
-        let token = groups.capture_checkpoint_with_retained_scope(
+        let token = admissions.capture_checkpoint_with_retained_scope(
             "real Haskell context".into(),
             context.actor,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::default(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
@@ -21450,36 +21670,21 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             retained,
             crate::ActorPersistencePolicy::Ephemeral,
         );
-        groups
+        admissions
             .settle_checkpoint(&token, context.placement.session, true)
             .expect("Haskell checkpoint answer delivered");
-        let (group, paths) = groups
-            .begin(
-                context.actor,
-                crate::ActorPath::parse("captured/work").unwrap(),
-                vec![
-                    crate::ActorPathSegment::new("first").unwrap(),
-                    crate::ActorPathSegment::new("second").unwrap(),
-                ],
-                None,
-            )
-            .unwrap();
-        let mut claims = paths.iter().map(|path| {
-            groups
-                .claim_with_checkpoint(
-                    group,
-                    context.actor,
-                    &path.allocated,
-                    Some((&token, context.placement.session)),
-                )
-                .expect("child path and checkpoint admitted before parent completion")
-                .checkpoint
-                .unwrap()
-                .0
-        });
-        let first = claims.next().unwrap();
-        let second = claims.next().unwrap();
-        drop(claims);
+        let first = admissions
+            .claim_spawn(context.actor, context.placement.session, Some(&token), None)
+            .expect("first child and checkpoint admitted before parent completion")
+            .checkpoint
+            .unwrap()
+            .0;
+        let second = admissions
+            .claim_spawn(context.actor, context.placement.session, Some(&token), None)
+            .expect("second child and checkpoint admitted before parent completion")
+            .checkpoint
+            .unwrap()
+            .0;
         let (release_first, first_ready) = tokio::sync::oneshot::channel();
         let (release_second, second_ready) = tokio::sync::oneshot::channel();
         let delayed_child = |admitted: crate::lineage::CheckpointLease,
@@ -21558,30 +21763,30 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .decision
                 .terminate());
             runner
-                .retire_fork_scopes(
+                .retire_context_scopes(
                     failing_context.clone(),
                     vec![failing_context.placement.lexical_scope],
                 )
                 .await
                 .expect("failed private parent releases its unpublishable scope");
             drop(failing_workbench);
-            assert!(groups
+            assert!(admissions
                 .settle_checkpoints(context.actor, &boundary, false)
                 .is_empty());
-            groups.retire_actor(context.actor);
-            let retired = groups
+            admissions.retire_actor(context.actor);
+            let retired = admissions
                 .release_checkpoint(&token, context.placement.session)
                 .expect("release token while both children await workspace admission");
             runner
                 .retire_checkpoint_scopes(context.placement.session, retired.into_iter().collect())
                 .await
                 .expect("original captured scope retires before remint");
-            groups
+            admissions
                 .confirm_checkpoint_release(&token, context.placement.session, captured_scope)
                 .expect("original scope retirement acknowledged");
-            assert!(groups.retains_session(context.placement.session));
+            assert!(admissions.retains_session(context.placement.session));
             assert!(matches!(
-                groups.preview_checkpoint(&token, context.placement.session),
+                admissions.preview_checkpoint(&token, context.placement.session),
                 Err(crate::CheckpointRefusal::ReleasedCheckpoint)
             ));
             release_first.send(()).unwrap();
@@ -21593,7 +21798,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             retire_original,
         );
         drop(first_lease);
-        assert!(groups.retains_session(context.placement.session));
+        assert!(admissions.retains_session(context.placement.session));
         workbench
             .access
             .with_machine(context.clone(), move |session, _, _| {
@@ -21614,7 +21819,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .expect("runtime owner observes surviving capture");
         drop(second_lease);
-        assert!(!groups.retains_session(context.placement.session));
+        assert!(!admissions.retains_session(context.placement.session));
         workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
@@ -21694,23 +21899,23 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .capture_context_scope(context.clone())
             .await
             .expect("captured scope");
-        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
-        let token = groups.capture_checkpoint(
+        let admissions = crate::ActorAdmissionRegistry::new();
+        let token = admissions.capture_checkpoint(
             "retryable release".into(),
             context.actor,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::default(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
             context.placement.session,
             scope,
-            tidepool_runtime::session::WorkbenchForkBoundary::external(
+            tidepool_runtime::session::ContextCheckpointBoundary::external(
                 "thread".into(),
                 "call".into(),
                 "call".into(),
             ),
         );
-        groups
+        admissions
             .settle_checkpoint(&token, context.placement.session, true)
             .expect("capture published");
         let removed = machines
@@ -21720,7 +21925,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             )
             .expect("machine was registered");
         assert_eq!(
-            groups.release_checkpoint(&token, context.placement.session),
+            admissions.release_checkpoint(&token, context.placement.session),
             Ok(Some(scope))
         );
         assert!(runner
@@ -21728,19 +21933,21 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .is_err());
         assert_eq!(
-            groups.pending_release_scopes(context.placement.session),
+            admissions.pending_release_scopes(context.placement.session),
             vec![(token.clone(), scope)]
         );
-        assert!(groups.retains_session(context.placement.session));
+        assert!(admissions.retains_session(context.placement.session));
         assert_eq!(
-            groups.checkpoint(&token, context.placement.session).err(),
+            admissions
+                .checkpoint(&token, context.placement.session)
+                .err(),
             Some(crate::CheckpointRefusal::ReleasedCheckpoint)
         );
         let tidepool_runtime::session::Slot::Idle(machine) = removed else {
             panic!("fixture machine was idle");
         };
         machines.insert_idle(context.placement.session, machine);
-        let retry = groups
+        let retry = admissions
             .release_checkpoint(&token, context.placement.session)
             .expect("idempotent retry");
         assert_eq!(retry, Some(scope));
@@ -21748,15 +21955,15 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .retire_checkpoint_scopes(context.placement.session, vec![scope])
             .await
             .expect("retry retires exact scope");
-        groups
+        admissions
             .confirm_checkpoint_release(&token, context.placement.session, scope)
             .expect("cleanup acknowledged");
-        assert!(groups
+        assert!(admissions
             .pending_release_scopes(context.placement.session)
             .is_empty());
-        assert!(!groups.retains_session(context.placement.session));
+        assert!(!admissions.retains_session(context.placement.session));
         assert_eq!(
-            groups.release_checkpoint(&token, context.placement.session),
+            admissions.release_checkpoint(&token, context.placement.session),
             Ok(None)
         );
     }

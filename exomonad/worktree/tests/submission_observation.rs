@@ -76,7 +76,7 @@ fn clean_branch_observation_carries_base_and_fresh_submitted_head() {
     assert_eq!(
         observed.submitted_head,
         HeadState::OnBranch {
-            branch: handle.branch().clone(),
+            branch: handle.branch().expect("managed branch").clone(),
             oid: submitted,
         }
     );

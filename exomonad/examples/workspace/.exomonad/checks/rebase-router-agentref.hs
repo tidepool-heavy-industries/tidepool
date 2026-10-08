@@ -1,6 +1,4 @@
-let group = "agentref-check" :: CampaignLabel
-let wave = "admission" :: ForkGroupLabel
-let worker = [label|worker|]
-response <- unfoldDeferred (batch group wave) (child @Text (withLifetime ActorOwned (coding projectHead (assignment worker ("reply ping" :: Text)))))
-let Just receipt = responseAdmission response
-sendMessage (admittedAgent receipt) "ping"
+Right worker <- spawnSubagent (FreshCtx "Reply to the ping when it arrives.") (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just "worker" })
+Right response <- request @Text worker "reply ping" defaultRequestOptions
+sendMessage worker "ping"

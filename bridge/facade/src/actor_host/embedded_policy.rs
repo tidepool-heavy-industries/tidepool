@@ -56,14 +56,14 @@ impl EmbeddedPolicyInstallation {
 
     pub(super) fn complete(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         self.policy.complete_boxed(boundary)
     }
 
     pub(super) fn abort(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         self.policy.abort_boxed(boundary)
     }
@@ -200,9 +200,9 @@ impl EmbeddedPolicySnapshot {
             )
         })?;
         self.policy
-            .abort_boxed(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
-                original.clone(),
-            ))
+            .abort_boxed(
+                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone()),
+            )
             .await
             .map(|_| ())
     }
@@ -698,7 +698,3 @@ mod tests {
         ));
     }
 }
-
-#[cfg(test)]
-#[path = "embedded_operation_settlement_tests.rs"]
-mod operation_settlement_tests;

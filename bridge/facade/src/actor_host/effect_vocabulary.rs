@@ -13,7 +13,7 @@ pub(crate) fn exomonad_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::commands_decl(),
         tidepool_mcp::agent_inspection_decl(),
         tidepool_mcp::agent_launch_decl(),
-        tidepool_mcp::forks_decl(),
+        tidepool_mcp::resource_scopes_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::reflect_decl(),

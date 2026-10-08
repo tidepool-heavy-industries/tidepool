@@ -56,4 +56,11 @@ filegroup(
     visibility = ["PUBLIC"],
 )
 
-declare_authored_haskell_sources(glob([".exomonad/**/*.hs"]))
+# Cabal component resources include authored source and adjacent runtime data.
+declare_authored_haskell_sources(glob([
+    ".exomonad/**/*.hs",
+    ".exomonad/**/*.hs-boot",
+    ".exomonad/**/*.json",
+    ".exomonad/**/*.cbor",
+    ".exomonad/**/*.txt",
+]))

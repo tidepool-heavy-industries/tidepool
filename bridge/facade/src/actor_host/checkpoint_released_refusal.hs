@@ -1,10 +1,12 @@
-import Data.Text (Text)
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+
+import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Actors.Exomonad
+
 Just seed <- R.call (readSeed (R.client seedStore)) ()
-let releasedGroup = "released" :: ForkGroupLabel
-let releasedLabel = [label|released|]
-result <- attemptUnfold (batch campaign releasedGroup)
-  (child (withContext (fromCheckpoint seed)
-    (researching @Text projectHead (assignment releasedLabel ("inspect" :: Text)))))
-case result of
-  Left (UnfoldCheckpointRefused ReleasedCheckpoint) -> display True
+case spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
+  (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree])) of
+  Left (SpawnRefused _) -> display True
   _ -> display False

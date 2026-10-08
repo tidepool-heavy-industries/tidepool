@@ -10,7 +10,7 @@ use parking_lot::Mutex as ParkingMutex;
 
 use exomonad_actor::{
     ActorAdmissionLease, ActorExitKind, ActorRef, ActorTerminal, HostedCheckpointAttachment,
-    HostedCheckpointCapture, HostedCheckpointCaptureError, KernelCallFailure, LocalActorRef,
+    HostedCheckpointCapture, HostedCheckpointCaptureError, LocalActorRef,
     LocalResidentInstallation, ResidentToolError, WorkbenchCancellationOutcome,
 };
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
@@ -48,13 +48,6 @@ struct StoreAdmission {
 }
 impl AdmissionGuard for StoreAdmission {}
 
-fn embedded_admission_error(error: KernelCallFailure) -> EmbeddedError {
-    match error {
-        KernelCallFailure::MailboxClosed(_) => EmbeddedError::AdmissionClosed,
-        error => EmbeddedError::Host(error.to_string()),
-    }
-}
-
 /// One harness owner for the existing run directory. The default
 /// Codex launch never opens this Store; the embedding owner calls `open` when
 /// it admits a bound conversation.
@@ -62,7 +55,7 @@ pub(super) struct EmbeddedHarnessRuntime {
     run: String,
     store: Arc<Store>,
     scheduler: Arc<JobScheduler>,
-    output_observer: OnceLock<harness::server::ServerControl>,
+    output_observer: Arc<OnceLock<harness::server::ServerControl>>,
     recovery: OnceLock<Arc<super::embedded_recovery::EmbeddedApplicationRecovery>>,
     context_models: Arc<OnceLock<ModelResolver>>,
     #[cfg(test)]
@@ -75,7 +68,7 @@ impl EmbeddedHarnessRuntime {
             super::display_output::open_run_store(run_root).map_err(EmbeddedError::Binding)?;
         Ok(Self {
             run: super::runtime_namespace(run_root),
-            output_observer: OnceLock::new(),
+            output_observer: Arc::new(OnceLock::new()),
             recovery: OnceLock::new(),
             context_models: Arc::new(OnceLock::new()),
             #[cfg(test)]
@@ -256,35 +249,30 @@ impl EmbeddedHarnessRuntime {
                 "embedded checkpoint child belongs to another admitted run/actor".into(),
             ));
         }
-        let gate = installation.fork_gate.as_ref().ok_or_else(|| {
-            EmbeddedError::Binding("embedded checkpoint child has no admitted fork gate".into())
-        })?;
-        let publication = gate
-            .publication()
-            .map_err(|error| EmbeddedError::Binding(error.to_string()))?;
-        if let Some(lease) = &installation.checkpoint {
+        installation
+            .spawn_admission
+            .as_ref()
+            .ok_or_else(|| {
+                EmbeddedError::Binding("checkpoint child has no independent spawn authority".into())
+            })?
+            .validate_child(installation.actor.identity())
+            .map_err(EmbeddedError::Binding)?;
+        let checkpoint = if let Some(lease) = &installation.checkpoint {
             if captured.issuer != lease.issuer || installation.context_parent != Some(lease.issuer)
             {
                 return Err(EmbeddedError::Binding(
                     "embedded checkpoint issuer mismatch".into(),
                 ));
             }
+            captured.cuts.before_call()
         } else {
-            if publication != exomonad_actor::ForkGroupPublication::Deferred {
-                return Err(EmbeddedError::Binding(
-                    "inherited hosted context requires deferred publication".into(),
-                ));
-            }
             captured.validate_inherited_origin(
                 &self.run,
                 installation.creator,
                 installation.context_parent,
-                installation.fork_boundary.as_ref(),
+                installation.checkpoint_boundary.as_ref(),
             )?;
-        }
-        let checkpoint = match publication {
-            exomonad_actor::ForkGroupPublication::Deferred => captured.cuts.deferred(),
-            exomonad_actor::ForkGroupPublication::Captured => captured.cuts.before_call(),
+            captured.cuts.deferred()
         };
         let actor = installation.actor.clone();
         let parent = checkpoint.origin().clone();
@@ -335,6 +323,14 @@ impl EmbeddedHarnessRuntime {
 
     pub(super) fn scheduler(&self) -> Arc<JobScheduler> {
         self.scheduler.clone()
+    }
+
+    pub(super) fn output_control_handle(&self) -> Arc<OnceLock<harness::server::ServerControl>> {
+        self.output_observer.clone()
+    }
+
+    pub(super) fn run_identity(&self) -> &str {
+        &self.run
     }
 
     pub(super) fn store(&self) -> Arc<Store> {
@@ -638,9 +634,7 @@ impl HostActor for EmbeddedHostActor {
     async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
         let original = original_operation(&self.identity, operation)?;
         self.installation
-            .complete(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
-                original,
-            ))
+            .complete(tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original))
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -649,9 +643,7 @@ impl HostActor for EmbeddedHostActor {
     async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
         let original = original_operation(&self.identity, operation)?;
         self.installation
-            .abort(tidepool_runtime::session::WorkbenchForkBoundary::Hosted(
-                original,
-            ))
+            .abort(tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original))
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -661,7 +653,7 @@ impl HostActor for EmbeddedHostActor {
         self.actor
             .admit_transaction()
             .map(|lease| Box::new(StoreAdmission { _lease: lease }) as Box<dyn AdmissionGuard>)
-            .map_err(embedded_admission_error)
+            .map_err(|error| EmbeddedError::Host(error.to_string()))
     }
 
     fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
@@ -670,7 +662,7 @@ impl HostActor for EmbeddedHostActor {
         let _admission = self
             .actor
             .admit_transaction()
-            .map_err(embedded_admission_error)?;
+            .map_err(|error| EmbeddedError::Host(error.to_string()))?;
         let snapshot = Arc::new(
             self.installation
                 .request_snapshot()
@@ -782,7 +774,7 @@ impl EmbeddedHostedCheckpoint {
         run: &str,
         creator: Option<ActorRef>,
         context_parent: Option<ActorRef>,
-        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
+        boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
     ) -> Result<(), EmbeddedError> {
         let operation = self.cuts.deferred().operation().ok_or_else(|| {
             EmbeddedError::Binding("inherited hosted context has no captured operation".into())
@@ -815,7 +807,7 @@ fn validate_inherited_operation(
     run: &str,
     creator: Option<ActorRef>,
     context_parent: Option<ActorRef>,
-    boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
+    boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
 ) -> Result<(), EmbeddedError> {
     let refused = || {
         EmbeddedError::Binding(
@@ -826,7 +818,7 @@ fn validate_inherited_operation(
         return Err(refused());
     }
     let original = boundary
-        .and_then(tidepool_runtime::session::WorkbenchForkBoundary::hosted)
+        .and_then(tidepool_runtime::session::ContextCheckpointBoundary::hosted)
         .filter(|operation| operation.is_complete())
         .ok_or_else(refused)?;
     match (&operation.origin, &original.origin) {
@@ -868,7 +860,7 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
     fn capture(
         &self,
         name: &str,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<HostedCheckpointAttachment, HostedCheckpointCaptureError> {
         let original = original_operation(&self.identity, &self.operation)
             .map_err(|_| HostedCheckpointCaptureError::CaptureFailed)?;
@@ -1104,7 +1096,7 @@ impl Provider for EmbeddedDispatcher {
                     Err(error) => {
                         return unavailable_context_completion(JobOutput::Completed(Err(
                             error.into_tool_failure()
-                        )))
+                        )));
                     }
                 };
                 let resolver = self.context_models.get().cloned().unwrap_or_else(|| {
@@ -1243,12 +1235,11 @@ struct UneditedInvocationCompletion;
 
 impl UneditedInvocationCompletion {
     fn project(output: JobOutput) -> ProviderCompletion {
-        let full_success = matches!(&output, JobOutput::Completed(Ok(_)));
-        ProviderCompletion::provider(
+        ProviderCompletion {
+            full_success: matches!(&output, JobOutput::Completed(Ok(_))),
             output,
-            full_success,
-            harness::provider::ContextDisposition::Unedited,
-        )
+            context: harness::provider::ContextDisposition::Unedited,
+        }
     }
 }
 
@@ -1289,11 +1280,11 @@ impl CancellationOwner for EmbeddedDispatcher {
 }
 
 fn unavailable_context_completion(output: JobOutput) -> ProviderCompletion {
-    ProviderCompletion::provider(
+    ProviderCompletion {
         output,
-        false,
-        harness::provider::ContextDisposition::Unavailable,
-    )
+        full_success: false,
+        context: harness::provider::ContextDisposition::Unavailable,
+    }
 }
 
 fn workbench_reply_receipt(
@@ -1704,24 +1695,6 @@ mod tests {
     const COLD_NATIVE_CELL_SETTLEMENT_BUDGET: Duration = Duration::from_secs(300);
 
     #[test]
-    fn admission_closure_preserves_temporary_and_generic_refusals() {
-        let actor = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1));
-        assert!(matches!(
-            embedded_admission_error(KernelCallFailure::MailboxClosed(actor)),
-            EmbeddedError::AdmissionClosed
-        ));
-        for error in [
-            KernelCallFailure::RetirementPending(actor),
-            KernelCallFailure::TargetUnavailable(actor),
-        ] {
-            assert!(matches!(
-                embedded_admission_error(error),
-                EmbeddedError::Host(_)
-            ));
-        }
-    }
-
-    #[test]
     fn m1_only_accepts_fresh_root_and_rejects_inherited_or_child_attachments() {
         let root = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1));
         let child = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(2));
@@ -1769,12 +1742,13 @@ mod tests {
             request_id: "request".into(),
             call_id: "call".into(),
         };
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::Hosted(original.clone());
+        let boundary =
+            tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone());
         let check =
             |run: &str,
              creator,
              context_parent,
-             boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>| {
+             boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>| {
                 validate_inherited_operation(
                     issuer,
                     &parent,
@@ -1823,10 +1797,10 @@ mod tests {
                 ..original
             },
         ] {
-            let boundary = tidepool_runtime::session::WorkbenchForkBoundary::Hosted(foreign);
+            let boundary = tidepool_runtime::session::ContextCheckpointBoundary::Hosted(foreign);
             assert!(check("run", Some(issuer), Some(issuer), Some(&boundary)).is_err());
         }
-        let route = tidepool_runtime::session::WorkbenchForkBoundary::Route {
+        let route = tidepool_runtime::session::ContextCheckpointBoundary::Route {
             actor_id: 1,
             incarnation: 1,
             watch_id: 1,
@@ -1882,7 +1856,7 @@ mod tests {
                 vec![Item(json!({
                     "type":"custom_tool_call", "call_id":"raw-cell-2",
                     "name":"haskell",
-                    "input":tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_checkpoint_capture.hs")
+                    "input":include_str!("embedded_checkpoint_capture.hs")
                 }))]
             } else {
                 self.completed.notify_one();

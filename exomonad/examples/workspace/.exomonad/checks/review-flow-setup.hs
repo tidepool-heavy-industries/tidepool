@@ -1,7 +1,12 @@
 {-# LANGUAGE QuasiQuotes #-}
-let campaign = "review-continuation" :: CampaignLabel
-let wave = "component" :: ForkGroupLabel
-let workerLabel = [label|implementation|] :: Label
-let reviewLabel = [label|review-produced-candidate|] :: Label
-let task = Task (batch campaign wave) "plans/component.md" sourceHead "Implement the feature" "Review the settled candidate without a model relay" ["feature.txt"] "read exact feature" []
-(reviewer, initialReviewProgress) <- reviewCandidate task OwnerRepairs (Candidate sourceHead [] ["implementation pending"])
+import Tidepool.Effects.Core (GitRef (..))
+let work = (task "implementation" "Implement the feature" ["feature.txt"] "read exact feature" sourceHead)
+      { planPath = "plans/component.md", rationale = "Review the settled candidate without a model relay" }
+let input = ReviewRequest (AssignedTask work) (Candidate sourceHead [] ["implementation pending"]) OwnerRepairs
+Right reviewerAgent <- spawnSubagent (FreshCtx (reviewContext input))
+  (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "review"), spawnLabel = Just "review-produced-candidate" })
+Right (reviewer, initialReviewProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision)
+  reviewerAgent input defaultRequestOptions

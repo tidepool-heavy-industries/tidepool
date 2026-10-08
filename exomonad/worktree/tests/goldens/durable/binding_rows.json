@@ -3,18 +3,21 @@
     "worktree": "wt-provisional-0001",
     "agent": "agent-alpha",
     "state": "Terminal",
+    "access": "ReadWrite",
     "bound_at_ms": 1700000000000
   },
   {
     "worktree": "wt-provisional-0001",
     "agent": "agent-beta",
     "state": "Released",
+    "access": "ReadWrite",
     "bound_at_ms": 1700000001000
   },
   {
     "worktree": "wt-provisional-0001",
     "agent": "agent-gamma",
     "state": "Active",
+    "access": "ReadWrite",
     "bound_at_ms": 1700000002000
   }
 ]

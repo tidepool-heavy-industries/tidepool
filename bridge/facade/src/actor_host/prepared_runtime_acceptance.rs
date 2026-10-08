@@ -1,4 +1,4 @@
-//! Completed source entries through real child admission and native tools.
+//! Prepared root originals and supplied compiled child specs through native replies.
 
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
@@ -9,7 +9,7 @@ use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 use tracing_subscriber::prelude::*;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Fields(BTreeMap<String, String>);
 
 impl tracing::field::Visit for Fields {
@@ -29,6 +29,7 @@ struct Observations {
     starts: HashMap<String, ChildLaunch>,
     first_child_launch_executions: Option<String>,
     installs: HashMap<String, (BTreeMap<String, String>, usize)>,
+    installer_phases: HashMap<String, (BTreeMap<String, String>, Vec<BTreeMap<String, String>>)>,
 }
 
 struct ChildLaunch {
@@ -52,7 +53,52 @@ impl SetupTrace {
     }
 }
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SetupTrace {
+impl<S> tracing_subscriber::Layer<S> for SetupTrace
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attributes: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut fields = Fields::default();
+        attributes.record(&mut fields);
+        let span = context.span(id).expect("observed registered span");
+        if attributes.metadata().name() == "compiled_spec_install" {
+            let actor = fields.0["actor"].clone();
+            span.extensions_mut().insert(fields.clone());
+            assert!(
+                self.observations
+                    .lock()
+                    .installer_phases
+                    .insert(actor, (fields.0, Vec::new()))
+                    .is_none(),
+                "one initial compiled installer phase per exact child"
+            );
+        } else if attributes.metadata().name() == "compile_request" {
+            for ancestor in span.scope() {
+                if ancestor.name() == "compiled_spec_install" {
+                    let actor = ancestor
+                        .extensions()
+                        .get::<Fields>()
+                        .expect("installer correlation fields")
+                        .0["actor"]
+                        .clone();
+                    self.observations
+                        .lock()
+                        .installer_phases
+                        .get_mut(&actor)
+                        .expect("the installer phase began before its compiler request")
+                        .1
+                        .push(fields.0);
+                    break;
+                }
+            }
+        }
+    }
+
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
         let mut fields = Fields::default();
         event.record(&mut fields);
@@ -89,7 +135,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SetupTrace {
                     "the measured launch labels must be unique"
                 );
             }
-            Some("toolset_installed") => {
+            Some("toolset_installed" | "explicit_toolset_installed") => {
                 let actor = fields.0["actor"].clone();
                 let count = state.requests.len();
                 assert!(
@@ -108,7 +154,9 @@ struct Progress {
     expected_children: usize,
     observed_children: usize,
     observed_installations: usize,
-    deployment_originals_verified: usize,
+    root_deployment_original_verified: bool,
+    explicit_installers_verified: usize,
+    compiler_requests_during_installers: usize,
     observed_native_replies: usize,
     distinct_installation_scopes: usize,
     compiler_requests_during_setup: usize,
@@ -126,11 +174,13 @@ struct Progress {
 impl Progress {
     fn new(expected_children: usize) -> Self {
         Self {
-            schema: 1,
+            schema: 2,
             expected_children,
             observed_children: 0,
             observed_installations: 0,
-            deployment_originals_verified: 0,
+            root_deployment_original_verified: false,
+            explicit_installers_verified: 0,
+            compiler_requests_during_installers: 0,
             observed_native_replies: 0,
             distinct_installation_scopes: 0,
             compiler_requests_during_setup: 0,
@@ -243,10 +293,8 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
             project.launch.embedded = Some(authored_settings);
             project.haskell.source_roots = vec![".".into()];
-            // This module supplies private installer policy, not notebook imports.
-            project.haskell.modules = Vec::new();
+            project.haskell.modules = vec!["PreparedRuntimeSpec".into()];
             project.haskell.spec = Some("PreparedRuntimeSpec.agentSpec".into());
-            project.preparation.roles = vec![exomonad_actor::ActorRole::Research];
         });
         commit_workspace(&config.workspace);
     })
@@ -283,13 +331,24 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             .expect("the actual host selected its completed workspace");
         let completed_entries = frozen.completed_entry_selections().expect("completed installer inventory");
         assert!(!completed_entries.is_empty());
-        let research_coverage = frozen.prepared_toolset_coverage()
-            .expect("completed toolset coverage")
-            .iter().find(|entry| entry.profile == crate::exomonad::PreparationProfile::Public(
-                exomonad_tool::PublicActorProfile::Research))
-            .expect("the configured public research profile was prepared");
-        assert_eq!(research_coverage.requested_effects,
-            exomonad_tool::PublicActorProfile::Research.effect_keys());
+        let coverage = frozen.prepared_toolset_coverage()
+            .expect("completed root toolset coverage");
+        assert_eq!(coverage.len(), 1, "one actual root toolset is prepared");
+        let root_coverage = &coverage[0];
+        assert_eq!(
+            root_coverage.requested_effects,
+            exomonad_actor::ActorCapabilities::default().effect_keys()
+        );
+        let root_installation = host.context.observer.installation(host.context.actor.identity()).await;
+        let root_acquisition = root_installation.acquisition.as_ref()
+            .expect("the source-prepared root retains its actual acquisition");
+        let exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original } = root_acquisition else {
+            panic!("the prepared root must load its deployment original: {root_acquisition:?}");
+        };
+        assert_eq!(completed_entries.get(recipe), Some(original),
+            "the installed root original belongs to the completed inventory");
+        assert_eq!((recipe, original), (&root_coverage.recipe, &root_coverage.original));
+        progress.root_deployment_original_verified = true;
         let prepared_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
         assert!(!prepared_executions.is_empty(), "the original producer executed the real quoter");
         progress.quotation_executions_before = Some(prepared_executions.lines().count());
@@ -303,10 +362,9 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             .call("prepared-children", &children_source);
         let mut children = HashSet::new();
         let mut scopes = HashSet::new();
-        let mut shared = None;
         let mut rows = Vec::new();
         for ordinal in 1..=expected_children {
-            let label = format!("prepared-runtime/probe-{ordinal}/prepared-child-{ordinal}");
+            let label = format!("prepared-child-{ordinal}");
             let round = match pending.pop_front() {
                 Some(round) => round,
                 None => tokio::time::timeout(std::time::Duration::from_secs(300), requests.recv())
@@ -330,51 +388,50 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             assert_eq!(conversation.identity().actor, *origin.actor());
             let installed = host.context.observer.installation(child.actor).await;
             progress.observed_installations += 1;
-            let (elapsed, compiler_requests, details, launch_executions, first_launch_executions) = {
+            let (elapsed, compiler_requests, installer_details, installer_compiler_requests, details, launch_executions, first_launch_executions) = {
                 let state = observations.observations.lock();
                 let start = state.starts.get(&label).expect("real pre-lookup launch request");
                 let (details, after) = state.installs.get(&child.actor.to_string())
                     .expect("same exact actor executed its installer");
+                let (installer_details, installer_requests) = state.installer_phases.get(&child.actor.to_string())
+                    .expect("same exact child executed its supplied compiled installer");
                 (installed.installed_at.duration_since(start.at).as_nanos(),
-                    state.requests[start.compiler_requests..*after].to_vec(), details.clone(),
+                    state.requests[start.compiler_requests..*after].to_vec(),
+                    installer_details.clone(), installer_requests.clone(), details.clone(),
                     start.quotation_executions.clone(),
                     state.first_child_launch_executions.clone().expect("the first actual child launch was observed"))
             };
             assert!(scopes.insert(details["installation_scope"].clone()), "fresh installation heap scope");
             progress.distinct_installation_scopes = scopes.len();
             progress.compiler_requests_during_setup += compiler_requests.len();
+            progress.compiler_requests_during_installers += installer_compiler_requests.len();
             progress.report();
             let current_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
             progress.observe_quotations(&prepared_executions, &first_launch_executions, &current_executions);
             progress.report();
             assert!(compiler_requests.is_empty(), "completed child admission must not compile installer source: {compiler_requests:?}");
+            assert!(installer_compiler_requests.is_empty(),
+                "supplied compiled installer must not submit compiler work: {installer_compiler_requests:?}");
+            assert_eq!(installer_details["origin"], "explicit_live");
+            assert_eq!(installer_details["actor"], child.actor.to_string());
+            assert_eq!(installer_details["installation"], details["install"]);
+            assert_eq!(details["phase"], "explicit_toolset_installed");
             assert_eq!(first_launch_executions, prepared_executions,
-                "parent notebook compilation must not replay the private installer policy before the first child launch");
+                "parent public spec import must not replay its original quotation before the first child launch");
             assert_eq!(launch_executions, first_launch_executions,
                 "no child may replay the quoter between the first launch and launch of {label}");
             assert_eq!(current_executions, launch_executions,
                 "child launch through its first provider turn must not execute the external quoter: {label}");
             assert!(progress.quotation_execution_unchanged,
-                "the private installer policy must retain its original quotation after input changes to 42: {current_executions}");
+                "the supplied spec must retain its original quotation after input changes to 42: {current_executions}");
             assert!(!installed.checkpoint);
             assert_eq!(installed.context_parent, None, "selected provider context");
-            assert_eq!(installed.role, exomonad_actor::ActorRole::Research);
-            let acquisition = installed.acquisition.as_ref().expect("installed source acquisition");
-            let exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original } = acquisition else {
-                panic!("prepared child must load its deployment original: {acquisition:?}");
-            };
-            assert_eq!(completed_entries.get(recipe), Some(original),
-                "the actual installed original belongs to the frozen completed inventory");
-            assert_eq!((recipe, original), (&research_coverage.recipe, &research_coverage.original),
-                "the child selects the configured research specialization");
-            progress.deployment_originals_verified += 1;
+            assert!(installed.acquisition.is_none(),
+                "a supplied compiled spec has no source-prepared acquisition receipt: {:?}", installed.acquisition);
+            progress.explicit_installers_verified += 1;
             progress.report();
             assert!(installed.tools.iter().any(|tool| matches!(tool,
                 exomonad_tool::HostedTool::Function(tool) if tool.name == "probe" && tool.description == "41")));
-            let identity = ["prepared_owner", "image_registry", "source_revision"]
-                .map(|field| details[field].clone());
-            if let Some(previous) = &shared { assert_eq!(&identity, previous); }
-            shared = Some(identity);
             round.function("prepared-native-probe", "probe", serde_json::json!({"topic": label}));
             let replied = next_hosted_script_round(&mut requests, &mut pending, origin.actor()).await;
             let output = replied.settled_output("prepared-native-probe");
@@ -386,15 +443,17 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             assert_eq!(replied_executions, launch_executions,
                 "child launch through its native reply must not execute the external quoter: {label}");
             assert_eq!(replied_executions, prepared_executions,
-                "native replies must preserve the private policy's original quotation 41");
+                "native replies must preserve the supplied spec's original quotation 41");
             replied.finish();
             progress.observed_native_replies += 1;
             progress.report();
-            let row = serde_json::json!({"schema":1,"composition":"engine-store-prepared-child",
+            let row = serde_json::json!({"schema":2,"composition":"engine-store-explicit-prepared-dependency-child",
                 "ordinal":ordinal,"actor":child.actor,"provider_origin":origin,"setup_elapsed_ns":elapsed,
                 "setup_end":"actual_policy_installed","setup_start":"child_launch_requested",
                 "compiler_requests_during_setup":compiler_requests,"installation":details,
-                "acquisition":acquisition,"completed_inventory_match":true,
+                "compiled_installer":installer_details,"compiler_requests_during_installer":installer_compiler_requests,
+                "acquisition":installed.acquisition,"prepared_root_acquisition":root_acquisition,
+                "prepared_root_completed_inventory_match":true,
                 "quotation_executions":{"prepared":prepared_executions.lines().count(),
                     "first_child_launch":first_launch_executions.lines().count(),
                     "parent_before_first_child_launch":progress.parent_quotation_executions,
@@ -411,10 +470,13 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         completed.finish();
         assert_eq!(children.len(), expected_children);
         assert_eq!(rows.len(), expected_children);
-        assert_eq!(progress.deployment_originals_verified, expected_children);
+        assert!(progress.root_deployment_original_verified);
+        assert_eq!(progress.explicit_installers_verified, expected_children);
+        assert_eq!(progress.compiler_requests_during_installers, 0);
+        assert_eq!(observations.observations.lock().installer_phases.len(), expected_children);
         assert_eq!(scopes.len(), children.len());
         assert_eq!(std::fs::read_to_string(input.with_extension("executions")).unwrap(), prepared_executions,
-            "child installers select the completed original without replaying external input42");
+            "supplied child specs retain original prepared values without replaying external input42");
         progress.quotation_execution_unchanged = true;
         let mut durations = rows.iter().map(|row| row["setup_elapsed_ns"].as_u64().unwrap()).collect::<Vec<_>>();
         durations.sort_unstable();

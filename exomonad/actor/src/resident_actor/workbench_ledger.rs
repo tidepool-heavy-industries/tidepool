@@ -38,10 +38,11 @@ pub(super) async fn settle_provider_child_owner(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn settle_provider_children(
     journal: &Arc<Mutex<WorkbenchExecutions>>,
     kernel: &KernelContext,
-    boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+    boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
 ) -> Result<(), KernelBehaviorError> {
     let children = journal.lock().provider_children(boundary)?;
     let batch = provider_child_retirement_batch(kernel, children)?;
@@ -79,7 +80,6 @@ struct WorkbenchExecutionRecord {
     state: WorkbenchExecutionState,
     invocation_work: Option<Arc<InvocationWork>>,
     cell_terminal: Option<crate::CellExit>,
-    fork_source: Option<crate::resident_workbench::PublishedForkSource>,
     boundary_abort: Option<BoundaryAbortCleanup>,
     display_settlements: Arc<DisplayExecutionSettlement>,
     provider_finalization: Option<Arc<crate::resident_tools::ProviderFinalization>>,
@@ -106,7 +106,7 @@ impl BoundaryAbortOwner {
     ) -> BoundaryAbortCleanup {
         let retained = self.journal.lock().0[&self.key].boundary_abort.clone();
         // The serial actor owns extraction; release the journal lock before
-        // entering the fork registry and retain the obligation before awaiting.
+        // entering the checkpoint registry and retain the obligation before awaiting.
         let cleanup = retained.unwrap_or_else(collect);
         self.retain_cleanup(cleanup.clone());
         cleanup
@@ -152,6 +152,9 @@ impl WorkbenchReplayKey {
 #[derive(Default)]
 pub(super) struct WorkbenchExecutions(
     std::collections::HashMap<WorkbenchReplayKey, WorkbenchExecutionRecord>,
+    // Actor callbacks have no notebook invocation, but use the same retained
+    // cleanup owner and journal retirement path as admitted notebook calls.
+    Vec<Arc<InvocationWork>>,
 );
 
 #[derive(Debug, PartialEq, Eq)]
@@ -207,6 +210,17 @@ impl WorkbenchExecutions {
         });
         observed
     }
+    pub(super) fn admitted_invocation_work(
+        &self,
+        execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+    ) -> Option<Arc<InvocationWork>> {
+        self.0
+            .get(&WorkbenchReplayKey::new(execution, invocation))?
+            .invocation_work
+            .clone()
+    }
+
     pub(super) fn retain_invocation_work(
         &mut self,
         work: Arc<InvocationWork>,
@@ -251,7 +265,25 @@ impl WorkbenchExecutions {
         self.0
             .values()
             .filter_map(|record| record.invocation_work.clone())
+            .chain(self.1.iter().cloned())
             .collect()
+    }
+
+    pub(super) fn actor_scope_root(&mut self, actor: ActorRef) -> Arc<InvocationWork> {
+        self.callback_root(actor, RequestReservationOwner::Scope(0))
+    }
+
+    pub(super) fn callback_root(
+        &mut self,
+        actor: ActorRef,
+        reservation: RequestReservationOwner,
+    ) -> Arc<InvocationWork> {
+        if let Some(root) = self.1.iter().find(|root| root.matches(actor, &reservation)) {
+            return root.clone();
+        }
+        let root = InvocationWork::new(actor, reservation);
+        self.1.push(root.clone());
+        root
     }
 
     pub(super) fn lookup(
@@ -312,7 +344,6 @@ impl WorkbenchExecutions {
                 state: WorkbenchExecutionState::Unconfirmed,
                 invocation_work: None,
                 cell_terminal: None,
-                fork_source: None,
                 boundary_abort: None,
                 display_settlements: Arc::new(DisplayExecutionSettlement::new(execution.clone())),
                 provider_finalization: None,
@@ -343,10 +374,6 @@ impl WorkbenchExecutions {
             .0
             .get(&key)
             .and_then(|record| record.cell_terminal.clone());
-        let fork_source = self
-            .0
-            .get(&key)
-            .and_then(|record| record.fork_source.clone());
         let display_settlements = self
             .0
             .get(&key)
@@ -375,7 +402,6 @@ impl WorkbenchExecutions {
                 },
                 invocation_work,
                 cell_terminal,
-                fork_source,
                 boundary_abort,
                 display_settlements,
                 provider_finalization,
@@ -434,12 +460,12 @@ impl WorkbenchExecutions {
 
     fn provider_cleanup_record(
         &mut self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<&mut WorkbenchExecutionRecord, KernelBehaviorError> {
         let keys = self
             .0
             .iter()
-            .filter(|(_, record)| record.request.fork_boundary() == Some(boundary))
+            .filter(|(_, record)| record.request.checkpoint_boundary() == Some(boundary))
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         let exact = match keys.as_slice() {
@@ -458,9 +484,20 @@ impl WorkbenchExecutions {
             .expect("retained original journal owner"))
     }
 
+    pub(super) fn provider_invocation_work(
+        &mut self,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> Result<Option<Arc<InvocationWork>>, KernelBehaviorError> {
+        Ok(self
+            .provider_cleanup_record(boundary)?
+            .invocation_work
+            .clone())
+    }
+
+    #[cfg(test)]
     pub(super) fn retain_provider_children(
         &mut self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
         children: Vec<ActorRef>,
     ) -> Result<(), KernelBehaviorError> {
         if children.is_empty() {
@@ -477,7 +514,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn provider_children(
         &mut self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<Vec<ActorRef>, KernelBehaviorError> {
         Ok(self
             .provider_cleanup_record(boundary)?
@@ -487,7 +524,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn provider_child_released(
         &mut self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
         child: ActorRef,
     ) -> Result<(), KernelBehaviorError> {
         self.provider_cleanup_record(boundary)?
@@ -498,7 +535,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn finalize_provider_boundary(
         &self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
         result: Result<crate::ProviderFinalizationKind, String>,
     ) {
         let records = self
@@ -523,7 +560,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn pending_provider_boundaries(
         &self,
-    ) -> Vec<tidepool_runtime::session::WorkbenchForkBoundary> {
+    ) -> Vec<tidepool_runtime::session::ContextCheckpointBoundary> {
         let mut boundaries = Vec::new();
         for record in self.0.values().filter(|record| {
             record
@@ -531,7 +568,7 @@ impl WorkbenchExecutions {
                 .as_ref()
                 .is_some_and(|owner| !owner.successfully_settled())
         }) {
-            if let Some(boundary) = record.request.fork_boundary() {
+            if let Some(boundary) = record.request.checkpoint_boundary() {
                 if !boundaries.contains(boundary) {
                     boundaries.push(boundary.clone());
                 }
@@ -542,7 +579,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn boundary_abort_owner(
         journal: &Arc<Mutex<Self>>,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
         has_pending_work: impl FnOnce() -> bool,
     ) -> Result<Option<BoundaryAbortOwner>, KernelBehaviorError> {
         let key = boundary
@@ -581,79 +618,9 @@ impl WorkbenchExecutions {
         record.cell_terminal = Some(exit);
     }
 
-    pub(super) fn retain_fork_source(
-        &mut self,
-        execution: &WorkbenchExecutionId,
-        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
-        source: crate::resident_workbench::PublishedForkSource,
-    ) {
-        let record = self
-            .0
-            .get_mut(&WorkbenchReplayKey::new(execution, invocation))
-            .expect("publication follows its admitted execution");
-        assert!(
-            record.fork_source.is_none(),
-            "execution publishes its fork source once"
-        );
-        record.fork_source = Some(source);
-    }
-
-    pub(super) fn fork_source_at_boundary(
-        &self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
-    ) -> Result<Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>, KernelBehaviorError>
-    {
-        let sources = self.0.iter().filter(|(key, record)| {
-            record.request.fork_boundary() == Some(boundary) && match key {
-                WorkbenchReplayKey::Hosted(invocation) => invocation.matches_boundary(boundary),
-                WorkbenchReplayKey::Execution(execution) => matches!(boundary,
-                    tidepool_runtime::session::WorkbenchForkBoundary::Execution { execution_id: selected, .. } if selected == execution),
-            }
-        }).filter_map(|(_, record)| record.fork_source.as_ref()).collect::<Vec<_>>();
-        let Some(selected) = sources.iter().max_by_key(|source| source.public_epoch) else {
-            return Ok(None);
-        };
-        for source in &sources {
-            if source.session != selected.session
-                || source.public_scope != selected.public_scope
-                || source.machine_incarnation != selected.machine_incarnation
-                || (source.public_epoch == selected.public_epoch
-                    && !Arc::ptr_eq(&source.lexical, &selected.lexical))
-            {
-                return Err(KernelBehaviorError {
-                    detail: "fork boundary has conflicting publication source captures".into(),
-                    diagnostic: None,
-                });
-            }
-        }
-        Ok(Some(Arc::clone(&selected.lexical)))
-    }
-
-    pub(super) fn release_fork_source(
-        &mut self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
-    ) {
-        for (key, record) in &mut self.0 {
-            let matches = match key {
-                WorkbenchReplayKey::Hosted(invocation) => invocation.matches_boundary(boundary),
-                WorkbenchReplayKey::Execution(execution) => matches!(boundary,
-                    tidepool_runtime::session::WorkbenchForkBoundary::Execution { execution_id: selected, .. } if selected == execution),
-            };
-            if matches {
-                record.fork_source.take();
-            }
-        }
-    }
-
-    pub(super) fn release_all_fork_sources(&mut self) {
-        for record in self.0.values_mut() {
-            record.fork_source.take();
-        }
-    }
-
     pub(super) fn cell_allows_publication(
         &self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> bool {
         self.0
             .iter()
@@ -700,7 +667,7 @@ impl WorkbenchExecutions {
 
     pub(super) fn at_boundary(
         &self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Option<WorkbenchBoundaryRecord> {
         let mut terminal = None;
         for (key, record) in &self.0 {
@@ -909,14 +876,14 @@ mod tests {
         let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
         let key = control.invocation.as_ref().unwrap();
         let execution = control.execution_id(parent.identity());
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "call".into(),
         );
         let request = WorkbenchRequest::from_cell_input("current operation")
             .with_execution_id(execution.clone())
-            .with_fork_boundary(boundary.clone());
+            .with_checkpoint_boundary(boundary.clone());
         let publications = crate::kernel::HostedCellPublications::default();
         publications.publish_provider_transport(parent.identity(), control.clone());
         publications.accept(&control);
@@ -988,7 +955,7 @@ mod tests {
             crate::HostedOperationFinalization::Settled(Err(_))
         ));
         assert!(!journal.lock().pending_provider_boundaries().is_empty());
-        let other = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let other = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "other".into(),
@@ -1050,14 +1017,14 @@ mod tests {
         let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation.clone()));
         let key = control.invocation.as_ref().unwrap();
         let execution = control.execution_id(actor);
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "call".into(),
         );
         let request = WorkbenchRequest::from_cell_input("respond value")
             .with_execution_id(execution.clone())
-            .with_fork_boundary(boundary.clone());
+            .with_checkpoint_boundary(boundary.clone());
         let slot = crate::kernel::HostedCellPublications::default();
         slot.publish_provider_transport(actor, control.clone());
         slot.accept(&control);
@@ -1139,7 +1106,7 @@ mod tests {
             .same_owner(&original));
         let wrong = WorkbenchRequest::from_cell_input("different effects")
             .with_execution_id(execution.clone())
-            .with_fork_boundary(boundary.clone());
+            .with_checkpoint_boundary(boundary.clone());
         assert_eq!(
             journal.lookup_for_provider_control(&execution, &wrong, Some(key), Some(&retry)),
             Err(WorkbenchReplayFailure::DifferentInput)
@@ -1222,25 +1189,22 @@ mod tests {
     fn abort_owner_refuses_nested_and_foreign_operations_before_checkpoint_extraction() {
         use tidepool_codegen::scope::ScopeId;
         use tidepool_repr::SessionId;
-        use tidepool_runtime::session::WorkbenchForkBoundary;
+        use tidepool_runtime::session::ContextCheckpointBoundary;
 
         let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
-        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
+        let checkpoints = crate::ActorAdmissionRegistry::new();
         let actor = crate::ActorRef::first(crate::ActorId(1));
         let boundary =
-            WorkbenchForkBoundary::external("thread".into(), "turn".into(), "call".into());
+            ContextCheckpointBoundary::external("thread".into(), "turn".into(), "call".into());
         assert!(
-            WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
-                groups.has_abort_work_at_boundary(actor, &boundary)
-            })
-            .unwrap()
-            .is_none()
+            WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || false)
+                .unwrap()
+                .is_none()
         );
-        assert!(!groups.has_abort_work_at_boundary(actor, &boundary));
-        let token = groups.capture_checkpoint(
+        let token = checkpoints.capture_checkpoint(
             "research".into(),
             actor,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::default(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
@@ -1276,9 +1240,9 @@ mod tests {
             let error = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
                 assert!(
                     journal.try_lock().is_some(),
-                    "read-only registry query must run unlocked"
+                    "pending-work observation must run outside the journal lock"
                 );
-                groups.has_abort_work_at_boundary(actor, &boundary)
+                true
             })
             .err()
             .expect("pending custody needs its exact original owner");
@@ -1286,8 +1250,7 @@ mod tests {
                 error.detail,
                 "output abort has no exact admitted invocation owner"
             );
-            assert!(groups.has_abort_work_at_boundary(actor, &boundary));
-            assert!(groups.checkpoint(&token, SessionId(7)).is_ok());
+            assert!(checkpoints.checkpoint(&token, SessionId(7)).is_ok());
         }
     }
 
@@ -1295,7 +1258,7 @@ mod tests {
     fn abort_cleanup_survives_retry_without_reextracting_obligations() {
         use tidepool_codegen::scope::ScopeId;
         use tidepool_repr::SessionId;
-        use tidepool_runtime::session::WorkbenchForkBoundary;
+        use tidepool_runtime::session::ContextCheckpointBoundary;
 
         let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
         let invocation = crate::resident_tools::WorkbenchCallKey::from(
@@ -1314,13 +1277,13 @@ mod tests {
             Some(&invocation),
         );
         let actor = crate::ActorRef::first(crate::ActorId(1));
-        let groups = crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default());
+        let checkpoints = crate::ActorAdmissionRegistry::new();
         let boundary =
-            WorkbenchForkBoundary::external("thread".into(), "turn".into(), "call".into());
-        let token = groups.capture_checkpoint(
+            ContextCheckpointBoundary::external("thread".into(), "turn".into(), "call".into());
+        let token = checkpoints.capture_checkpoint(
             "research".into(),
             actor,
-            crate::EffectiveRole::root(),
+            crate::ActorCapabilities::default(),
             None,
             None,
             crate::CheckpointSourceLayer::default(),
@@ -1328,19 +1291,17 @@ mod tests {
             ScopeId(3),
             boundary.clone(),
         );
-        let owner = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
-            groups.has_abort_work_at_boundary(actor, &boundary)
-        })
-        .unwrap()
-        .unwrap();
+        let owner = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || true)
+            .unwrap()
+            .unwrap();
         let cleanup = owner.collect_cleanup(|| {
             assert!(
                 journal.try_lock().is_some(),
-                "fork extraction must run unlocked"
+                "checkpoint extraction must run unlocked"
             );
             BoundaryAbortCleanup {
                 children: Vec::new(),
-                scopes: groups
+                scopes: checkpoints
                     .settle_checkpoints(actor, &boundary, false)
                     .into_iter()
                     .map(|(_, scope)| scope)
@@ -1348,24 +1309,20 @@ mod tests {
             }
         });
         assert_eq!(cleanup.scopes, vec![ScopeId(3)]);
-        assert!(!groups.has_abort_work_at_boundary(actor, &boundary));
         assert!(matches!(
-            groups.checkpoint(&token, SessionId(7)),
+            checkpoints.checkpoint(&token, SessionId(7)),
             Err(crate::CheckpointRefusal::CaptureFailed)
         ));
         drop(owner);
         // A failed retirement leaves the exact obligation in the admitted journal.
-        let retry = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || {
-            groups.has_abort_work_at_boundary(actor, &boundary)
-        })
-        .unwrap()
-        .unwrap();
+        let retry = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || true)
+            .unwrap()
+            .unwrap();
         let mut cleanup = retry.collect_cleanup(|| panic!("retry must not detach custody again"));
         assert_eq!(cleanup.scopes, vec![ScopeId(3)]);
         cleanup.scopes.clear();
         retry.retain_cleanup(cleanup);
         let completed = retry.collect_cleanup(|| panic!("completed abort remains idempotent"));
-        assert!(completed.children.is_empty());
         assert!(completed.scopes.is_empty());
     }
 
@@ -1448,9 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_source_stays_with_its_admitted_boundary_and_drops_after_settlement() {
-        use tidepool_codegen::scope::ScopeId;
-        use tidepool_runtime::session::{PersistentSession, WorkbenchForkBoundary};
+    fn cell_terminal_gates_checkpoint_publication_until_confirmed_full_return() {
         let invocation = crate::resident_tools::WorkbenchCallKey::from(
             exomonad_tool::ToolInvocationContext::external(
                 "thread".into(),
@@ -1460,185 +1415,7 @@ mod tests {
                 None,
             ),
         );
-        let boundary =
-            WorkbenchForkBoundary::external("thread".into(), "turn".into(), "call".into());
-        let other = WorkbenchForkBoundary::external("thread".into(), "turn".into(), "other".into());
-        let execution = WorkbenchExecutionId::from_digest([19; 16]);
-        let request = WorkbenchRequest::from_cell_input("pure ()")
-            .with_execution_id(execution.clone())
-            .with_fork_boundary(boundary.clone());
-        let mut session = PersistentSession::new(None, 64 * 1024);
-        let source = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
-        let weak = Arc::downgrade(&source);
-        let mut journal = WorkbenchExecutions::default();
-        journal.begin(&execution, request.clone(), Some(&invocation));
-        assert!(journal
-            .fork_source_at_boundary(&boundary)
-            .unwrap()
-            .is_none());
-        journal.retain_fork_source(
-            &execution,
-            Some(&invocation),
-            crate::resident_workbench::PublishedForkSource {
-                lexical: Arc::clone(&source),
-                session: tidepool_repr::SessionId(1),
-                public_scope: ScopeId::ROOT,
-                public_epoch: 0,
-                machine_incarnation: None,
-            },
-        );
-        assert!(journal.fork_source_at_boundary(&other).unwrap().is_none());
-        assert!(!journal.cell_allows_publication(&boundary));
-        journal.record(
-            execution.clone(),
-            request,
-            Err(crate::KernelInvocationFailure::Failed {
-                receipts: Vec::new(),
-                actor: crate::ActorRef::first(crate::ActorId(1)),
-                detail: "fixture cleanup is not confirmed".into(),
-                diagnostic: None,
-            }),
-            crate::WorkbenchCancellationOutcome::NotSleeping {
-                execution: execution.clone(),
-            },
-            Some(&invocation),
-        );
-        assert!(Arc::ptr_eq(
-            &journal.fork_source_at_boundary(&boundary).unwrap().unwrap(),
-            &source
-        ));
-        assert!(!journal.cell_allows_publication(&boundary));
-        drop(source);
-        journal.release_fork_source(&other);
-        assert!(weak.upgrade().is_some());
-        journal.release_fork_source(&boundary);
-        assert!(weak.upgrade().is_none());
-        assert!(journal
-            .fork_source_at_boundary(&boundary)
-            .unwrap()
-            .is_none());
-        let source = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
-        let weak = Arc::downgrade(&source);
-        journal.retain_fork_source(
-            &execution,
-            Some(&invocation),
-            crate::resident_workbench::PublishedForkSource {
-                lexical: source,
-                session: tidepool_repr::SessionId(1),
-                public_scope: ScopeId::ROOT,
-                public_epoch: 1,
-                machine_incarnation: None,
-            },
-        );
-        journal.release_all_fork_sources();
-        assert!(weak.upgrade().is_none());
-        assert_eq!(
-            journal.terminal_entries().len(),
-            1,
-            "retirement preserves replay metadata"
-        );
-    }
-
-    #[test]
-    fn nested_fork_sources_follow_publication_epoch_instead_of_callback_order() {
-        use crate::resident_workbench::PublishedForkSource;
-        use tidepool_codegen::scope::ScopeId;
-        use tidepool_runtime::session::{PersistentSession, WorkbenchForkBoundary};
-        let boundary =
-            WorkbenchForkBoundary::external("thread".into(), "turn".into(), "call".into());
-        let other = WorkbenchForkBoundary::external("thread".into(), "turn".into(), "other".into());
-        let key = |local: &str, original: &str| {
-            crate::resident_tools::WorkbenchCallKey::from(
-                exomonad_tool::ToolInvocationContext::external(
-                    "thread".into(),
-                    "turn".into(),
-                    local.into(),
-                    Some(original.into()),
-                    None,
-                ),
-            )
-        };
-        let mut session = PersistentSession::new(None, 64 * 1024);
-        let capsules = (1..=3)
-            .map(|epoch| PublishedForkSource {
-                lexical: session.retain_lexical_scope(ScopeId::ROOT).unwrap(),
-                session: tidepool_repr::SessionId(1),
-                public_scope: ScopeId::ROOT,
-                public_epoch: epoch,
-                machine_incarnation: None,
-            })
-            .collect::<Vec<_>>();
-        let keys = [
-            key("inner-a", "call"),
-            key("inner-b", "call"),
-            key("other", "other"),
-        ];
-        let executions = (1..=3)
-            .map(|id| WorkbenchExecutionId::from_digest([id; 16]))
-            .collect::<Vec<_>>();
-        for retention_order in [[0, 1, 2], [2, 1, 0]] {
-            let mut journal = WorkbenchExecutions::default();
-            for index in retention_order {
-                let requested_boundary = if index == 2 { &other } else { &boundary };
-                journal.begin(
-                    &executions[index],
-                    WorkbenchRequest::from_cell_input("pure ()")
-                        .with_execution_id(executions[index].clone())
-                        .with_fork_boundary(requested_boundary.clone()),
-                    Some(&keys[index]),
-                );
-                journal.retain_fork_source(
-                    &executions[index],
-                    Some(&keys[index]),
-                    capsules[index].clone(),
-                );
-            }
-            assert!(Arc::ptr_eq(
-                &journal.fork_source_at_boundary(&boundary).unwrap().unwrap(),
-                &capsules[1].lexical
-            ));
-            assert!(Arc::ptr_eq(
-                &journal.fork_source_at_boundary(&other).unwrap().unwrap(),
-                &capsules[2].lexical
-            ));
-            assert!(
-                !journal.cell_allows_publication(&boundary),
-                "source observations never replace terminal gates"
-            );
-            let tied = journal
-                .0
-                .get_mut(&WorkbenchReplayKey::Hosted(keys[0].clone()))
-                .unwrap()
-                .fork_source
-                .as_mut()
-                .unwrap();
-            tied.public_epoch = 2;
-            assert!(journal.fork_source_at_boundary(&boundary).is_err());
-            let conflicting = journal
-                .0
-                .get_mut(&WorkbenchReplayKey::Hosted(keys[0].clone()))
-                .unwrap()
-                .fork_source
-                .as_mut()
-                .unwrap();
-            conflicting.public_epoch = 1;
-            conflicting.session = tidepool_repr::SessionId(2);
-            assert!(journal.fork_source_at_boundary(&boundary).is_err());
-        }
-    }
-
-    #[test]
-    fn cell_terminal_gates_deferred_publication_until_confirmed_full_return() {
-        let invocation = crate::resident_tools::WorkbenchCallKey::from(
-            exomonad_tool::ToolInvocationContext::external(
-                "thread".into(),
-                "turn".into(),
-                "call".into(),
-                Some("call".into()),
-                None,
-            ),
-        );
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "call".into(),
@@ -1662,7 +1439,7 @@ mod tests {
         exit.cleanup_confirmed = true;
         journal.retain_cell_terminal(&execution, Some(&invocation), exit);
         assert!(journal.cell_allows_publication(&boundary));
-        let sibling = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let sibling = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "sibling".into(),
@@ -1681,7 +1458,7 @@ mod tests {
                 None,
             ),
         );
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "call".into(),
@@ -1721,8 +1498,8 @@ mod tests {
         ] {
             let control = crate::WorkbenchExecutionControl::untracked();
             assert!(!control.has_context_binding());
-            let request = WorkbenchRequest::from_cell_input("unfoldDeferred group branches")
-                .with_execution_id(execution.clone());
+            let request =
+                WorkbenchRequest::from_cell_input("pure True").with_execution_id(execution.clone());
             let mut journal = WorkbenchExecutions::default();
             journal.begin(&execution, request.clone(), Some(&invocation));
             let exit = crate::CellExit::from_reply(execution.clone(), &reply, cleanup, cancelled);
@@ -1771,7 +1548,7 @@ mod tests {
     }
 
     #[test]
-    fn context_binding_and_deferred_ledger_share_the_same_sealed_cell_exit() {
+    fn context_binding_and_invocation_ledger_share_the_same_sealed_cell_exit() {
         use crate::HostedContextBinding;
         let invocation = crate::resident_tools::WorkbenchCallKey::from(
             exomonad_tool::ToolInvocationContext::external(
@@ -1782,7 +1559,7 @@ mod tests {
                 None,
             ),
         );
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "call".into(),
@@ -1855,11 +1632,13 @@ mod tests {
         let mut journal = WorkbenchExecutions::default();
         journal.begin(&execution, request.clone(), Some(&invocation));
         assert!(matches!(
-            journal.at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary::external(
-                "thread".into(),
-                "turn".into(),
-                "outer".into()
-            )),
+            journal.at_boundary(
+                &tidepool_runtime::session::ContextCheckpointBoundary::external(
+                    "thread".into(),
+                    "turn".into(),
+                    "outer".into()
+                )
+            ),
             Some(WorkbenchBoundaryRecord::Unconfirmed)
         ));
         journal.record(
@@ -1872,29 +1651,33 @@ mod tests {
             Some(&invocation),
         );
         assert!(matches!(
-            journal.at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary::external("thread".into(), "turn".into(), "outer".into())),
+            journal.at_boundary(&tidepool_runtime::session::ContextCheckpointBoundary::external("thread".into(), "turn".into(), "outer".into())),
             Some(WorkbenchBoundaryRecord::Terminal(found)) if found == reply
         ));
         assert!(journal
-            .at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary::external(
-                "thread".into(),
-                "turn".into(),
-                "other".into()
-            ))
+            .at_boundary(
+                &tidepool_runtime::session::ContextCheckpointBoundary::external(
+                    "thread".into(),
+                    "turn".into(),
+                    "other".into()
+                )
+            )
             .is_none());
         assert!(journal
-            .at_boundary(&tidepool_runtime::session::WorkbenchForkBoundary::external(
-                "thread".into(),
-                "later-turn".into(),
-                "outer".into()
-            ))
+            .at_boundary(
+                &tidepool_runtime::session::ContextCheckpointBoundary::external(
+                    "thread".into(),
+                    "later-turn".into(),
+                    "outer".into()
+                )
+            )
             .is_none());
     }
 
     #[test]
     fn several_nested_replies_do_not_prove_the_original_operation_result() {
         let mut journal = WorkbenchExecutions::default();
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "turn".into(),
             "outer".into(),

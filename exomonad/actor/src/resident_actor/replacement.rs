@@ -29,7 +29,7 @@ pub(super) struct RetainedHandler {
 
 pub(super) struct ReplacementCustody {
     sources: Option<crate::request::sources::ActorSourceConnections>,
-    worktree: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
+    worktree: Option<Arc<dyn crate::WorkspaceCustody>>,
     retained: Vec<RetainedHandler>,
 }
 
@@ -303,12 +303,13 @@ where
         let crate::start::CapturedChildLaunch {
             lifetime: _,
             mut descriptor,
+            spawn: _,
             entry,
             launch_worktrees,
-            fork_workspace,
+            record_workspace,
             seed,
         } = definition.child;
-        if launch_worktrees != self.launch_worktrees || fork_workspace.is_some() {
+        if !launch_worktrees.is_empty() || record_workspace.is_some() {
             return Err(reject(
                 "replacement must preserve the actor's worktree custody",
             ));

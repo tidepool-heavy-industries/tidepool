@@ -1,11 +1,11 @@
 {-# LANGUAGE TypeApplications #-}
 module HydratedSiteExpr where
 
-import Tidepool.Actors.Unfold (child)
+import Tidepool.Actors.Internal.Agent (request)
 
 {-# OPAQUE __result #-}
 __result :: Char -> Maybe Bool
-__result = child @Bool @Int @Char @String
+__result = request @Bool @Char
 
 result :: Maybe Bool
 result = __result 'r'

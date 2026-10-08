@@ -2,9 +2,9 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeOperators #-}
 
--- Project-sized defaults for authored actor records. Runtime roles, scheduling
--- and resource authority remain with Exomonad's existing owners.
-module Exomonad.Contrib.Actors (CoordinationEffects, coordinationActor, releaseGroup) where
+-- Project-sized defaults for authored actor records. Scheduling and resource
+-- authority remain with Exomonad's existing owners.
+module Exomonad.Contrib.Actors (CoordinationEffects, coordinationActor) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
@@ -20,10 +20,3 @@ coordinationActor
   -> api (Definition (Handler (ActorState api) (CoordinationEffects api)))
   -> ActorSpec api (CoordinationEffects api)
 coordinationActor name = R.definition name (Actor.Selected knownEffects)
-
--- The cleanup owner checks exact revisions and admission while releasing.
--- The receipt retains active/uncertain members; this does not stop them first.
-releaseGroup
-  :: (Member AgentInspection effects, Member AgentControl effects)
-  => ForkGroupHandle -> Eff effects CleanupReceipt
-releaseGroup group = planCleanup group >>= executeCleanup

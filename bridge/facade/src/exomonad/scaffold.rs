@@ -14,7 +14,7 @@ include!(concat!(env!("OUT_DIR"), "/scaffold_package.rs"));
 // Keep this in step with this repository's .exomonad/workspace gitlink.
 // Both the qualified Git bundle and DEFAULT_WORKSPACE_URL must install the
 // commit this release compiled and checked, even if the remote advances.
-pub(super) const DEFAULT_WORKSPACE_REV: &str = "9dcdd1705effa4248aa816f43158317446f04c3c";
+pub(super) const DEFAULT_WORKSPACE_REV: &str = "6eb5d0de48e7fa309885a57fe020db54e673cac6";
 
 /// The configuration `exomonad new` writes. Its modules, recipes, model aliases
 /// and prompt files match the shipped workspace; only repository-specific
@@ -28,10 +28,6 @@ planner = "gpt-6-astra"
 executor = "gpt-6.1-sol"
 luna = "gpt-6-luna"
 
-[research]
-default_depth = 1
-maximum_depth = 8
-
 [haskell]
 source_roots = [".", "workspace"]
 modules = [
@@ -41,13 +37,13 @@ modules = [
   "Project.FieldNotes", "Project.RebaseRouter", "Project.SupervisionProfiles",
   "Project.Service", "Project.Repository", "Exomonad.Contrib.CheckResults",
   "Exomonad.Contrib.PrepareContinue", "Exomonad.Contrib.RetainedEvidence", "Project.AssumptionWatch",
-  "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview",
+  "Project.ParallelInvestigate", "Project.SlowCommandWatch", "Project.Interview", "Project.WorkflowExamples",
   "Exomonad.Contrib.CheckPlan", "Project.TestEvidence", "Exomonad.Contrib.ReviewFlow",
   "Project.BaselineIncorporation", "Project.WorkflowReminders", "Project.WorkflowReminderExamples",
 ]
 spec = "AgentSpec.agentSpec"
 checks = [
-  "Project.RecursiveWorkChecks.nestedBatches",
+  "Project.RecursiveWorkChecks.nestedRequests",
   "Project.RecursiveWorkChecks.revisedReview",
   "Project.DecisionAnswerChecks.routing",
   "Project.DecisionAnswerChecks.replay",

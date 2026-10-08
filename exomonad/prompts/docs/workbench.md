@@ -5,8 +5,9 @@ effectful functions with Kleisli composition (`>=>`) or `do`. The notebook's
 they sequence effects, while `Tidepool.Async` overlaps independent waits.
 `Control.Lens` is in scope for reusable focuses, updates and traversals.
 
-Agent RPC carries your assignment and reply types. Record actors interpret
-typed calls and events against persistent state; Jev alternatives can carry
+Typed agent request sites select their own input and reply types; the installed
+AgentSpec supplies tools and effects. Record actors interpret typed calls and
+events against persistent state; Jev alternatives can carry
 values, closures or actions into their next transition. Keep one-off definitions
 in the notebook and adapt them as you learn. See `exomonad-workbench` for the
 composing vocabulary, `doc actors` for stateful machines and `doc jev` for semantic
@@ -44,19 +45,16 @@ asynchronous-only host may expose no synchronous alternative. When a typed
 agent spec declares a synchronous notebook such as `haskell_sync`, that cell
 waits for completion before its caller continues to the next inference. The
 default notebooks share the same effects; the spec can declare separate effect
-profiles. The pause applies to that caller; it does not wait for actor-owned
-deferred children. Only an explicit synchronous profile can include
+profiles. The pause applies to that caller; independently owned work follows its own
+lifecycle. Only an explicit synchronous profile can include
 `ContextReadWrite`, which provides context
 editing, `setNextModel`, and `setNextEffort`.
 
 Context, next-model, and next-effort edits staged by a synchronous cell commit
 together only when the whole cell succeeds. A failed cell does not commit those edits, but it
 cannot undo external effects already issued, such as a command or provider
-request. For parent curation followed by delegation, finish the synchronous
-parent invocation with `unfoldDeferred`; its actor-owned children then start
-from the committed context. Do not await those children inside the invocation
-that creates them. `bridge/haskell/examples/model-turns/ContextWorkflow.hs`
-contains compiled examples of this workflow. `setNextModel` takes `Text`: the
+request. Captured contexts are snapshots. To use a completed edit as another actor’s
+starting context, explicitly capture and pass that context. `setNextModel` takes `Text`: the
 host resolves a configured alias first, then treats an unmatched value as a
 literal model identifier. `C.setNextEffort C.High` changes the next request’s
 reasoning effort while preserving the model and existing context prefix.
@@ -88,10 +86,9 @@ nonopaque completed exchanges; opaque group removal is refused.
 
 Same-model continuation forwards opaque reasoning unchanged, although edited
 facts may make earlier conclusions stale. Unsupported cross-model opaque history
-fails explicitly. Actor-owned background work may outlive successful settlement;
-deferred children inherit committed context and Haskell bindings, and cannot be
-awaited inside their creating cell. External effects already issued by a failed
-cell are not rolled back.
+fails explicitly. Explicitly owned background work may outlive successful
+settlement. Other agents receive only the context and dependencies selected for
+them. External effects already issued by a failed cell are not rolled back.
 
 Launching actor-owned background work does not prevent a normally completed
 cell from committing. The editing computation itself must finish successfully;

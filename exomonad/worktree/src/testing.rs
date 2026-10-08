@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::binding::{AgentRef, Binding, BindingState};
+use crate::binding::{AgentRef, Binding, BindingState, WorkspaceAccess};
 use crate::error::WorktreeError;
 use crate::git::GitCli;
 use crate::id::{BranchName, GitOid, WorktreeId};
@@ -37,9 +37,10 @@ pub fn binding_row(
     worktree: WorktreeId,
     agent: AgentRef,
     state: BindingState,
+    access: WorkspaceAccess,
     bound_at_ms: i64,
 ) -> Binding {
-    Binding::new(worktree, agent, state, bound_at_ms)
+    Binding::new(worktree, agent, state, access, bound_at_ms)
 }
 
 /// A real git repository in a temporary directory, deleted when dropped.

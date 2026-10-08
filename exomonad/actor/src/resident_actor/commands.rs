@@ -1,6 +1,7 @@
 use super::*;
 use crate::command_jobs::CommandControl;
 use crate::generated::commands::CommandsReq;
+use crate::request::ResourceCleanupOwner;
 use tidepool_bridge_effects::CommandError;
 
 /// The owner settles the command operation before evaluating its Haskell continuation.
@@ -29,11 +30,228 @@ pub(super) fn disposition<T>(result: &Result<T, CommandError>) -> WorkbenchOpera
     }
 }
 
+struct CommandRetention {
+    kernel: KernelContext,
+    jobs: crate::command_jobs::CommandJobs,
+    caller: ActorRef,
+    id: String,
+    marker: ResourceCleanupOwner,
+    source: Option<Arc<InvocationWork>>,
+    destination: Option<Arc<InvocationWork>>,
+    destination_run: bool,
+}
+
+impl CommandRetention {
+    async fn commit(self) -> Result<(), CommandError> {
+        let Self {
+            kernel,
+            jobs,
+            caller,
+            id,
+            marker,
+            source,
+            destination,
+            destination_run,
+        } = self;
+        if destination_run {
+            // Backend supply captures the original principal and filesystem
+            // grants. Until then, retirement still belongs to the old owner.
+            jobs.supplied(&id).await?;
+            return match source {
+                Some(source) => source.transfer_command_to_run(&jobs, &kernel, caller, &id),
+                None => jobs.transfer_cleanup_owner_in_context(
+                    &kernel,
+                    caller,
+                    &id,
+                    &marker,
+                    ResourceCleanupOwner::Run,
+                    |_| (),
+                ),
+            };
+        }
+        match (source, destination) {
+            (Some(source), Some(destination)) => {
+                source.transfer_command_to_owner(&destination, &jobs, caller, &id)
+            }
+            (Some(source), None) => source.transfer_command_to_actor(&jobs, caller, &id),
+            (None, Some(destination)) if marker == ResourceCleanupOwner::Run => {
+                destination.adopt_run_command(&jobs, &kernel, caller, &id)
+            }
+            (None, Some(destination)) => destination.adopt_actor_command(&jobs, caller, &id),
+            (None, None) => jobs.transfer_cleanup_owner_in_context(
+                &kernel,
+                caller,
+                &id,
+                &marker,
+                ResourceCleanupOwner::Actor,
+                |_| (),
+            ),
+        }
+    }
+}
+
 impl<H, O> ResidentKernelBehavior<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    pub(super) fn prepare_command_ownership(
+        &self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        effect_owner: &CurrentEffectOwner<'_>,
+        continuation: ResidentHole,
+        request: CommandsReq,
+    ) -> futures_util::future::BoxFuture<
+        'static,
+        Result<ResidentOutcome, ResidentActorWorkbenchError>,
+    > {
+        let permitted = self
+            .descriptor
+            .capabilities()
+            .effect_keys()
+            .contains(&crate::ActorEffectKey::Commands);
+        let environment = self.environment.clone();
+        let context = context.clone();
+        let kernel = kernel.clone();
+        match request {
+            CommandsReq::CommandRetainWith(id, lifetime) => {
+                let result = if permitted {
+                    self.retain_command(
+                        &kernel,
+                        context.actor,
+                        &context,
+                        effect_owner,
+                        &id,
+                        lifetime,
+                    )
+                } else {
+                    Err(CommandError::CommandUnauthorized)
+                };
+                Box::pin(async move {
+                    let result = match result {
+                        Ok(prepared) => prepared.commit().await,
+                        Err(error) => Err(error),
+                    };
+                    environment
+                        .runner
+                        .resume_value(context, continuation, result)
+                        .await
+                })
+            }
+            CommandsReq::CommandStartOwnedWith(spec, lifetime) => {
+                let selected = if permitted {
+                    self.command_resource_owner(&context, effect_owner, lifetime)
+                } else {
+                    Err(CommandError::CommandUnauthorized)
+                };
+                Box::pin(async move {
+                    let owner = match selected {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            return environment
+                                .runner
+                                .resume_value(context, continuation, Err::<String, _>(error))
+                                .await
+                        }
+                    };
+                    if lifetime == crate::WorkerLifetime::RunOwned {
+                        let mut result =
+                            super::command_settlement::CommandSettlements::new(&environment)
+                                .start(&kernel, spec, false, None)
+                                .await;
+                        if let Ok(id) = &result {
+                            let transfer = match environment.commands.supplied(id).await {
+                                Ok(()) => environment.commands.transfer_cleanup_owner_in_context(
+                                    &kernel,
+                                    context.actor,
+                                    id,
+                                    &ResourceCleanupOwner::Actor,
+                                    ResourceCleanupOwner::Run,
+                                    |_| (),
+                                ),
+                                Err(error) => Err(error),
+                            };
+                            if let Err(error) = transfer {
+                                drop(
+                                    environment
+                                        .commands
+                                        .control(context.actor, id, CommandControl::Cancel)
+                                        .await,
+                                );
+                                result = Err(error);
+                            }
+                        }
+                        return environment
+                            .runner
+                            .resume_value(context, continuation, result)
+                            .await;
+                    }
+                    resolve_command(
+                        &environment,
+                        &kernel,
+                        &context,
+                        continuation,
+                        CommandsReq::CommandStartWith(spec),
+                        permitted,
+                        None,
+                        owner.as_deref(),
+                    )
+                    .await
+                    .outcome
+                })
+            }
+            _ => unreachable!("command ownership operation"),
+        }
+    }
+
+    fn command_resource_owner(
+        &self,
+        context: &ActorSessionContext,
+        effect_owner: &CurrentEffectOwner<'_>,
+        lifetime: crate::WorkerLifetime,
+    ) -> Result<Option<Arc<InvocationWork>>, CommandError> {
+        self.resolve_resource_owner(context, effect_owner, lifetime)
+            .map_err(|error| CommandError::CommandUnavailable(error.to_string()))
+    }
+
+    fn retain_command(
+        &self,
+        kernel: &KernelContext,
+        caller: ActorRef,
+        context: &ActorSessionContext,
+        effect_owner: &CurrentEffectOwner<'_>,
+        id: &str,
+        lifetime: crate::WorkerLifetime,
+    ) -> Result<CommandRetention, CommandError> {
+        let jobs = &self.environment.commands;
+        let marker = jobs.cleanup_owner(caller, id)?;
+        let destination = self.command_resource_owner(context, effect_owner, lifetime)?;
+        let source = match &marker {
+            ResourceCleanupOwner::Actor | ResourceCleanupOwner::Run => None,
+            marker => Some(
+                self.retained_scope_roots()
+                    .into_iter()
+                    .find_map(|root| root.find_command_owner(marker))
+                    .ok_or_else(|| {
+                        CommandError::CommandUnavailable(
+                            "command cleanup owner is no longer retained".into(),
+                        )
+                    })?,
+            ),
+        };
+        Ok(CommandRetention {
+            kernel: kernel.clone(),
+            jobs: jobs.clone(),
+            caller,
+            id: id.into(),
+            marker,
+            source,
+            destination,
+            destination_run: lifetime == crate::WorkerLifetime::RunOwned,
+        })
+    }
+
     pub(super) async fn resolve_command(
         &mut self,
         kernel: &KernelContext,
@@ -44,7 +262,7 @@ where
     ) -> CommandResolution {
         let permitted = self
             .descriptor
-            .effective_role()
+            .capabilities()
             .effect_keys()
             .contains(&crate::ActorEffectKey::Commands);
         resolve_command(
@@ -138,6 +356,11 @@ where
                     }
                     started
                 })
+            }
+            CommandsReq::CommandStartOwnedWith(..) | CommandsReq::CommandRetainWith(..) => {
+                answer!(Err::<String, _>(CommandError::CommandUnavailable(
+                    "command ownership requires its admitted resource owner".into(),
+                )))
             }
             CommandsReq::CommandStatusWith(id) => answer!(jobs.status(owner, &id).await),
             CommandsReq::CommandAwaitWith(id, milliseconds) => {
@@ -259,6 +482,13 @@ where
     }
 }
 
+pub(super) fn ownership_operation(request: &CommandsReq) -> bool {
+    matches!(
+        request,
+        CommandsReq::CommandStartOwnedWith(..) | CommandsReq::CommandRetainWith(..)
+    )
+}
+
 pub(super) fn waits_for_completion(request: &CommandsReq) -> bool {
     matches!(
         request,
@@ -292,5 +522,73 @@ async fn wait_for_observation<F: std::future::Future>(
             control.request_cancellation();
             Err(format!("command observation interrupted by actor retirement: {}", terminal.summary))
         }
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use crate::resident_actor::invocation_work::tests::Fixture;
+    use std::time::Duration;
+    use tidepool_bridge_effects::{CommandInput, CommandSourceCapture, CommandSpec};
+
+    #[tokio::test]
+    async fn run_retention_waits_for_original_backend_admission_before_publication() {
+        let fixture = Fixture::start().await;
+        let caller = fixture.actor.identity();
+        let jobs = fixture.environment.commands.clone();
+        let (id, backend) = jobs
+            .start(
+                &fixture.kernel,
+                CommandSpec {
+                    argv: vec!["admission-fixture".into()],
+                    directory: None,
+                    environment: vec![],
+                    memory: 64 * 1024 * 1024,
+                    input: CommandInput::ClosedInput,
+                    source_capture: CommandSourceCapture::NoCapture,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let prepared = CommandRetention {
+            kernel: fixture.kernel.clone(),
+            jobs: jobs.clone(),
+            caller,
+            id: id.clone(),
+            marker: ResourceCleanupOwner::Actor,
+            source: None,
+            destination: None,
+            destination_run: true,
+        };
+        let mut transfer = tokio::spawn(prepared.commit());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut transfer)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            jobs.cleanup_owner(caller, &id).unwrap(),
+            ResourceCleanupOwner::Actor
+        );
+        backend.supply(Err(CommandError::CommandUnavailable(
+            "backend admission refused".into(),
+        )));
+        tokio::time::timeout(Duration::from_secs(1), transfer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(jobs.owner(&id).unwrap(), caller);
+        assert_eq!(
+            jobs.cleanup_owner(caller, &id).unwrap(),
+            ResourceCleanupOwner::Run
+        );
+        assert!(matches!(
+            jobs.status(caller, &id).await.unwrap(),
+            tidepool_bridge_effects::CommandStatus::CommandFinished(_)
+        ));
+        fixture.finish().await;
     }
 }

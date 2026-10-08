@@ -15,7 +15,7 @@
 -- merely because a worker named it.
 module Project.BaselineIncorporation
   ( BaselineChange (..), Affected (..), OpenedEpisode (..), EpisodeHandle (..)
-  , BaselineAssignment (..), lunaBaselineTaskFrom
+  , BaselineAssignment (..), baselineContext
   , Collector (..), CollectorState (..), OwnerState (..)
   , UpdateDelivery (..), IncorporationReport (..), ReportResult (..)
   , openBaselineEpisode, beginBaselineEpisode, refreshBaselineEpisode, episodeView
@@ -40,7 +40,7 @@ import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Inspection (Display (..), displayRecord)
 import Tidepool.Worktree (renderGitOid)
 import Exomonad.Contrib.Types
-import Project.Work (decisionContext, lunaTaskInputFrom, taskContext)
+import Project.Work (decisionContext, taskContext)
 
 data BaselineChange = BaselineChange
   { baselineBefore :: GitOid
@@ -49,11 +49,11 @@ data BaselineChange = BaselineChange
   , baselineDecision :: AcceptedDecision
   } deriving (Show, Eq)
 
--- | The caller owns each Response. The worker is its exact target actor; the
+-- | The caller owns each Request. The worker is its exact target actor; the
 -- question is the specific affected decision, not a broad plan topic.
 data Affected result = Affected
   { affectedLabel :: Text
-  , affectedResponse :: Response result
+  , affectedResponse :: Request result
   , affectedWorker :: AgentRef
   , affectedTask :: Task
   , affectedQuestion :: Question
@@ -114,7 +114,7 @@ data OpenedEpisode = OpenedEpisode
 -- | A selected-context Luna receives the task and the live collector handle
 -- together. The handle is deliberately absent from rendered task context:
 -- it is an opaque capability read from typed sessionInput, not an address for
--- the model to reconstruct. Allocate the one-use handle before this fork.
+-- the model to reconstruct. Allocate the one-use handle before sending this request.
 data BaselineAssignment = BaselineAssignment
   { baselineTask :: Task
   , baselineOwnerLabel :: Text
@@ -132,12 +132,6 @@ baselineContext input = taskContext (baselineTask input) <> Text.unlines
   [ "Incorporation receipts: if your owner sends an accepted baseline update, read the typed collector handle in baselineCollector sessionInput."
   , "Use baselineOwnerLabel sessionInput when calling submitIncorporation. A reported check name is evidence to review, not executed verification."
   ]
-
-lunaBaselineTaskFrom
-  :: Label -> ForkEffort -> WorktreeSeed -> BaselineAssignment
-  -> Branch CodingEffects BaselineAssignment result
-lunaBaselineTaskFrom label effort source =
-  lunaTaskInputFrom label effort source baselineContext
 
 data EpisodeHandle = EpisodeHandle
   { episodeActor :: R.ActorHandle Collector
@@ -174,16 +168,16 @@ validateBaselineFor :: BaselineChange -> Task -> Question -> [Text] -> Either Te
 validateBaselineFor change task question checks =
   validateCore change [("coordinator", task, question, checks)]
 
--- | Allocate the handle before workers fork. No baseline is selected yet.
--- This costs one resident actor and one typed assignment field per anticipated
--- episode; finish an unused handle. A handle created after a fork cannot be
--- retroactively inserted into that child's assignment.
+-- | Allocate the handle before requesting worker incorporation. No baseline is selected yet.
+-- This costs one resident actor and one typed input field per anticipated
+-- episode; finish an unused handle. An idle worker can receive this handle in
+-- a later typed request without changing its captured context.
 openBaselineEpisode :: Member Actor effects => AgentRef -> Eff effects OpenedEpisode
 openBaselineEpisode owner = do
   actor <- R.start (collector (CollectorState Nothing owner False []))
   pure (OpenedEpisode actor owner)
 
--- | Open the actor before forking workers so its handle can be assigned to
+-- | Open the actor before sending worker requests so its handle can be passed to
 -- their selected context. Begin after the caller owns active responses. One opened
 -- collector admits one accepted change; it is not a reusable episode service.
 -- An update failure is retained; it does not create a replacement request.
@@ -350,11 +344,11 @@ routeQuestion parent question affected = case exactOwners question affected of
     let routed =
           case answer of
             Left failure -> Left ("question ownership unresolved: " <> Text.pack (show failure))
-            Right response -> case J.settle J.careful response.route
+            Right response -> case J.settle J.careful (J.answers response).route
               (#unresolved (\() -> Left "question ownership unresolved; parent must choose")
                 J..| #owner (\_ row -> Right [affectedLabel row])) of
               Left doubt -> Left ("question ownership unresolved: " <> doubt.why)
-              Right (J.Settled route) -> route
+              Right settled -> let route = J.settledValue settled in route
     case routed of
       Left reason -> do
         notified <- sendMessage parent (reason <> ": " <> questionKey question)

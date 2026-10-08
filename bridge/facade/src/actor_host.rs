@@ -55,6 +55,7 @@ mod embedded_recovery;
 mod embedded_recovery_tests;
 mod embedded_reflect;
 mod embedded_service;
+mod form_output;
 #[cfg(test)]
 mod scaffold_admission_tests;
 
@@ -91,9 +92,11 @@ mod prepared_runtime_acceptance;
 pub(crate) use overlay_resource::valid_artifact_path;
 
 mod workspace;
+#[cfg(test)]
+mod workspace_admission_tests;
 pub mod workspace_cleanup;
 
-pub(crate) use workspace::{copy_helper_draft, initialize_helper_draft};
+pub(crate) use workspace::initialize_helper_draft;
 use workspace::{ActiveWorkspace, PreparedWorkspace};
 #[cfg(test)]
 mod fresh_child_tests;
@@ -124,7 +127,6 @@ mod jev_tests;
 #[cfg(test)]
 mod observation_budget_tests;
 #[cfg(test)]
-mod research_policy_tests;
 #[cfg(test)]
 mod source_reload_tests;
 #[cfg(test)]
@@ -142,9 +144,8 @@ use std::time::Duration;
 use exomonad_actor::{
     ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement, ActorRef, ActorTerminal,
     ActorWorkbenchSource, ExternalApplicationFailure, ExternalApplicationFailureClass,
-    ExternalFailureDisposition, ForkWorkspaceAdmission, ForkWorkspaceAdmissionError,
-    ForkWorkspaceSeed, LocalActorRef, LocalResidentDeployment, LocalResidentInstallation,
-    ResidentActorRoot, ResidentForest,
+    ExternalFailureDisposition, LocalActorRef, LocalResidentDeployment, LocalResidentInstallation,
+    ResidentActorRoot, ResidentForest, WorkspaceAdmission, WorkspaceAdmissionError,
 };
 
 use exomonad_actor::ForkEffort;
@@ -271,11 +272,17 @@ fn with_host_interpreters(
         recovery,
     ));
     forest.set_jev_backend(jev_backend(config));
-    Ok(forest.with_cell_model_factory(models))
+    Ok(forest
+        .with_cell_model_factory(models)
+        .with_form_host(form_output::host(
+            runtime.store(),
+            runtime.run_identity().to_owned(),
+            runtime.output_control_handle(),
+        )))
 }
 
 #[derive(Clone)]
-struct ActorForkWorkspaceAdmission {
+struct ActorWorkspaceAdmission {
     worktrees: Arc<Mutex<ActorWorktreeHandler>>,
     authority: ActorWorktreeAuthority,
     manager: WorktreeManager,
@@ -293,11 +300,11 @@ struct ActorWorkspaceCustody {
     inheritance_notice: Option<String>,
 }
 
-impl exomonad_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
+impl exomonad_actor::WorkspaceCustody for ActorWorkspaceCustody {
     fn transfer_to(
         &self,
         successor: ActorRef,
-    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+    ) -> Result<Arc<dyn exomonad_actor::WorkspaceCustody>, WorkspaceAdmissionError> {
         let state = self.state.lock();
         let process_absent = match state.launch {
             scoped_custody::LaunchCustody::Unclaimed => true,
@@ -307,17 +314,15 @@ impl exomonad_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
             | scoped_custody::LaunchCustody::Legacy => false,
         };
         if !process_absent || state.terminal.is_some() {
-            return Err(ForkWorkspaceAdmissionError {
+            return Err(WorkspaceAdmissionError {
                 detail: "workspace transfer requires a live actor with no possible native process"
                     .into(),
             });
         }
         let mut binding = self.binding.lock();
-        let lease = binding
-            .as_mut()
-            .ok_or_else(|| ForkWorkspaceAdmissionError {
-                detail: "workspace custody was already transferred".into(),
-            })?;
+        let lease = binding.as_mut().ok_or_else(|| WorkspaceAdmissionError {
+            detail: "workspace custody was already transferred".into(),
+        })?;
         self.bindings
             .lock()
             .transfer(
@@ -329,7 +334,7 @@ impl exomonad_actor::ForkWorkspaceCustody for ActorWorkspaceCustody {
                 ),
                 current_time_ms(),
             )
-            .map_err(|error| ForkWorkspaceAdmissionError {
+            .map_err(|error| WorkspaceAdmissionError {
                 detail: error.to_string(),
             })?;
         Ok(Arc::new(Self {
@@ -382,28 +387,29 @@ impl Drop for ActorWorkspaceCustody {
     }
 }
 
-impl ActorForkWorkspaceAdmission {
+impl ActorWorkspaceAdmission {
     fn bind_workspace(
         &self,
         actor: ActorRef,
         worktree: &str,
+        access: exomonad_worktree::WorkspaceAccess,
         workspace: Option<Arc<PreparedWorkspace>>,
         inheritance_notice: Option<String>,
-    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+    ) -> Result<Arc<dyn exomonad_actor::WorkspaceCustody>, WorkspaceAdmissionError> {
         if !WorktreeId::is_path_safe(worktree) {
-            return Err(ForkWorkspaceAdmissionError {
+            return Err(WorkspaceAdmissionError {
                 detail: "invalid custody worktree id".into(),
             });
         }
         if self
             .manager
             .lookup(&WorktreeId::from_raw(worktree))
-            .map_err(|error| ForkWorkspaceAdmissionError {
+            .map_err(|error| WorkspaceAdmissionError {
                 detail: error.to_string(),
             })?
             .is_none()
         {
-            return Err(ForkWorkspaceAdmissionError {
+            return Err(WorkspaceAdmissionError {
                 detail: "custody worktree is not registered".into(),
             });
         }
@@ -415,9 +421,10 @@ impl ActorForkWorkspaceAdmission {
             .bind(
                 &WorktreeId::from_raw(worktree),
                 &principal,
+                access,
                 current_time_ms(),
             )
-            .map_err(|error| ForkWorkspaceAdmissionError {
+            .map_err(|error| WorkspaceAdmissionError {
                 detail: error.to_string(),
             })?;
         Ok(Arc::new(ActorWorkspaceCustody {
@@ -432,74 +439,137 @@ impl ActorForkWorkspaceAdmission {
     }
 }
 
-impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
-    fn install_custody(
-        &self,
-        actor: ActorRef,
-        worktree: &str,
-        role: exomonad_actor::ActorRole,
-    ) -> Result<Arc<dyn exomonad_actor::ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
-        let custody = self.bind_workspace(actor, worktree, None, None)?;
-        // Custody alone lets the actor inspect its tree; the grant is what
-        // lets a coding-role holder merge into it. Interactive actors are
-        // granted again at `PolicyInstalled` with the same value.
-        self.authority
-            .install_grant(actor.into(), worktree_grant(role));
-        Ok(custody)
-    }
-
-    fn admit(
+impl WorkspaceAdmission for ActorWorkspaceAdmission {
+    fn prepare(
         &self,
         owner: ActorRef,
-        actor_path: String,
-        seed: ForkWorkspaceSeed,
-        _policy: exomonad_actor::ForkWorkspacePolicy,
-    ) -> exomonad_actor::ForkWorkspaceAdmissionFuture<'_> {
-        let worktrees = self.worktrees.clone();
+        selection: exomonad_actor::WorkspaceSelection,
+        requested: Option<exomonad_actor::WorkspaceAccess>,
+    ) -> exomonad_actor::WorkspaceAdmissionFuture<'_> {
         let custody = self.clone();
         Box::pin(async move {
-            let authorized = tidepool_runtime::spawn_blocking_in_span(move || {
-                let (spec, dirty_policy) = match seed {
-                    ForkWorkspaceSeed::Explicit(spec) => {
-                        let dirty_policy = spec.spec_dirty_policy;
-                        (Some(spec), dirty_policy)
+            let preparation = custody.clone();
+            let (handle, access) = tidepool_runtime::spawn_blocking_in_span(move || {
+                let authority = &preparation.authority;
+                let (tree, available) = match selection {
+                    exomonad_actor::WorkspaceSelection::SameDirectory => {
+                        if let Some(tree) = authority.bound_worktree(owner.into()) {
+                            let access = authority
+                                .workspace_access(owner.into(), &tree)
+                                .ok_or_else(|| WorkspaceAdmissionError {
+                                    detail: "caller workspace membership is unavailable".into(),
+                                })?;
+                            (tree, access)
+                        } else {
+                            let available = match authority.grant(owner.into()) {
+                                ActorWorktreeGrant::Repository => {
+                                    exomonad_worktree::WorkspaceAccess::ReadWrite
+                                }
+                                ActorWorktreeGrant::RepositoryReadOnly => {
+                                    exomonad_worktree::WorkspaceAccess::ReadOnly
+                                }
+                                _ => {
+                                    return Err(WorkspaceAdmissionError {
+                                        detail: "SameDir requires an attached caller workspace"
+                                            .into(),
+                                    })
+                                }
+                            };
+                            (
+                                preparation
+                                    .manager
+                                    .register_source_checkout()
+                                    .map_err(workspace_admission_error)?
+                                    .id()
+                                    .clone(),
+                                available,
+                            )
+                        }
                     }
-                    ForkWorkspaceSeed::CurrentCheckout(dirty_policy) => (None, dirty_policy),
+                    exomonad_actor::WorkspaceSelection::ExistingDirectory(handle) => authority
+                        .workspace_capability(&handle.raw)
+                        .map_err(workspace_admission_error)?,
+                    exomonad_actor::WorkspaceSelection::ForkDirectory(seed) => {
+                        let seed = match seed {
+                            exomonad_actor::WorkspaceSeedWire::CurrentCheckout => {
+                                let tree =
+                                    if let Some(tree) = authority.bound_worktree(owner.into()) {
+                                        tree
+                                    } else if matches!(
+                                        authority.grant(owner.into()),
+                                        ActorWorktreeGrant::Repository
+                                            | ActorWorktreeGrant::RepositoryReadOnly
+                                    ) {
+                                        preparation
+                                            .manager
+                                            .register_source_checkout()
+                                            .map_err(workspace_admission_error)?
+                                            .id()
+                                            .clone()
+                                    } else {
+                                        return Err(WorkspaceAdmissionError {
+                                            detail: "currentCheckout requires an attached backing"
+                                                .into(),
+                                        });
+                                    };
+                                tidepool_bridge_effects::WtWorktreeSource::SourceWorktree(
+                                    tidepool_bridge_effects::WtWorktreeId {
+                                        raw: tree.as_str().into(),
+                                    },
+                                )
+                            }
+                            exomonad_actor::WorkspaceSeedWire::CommittedSource(source) => source,
+                        };
+                        let authorized = preparation
+                            .worktrees
+                            .lock()
+                            .authorize_committed_fork(owner.into(), seed)
+                            .map_err(|error| WorkspaceAdmissionError {
+                                detail: tidepool_handlers::render_worktree_error(&error),
+                            })?;
+                        let handle = authorized.materialize_committed().map_err(|error| {
+                            WorkspaceAdmissionError {
+                                detail: tidepool_handlers::render_worktree_error(&error),
+                            }
+                        })?;
+                        return Ok((
+                            handle,
+                            requested.unwrap_or(exomonad_worktree::WorkspaceAccess::ReadWrite),
+                        ));
+                    }
                 };
-                worktrees
-                    .lock()
-                    .authorize_fork_workspace(owner.into(), actor_path, spec, dirty_policy)
-                    // The worktree's own sentence, not a struct dump: "source
-                    // repository is dirty: … commit or stash first, or call
-                    // allowDirtySnapshot" is exactly what the forking actor
-                    // needs, and Debug throws the remedy away.
-                    .map_err(|error| ForkWorkspaceAdmissionError {
-                        detail: tidepool_handlers::render_worktree_error(&error),
-                    })
+                let access = requested.unwrap_or(available);
+                if !available.permits(access) {
+                    return Err(WorkspaceAdmissionError {
+                        detail: "workspace attachment cannot widen read-only access".into(),
+                    });
+                }
+                let handle = preparation
+                    .manager
+                    .lookup(&tree)
+                    .map_err(workspace_admission_error)?
+                    .map(|handle| tidepool_handlers::handlers::worktree::handle_to_wire(&handle))
+                    .ok_or_else(|| WorkspaceAdmissionError {
+                        detail: "workspace backing is not registered".into(),
+                    })?;
+                Ok((handle, access))
             })
             .await
-            .map_err(|error| ForkWorkspaceAdmissionError {
+            .map_err(|error| WorkspaceAdmissionError {
                 detail: format!("workspace preparation task failed: {error}"),
             })??;
-
-            let (handle, workspace, notice) = {
-                let handle =
-                    tidepool_runtime::spawn_blocking_in_span(move || authorized.materialize())
-                        .await
-                        .map_err(|error| ForkWorkspaceAdmissionError {
-                            detail: format!("workspace preparation task failed: {error}"),
-                        })?
-                        .map_err(|error| ForkWorkspaceAdmissionError {
-                            detail: tidepool_handlers::render_worktree_error(&error),
-                        })?;
-                (handle, None, None)
-            };
-            let worktree = handle.handle_receipt.tree_id.raw.clone();
-            Ok(exomonad_actor::PreparedForkWorkspace::new(
+            let tree = handle.handle_receipt.tree_id.raw.clone();
+            Ok(exomonad_actor::PreparedWorkspaceAttachment::new(
                 handle,
-                move |actor| custody.bind_workspace(actor, &worktree, workspace, notice),
+                move |actor| custody.bind_workspace(actor, &tree, access, None, None),
             ))
         })
+    }
+}
+
+fn workspace_admission_error(error: exomonad_worktree::WorktreeError) -> WorkspaceAdmissionError {
+    WorkspaceAdmissionError {
+        detail: error.to_string(),
     }
 }
 
@@ -508,8 +578,8 @@ fn fork_workspace_admission(
     authority: ActorWorktreeAuthority,
     bindings: Arc<Mutex<BindingTable>>,
     runtime: String,
-) -> Arc<ActorForkWorkspaceAdmission> {
-    Arc::new(ActorForkWorkspaceAdmission {
+) -> Arc<ActorWorkspaceAdmission> {
+    Arc::new(ActorWorkspaceAdmission {
         bindings,
         runtime,
 
@@ -540,7 +610,6 @@ pub struct ActorHostConfig {
     pub tmux_session: String,
     pub model: String,
     pub effort: ForkEffort,
-    pub research_policy: exomonad_actor::ResearchPolicy,
     pub pane_environment: std::collections::BTreeMap<String, String>,
     /// Answers actors' `Jev` requests; `None` uses the TypeSafe client with
     /// the key from `TYPESAFE_API_KEY` or the secrets directory.
@@ -747,10 +816,8 @@ fn remove_predecessor_socket_root(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
-fn operator_effective_role(
-    research_policy: exomonad_actor::ResearchPolicy,
-) -> exomonad_actor::EffectiveRole {
-    exomonad_actor::EffectiveRole::root().with_research_policy(research_policy)
+fn operator_capabilities() -> exomonad_actor::ActorCapabilities {
+    exomonad_actor::ActorCapabilities::default()
 }
 
 fn next_actor_incarnation(actor: ActorRef) -> Result<ActorRef, Box<dyn std::error::Error>> {
@@ -874,10 +941,10 @@ fn durable_root_identity(
 
 fn contains_durable_root_admission(records: &[exomonad_actor::DurableActorRecord]) -> bool {
     records.iter().any(|record| {
-        record.admission.role == exomonad_actor::ActorRole::Root
-            && record.admission.creator.is_none()
+        record.admission.creator.is_none()
             && record.admission.supervisor_parent.is_none()
             && record.admission.context_parent.is_none()
+            && record.admission.actor_path.as_deref() == Some("root")
     })
 }
 
@@ -917,26 +984,25 @@ impl exomonad_actor::JevBackend for HostJev {
         use tidepool_handlers::JevFailure;
         Box::pin(async move {
             let body: serde_json::Value = serde_json::from_str(&request)
-                .map_err(|error| Failure::Malformed(format!("request is not JSON: {error}")))?;
+                .map_err(|error| Failure::JevMalformed(format!("request is not JSON: {error}")))?;
             match self.0.ask(body).await {
                 Ok(response) => Ok(response.to_string()),
                 Err(failure) => Err(match failure {
-                    JevFailure::Unconfigured => Failure::Unconfigured,
-                    JevFailure::CallCap => Failure::CallCap,
-                    JevFailure::Transport(detail) => Failure::Transport(detail),
-                    JevFailure::Timeout => Failure::Timeout,
-                    JevFailure::Http { status, body } => Failure::Http(i64::from(status), body),
-                    // The actor's Haskell error surface treats provider
-                    // refusal as HTTP; preserve that contract for fast fails.
+                    JevFailure::Unconfigured => Failure::JevUnconfigured,
+                    JevFailure::CallCap => Failure::JevCallCap,
+                    JevFailure::Transport(detail) => Failure::JevTransport(detail),
+                    JevFailure::Timeout => Failure::JevTimeout,
+                    JevFailure::Http { status, body } => Failure::JevHttp(i64::from(status), body),
                     JevFailure::CircuitOpen {
                         status,
                         retry_after_ms,
-                    } => Failure::Http(
+                    } => Failure::JevCircuitOpen(
                         i64::from(status),
-                        format!("Jev circuit open; retry after {retry_after_ms} ms"),
+                        i64::try_from(retry_after_ms).unwrap_or(i64::MAX),
                     ),
-                    JevFailure::BodyLimit => Failure::BodyLimit,
-                    JevFailure::Malformed(detail) => Failure::Malformed(detail),
+                    JevFailure::ClientSetup(detail) => Failure::JevClientSetup(detail),
+                    JevFailure::BodyLimit => Failure::JevBodyLimit,
+                    JevFailure::Malformed(detail) => Failure::JevMalformed(detail),
                 }),
             }
         })
@@ -955,31 +1021,15 @@ fn jev_backend(config: &ActorHostConfig) -> exomonad_actor::JevBackendHandle {
             Arc::new(HostJev(client))
         }
         Err(error) => {
-            tracing::warn!(%error, "jev client unavailable; Jev requests answer JevUnconfigured");
-            exomonad_actor::unconfigured_jev()
+            tracing::warn!(%error, "jev client setup failed; Jev requests retain the setup failure");
+            exomonad_actor::failed_jev_client_setup(error.to_string())
         }
     }
 }
 
-fn worker_launch_resolver(config: &ActorHostConfig) -> exomonad_actor::WorkerLaunchResolver {
-    let config = config.clone();
-    let base = FrozenBasePrompt::selected_body(
-        config
-            .workspace_inputs
-            .as_ref()
-            .and_then(|inputs| inputs.prompts.get("core"))
-            .map(String::as_str),
-        config.jev_surface(),
-    );
-    let fingerprint = blake3::hash(base.as_bytes()).to_hex().to_string();
-    Arc::new(move |request| resolve_worker_launch(&config, request, &fingerprint))
-}
-
 /// Resolve a requested `Model` (an alias into the frozen workspace's model
 /// table, or an already-literal provider model name) against the host
-/// config. Shared by the real launch preview below and by recipe checks'
-/// `RecipeActivation`, so both report the same resolved model string instead
-/// of one of them echoing the alias back unresolved.
+/// config. Actual launches and recipe checks use the same frozen model table.
 pub(crate) fn resolve_model(
     config: &ActorHostConfig,
     model: &exomonad_actor::Model,
@@ -993,42 +1043,6 @@ pub(crate) fn resolve_model(
             .ok_or_else(|| format!("unknown frozen workspace model alias: {alias}")),
         exomonad_actor::Model::Literal(model) => Ok(model.clone()),
     }
-}
-
-fn resolve_worker_launch(
-    config: &ActorHostConfig,
-    request: &exomonad_actor::WorkerLaunchRequest,
-    base_fingerprint: &str,
-) -> Result<exomonad_actor::WorkerLaunchPreview, String> {
-    let mut instructions = developer_instructions_selected(
-        &request.role,
-        config.workspace_inputs.as_ref(),
-        request.instructions.as_deref(),
-    );
-    append_inheritance_authority(&mut instructions);
-    let model = request
-        .model
-        .as_ref()
-        .map(|model| resolve_model(config, model))
-        .transpose()?;
-    Ok(exomonad_actor::WorkerLaunchPreview {
-        model: model.or_else(|| {
-            (request.context == exomonad_actor::ForkContext::SelectedContext)
-                .then(|| config.model.clone())
-        }),
-        effort: request.effort.unwrap_or(config.effort),
-        instructions,
-        base_fingerprint: base_fingerprint.into(),
-        workspace_identity: config
-            .workspace_inputs
-            .as_ref()
-            .map(|inputs| inputs.identity().into()),
-        modules: config
-            .workspace_inputs
-            .as_ref()
-            .map(|inputs| inputs.import_modules().map(str::to_owned).collect())
-            .unwrap_or_default(),
-    })
 }
 
 fn append_inheritance_authority(instructions: &mut String) {
@@ -1272,12 +1286,8 @@ struct InteractiveApplicationOwner {
     cancel: Option<oneshot::Sender<NativeRetirement>>,
     native_retirement: NativeRetirement,
     pane: Arc<Mutex<Option<TmuxPaneId>>>,
-    fork_gate: Option<exomonad_actor::ForkGroupGate>,
-    custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
+    custody: Option<Arc<dyn exomonad_actor::WorkspaceCustody>>,
     scoped_retention: Option<scoped_custody::ScopedHostRetention>,
-
-    embedded_policy: Option<Arc<embedded_policy::EmbeddedPolicyInstallation>>,
-
     embedded: EmbeddedApplicationState,
     terminal: Option<ActorTerminal>,
 }
@@ -1420,12 +1430,8 @@ impl InteractiveApplicationOwner {
             cancel: None,
             native_retirement: NativeRetirement::Preserve,
             pane: Arc::new(Mutex::new(None)),
-            fork_gate: None,
             custody: None,
             scoped_retention: None,
-
-            embedded_policy: None,
-
             embedded: EmbeddedApplicationState::new(),
             terminal: None,
         }
@@ -1433,11 +1439,6 @@ impl InteractiveApplicationOwner {
 
     fn cancel(&mut self) {
         self.creator_workspace = None;
-        if let Some(gate) = &self.fork_gate {
-            // best-effort: the fork group may already be resolved (ready or
-            // failed) by a concurrent path; there is nothing more to do here.
-            gate.mark_failed().ok();
-        }
         if let Some(cancel) = self.cancel.take() {
             // best-effort: the receiver may already have been dropped if the
             // cancellation race resolved on the other side first.
@@ -1454,7 +1455,6 @@ impl InteractiveApplicationOwner {
             custody.actor_stopped(&terminal);
         }
         self.terminal.get_or_insert(terminal);
-        drop(self.embedded_policy.take());
         self.cancel();
     }
 }
@@ -2000,13 +2000,12 @@ async fn run_owned(
         bindings.clone(),
         runtime_namespace(&run_root),
     );
-    let (forest, deployments) = ResidentForest::new_with_launch_resolver(
+    let (forest, deployments) = ResidentForest::new(
         source,
         descriptor.placement().session,
         machine,
         Some(worktree_admission.clone()),
         host_incarnation.incarnation(),
-        Some(worker_launch_resolver(&config)),
     );
     let mut forest = forest
         .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(
@@ -2296,7 +2295,7 @@ async fn run_owned(
     let provision_forest = forest.clone();
     let provision_authority = worktree_authority.clone();
     let provision_source = source_layers.clone();
-    let operator_role = operator_effective_role(config.research_policy);
+    let operator_role = operator_capabilities();
     let operator_socket = run_root.join("operator").join("operator.sock");
     if operator_socket.exists() {
         std::fs::remove_file(&operator_socket)?;
@@ -2890,10 +2889,10 @@ pub(crate) fn spec_effect_preflight(
     preamble = insert_preamble_imports(&preamble, "Tidepool.Actors.Exomonad");
     preamble = insert_preamble_imports(&preamble, &format!("qualified {module}"));
     let mut failures = Vec::new();
-    for profile in exomonad_tool::PublicActorProfile::ALL {
-        let label = profile.label();
+    {
+        let capabilities = exomonad_actor::ActorCapabilities::default();
         let installation =
-            exomonad_actor::agent_spec::installation_expression(entry, profile.effect_keys());
+            exomonad_actor::agent_spec::installation_expression(entry, capabilities.effect_keys());
         let dispatcher_effects = installation.dispatcher_effect_row();
         let templates = resident_workbench_templates(&preamble, &dispatcher_effects, "");
         let template = templates
@@ -2929,12 +2928,12 @@ pub(crate) fn spec_effect_preflight(
                     },
                 );
                 failures.push(format!(
-                    "profile {label} cannot install spec {entry}:\n{detail}"
+                    "root installer cannot install spec {entry}:\n{detail}"
                 ));
             }
             Err(error) => {
                 return Err(runtime_error(format!(
-                    "could not establish whether profile {label} can install spec {entry}: {error}"
+                    "could not establish whether the root can install spec {entry}: {error}"
                 )));
             }
         }
@@ -3459,12 +3458,10 @@ fn compile_root(
     // Profiles classify resident Haskell rows, not the native Codex sandbox.
     // The root allocates worktrees and may attenuate children to ReadOnly.
     .with_profile(ActorEffectProfile::ReadWrite)
-    .with_effective_role(
-        exomonad_actor::EffectiveRole::root().with_research_policy(config.research_policy),
-    );
+    .with_capabilities(exomonad_actor::ActorCapabilities::default());
     if let Some(layers) = source {
         descriptor = descriptor.with_source_layer(
-            exomonad_actor::ActorSourceLayers::layer_include(layers.as_ref(), &[])
+            exomonad_actor::ActorSourceLayers::layer_include_for(layers.as_ref(), "run")
                 .map_err(std::io::Error::other)?,
         );
     }
@@ -3490,19 +3487,6 @@ fn host_workbench_source(
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
         .with_toolset_support_roots(toolset_support)
-        .with_preparation_profiles(match &config.workspace_inputs {
-            Some(inputs) => inputs
-                .config()?
-                .preparation
-                .selected_profiles(config.research_policy)?
-                .into_iter()
-                .filter_map(|selected| match selected.profile {
-                    crate::exomonad::PreparationProfile::Root => None,
-                    crate::exomonad::PreparationProfile::Public(profile) => Some(profile),
-                })
-                .collect(),
-            None => Vec::new(),
-        })
         .with_installed_effect_support(host_context_support())
         .with_imports(WORKBENCH_SURFACE_MODULE)
         .with_imports("qualified Tidepool.Actor.Record as R")
@@ -3548,7 +3532,9 @@ pub(crate) async fn prepare_workspace_toolsets(
     source: Arc<crate::exomonad::source::ExomonadSourceReload>,
 ) -> Result<Vec<crate::exomonad::workspace::PreparedToolsetCoverage>, Box<dyn std::error::Error>> {
     let authored = inputs.config()?;
-    let profiles = authored.preparation.selected_profiles(authored.research)?;
+    let requested_effects = exomonad_actor::ActorCapabilities::default()
+        .effect_keys()
+        .to_vec();
     let settings = authored
         .launch
         .embedded
@@ -3574,7 +3560,6 @@ pub(crate) async fn prepare_workspace_toolsets(
         tmux_session: String::new(),
         model: authored.defaults.model,
         effort: authored.defaults.effort.into(),
-        research_policy: authored.research,
         pane_environment: Default::default(),
         jev: None,
     };
@@ -3652,12 +3637,12 @@ pub(crate) async fn prepare_workspace_toolsets(
     let outcome = compiler_owner
         .scope(async {
             let mut selected = Vec::new();
-            for profile in profiles {
+            {
                 let ready = workbench
                     .prepare_source_toolset(
                         tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                         frozen.clone(),
-                        &profile.requested_effects,
+                        &requested_effects,
                         &supported,
                         Arc::clone(&registry),
                     )
@@ -3668,8 +3653,7 @@ pub(crate) async fn prepare_workspace_toolsets(
                     )
                 })?;
                 selected.push(crate::exomonad::workspace::PreparedToolsetCoverage {
-                    profile: profile.profile,
-                    requested_effects: profile.requested_effects,
+                    requested_effects,
                     effective_effects: ready.effects().to_vec(),
                     recipe: recipe.to_owned(),
                     original,
@@ -4046,83 +4030,33 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
 }
 
 #[cfg(test)]
-fn developer_instructions(effective_role: &exomonad_actor::EffectiveRole) -> String {
-    developer_instructions_selected(effective_role, None, None)
+fn developer_instructions(capabilities: &exomonad_actor::ActorCapabilities) -> String {
+    developer_instructions_selected(capabilities, None, None)
 }
 
 fn developer_instructions_selected(
-    effective_role: &exomonad_actor::EffectiveRole,
+    capabilities: &exomonad_actor::ActorCapabilities,
     inputs: Option<&crate::exomonad::workspace::FrozenWorkspace>,
     instructions: Option<&str>,
 ) -> String {
-    if let Some(body) = instructions {
-        return append_effective_role(body.to_owned(), effective_role);
-    }
-    let role = effective_role.role();
-    let key = match role {
-        exomonad_actor::ActorRole::Root => "root",
-        exomonad_actor::ActorRole::Research => "research",
-        exomonad_actor::ActorRole::Coding | exomonad_actor::ActorRole::Inherited => "coding",
-        exomonad_actor::ActorRole::Scaffolding => "scaffolding",
-        exomonad_actor::ActorRole::Integration => "integration",
-    };
-    if let Some(body) = inputs.and_then(|inputs| inputs.prompts.get(key)) {
-        let body = body.clone();
-
-        return append_effective_role(body, effective_role);
-    }
-    if role == exomonad_actor::ActorRole::Root {
-        let instructions = PromptId::ExomonadRoot.body().to_string();
-
-        append_effective_role(instructions, effective_role)
-    } else {
-        let instructions = match role {
-            exomonad_actor::ActorRole::Research => PromptId::ReadonlyAgent.body().into(),
-            exomonad_actor::ActorRole::Coding | exomonad_actor::ActorRole::Inherited => {
-                PromptId::WorktreeAgent.body().into()
-            }
-            exomonad_actor::ActorRole::Scaffolding => PromptId::ScaffoldingAgent.body().into(),
-            exomonad_actor::ActorRole::Integration => PromptId::IntegrationAgent.body().into(),
-            exomonad_actor::ActorRole::Root => unreachable!("root handled above"),
-        };
-        append_effective_role(instructions, effective_role)
-    }
+    let body = instructions
+        .or_else(|| inputs.and_then(|inputs| inputs.prompts.get("agent").map(String::as_str)))
+        .unwrap_or_else(|| PromptId::Agent.body());
+    append_capabilities(body.to_owned(), capabilities)
 }
 
-fn append_effective_role(mut instructions: String, role: &exomonad_actor::EffectiveRole) -> String {
-    let descendants = role.descendants();
+fn append_capabilities(
+    mut instructions: String,
+    capabilities: &exomonad_actor::ActorCapabilities,
+) -> String {
+    let descendants = capabilities.descendants();
     instructions.push_str(&format!(
-        "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={}. These are the effective runtime facts; effect membership alone is not authority.\n",
-        role.prompt_profile(),
-        role.role(),
-        role.haskell_effects_type(),
-        role.native_tools(),
-        role.workspace(),
+        "\n\nAvailable effects: {}; descendant_depth={}; active_children={}. Concrete resource grants authorize resource access independently of effect membership.\n",
+        capabilities.haskell_effects_type(),
         descendants.maximum_depth,
         exomonad_actor::render_child_budget(descendants.maximum_active_children),
     ));
     instructions
-}
-
-fn worktree_grant(role: exomonad_actor::ActorRole) -> ActorWorktreeGrant {
-    match role {
-        exomonad_actor::ActorRole::Root => ActorWorktreeGrant::Repository,
-        exomonad_actor::ActorRole::Coding | exomonad_actor::ActorRole::Scaffolding => {
-            ActorWorktreeGrant::Bound {
-                enumerate: false,
-                allocate: true,
-                integrate: true,
-            }
-        }
-        exomonad_actor::ActorRole::Integration => ActorWorktreeGrant::Bound {
-            enumerate: false,
-            allocate: false,
-            integrate: true,
-        },
-        exomonad_actor::ActorRole::Research | exomonad_actor::ActorRole::Inherited => {
-            ActorWorktreeGrant::default()
-        }
-    }
 }
 
 /// Resolve command mounts from the exact actor's worktree grant and custody.
@@ -4136,21 +4070,29 @@ fn resident_command_roots(
     source: &Path,
     actor: ActorRef,
 ) -> Result<ResidentCommandRoots, exomonad_worktree::WorktreeError> {
-    let custody = authority
-        .bound_worktree(actor.into())
-        .and_then(|id| worktrees.registry().get(&id).ok().flatten())
-        .map(|receipt| receipt.cwd);
+    let bound = authority.bound_worktree(actor.into());
+    let custody = bound
+        .as_ref()
+        .map(|id| {
+            worktrees.lookup(id).and_then(|handle| {
+                handle.ok_or_else(|| {
+                    exomonad_worktree::WorktreeError::WorktreeNotRegistered(id.clone())
+                })
+            })
+        })
+        .transpose()?
+        .map(|handle| handle.cwd().to_owned());
+    let access = bound
+        .as_ref()
+        .and_then(|id| authority.workspace_access(actor.into(), id))
+        .unwrap_or(exomonad_worktree::WorkspaceAccess::ReadOnly);
     let git_common_dir = exomonad_worktree::git::inspect::git_common_dir(worktrees.git(), source)?;
     let root_allocations = worktrees.root_allocations();
     let grant = authority.grant(actor.into());
     let root = grant == ActorWorktreeGrant::Repository;
     let writable = writable_repository_roots(
         root,
-        if custody.is_some() && grant != ActorWorktreeGrant::RepositoryReadOnly {
-            exomonad_actor::WorkspaceAccess::WritableBound
-        } else {
-            exomonad_actor::WorkspaceAccess::InspectOnly
-        },
+        access,
         source,
         custody.as_deref(),
         &git_common_dir,
@@ -4176,7 +4118,7 @@ struct ResidentCommandRoots {
     directory: PathBuf,
     protected: Vec<PathBuf>,
     writable: Vec<PathBuf>,
-    /// Whether this actor holds an exclusive worktree binding.
+    /// Whether this actor holds its exact workspace attachment.
     custody: bool,
 }
 
@@ -4192,7 +4134,7 @@ struct ResidentCommandRoots {
 /// typed observation, never by writing in the child's checkout.
 fn writable_repository_roots(
     root: bool,
-    workspace_access: exomonad_actor::WorkspaceAccess,
+    workspace_access: exomonad_worktree::WorkspaceAccess,
     source: &Path,
     worker_worktree: Option<&Path>,
     git_common_dir: &Path,
@@ -4204,12 +4146,12 @@ fn writable_repository_roots(
         let mut writable = vec![source.to_path_buf()];
         writable.extend(root_worktrees.map(Path::to_path_buf));
         writable
-    } else if workspace_access == exomonad_actor::WorkspaceAccess::WritableBound {
+    } else if workspace_access == exomonad_worktree::WorkspaceAccess::ReadWrite {
         worker_worktree.map(Path::to_path_buf).into_iter().collect()
     } else {
         Vec::new()
     };
-    if root || workspace_access == exomonad_actor::WorkspaceAccess::WritableBound {
+    if root || workspace_access == exomonad_worktree::WorkspaceAccess::ReadWrite {
         // Writable linked worktrees intentionally share objects, refs, config,
         // and per-worktree administrative state. Inspection-only actors must
         // observe the same metadata without being able to mutate it.

@@ -9,6 +9,8 @@ pub fn commands_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "CommandStartWith :: CommandSpec -> Commands (Either CommandError Text)",
+            "CommandStartOwnedWith :: CommandSpec -> WorkerLifetime -> Commands (Either CommandError Text)",
+            "CommandRetainWith :: Text -> WorkerLifetime -> Commands (Either CommandError ())",
             "CommandBackgroundWith :: CommandSpec -> Commands (Either CommandError Text)",
             "CommandStatusWith :: Text -> Commands (Either CommandError CommandStatus)",
             "CommandAwaitWith :: Text -> Int -> Commands (Either CommandError CommandStatus)",

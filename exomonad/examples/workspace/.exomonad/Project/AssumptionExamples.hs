@@ -37,9 +37,9 @@ semanticImpact task render change = do
         J..| J.alt #uncertain "The supplied task and observations do not establish the impact" UnresolvedChange))
   pure $ case answer of
     Left failure -> UnresolvedChange (task <> ": " <> Text.pack (show failure))
-    Right choice -> case J.takenUnder J.careful choice of
+    Right response -> case J.takenUnder J.careful (J.answers response) of
       Left doubt -> UnresolvedChange (task <> ": " <> doubt.why)
-      Right (J.Settled decision) -> decision
+      Right settled -> let decision = J.settledValue settled in decision
         (task <> "\nBefore: " <> render (changeBefore change)
           <> "\nAfter: " <> render (changeAfter change)
           <> "\n" <> J.explain J.careful choice)

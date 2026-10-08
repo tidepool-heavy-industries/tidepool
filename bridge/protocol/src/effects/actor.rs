@@ -51,54 +51,7 @@ pub fn actor() -> Effect {
         default_row_args: &[],
         extra_imports: &["import Tidepool.Actor"],
         type_defs: vec![
-            TypeDef {
-                name: "ActorLaunchRole",
-                wire_rust: None,
-                haskell_module: None,
-                shape: TypeShape::Sum {
-                    variants: vec![
-                        SumVariant {
-                            ctor: "ActorRootRole",
-                            fields: positional_fields![],
-                            doc: &[],
-                        },
-                        SumVariant {
-                            ctor: "ActorResearchRole",
-                            fields: positional_fields![],
-                            doc: &[],
-                        },
-                        SumVariant {
-                            ctor: "ActorCodingRole",
-                            fields: positional_fields![],
-                            doc: &[],
-                        },
-                        SumVariant {
-                            ctor: "ActorScaffoldingRole",
-                            fields: positional_fields![],
-                            doc: &[],
-                        },
-                        SumVariant {
-                            ctor: "ActorIntegrationRole",
-                            fields: positional_fields![],
-                            doc: &[],
-                        },
-                        SumVariant {
-                            ctor: "ActorInheritedRole",
-                            fields: positional_fields![],
-                            doc: &[],
-                        },
-                    ],
-                },
-                json: JsonInstance::None,
-                derives: WireDerives(&[
-                    WireDerive::Debug,
-                    WireDerive::Clone,
-                    WireDerive::PartialEq,
-                    WireDerive::Eq,
-                ]),
-                domain: None,
-                doc: &["Semantic role selected before runtime policy projection."],
-            },
+
             TypeDef {
                 name: "ActorEffectProfile",
                 wire_rust: None,
@@ -199,40 +152,17 @@ pub fn actor() -> Effect {
             },
         ],
         external_types: &[crate::schema::ExternalType {
+            haskell_name: "WorkspaceHandle",
+            rust_wire: "tidepool_bridge_effects::WtWorkspaceHandle",
+            core_module: None,
+        }, crate::schema::ExternalType {
             haskell_name: "ActorEffectKey",
             rust_wire: "crate::ActorEffectKeyWire",
             core_module: None,
         }],
         errors: None,
         verbs: vec![
-            Verb {
-                ctor: "ActorBeginForkGroupWith",
-                method: "actor_begin_fork_group_with",
-                args: vec![
-                    Arg {
-                        name: "relative",
-                        ty: HsType::Bool,
-                        rust: RustBinding::Derived,
-                    },
-                    Arg {
-                        name: "group",
-                        ty: HsType::Text,
-                        rust: RustBinding::Derived,
-                    },
-                    Arg {
-                        name: "branches",
-                        ty: HsType::List(Box::new(HsType::Text)),
-                        rust: RustBinding::Derived,
-                    },
-                ],
-                ret: HsType::Tuple(vec![
-                    HsType::Int,
-                    HsType::Text,
-                    HsType::List(Box::new(HsType::Text)),
-                ]),
-                errors: None,
-                handling: HandlingClass::Actor,
-            },
+
             Verb {
                 ctor: "ActorStartWith",
                 method: "actor_start_with",
@@ -254,94 +184,23 @@ pub fn actor() -> Effect {
                         rust: RustBinding::HaskellValue,
                     },
                     Arg {
-                        name: "role",
-                        ty: HsType::Named("ActorLaunchRole"),
-                        rust: RustBinding::Path("crate::ActorLaunchRoleWire"),
-                    },
-                    Arg {
                         name: "profile",
                         ty: HsType::Named("ActorEffectProfile"),
                         rust: RustBinding::Path("crate::ActorEffectProfileWire"),
                     },
                     Arg {
-                        name: "launchWorktrees",
-                        ty: HsType::List(Box::new(HsType::Text)),
-                        rust: RustBinding::Derived,
+                        name: "workspace",
+                        ty: HsType::Maybe(Box::new(HsType::Named("WorkspaceHandle"))),
+                        rust: RustBinding::External,
                     },
                 ],
                 ret: launched_actor_type(),
                 errors: None,
                 handling: HandlingClass::Actor,
             },
-            Verb {
-                ctor: "ActorForkWith",
-                method: "actor_fork_with",
-                args: vec![
-                    Arg {
-                        name: "label",
-                        ty: HsType::Text,
-                        rust: RustBinding::Derived,
-                    },
-                    Arg {
-                        name: "entry",
-                        ty: HsType::func(
-                            HsType::Int,
-                            HsType::app(
-                                HsType::app(HsType::Named("Eff"), HsType::Var("childEffs")),
-                                HsType::Unit,
-                            ),
-                        ),
-                        rust: RustBinding::HaskellValue,
-                    },
-                    Arg {
-                        name: "forkGroup",
-                        ty: HsType::Int,
-                        rust: RustBinding::Derived,
-                    },
-                    Arg {
-                        name: "role",
-                        ty: HsType::Named("ActorLaunchRole"),
-                        rust: RustBinding::Path("crate::ActorLaunchRoleWire"),
-                    },
-                    Arg {
-                        name: "profile",
-                        ty: HsType::Named("ActorEffectProfile"),
-                        rust: RustBinding::Path("crate::ActorEffectProfileWire"),
-                    },
-                    Arg {
-                        name: "launchWorktrees",
-                        ty: HsType::List(Box::new(HsType::Text)),
-                        rust: RustBinding::Derived,
-                    },
-                ],
-                ret: launched_actor_type(),
-                errors: None,
-                handling: HandlingClass::Actor,
-            },
-            Verb {
-                ctor: "ActorCommitForkGroupWith",
-                method: "actor_commit_fork_group_with",
-                args: vec![Arg {
-                    name: "forkGroup",
-                    ty: HsType::Int,
-                    rust: RustBinding::Derived,
-                }],
-                ret: HsType::Unit,
-                errors: None,
-                handling: HandlingClass::Actor,
-            },
-            Verb {
-                ctor: "ActorAbortForkGroupWith",
-                method: "actor_abort_fork_group_with",
-                args: vec![Arg {
-                    name: "forkGroup",
-                    ty: HsType::Int,
-                    rust: RustBinding::Derived,
-                }],
-                ret: HsType::Unit,
-                errors: None,
-                handling: HandlingClass::Actor,
-            },
+
+
+
             Verb {
                 ctor: "ActorWaitWith",
                 method: "actor_wait_with",
@@ -484,11 +343,6 @@ pub fn actor() -> Effect {
                         ty: HsType::Named("ActorEffectProfile"),
                         rust: RustBinding::Path("crate::ActorEffectProfileWire"),
                     },
-                    Arg {
-                        name: "launchWorktrees",
-                        ty: HsType::List(Box::new(HsType::Text)),
-                        rust: RustBinding::Derived,
-                    },
                 ],
                 ret: address_type(),
                 errors: None,
@@ -513,7 +367,7 @@ mod tests {
     #[test]
     fn actor_entries_remain_the_field_one_live_payload() {
         let effect = actor();
-        for constructor in ["ActorStartWith", "ActorForkWith", "ActorReplaceWith"] {
+        for constructor in ["ActorStartWith", "ActorReplaceWith"] {
             let verb = effect
                 .verbs
                 .iter()

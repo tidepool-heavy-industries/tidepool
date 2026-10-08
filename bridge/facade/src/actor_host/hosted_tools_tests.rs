@@ -6,7 +6,6 @@ use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation};
 #[tokio::test]
 async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindings() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let directory = config.workspace.join(".exomonad");

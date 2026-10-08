@@ -48,7 +48,7 @@ impl PromptId {
 /// Fingerprint of the shared hosted Haskell usage instructions. Per-tool
 /// descriptions belong to the typed declarations supplied by the AgentSpec
 /// and the actor-local builtins; this digest does not cover those declarations.
-/// The composition root combines this with its base and role prompt digest.
+/// The composition root combines this with its base and agent prompt digest.
 pub fn hosted_prompt_fingerprint() -> String {
     let mut hasher = blake3::Hasher::new();
     let body = PromptId::HaskellToolInstructions.body();
@@ -77,14 +77,12 @@ pub(crate) struct PromptArtifact {
 /// workspace modules existed.
 /// The skills an Exomonad workspace ships, named so an unknown topic can point at
 /// the one that answers it. These are the same names the `topics` body lists.
-const SHIPPED_SKILLS: [&str; 11] = [
+const SHIPPED_SKILLS: [&str; 9] = [
     "exomonad-jev",
-    "exomonad-unfold",
+    "exomonad-agent-work",
     "exomonad-workbench",
     "exomonad-cleanup",
     "exomonad-project-work",
-    "exomonad-fork",
-    "exomonad-coordinate",
     "exomonad-review",
     "exomonad-command",
     "exomonad-define-actors",
@@ -111,9 +109,9 @@ pub(crate) fn workbench_doc(
             "../../prompts/docs/workbench.md"
         ))),
         "request" | "requests" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/request.md"))),
-        "unfold" | "fork" | "forks" => {
-            Ok(Cow::Borrowed(include_str!("../../prompts/docs/unfold.md")))
-        }
+        "agents" | "agent-work" => Ok(Cow::Borrowed(include_str!(
+            "../../prompts/docs/agents.md"
+        ))),
         "jev" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/jev.md"))),
         "actors" | "actor" | "record" => {
             Ok(Cow::Borrowed(include_str!("../../prompts/docs/actors.md")))
@@ -139,8 +137,8 @@ pub(crate) fn workbench_doc(
         }
         "help" | "topics" => {
             let mut body = String::from(
-                "Exomonad topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
-                 Load the skill first where one exists; a topic is the fallback. Workspace skills: exomonad-workbench (Kleisli composition, optics and local languages), exomonad-define-actors (stateful interpreters for typed calls and events), exomonad-jev (semantic predicates, choices and continuations), exomonad-project-work (default Git workflow, recursive Sol/Luna ownership and delivery), exomonad-unfold (typed agent products and joins), exomonad-fork (Project delegation compositions), exomonad-coordinate (batch collectors and event routing), exomonad-agent-spec (model-facing tools and reloads), exomonad-command (commands as values and retained results), exomonad-review (exact-source review and repair), exomonad-cleanup (retiring workers and groups).",
+                "Exomonad topics: tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
+                 Load the skill first where one exists; a topic is the fallback. Workspace skills: exomonad-workbench (Kleisli composition, optics and local languages), exomonad-define-actors (stateful interpreters for typed calls and events), exomonad-jev (semantic predicates, choices and continuations), exomonad-project-work (optional Git delivery workflow), exomonad-agent-work (typed agents, requests and waits), exomonad-agent-spec (model-facing tools and reloads), exomonad-command (commands as values and retained results), exomonad-review (exact-source review and repair), exomonad-cleanup (retiring actors and scoped resources).",
             );
             if !workspace_modules.is_empty() {
                 body.push_str(
@@ -159,7 +157,7 @@ pub(crate) fn workbench_doc(
                 ));
             }
             message.push_str(
-                "; topics: tree (worktree), workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors; `doc topics` lists the workspace skills"
+                "; topics: tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors; `doc topics` lists the workspace skills"
             );
             if !workspace_modules.is_empty() {
                 message.push_str(&format!(
@@ -177,7 +175,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_is_complete_nonempty_and_role_typed() {
+    fn catalog_is_complete_nonempty_and_layer_typed() {
         let artifacts = PromptId::ALL.map(PromptId::artifact);
         assert_eq!(artifacts.map(|artifact| artifact.id), PromptId::ALL);
         assert!(artifacts
@@ -194,7 +192,7 @@ mod tests {
             "tree",
             "workbench",
             "request",
-            "unfold",
+            "agents",
             "watch",
             "deadline",
             "refinement",
@@ -206,28 +204,6 @@ mod tests {
         ] {
             assert!(!workbench_doc(topic, &[]).unwrap().trim().is_empty());
         }
-        // Every topic with a workspace skill names it on its last line, and the
-        // topic listing names the skills beside the topics. `jev` instead
-        // links the skill inline and says so, rather than duplicating its
-        // content behind a trailer.
-        for (topic, skill) in [
-            ("actors", "exomonad-define-actors"),
-            ("cleanup", "exomonad-cleanup"),
-            ("unfold", "exomonad-unfold"),
-            ("workbench", "exomonad-workbench"),
-        ] {
-            let body = workbench_doc(topic, &[]).unwrap();
-            assert_eq!(
-                body.trim_end().lines().last(),
-                Some(format!("skill: {skill}").as_str()),
-                "`doc {topic}` must end by naming {skill}"
-            );
-            assert!(workbench_doc("topics", &[]).unwrap().contains(skill));
-        }
-        assert!(workbench_doc("jev", &[]).unwrap().contains("exomonad-jev"));
-        assert!(workbench_doc("topics", &[])
-            .unwrap()
-            .contains("exomonad-jev"));
         assert_eq!(hosted_prompt_fingerprint().len(), 64);
         assert!(workbench_doc("missing", &[]).is_err());
     }
@@ -302,34 +278,23 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_topic_naming_a_shipped_skill_says_so() {
-        // A short skill alias resolves even when it has no built-in doc topic.
-        let refusal = workbench_doc("command", &[]).unwrap_err();
-        assert!(
-            refusal.contains("`exomonad-command` skill covers this"),
-            "{refusal}"
+    fn skill_aliases_use_the_current_roster_and_unknown_topics_refuse() {
+        assert_eq!(skill_for_topic("agent-work"), Some("exomonad-agent-work"));
+        assert_eq!(
+            skill_for_topic("exomonad-agent-work"),
+            Some("exomonad-agent-work")
         );
-        assert!(refusal.starts_with("unknown Exomonad documentation topic `command`"));
-
-        // The full name works too, and so does every other shipped skill that
-        // is not already a topic in its own right.
-        for topic in [
-            "exomonad-command",
-            "review",
+        for retired in [
+            "fork",
+            "exomonad-fork",
             "coordinate",
-            "project-work",
-            "exomonad-project-work",
+            "exomonad-coordinate",
+            "unfold",
+            "exomonad-unfold",
         ] {
-            let refusal = workbench_doc(topic, &[]).unwrap_err();
-            assert!(
-                refusal.contains("skill covers this"),
-                "`doc {topic}`: {refusal}"
-            );
+            assert_eq!(skill_for_topic(retired), None);
         }
-
-        // A topic that names nothing still refuses plainly, with no skill line.
-        let missing = workbench_doc("missing", &[]).unwrap_err();
-        assert!(!missing.contains("skill covers this"), "{missing}");
+        assert!(workbench_doc("missing", &[]).is_err());
     }
 
     #[test]

@@ -7,17 +7,13 @@
 
 use std::sync::{Arc, OnceLock};
 
-mod after_tool_wait;
-#[cfg(test)]
-mod capture_workspace_tests;
-mod captured_commit;
-pub(crate) mod child_initialization;
-mod child_launch;
-#[cfg(test)]
-mod terminal_transfer_tests;
-pub use child_initialization::ForkChildRelease;
 #[cfg(test)]
 mod activation_publication_tests;
+mod after_tool_wait;
+mod agent_retention;
+#[cfg(test)]
+mod capture_workspace_tests;
+pub(crate) mod child_launch;
 mod clock_wait;
 mod command_presentation;
 mod command_settlement;
@@ -26,16 +22,28 @@ mod display_settlement;
 mod drain_wait;
 #[cfg(test)]
 mod forest_shutdown_tests;
+pub(crate) mod forms;
+pub(crate) mod green;
+mod green_notebook;
 #[cfg(test)]
-mod inherited_host_tests;
+mod green_runtime_tests;
+mod green_tool;
 mod inspection_wait;
+mod invocation_effects;
 pub(crate) mod invocation_work;
+#[cfg(test)]
+mod jev_form_runtime_tests;
 mod owned_workbench;
 #[cfg(test)]
 mod provider_owner_tests;
 mod replacement;
 mod request_wait;
+#[cfg(test)]
+mod scope_runtime_tests;
+mod scopes;
 mod status_rendering;
+#[cfg(test)]
+mod terminal_transfer_tests;
 mod terminal_wait;
 mod tool_support;
 mod workbench_ledger;
@@ -78,9 +86,9 @@ use tracing::Instrument;
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
 use crate::request::{RequestRegistry, RequestReservationOwner};
 use crate::resident_workbench::{
-    AgentStopProjection, ForkContinuation, ForkGroupBoundary, ForkReply, PreparedCell,
-    ResidentActorBoundary, ResidentActorStartupStep, ResidentKernelBoundary,
-    ResidentWorkbenchFragment, ResidentWorkbenchStep, ResidentWorkbenchSuspension,
+    AgentStopProjection, ContextCheckpointBoundary, PreparedCell, ResidentActorBoundary,
+    ResidentActorStartupStep, ResidentKernelBoundary, ResidentWorkbenchFragment,
+    ResidentWorkbenchStep, ResidentWorkbenchSuspension,
 };
 use crate::{
     ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef, ActorSessionContext,
@@ -136,23 +144,6 @@ impl<H, O> ResidentActorRoot<H, O> {
     }
 }
 
-fn selected_child_retirement_batch(
-    kernel: &KernelContext,
-    children: Vec<ActorRef>,
-    summary: &str,
-) -> crate::kernel::RetirementBatch {
-    crate::kernel::RetirementBatch::issue(
-        children
-            .into_iter()
-            .filter_map(|child| {
-                kernel
-                    .resolve(child)
-                    .map(|child| (child, ActorTerminal::new(ActorExitKind::Cancelled, summary)))
-            })
-            .collect(),
-    )
-}
-
 #[derive(Clone)]
 pub struct LocalResidentInstallation {
     /// Newly prepared handler custody transfers only with application publication.
@@ -163,21 +154,21 @@ pub struct LocalResidentInstallation {
     pub label: String,
     pub policy: Arc<dyn ResidentToolEndpoint>,
     pub initial_user_message: Option<String>,
+    pub fresh_context_seed: Option<String>,
+    pub spawn_admission: Option<crate::SpawnAdmission>,
     pub launch_worktrees: Vec<String>,
-    pub worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
-    pub effective_role: crate::EffectiveRole,
+    pub worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
+    pub capabilities: crate::ActorCapabilities,
     pub fork_effort: Option<crate::ForkEffort>,
     pub model: Option<crate::Model>,
     pub instructions: Option<String>,
     pub creator: Option<crate::ActorRef>,
-    pub fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    pub checkpoint_boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
     pub checkpoint: Option<crate::CheckpointLease>,
     /// Captured when the child is admitted, before release can revoke new users.
     pub checkpoint_attachment: Option<HostedCheckpointAttachment>,
     pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
-    pub fork_group: Option<crate::ForkGroupId>,
-    pub fork_gate: Option<crate::ForkGroupGate>,
     pub runtime_observation: crate::ActorRuntimeObservationHandle,
 }
 
@@ -479,16 +470,18 @@ struct ResidentEnvironment<H, O> {
     retired: Arc<Mutex<std::collections::HashSet<ActorRef>>>,
     requests: Arc<RequestRegistry>,
     commands: crate::command_jobs::CommandJobs,
-    fork_groups: crate::ForkGroupRegistry,
+    actor_admissions: crate::ActorAdmissionRegistry,
     actors: Arc<Mutex<std::collections::HashMap<ActorRef, ResidentActorRecord>>>,
-    fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
+    fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
     root_admission_closed: Arc<tokio::sync::RwLock<bool>>,
-    launch_resolver: Option<crate::WorkerLaunchResolver>,
     /// Installed by a host that keeps a source layer per checkout. Without
     /// one every actor compiles against exactly the deployment-wide roots.
     source_layers: Option<crate::ActorSourceLayerResolver>,
     jev: crate::JevBackendHandle,
     cell_model_factory: Option<Arc<dyn crate::CellModelFactory>>,
+    form_host: Option<Arc<dyn crate::FormHost>>,
+    form_registry:
+        Arc<Mutex<std::collections::HashMap<String, std::sync::Weak<crate::forms::MountedForm>>>>,
     /// Set by an actor host that answers `ReleaseAwait`; without one a stop
     /// has no interactive resources to wait for.
     release_tracked: Arc<std::sync::atomic::AtomicBool>,
@@ -502,13 +495,13 @@ fn retain_retired_metadata<H, O>(
     actor: ActorRef,
     terminal: &ActorTerminal,
 ) {
-    environment.fork_groups.fail_issuer_checkpoints(actor);
+    environment.actor_admissions.fail_issuer_checkpoints(actor);
     if let Some(recovery) = &environment.recovery {
         if let Err(error) = recovery.retire(actor, terminal.clone()) {
             tracing::error!(?actor, %error, "actor terminal evidence remains uncertain");
         }
     }
-    environment.fork_groups.retire_actor(actor);
+    environment.actor_admissions.retire_actor(actor);
     if let Some(record) = environment.actors.lock().get_mut(&actor) {
         record.descriptor.source_imports().release_capture();
         record.terminal = Some(terminal.clone());
@@ -676,6 +669,18 @@ fn valid_display_reference(
 }
 
 impl ActorDisplays {
+    fn reserve_rich_slot(&mut self) -> Result<u64, ResidentActorWorkbenchError> {
+        if self.retired {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "display actor is retired".into(),
+            ));
+        }
+        let slot = self.next_slot.checked_add(1).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol("display slot space exhausted".into())
+        })?;
+        self.next_slot = slot;
+        Ok(slot as u64)
+    }
     fn pending_count(&mut self) -> usize {
         for slot in self.slots.keys().copied().collect::<Vec<_>>() {
             let _ = self.reconcile(slot);
@@ -1654,7 +1659,7 @@ where
     }
 }
 
-fn settle_root_public_owner_record(
+fn settle_public_owner_record(
     record: &mut ResidentActorRecord,
     context: &ActorSessionContext,
     expected_owner: &tidepool_runtime::session::RecoveryPublicOwner,
@@ -1671,7 +1676,7 @@ fn settle_root_public_owner_record(
                 if owner.durable() == Some(expected_owner)))
     {
         return Err(ResidentActorWorkbenchError::ActorProtocol(
-            "root public settlement requires its original pending owner".into(),
+            "public settlement requires its original pending owner".into(),
         ));
     }
     match outcome {
@@ -1805,6 +1810,7 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
         ReplyError::ProgressTypeMismatch => {
             "a request this watch names has an incompatible progress type"
         }
+        ReplyError::InvalidReadiness => "this watch's readiness expression is invalid",
     };
     format!("watch registration was rejected: {detail}")
 }
@@ -1840,6 +1846,9 @@ fn settlement_refusal(
         }
         ReplyError::ProgressTypeMismatch => {
             format!("request {request} expects a different progress type")
+        }
+        ReplyError::InvalidReadiness => {
+            format!("request {request} has an invalid readiness expression")
         }
         ReplyError::AlreadySettled => format!("request {request} is already settled"),
         ReplyError::Stale => format!("request {request} is not active for this actor"),
@@ -1932,6 +1941,59 @@ fn render_watches_view(
             .to_owned(),
     );
     lines.join("\n")
+}
+
+async fn install_explicit_replacement<H, O>(
+    environment: ResidentEnvironment<H, O>,
+    context: ActorSessionContext,
+    state: Arc<crate::resident_workbench::InstalledToolsState>,
+    allowed: Vec<crate::ActorEffectKey>,
+    definition: crate::SpecReplacementDefinition,
+) -> Result<(), crate::SpecReplacementError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let expected = state
+        .current()
+        .filter(|lease| lease.tools().is_some())
+        .ok_or(crate::SpecReplacementError::Unavailable)?;
+    if definition
+        .effects
+        .iter()
+        .any(|effect| !allowed.contains(effect))
+    {
+        return Err(crate::SpecReplacementError::Unauthorized);
+    }
+    let workbench = environment
+        .runner
+        .application_workbench()
+        .with_intrinsic_effect_support(environment.intrinsic_effect_support());
+    let installer = Arc::new(
+        environment
+            .runner
+            .transfer_custody(
+                definition.installer,
+                definition.session,
+                context.placement.session,
+                context.placement.resource_scope,
+            )
+            .await
+            .map_err(|error| crate::SpecReplacementError::Failed(error.to_string()))?,
+    );
+    let install = expected
+        .tools()
+        .expect("admitted installation")
+        .install
+        .checked_add(1)
+        .ok_or_else(|| {
+            crate::SpecReplacementError::Failed("installation identity exhausted".into())
+        })?;
+    let tools = workbench
+        .prepare_explicit_tools(context, install, definition.effects, installer)
+        .await
+        .map_err(|error| crate::SpecReplacementError::Failed(error.to_string()))?;
+    state.replace_explicit(&expected, Arc::new(tools))
 }
 
 fn actor_can_control(
@@ -2088,14 +2150,15 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             retired: Arc::clone(&self.retired),
             requests: Arc::clone(&self.requests),
             commands: self.commands.clone(),
-            fork_groups: self.fork_groups.clone(),
+            actor_admissions: self.actor_admissions.clone(),
             actors: Arc::clone(&self.actors),
             fork_workspaces: self.fork_workspaces.clone(),
             root_admission_closed: self.root_admission_closed.clone(),
-            launch_resolver: self.launch_resolver.clone(),
             source_layers: self.source_layers.clone(),
             jev: Arc::clone(&self.jev),
             cell_model_factory: self.cell_model_factory.clone(),
+            form_host: self.form_host.clone(),
+            form_registry: self.form_registry.clone(),
             release_tracked: Arc::clone(&self.release_tracked),
             conversation_reader: self.conversation_reader.clone(),
             usage_pointers: self.usage_pointers.clone(),
@@ -2528,6 +2591,7 @@ fn resident_actor_failure_layer(
                 .failure_layer()
                 .unwrap_or(WorkbenchFailureLayer::Effect),
         ),
+        ResidentActorWorkbenchError::InvocationCancelled => None,
         _ => None,
     }
 }
@@ -2692,16 +2756,20 @@ pub struct ResidentKernelBehavior<H, O> {
     descriptor: ActorDescriptor,
     environment: ResidentEnvironment<H, O>,
     boot: Option<ResidentBoot>,
+    explicit_installer: Option<Arc<RootCustody>>,
+    prepared_request_receiver: Option<crate::resident_workbench::PreparedRequestReceiver>,
+    request_receiver_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+    fresh_context_seed: Option<String>,
+    spawn_source: Option<crate::CheckpointSourceLayer>,
+    spawn_helper_branch: Option<String>,
+    spawn_admission: Option<crate::SpawnAdmission>,
     root_startup: Option<(crate::RootStartupIntent, Arc<Mutex<RootStartupState>>)>,
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
     checkpoint: Option<StateCheckpoint>,
     admitted_checkpoint: Option<(crate::CheckpointLease, Option<HostedCheckpointAttachment>)>,
-    inherited_host_attachment: Option<HostedCheckpointAttachment>,
-    child_scope_lease: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
-    child_release: child_initialization::ForkChildReleaseState,
-    pending_child_initialization: Option<child_initialization::PublishedChildInitialization>,
     child_session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
+    child_placement_custody: Option<child_launch::ChildPlacementCustody>,
     pending_checkpoint: Option<StateCheckpoint>,
     active_input: Option<RetainedActorInput>,
     input_origin: ActorInputOrigin,
@@ -2709,8 +2777,8 @@ pub struct ResidentKernelBehavior<H, O> {
     static_source_count: usize,
     source_connections: Option<crate::request::sources::ActorSourceConnections>,
     launch_worktrees: Vec<String>,
-    prepared_workspace: Option<crate::PreparedForkWorkspace>,
-    worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
+    prepared_workspace: Option<crate::PreparedWorkspaceAttachment>,
+    worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
     policy_installed: bool,
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
     /// How many specs this incarnation has installed. `policy_installed` stays
@@ -2739,11 +2807,9 @@ pub struct ResidentKernelBehavior<H, O> {
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
-    active_route: Option<(crate::WatchId, Vec<crate::ForkGroupId>)>,
-    fork_publication: ForkPublication,
+    checkpoint_publication: CheckpointPublication,
     active_route_reservation_owner: Option<RequestReservationOwner>,
-    settled_fork_boundaries: Vec<tidepool_runtime::session::WorkbenchForkBoundary>,
-    pending_fork_publications: Vec<PendingForkPublication>,
+    settled_checkpoint_boundaries: Vec<tidepool_runtime::session::ContextCheckpointBoundary>,
     /// This actor's last summary-family status roster, for the `changed`
     /// view. One per actor, replaced on each such call.
     roster_snapshot: Mutex<Option<status_rendering::RosterSnapshot>>,
@@ -2833,7 +2899,7 @@ struct WorkbenchFinalization {
     result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     rejected: bool,
     retire_scopes: Option<Vec<tidepool_codegen::scope::ScopeId>>,
-    context_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    context_boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
 }
 
@@ -2872,7 +2938,7 @@ where
     let context_failed = context_boundary.is_some() && (!cleanup_confirmed || context_cancelled);
     if context_failed {
         let scopes = environment
-            .fork_groups
+            .actor_admissions
             .settle_checkpoints(
                 context.actor,
                 context_boundary.as_ref().expect("context boundary"),
@@ -2885,7 +2951,7 @@ where
     let checkpoint_cleanup_failure = match retire_scopes {
         Some(scopes) => environment
             .runner
-            .retire_fork_scopes(context.clone(), scopes)
+            .retire_context_scopes(context.clone(), scopes)
             .await
             .err()
             .map(|failure| format!("failed checkpoint cleanup: {failure}")),
@@ -2973,7 +3039,7 @@ struct WorkbenchEffectState {
     admitted_source: crate::CheckpointSourceLayer,
     reservation_owner: RequestReservationOwner,
     invocation_work: Arc<InvocationWork>,
-    publication: ForkPublication,
+    publication: CheckpointPublication,
     /// The nested slot borrows this execution and cannot recursively invoke itself.
     after_tool_active: bool,
     terminal_transfer: Option<Arc<AcceptedTerminalTransfer>>,
@@ -3020,6 +3086,8 @@ struct WorkbenchFragmentExecution {
     resume_failure: Option<ResidentActorWorkbenchError>,
     fragment: Option<ResidentWorkbenchFragment>,
     outcome: Option<ResidentOutcome>,
+    scopes: Vec<scopes::ScopeFrame>,
+    green: Option<green::GreenInvocation<green_notebook::EffectCompletion>>,
 }
 
 impl WorkbenchFragmentExecution {
@@ -3032,6 +3100,8 @@ impl WorkbenchFragmentExecution {
             resume_failure: None,
             fragment: Some(fragment),
             outcome: Some(outcome.into()),
+            scopes: Vec::new(),
+            green: None,
         }
     }
 }
@@ -3092,8 +3162,6 @@ enum OwnedWorkbenchWait {
         operation: Option<WorkbenchOperationId>,
     },
     Launch(child_launch::PreparedChildLaunch),
-    CapturedCommit(captured_commit::PreparedCapturedCommit),
-    DeferredCommit(captured_commit::PreparedDeferredCommit),
     Prepared(
         futures_util::future::BoxFuture<
             'static,
@@ -3117,6 +3185,7 @@ enum OwnedWorkbenchWait {
     },
     Exit {
         continuation: ResidentHole,
+        target: ActorRef,
         terminal: crate::RetainedActorExit,
     },
     PollExit {
@@ -3145,6 +3214,7 @@ enum OwnedWorkbenchWait {
 impl OwnedWorkbenchWait {
     fn observe_after_resume(&self) -> Option<ActorRef> {
         match self {
+            Self::Exit { target, .. } => Some(*target),
             Self::PollExit {
                 target,
                 terminal: Some(_),
@@ -3191,6 +3261,7 @@ enum WorkbenchRunAdvance {
     ParkUnit,
     ParkNative,
     ParkEffect,
+    ParkGreen,
     ParkAfterToolStart,
     ParkAfterToolFinish,
 }
@@ -3199,6 +3270,7 @@ enum FragmentAdvance {
     Settled(ResidentWorkbenchStep),
     ParkEffect,
     ParkNative,
+    ParkGreen,
 }
 
 /// Structured actor turns retain actor publication authority. Workbench effects
@@ -3206,8 +3278,19 @@ enum FragmentAdvance {
 #[derive(Clone)]
 enum CurrentEffectOwner<'a> {
     Workbench(&'a WorkbenchEffectState),
+    Scoped {
+        base: Box<CurrentEffectOwner<'a>>,
+        scope: Arc<InvocationWork>,
+        wait_control: Option<Arc<crate::WorkbenchExecutionControl>>,
+    },
+    Tool {
+        work: Arc<InvocationWork>,
+        publication: CheckpointPublication,
+        control: Arc<crate::WorkbenchExecutionControl>,
+    },
     Actor {
-        publication: ForkPublication,
+        ephemeral_work: Arc<InvocationWork>,
+        publication: CheckpointPublication,
         reservation_owner: Option<RequestReservationOwner>,
         control: Option<Arc<crate::WorkbenchExecutionControl>>,
     },
@@ -3216,6 +3299,8 @@ enum CurrentEffectOwner<'a> {
 impl CurrentEffectOwner<'_> {
     fn context_binding(&self) -> Option<Arc<dyn crate::HostedContextBinding>> {
         match self {
+            Self::Scoped { base, .. } => base.context_binding(),
+
             Self::Workbench(execution) if !execution.after_tool_active => {
                 execution.context_binding.clone()
             }
@@ -3224,55 +3309,94 @@ impl CurrentEffectOwner<'_> {
     }
     fn model(&self) -> Option<Arc<dyn crate::CellModelBinding>> {
         match self {
+            Self::Scoped { base, .. } => base.model(),
+
             Self::Workbench(execution) => execution.model.clone(),
-            Self::Actor { .. } => None,
+            Self::Actor { .. } | Self::Tool { .. } => None,
         }
     }
 
     fn invocation_work(&self) -> Option<Arc<InvocationWork>> {
         match self {
+            Self::Scoped { base, .. } => base.invocation_work(),
+
             Self::Workbench(execution) => {
                 assert!(execution
                     .invocation_work
                     .matches(execution.context.actor, &execution.reservation_owner));
                 Some(execution.invocation_work.clone())
             }
+            Self::Tool { work, .. } => Some(work.clone()),
             Self::Actor { .. } => None,
         }
     }
 
-    fn publication(&self) -> &ForkPublication {
+    fn ephemeral_work(&self) -> Option<Arc<InvocationWork>> {
         match self {
+            Self::Scoped { scope, .. } => Some(scope.clone()),
+            Self::Actor { ephemeral_work, .. } => Some(ephemeral_work.clone()),
+            Self::Tool { work, .. } => Some(work.clone()),
+            _ => self.invocation_work(),
+        }
+    }
+
+    fn publication(&self) -> &CheckpointPublication {
+        match self {
+            Self::Scoped { base, .. } => base.publication(),
+
             Self::Workbench(execution) => &execution.publication,
-            Self::Actor { publication, .. } => publication,
+            Self::Actor { publication, .. } | Self::Tool { publication, .. } => publication,
+        }
+    }
+
+    fn interaction_control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
+        match self {
+            Self::Scoped { base, .. } => base.interaction_control(),
+            Self::Workbench(execution) => execution.control.clone(),
+            Self::Actor { control, .. } => control.clone(),
+            Self::Tool { control, .. } => Some(control.clone()),
         }
     }
 
     fn control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
         match self {
+            Self::Scoped {
+                base, wait_control, ..
+            } => wait_control.clone().or_else(|| base.control()),
+
             Self::Workbench(execution) => execution.control.clone(),
             Self::Actor { control, .. } => control.clone(),
+            Self::Tool { control, .. } => Some(control.clone()),
         }
     }
 
     fn admitted_source(&self) -> Option<&crate::CheckpointSourceLayer> {
         match self {
+            Self::Scoped { base, .. } => base.admitted_source(),
+
             Self::Workbench(execution) => Some(&execution.admitted_source),
-            Self::Actor { .. } => None,
+            Self::Actor { .. } | Self::Tool { .. } => None,
         }
     }
 
     fn reservation_owner(&self) -> Option<RequestReservationOwner> {
         match self {
+            Self::Scoped { scope, .. } => Some(scope.reservation_owner()),
+
             Self::Workbench(execution) => Some(execution.reservation_owner.clone()),
             Self::Actor {
                 reservation_owner, ..
             } => reservation_owner.clone(),
+            Self::Tool { work, .. } => Some(work.reservation_owner()),
         }
     }
 
     fn after_tool_active(&self) -> bool {
-        matches!(self, Self::Workbench(execution) if execution.after_tool_active)
+        match self {
+            Self::Scoped { base, .. } => base.after_tool_active(),
+            Self::Workbench(execution) => execution.after_tool_active,
+            Self::Actor { .. } | Self::Tool { .. } => false,
+        }
     }
 }
 
@@ -3362,20 +3486,19 @@ fn admit_context_authority(
     Ok(())
 }
 
-// Hosted groups retain provider completion custody. Direct executions and
-// resident handlers publish committed admissions before continuing.
+// Checkpoints retain the exact invocation provenance and hosted capture owner.
 #[derive(Clone)]
-enum ForkPublication {
+enum CheckpointPublication {
     Resident,
     Workbench {
-        boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+        boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
         capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
     },
-    Route(tidepool_runtime::session::WorkbenchForkBoundary),
+    Route(tidepool_runtime::session::ContextCheckpointBoundary),
 }
 
-impl ForkPublication {
-    fn boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
+impl CheckpointPublication {
+    fn boundary(&self) -> Option<&tidepool_runtime::session::ContextCheckpointBoundary> {
         match self {
             Self::Resident => None,
             Self::Workbench { boundary, .. } => boundary.as_ref(),
@@ -3383,7 +3506,7 @@ impl ForkPublication {
         }
     }
 
-    fn hosted_boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
+    fn hosted_boundary(&self) -> Option<&tidepool_runtime::session::ContextCheckpointBoundary> {
         match self {
             Self::Workbench {
                 boundary: Some(boundary),
@@ -3391,34 +3514,6 @@ impl ForkPublication {
             } => boundary.hosted().map(|_| boundary),
             Self::Resident | Self::Workbench { .. } | Self::Route(_) => None,
         }
-    }
-
-    fn capture_inherited_child(
-        &self,
-        descriptor: &ActorDescriptor,
-    ) -> Result<Option<HostedCheckpointAttachment>, ResidentActorWorkbenchError> {
-        if descriptor.fork_group().is_none()
-            || descriptor.context_parent().is_none()
-            || descriptor.checkpoint_token().is_some()
-        {
-            return Ok(None);
-        }
-        let (Some(boundary), Some(capture)) = (self.hosted_boundary(), self.capture()) else {
-            return Ok(None);
-        };
-        if !boundary.is_complete() || descriptor.fork_boundary() != Some(boundary) {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "inherited host attachment requires its exact admitted invocation".into(),
-            ));
-        }
-        capture
-            .capture(descriptor.label(), boundary)
-            .map(Some)
-            .map_err(|error| {
-                ResidentActorWorkbenchError::ActorProtocol(format!(
-                    "inherited host context capture failed: {error:?}"
-                ))
-            })
     }
 
     fn capture(&self) -> Option<&Arc<dyn crate::HostedCheckpointCapture>> {
@@ -3429,91 +3524,13 @@ impl ForkPublication {
     }
 }
 
-#[derive(Clone)]
-struct PendingForkPublication {
-    boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
-    phase: PendingForkPublicationPhase,
-    releases: std::collections::VecDeque<PendingForkChildRelease>,
-    unused_scopes: Vec<(tidepool_repr::SessionId, tidepool_codegen::scope::ScopeId)>,
-    // Siblings and interrupted retries share one final committed source seed.
-    inherited: Arc<OnceLock<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>>,
-}
-
-#[derive(Clone)]
-struct PendingForkChildRelease {
-    child: ActorRef,
-    session: tidepool_repr::SessionId,
-    scope: tidepool_codegen::scope::ScopeId,
-    // Retained publication clones share the first runtime-issued grant so an
-    // interrupted finalizer retries the exact capsule, without reminting it.
-    lexical: Arc<OnceLock<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>>,
-}
-
-#[derive(Clone)]
-enum PendingForkPublicationPhase {
-    Prepared(Vec<crate::ForkGroupId>),
-    Committed(Arc<crate::lineage::CommittedForkGroups>),
-}
-
 impl<H, O> ResidentKernelBehavior<H, O> {
-    /// A fork refusal, with the full coordinator named by its path.
-    ///
-    /// Every ancestor's ceiling counts its whole subtree, so the coordinator
-    /// that is full is often not the one forking. It is carried as an
-    /// incarnation, which an agent cannot act on: it reasons in paths.
-    /// Resolve it here, where the actor records are in reach, and fall back to
-    /// the short form when the record is gone.
-    fn name_coordinator(&self, error: crate::lineage::ForkGroupError) -> String {
-        use crate::lineage::ForkGroupError;
-        let ForkGroupError::DescendantBudgetExceeded {
-            coordinator,
-            requested,
-            active,
-            maximum,
-        } = error
-        else {
-            return error.to_string();
-        };
-        let named = self
-            .environment
-            .actors
-            .lock()
-            .get(&coordinator)
-            .and_then(|record| record.descriptor.actor_path())
-            .map_or_else(|| coordinator.to_string(), |path| path.to_string());
-        format!(
-            "fork group would exceed the active descendant ceiling of coordinator {named} \
-             ({requested} requested, {active} already active or reserved in its subtree, \
-             maximum {maximum})"
-        )
-    }
-
-    fn pending_in_tool_block(
-        &self,
-        owner: ActorRef,
-        effect_owner: &CurrentEffectOwner<'_>,
-        target: ActorRef,
-    ) -> bool {
-        request_wait::guard_deferred_target(
-            &self.environment.fork_groups,
-            owner,
-            effect_owner.publication().boundary(),
-            target,
-        )
-        .is_err()
-    }
-
     fn capture_exit_target(
         &self,
         kernel: &KernelContext,
-        effect_owner: &CurrentEffectOwner<'_>,
+        _effect_owner: &CurrentEffectOwner<'_>,
         target: ActorRef,
     ) -> Result<crate::RetainedActorExit, ResidentActorWorkbenchError> {
-        if self.pending_in_tool_block(kernel.identity(), effect_owner, target) {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "child starts after this invocation settles; wait in a later invocation".into(),
-            ));
-        }
         let actor = kernel.resolve(target).ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 KernelCallFailure::TargetUnavailable(target).to_string(),
@@ -3609,16 +3626,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             descriptor,
             environment,
             boot: Some(boot),
+            explicit_installer: None,
+            prepared_request_receiver: None,
+            request_receiver_scope: None,
+            fresh_context_seed: None,
+            spawn_source: None,
+            spawn_helper_branch: None,
+            spawn_admission: None,
             root_startup: None,
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
             checkpoint: None,
             admitted_checkpoint: None,
-            inherited_host_attachment: None,
-            child_scope_lease: None,
-            child_release: Default::default(),
-            pending_child_initialization: None,
             child_session_startup: None,
+            child_placement_custody: None,
             pending_checkpoint: None,
             active_input: None,
             input_origin: ActorInputOrigin::ActorStartup,
@@ -3644,11 +3665,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
             workbench_executions: Arc::default(),
-            active_route: None,
-            fork_publication: ForkPublication::Resident,
+            checkpoint_publication: CheckpointPublication::Resident,
             active_route_reservation_owner: None,
-            settled_fork_boundaries: Vec::new(),
-            pending_fork_publications: Vec::new(),
+            settled_checkpoint_boundaries: Vec::new(),
             roster_snapshot: Mutex::new(None),
             assignment_base: None,
             #[cfg(test)]
@@ -3671,9 +3690,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     {
         let mut context = self.context(actor);
         let (mut request, execution) = ensure_workbench_execution_id(invocation.request);
-        if request.fork_boundary().is_none() {
-            request = request.with_fork_boundary(
-                tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+        if request.checkpoint_boundary().is_none() {
+            request = request.with_checkpoint_boundary(
+                tidepool_runtime::session::ContextCheckpointBoundary::Execution {
                     actor_id: actor.id.0,
                     incarnation: actor.incarnation.0,
                     execution_id: execution,
@@ -3776,7 +3795,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             let keys = selected.effect_keys();
             if keys.iter().any(|key| match key {
                 exomonad_tool::ToolEffectKey::Actor(key) => {
-                    !self.descriptor.effective_role().effect_keys().contains(key)
+                    !self.descriptor.capabilities().effect_keys().contains(key)
                 }
                 exomonad_tool::ToolEffectKey::ContextReadWrite => {
                     selected.scheduling() != exomonad_tool::ToolScheduling::BeforeNextInference
@@ -3956,8 +3975,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn actor_effect_owner(&self, actor: ActorRef) -> CurrentEffectOwner<'static> {
         let control = crate::resident_workbench::execution_control();
+        let ephemeral_work = match &self.active_route_reservation_owner {
+            Some(reservation) => self
+                .workbench_executions
+                .lock()
+                .callback_root(actor, reservation.clone()),
+            None => self.workbench_executions.lock().actor_scope_root(actor),
+        };
         CurrentEffectOwner::Actor {
-            publication: self.fork_publication.clone(),
+            ephemeral_work,
+            publication: self.checkpoint_publication.clone(),
             reservation_owner: control
                 .as_ref()
                 .and_then(|control| control.reservation_owner(actor))
@@ -3968,6 +3995,18 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn failure(detail: impl Into<String>) -> KernelBehaviorError {
         KernelBehaviorError::new(detail)
+    }
+
+    fn tool_invocation_failure(
+        actor: ActorRef,
+        error: ResidentActorWorkbenchError,
+    ) -> KernelInvocationFailure {
+        match error {
+            ResidentActorWorkbenchError::InvocationCancelled => {
+                KernelInvocationFailure::Cancelled { actor }
+            }
+            error => Self::invocation_failure(actor, error),
+        }
     }
 
     fn workbench_failure(error: ResidentActorWorkbenchError) -> KernelBehaviorError {
@@ -3998,15 +4037,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         {
             record.interactive_policy_installed = true;
         }
-        // best-effort: the deployment observer channel may have no listener
-        // (e.g. shut down); a missed PolicyInstalled event has no correctness
-        // effect since the policy flag above is already committed to state.
-        self.environment
-            .deployments
-            .try_send(LocalResidentDeployment::PolicyInstalled(Box::new(
-                installation,
-            )))
-            .ok();
+        let admission = installation.spawn_admission.clone();
+        if let Err(error) =
+            self.environment
+                .deployments
+                .try_send(LocalResidentDeployment::PolicyInstalled(Box::new(
+                    installation,
+                )))
+        {
+            if let Some(authority) = admission {
+                authority.fail(format!(
+                    "provider attachment deployment unavailable: {error}"
+                ));
+            }
+        }
     }
 
     /// The actor whose native application services this actor's commands.
@@ -4051,6 +4095,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
+        if let Some(admission) = &self.spawn_admission {
+            admission.fail(terminal.summary.clone());
+        }
         publish_retired(&self.environment, actor, terminal);
     }
 
@@ -4159,7 +4206,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .filter_map(|(identity, record)| {
                 let key = format!(
                     "{:?} ({}@{})",
-                    record.descriptor.label(),
+                    record.descriptor.display_label(),
                     identity.id.0,
                     identity.incarnation.0
                 );
@@ -4195,7 +4242,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     format!(
                         "\n    {}",
                         runtime.delivery_status_line(
-                            record.descriptor.label(),
+                            &record.descriptor.display_label(),
                             requests.0.len() + requests.1.len(),
                             crate::runtime_observation::unix_time_ms(),
                         )
@@ -4205,23 +4252,22 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 };
                 if view == StatusView::Concise {
                     return Some((key, format!(
-                        "  - {:?} ({}@{}) supervisor={} role={:?} bound_worktree={:?} state={state} {}{delivery}",
-                        record.descriptor.label(), identity.id.0, identity.incarnation.0,
+                        "  - {:?} ({}@{}) supervisor={} bound_worktree={:?} state={state} {}{delivery}",
+                        record.descriptor.display_label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.supervisor_parent().map_or_else(
                             || "none".to_owned(),
                             |parent| format!("{}@{}", parent.id.0, parent.incarnation.0),
                         ),
-                        record.descriptor.effective_role().role(),
                         record.bound_worktree,
                         runtime.usage_summary_display(),
                     )));
                 }
                 if view == StatusView::Lineage {
                     return Some((key, format!(
-                        "  - {:?} ({}@{}) creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
-                        record.descriptor.label(), identity.id.0, identity.incarnation.0,
+                        "  - {:?} ({}@{}) creator={:?} supervisor={:?} context_parent={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
+                        record.descriptor.display_label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.creator(), record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
-                        record.descriptor.fork_group(), record.descriptor.placement().lexical_scope.0,
+                        record.descriptor.placement().lexical_scope.0,
                         runtime.provider_thread, runtime.provider_parent_thread,
                         runtime.first_provider_usage.as_ref().map(|sample| (&sample.observation_id, sample.cached_input_tokens, sample.uncached_input_tokens)),
                         usage.map(|sample| sample.cache_boundary),
@@ -4232,14 +4278,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     )));
                 }
                 Some((key, format!(
-                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={} {}{delivery}",
+                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} workbench={:?} state={} {}{delivery}",
                     identity.id.0,
                     identity.incarnation.0,
-                    record.descriptor.label(),
+                    record.descriptor.display_label(),
                     record.descriptor.supervisor_parent(),
                     record.descriptor.context_parent(),
-                    record.descriptor.fork_group(),
-                    record.descriptor.effective_role().role(),
                     record.bound_worktree,
                     runtime.provider_thread,
                     runtime.provider_parent_thread,
@@ -4270,7 +4314,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let runtime = self.runtime_observation.snapshot();
         let usage = runtime.latest_provider_usage();
         let unavailable_responses = format!("{:?}", requests.unavailable_responses);
-        let unavailable_watches = format!("{:?}", requests.unavailable_watches);
+        let unavailable_watches = format!(
+            "{:?}; rejected: {:?}",
+            requests.unavailable_watches, requests.rejected_watches
+        );
         let roster_summary = if view != StatusView::Concise || hidden_terminal_actors == 0 {
             String::new()
         } else {
@@ -4319,8 +4366,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let current = if view == StatusView::Concise {
             format!(
-                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  jobs: running={:?}\n  role={:?} workspace={:?} descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
-                self.descriptor.label(),
+                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  jobs: running={:?}\n  descendant_depth={} active_children={} bound_worktree={:?} workbench={:?}{}",
+                self.descriptor.display_label(),
                 actor.id.0,
                 actor.incarnation.0,
                 runtime.activation_kind,
@@ -4336,12 +4383,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 unavailable_watches,
                 requests.pending_watches,
                 requests.running_jobs,
-                self.descriptor.effective_role().role(),
-                self.descriptor.effective_role().workspace(),
-                self.descriptor.effective_role().descendants().maximum_depth,
+                self.descriptor.capabilities().descendants().maximum_depth,
                 crate::render_child_budget(
                     self.descriptor
-                        .effective_role()
+                        .capabilities()
                         .descendants()
                         .maximum_active_children,
                 ),
@@ -4351,14 +4396,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )
         } else {
             format!(
-                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
+                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  available effects: {} descendants={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
                 actor.id.0,
                 actor.incarnation.0,
-                self.descriptor.label(),
+                self.descriptor.display_label(),
                 self.descriptor.creator(),
                 self.descriptor.supervisor_parent(),
                 self.descriptor.context_parent(),
-                self.descriptor.fork_group(),
                 self.descriptor.placement().lexical_scope.0,
                 runtime.provider_thread,
                 runtime.provider_parent_thread,
@@ -4367,15 +4411,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 usage.map(|sample| sample.cache_boundary),
                 runtime.activation_kind,
                 runtime.event_watermark,
-                self.descriptor.effective_role().role(),
-                self.descriptor.effective_role().haskell_effects_type(),
-                self.descriptor.effective_role().native_tools(),
-                self.descriptor.effective_role().workspace(),
-                self.descriptor.effective_role().descendants(),
-                runtime
-                    .prompt_profile
-                    .as_deref()
-                    .unwrap_or(self.descriptor.effective_role().prompt_profile()),
+                self.descriptor.capabilities().haskell_effects_type(),
+                self.descriptor.capabilities().descendants(),
                 prompt_identity,
                 if self.policy_installed {
                     "attached"
@@ -4452,12 +4489,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         if view == StatusView::Lineage {
             let lineage = roster_text;
             format!(
-                "actor {}@{} lineage\n  supervisor={:?}\n  context_parent={:?}\n  fork_group={:?}\nactors:\n{lineage}",
+                "actor {}@{} lineage\n  supervisor={:?}\n  context_parent={:?}\n \nactors:\n{lineage}",
                 actor.id.0,
                 actor.incarnation.0,
                 self.descriptor.supervisor_parent(),
                 self.descriptor.context_parent(),
-                self.descriptor.fork_group(),
             )
         } else {
             status
@@ -4479,16 +4515,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     .and_then(|actor| actor.terminal().get())
                     .is_none()
         };
-        let operator_checkout = if self.descriptor.effective_role().role() == crate::ActorRole::Root
-        {
+        let operator_checkout = if self.descriptor.is_root() {
             own.source_drift.checkout.clone()
         } else {
             records
                 .iter()
-                .filter(|(identity, record)| {
-                    record.descriptor.effective_role().role() == crate::ActorRole::Root
-                        && live(identity, record)
-                })
+                .filter(|(identity, record)| record.descriptor.is_root() && live(identity, record))
                 .map(|(_, record)| record.runtime_observation.snapshot().source_drift.checkout)
                 .next()
                 .unwrap_or_default()
@@ -4502,7 +4534,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             })
             .map(|(_, record)| {
                 (
-                    record.descriptor.label().to_owned(),
+                    record.descriptor.display_label().into_owned(),
                     record.runtime_observation.snapshot().source_drift.checkout,
                 )
             })
@@ -4663,81 +4695,6 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             actor.id.0, actor.incarnation.0,
         )
     }
-
-    fn idle_for_cleanup(&self, actor: ActorRef) -> bool {
-        let requests = self.environment.requests.work_for_target(actor);
-        self.environment
-            .actors
-            .lock()
-            .get(&actor)
-            .is_some_and(|record| {
-                record
-                    .runtime_observation
-                    .snapshot()
-                    .disposition(!requests.0.is_empty() || !requests.1.is_empty())
-                    == crate::runtime_observation::AgentDisposition::IdleRetained
-            })
-    }
-
-    fn cleanup_plan(
-        &self,
-        kernel: &KernelContext,
-        owner: ActorRef,
-        group: crate::ForkGroupId,
-    ) -> crate::resident_workbench::CleanupPlanProjection {
-        let members = match self.environment.fork_groups.members(group, owner) {
-            Ok(members) => members,
-            Err(error) => {
-                return crate::resident_workbench::CleanupPlanProjection {
-                    group,
-                    actors: Vec::new(),
-                    pending_responses: Vec::new(),
-                    pending_watches: Vec::new(),
-                    refusal: Some(error.to_string()),
-                };
-            }
-        };
-        let records = self.environment.actors.lock().clone();
-        let actors = members
-            .iter()
-            .map(|actor| {
-                let record = records.get(actor);
-                crate::resident_workbench::CleanupActorProjection {
-                    actor: *actor,
-                    revision: self.environment.requests.cleanup_revision(*actor),
-                    label: record
-                        .map(|record| record.descriptor.label().to_owned())
-                        .unwrap_or_else(|| "<unavailable>".into()),
-                    terminal: (record.is_none() && kernel.resolve(*actor).is_none())
-                        || record.and_then(|record| record.terminal.as_ref()).is_some()
-                        || kernel
-                            .resolve(*actor)
-                            .and_then(|actor| actor.terminal().get())
-                            .is_some(),
-                }
-            })
-            .collect::<Vec<_>>();
-        drop(records);
-        let targets = members
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        let mut owners = targets.clone();
-        owners.insert(owner);
-        let (pending_responses, pending_watches) = self
-            .environment
-            .requests
-            .campaign_cleanup_blockers(&owners, &targets);
-        let refusal = actors.iter().find(|entry| !entry.terminal && !self.idle_for_cleanup(entry.actor))
-            .map(|entry| format!("actor {}@{} has no confirmed idle provider turn; inspect its health before cleanup", entry.actor.id.0, entry.actor.incarnation.0));
-        crate::resident_workbench::CleanupPlanProjection {
-            group,
-            actors,
-            pending_responses,
-            pending_watches,
-            refusal,
-        }
-    }
 }
 
 fn join_roster_rows(roster: &[(String, String)]) -> String {
@@ -4746,32 +4703,6 @@ fn join_roster_rows(roster: &[(String, String)]) -> String {
         .map(|(_, row)| row.as_str())
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-async fn await_cleanup_releases<F, Fut>(
-    stopped: Vec<(
-        ActorRef,
-        Option<crate::resident_workbench::AgentStopProjection>,
-    )>,
-    release: F,
-) -> Vec<crate::resident_workbench::CleanupStepProjection>
-where
-    F: Fn(ActorRef) -> Fut,
-    Fut: std::future::Future<Output = crate::resident_workbench::AgentStopProjection>,
-{
-    futures_util::future::join_all(stopped.into_iter().map(|(actor, outcome)| {
-        let release = &release;
-        async move {
-            crate::resident_workbench::CleanupStepProjection::StoppedActor(
-                actor,
-                match outcome {
-                    Some(outcome) => outcome,
-                    None => release(actor).await,
-                },
-            )
-        }
-    }))
-    .await
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4799,15 +4730,13 @@ where
     /// returns and nothing else calls a method on a stopped behavior
     /// first, so nothing reads any of these fields again afterwards.
     fn release_session_state(&mut self) {
-        self.workbench_executions.lock().release_all_fork_sources();
-        self.pending_fork_publications.clear();
         self.descriptor.source_imports().release_capture();
+        self.explicit_installer.take();
+        self.prepared_request_receiver.take();
+        self.request_receiver_scope.take();
         self.shutdown_hook.take();
         self.checkpoint.take();
         self.admitted_checkpoint.take();
-        self.inherited_host_attachment.take();
-        self.child_scope_lease.take();
-        self.pending_child_initialization.take();
         self.pending_checkpoint.take();
         self.active_input.take();
         self.boot.take();
@@ -4904,18 +4833,11 @@ where
         &self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
-        effect_owner: CurrentEffectOwner<'_>,
+        _effect_owner: CurrentEffectOwner<'_>,
         ancestry: &crate::CallAncestry,
         target: ActorRef,
         request: MailboxValue,
     ) -> Result<MailboxValue, ResidentCallError> {
-        if self.pending_in_tool_block(context.actor, &effect_owner, target) {
-            return Err(ResidentCallError::Call(KernelCallFailure::Handler {
-                actor: target,
-                detail: "child starts after this tool block completes; register a watch or call it in a later tool invocation".into(),
-                diagnostic: None,
-            }));
-        }
         ancestry.enter(target).map_err(ResidentCallError::Call)?;
         let target_ref = kernel
             .resolve(target)
@@ -4969,23 +4891,29 @@ where
         effect_owner: CurrentEffectOwner<'_>,
         start: crate::ResidentActorStart,
     ) -> child_launch::PreparedChildLaunch {
-        tracing::info!(target: "exomonad_actor::workbench_phase", parent = %context.actor, label = start.child.descriptor.label(), phase = "child_launch_requested", "actor phase");
+        tracing::info!(target: "exomonad_actor::workbench_phase", parent = %context.actor, label = %start.child.descriptor.display_label(), phase = "child_launch_requested", "actor phase");
         let crate::ResidentActorStart { parent_hole, child } = start;
-        let fork_reply = if child.fork_workspace.is_some() {
-            ForkReply::Forks
-        } else {
-            ForkReply::Actor
-        };
-        let fork_group = child.descriptor.fork_group();
-        let original_placement = child.descriptor.placement();
-        let invocation_work = effect_owner.invocation_work();
+        let spawn_reply = child.spawn.is_some();
+        let placement_custody =
+            child_launch::ChildPlacementCustody::new(child.descriptor.placement());
+        let placement_startup = placement_custody.startup_guard();
+        let placement_registration = effect_owner
+            .ephemeral_work()
+            .expect("actor effects retain their construction cleanup owner")
+            .retain_launch_placement(context, placement_custody.clone());
+        let resolved_owner = self.resolve_resource_owner(context, &effect_owner, child.lifetime);
+        let invocation_work = resolved_owner.as_ref().ok().cloned().flatten();
+        let mut retained_spawn_admission = None;
         let admission = (|| {
+            placement_registration.map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            let invocation_work = resolved_owner?;
             let crate::start::CapturedChildLaunch {
                 lifetime,
                 mut descriptor,
+                spawn,
                 entry,
                 launch_worktrees,
-                fork_workspace,
+                record_workspace,
                 seed,
             } = child;
             let child_session_startup = (descriptor.placement().session
@@ -5000,7 +4928,7 @@ where
                 .checkpoint_token()
                 .map(|token| {
                     self.environment
-                        .fork_groups
+                        .actor_admissions
                         .preview_checkpoint(token, context.placement.session)
                 })
                 .transpose()
@@ -5011,6 +4939,11 @@ where
                 })?;
             let checkpoint_lease = checkpoint_preview.as_ref().map(|preview| preview.lease());
             if let Some(lease) = checkpoint_lease {
+                if let Some(layers) = &self.environment.source_layers {
+                    layers
+                        .validate_source_authority(&lease.issuer_source_layer)
+                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                }
                 lease.retained_scope().map_err(|refusal| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
                         "checkpoint retained-scope refusal: {refusal:?}"
@@ -5031,38 +4964,6 @@ where
                 descriptor = descriptor
                     .with_fork_effort(checkpoint_effort.or(self.descriptor.fork_effort()));
             }
-            let fork_group = descriptor.fork_group();
-            let fork_context = if descriptor.context_parent().is_some() {
-                crate::ForkContext::InheritedContext
-            } else {
-                crate::ForkContext::SelectedContext
-            };
-            self.validate_worker_context(lifetime, fork_context)
-                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-            if descriptor.fork_group().is_some() {
-                if checkpoint_lease.is_none()
-                    && self.policy_installed
-                    && effect_owner
-                        .publication()
-                        .boundary()
-                        .is_none_or(|boundary| !boundary.is_complete())
-                {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "context fork requires recorded invocation provenance from the hosted transport; use a Codex build that supplies contextCallId".into(),
-                ));
-                }
-                descriptor = descriptor.with_fork_boundary(
-                    checkpoint_lease
-                        .as_ref()
-                        .map(|lease| lease.boundary.clone())
-                        .or_else(|| effect_owner.publication().boundary().filter(|boundary|
-                            !matches!(boundary, tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. })
-                        ).cloned()),
-                );
-                if let Some(lease) = &checkpoint_lease {
-                    descriptor = descriptor.with_context_parent(lease.issuer);
-                }
-            }
             if !self
                 .descriptor
                 .profile()
@@ -5074,66 +4975,46 @@ where
                     descriptor.profile()
                 )));
             }
-            let role = if descriptor.fork_group().is_some() {
-                self.descriptor
-                    .effective_role()
-                    .preview_child(
-                        descriptor.effective_role().clone(),
-                        descriptor.fork_budget(),
-                    )
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?
-            } else {
-                if !descriptor.effective_role().respects_role_ceiling() {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "requested effect row exceeds or duplicates the role ceiling".into(),
-                    ));
-                }
-                self.descriptor
-                    .effective_role()
-                    .attenuate_child(descriptor.effective_role().clone())
-            };
-            let role = if let Some(lease) = &checkpoint_lease {
-                lease
-                    .issuer_role
-                    .preview_child(role, descriptor.fork_budget())
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?
-            } else {
-                role
-            };
-            descriptor = descriptor.with_effective_role(role);
-            if fork_group.is_some() {
-                let policy = checkpoint_lease.as_ref().map_or_else(
-                    || self.descriptor.persistence_policy(),
-                    |lease| lease.issuer_persistence_policy,
-                );
-                descriptor = descriptor.with_persistence_policy(policy);
-            }
+            let capabilities = self
+                .descriptor
+                .capabilities()
+                .preview_child(descriptor.capabilities().clone(), descriptor.fork_budget())
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            descriptor = descriptor.with_capabilities(capabilities);
             let mut checkpoint_admission = None;
-            if let Some(group) = fork_group {
-                let requested = crate::ActorPath::parse(descriptor.label()).map_err(|error| {
-                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                })?;
-                let claim = self
+            let mut spawn_admission = None;
+            if spawn.is_some() {
+                descriptor =
+                    descriptor.with_persistence_policy(self.descriptor.persistence_policy());
+                let claimed = self
                     .environment
-                    .fork_groups
-                    .claim_with_checkpoint(
-                        group,
+                    .actor_admissions
+                    .claim_spawn(
                         context.actor,
-                        &requested,
-                        descriptor
-                            .checkpoint_token()
-                            .map(|token| (token, context.placement.session)),
+                        context.placement.session,
+                        descriptor.checkpoint_token(),
+                        self.descriptor
+                            .capabilities()
+                            .descendants()
+                            .maximum_active_children
+                            .map(usize::from),
                     )
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(self.name_coordinator(error))
+                    .map_err(|refusal| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "checkpoint refusal: {refusal:?}"
+                        ))
                     })?;
-                descriptor = descriptor.with_actor_path(claim.path);
-                checkpoint_admission = claim.checkpoint;
-            } else if descriptor.context_parent().is_some() {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "context fork did not name an admission group".into(),
-                ));
+                descriptor = descriptor.with_actor_path(claimed.path);
+                checkpoint_admission = claimed.checkpoint;
+                retained_spawn_admission = Some(claimed.authority.clone());
+                spawn_admission = Some(claimed.authority);
+                if let Some((lease, _)) = &checkpoint_admission {
+                    descriptor = descriptor
+                        .with_context_parent(lease.issuer)
+                        .with_checkpoint_boundary(Some(lease.boundary.clone()));
+                }
             }
+
             drop(checkpoint_preview);
             let retained_checkpoint_scope = checkpoint_admission
                 .as_ref()
@@ -5144,42 +5025,43 @@ where
                         "checkpoint retained-scope refusal: {refusal:?}"
                     ))
                 })?;
-            // The exact issuing claim is still pending here. The admitted child
-            // retains this host share across workspace waits and parent publication.
-            let inherited_host_attachment = effect_owner
-                .publication()
-                .capture_inherited_child(&descriptor)?;
-            let inherited_source = if descriptor.source_imports().inherited_scope()?.is_some() {
-                let source = match effect_owner.admitted_source() {
-                    Some(source) => source.clone(),
-                    None => self.freeze_installed_source(context.actor)?,
+            let inherited_source =
+                if spawn.is_some() || descriptor.source_imports().inherited_scope()?.is_some() {
+                    let source = match effect_owner.admitted_source() {
+                        Some(source) => source.clone(),
+                        None => self.freeze_installed_source(context.actor)?,
+                    };
+                    if let Some(layers) = &self.environment.source_layers {
+                        layers
+                            .validate_source_authority(&source)
+                            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+                    }
+                    Some(source)
+                } else {
+                    None
                 };
-                if let Some(layers) = &self.environment.source_layers {
-                    layers
-                        .validate_source_authority(&source)
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-                }
-                Some(source)
-            } else {
-                None
-            };
             Ok(child_launch::ChildLaunchAdmission {
                 child: crate::start::CapturedChildLaunch {
                     lifetime,
                     descriptor,
+                    spawn,
                     entry,
                     launch_worktrees,
-                    fork_workspace,
+                    record_workspace,
                     seed,
                 },
                 checkpoint_admission,
-                inherited_host_attachment,
+                spawn_admission,
                 inherited_source,
                 retained_checkpoint_scope,
                 child_session_startup,
                 invocation_work: invocation_work.clone(),
             })
         })();
+        if let (Err(error), Some(authority)) = (&admission, &retained_spawn_admission) {
+            authority.fail(error.to_string());
+        }
+        let spawn_admission = retained_spawn_admission;
         child_launch::PreparedChildLaunch {
             continuation: child_launch::ChildLaunchContinuation {
                 context: context.clone(),
@@ -5187,9 +5069,10 @@ where
                 control: effect_owner.control(),
                 invocation_work,
                 parent_hole,
-                fork_reply,
-                fork_group,
-                original_placement,
+                spawn_reply,
+                spawn_admission,
+                placement_custody,
+                placement_startup,
             },
             admission,
         }
@@ -5200,26 +5083,7 @@ where
         kernel: &KernelContext,
         completed: child_launch::CompletedChildLaunch,
     ) -> child_launch::ChildLaunchResume {
-        child_launch::apply_launch(&self.environment, kernel, &self.descriptor, completed)
-    }
-
-    fn validate_worker_context(
-        &self,
-        lifetime: crate::WorkerLifetime,
-        context: crate::ForkContext,
-    ) -> Result<(), String> {
-        if lifetime == crate::WorkerLifetime::SwarmOwned {
-            if context == crate::ForkContext::InheritedContext {
-                return Err("a swarm-owned worker requires a selected context".into());
-            }
-            if self.descriptor.supervisor_parent().is_some() && !self.forest_control {
-                return Err("only a top-level actor can admit a swarm-owned worker".into());
-            }
-        }
-        if self.active_route.is_some() && context == crate::ForkContext::InheritedContext {
-            return Err("automatic routes have no provider transcript boundary; select a task context for spawned workers".into());
-        }
-        Ok(())
+        child_launch::apply_launch(kernel, &self.descriptor, completed)
     }
 
     async fn resolve_outbound(
@@ -5352,29 +5216,17 @@ where
     /// request continuation, then hand it back to the ordinary actor scheduler.
     async fn stage_request_reply(
         &mut self,
-        kernel: &KernelContext,
+        _kernel: &KernelContext,
         context: &ActorSessionContext,
         request: crate::RequestId,
         result: RootCustody,
         carried_preview: Option<String>,
-        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
-        invocation: Option<&InvocationWork>,
+        _boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
+        _invocation: Option<&InvocationWork>,
         effects: Option<&mut WorkbenchEffectState>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let settled = async {
-            if self.has_incomplete_groups(context.actor, boundary) {
-                self.abort_incomplete_groups(
-                    kernel,
-                    context.actor,
-                    boundary,
-                    "request reply interrupted unfold admission",
-                    invocation,
-                )
-                .await;
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "an actor cannot reply while an unfold group is unpublished".into(),
-                ));
-            }
+
             if self.pending_program.is_some() || self.pending_reply.is_some() {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "actor settled a second reply before resuming the first".into(),
@@ -5554,228 +5406,115 @@ where
         let workbench = self
             .active_workbench()
             .unwrap_or_else(|| environment.runner.application_workbench());
-        let publication = effect_owner.publication().clone();
         let control = effect_owner.control();
-        let invocation_work = effect_owner.invocation_work();
+        let ephemeral_work = effect_owner.ephemeral_work();
+        let interaction_control = effect_owner.interaction_control();
         let operation: futures_util::future::BoxFuture<
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
+            ResidentActorBoundary::Form {
                 continuation,
-                relative,
-                group,
-                branches,
-            }) => {
-                let admitted = (|| {
-                    let group = if relative {
-                        let parent = descriptor.actor_path().ok_or_else(|| {
-                            "relative subgroup requires an allocated parent actor path".to_string()
-                        })?;
-                        let segment = crate::ActorPathSegment::new(group)
-                            .map_err(|error| error.to_string())?;
-                        parent.child(segment).map_err(|error| error.to_string())?
-                    } else {
-                        crate::ActorPath::parse(&group).map_err(|error| error.to_string())?
-                    };
-                    let branches = branches
-                        .into_iter()
-                        .map(crate::ActorPathSegment::new)
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|error| error.to_string())?;
-                    let budget = descriptor.effective_role().descendants();
-                    if budget.maximum_depth == 0 {
-                        return Err(
-                            "cannot unfold context: descendant depth budget is exhausted".into(),
-                        );
-                    }
-                    let group_path = group.to_string();
-                    let maximum = budget.maximum_active_children.map(usize::from);
-                    let (group_id, reservations) = match publication.boundary().cloned() {
-                        Some(boundary) => environment.fork_groups.begin_at_boundary(
-                            context.actor,
-                            group,
-                            branches,
-                            maximum,
-                            boundary,
-                        ),
-                        None => {
-                            environment
-                                .fork_groups
-                                .begin(context.actor, group, branches, maximum)
-                        }
-                    }
-                    .map_err(|error| self.name_coordinator(error))?;
-                    Ok::<_, String>((group_id, group_path, reservations))
-                })();
-                let admitted = admitted.and_then(|admitted| {
-                    if let Some(invocation) = &invocation_work {
-                        if let Err(detail) = invocation.register_group(admitted.0) {
-                            let _ = environment.fork_groups.abort(admitted.0, context.actor);
-                            return Err(detail);
-                        }
-                    }
-                    Ok(admitted)
-                });
-                if matches!(publication, ForkPublication::Route(_)) {
-                    if let (Ok((group, _, _)), Some((_, groups))) =
-                        (&admitted, &mut self.active_route)
-                    {
-                        groups.push(*group);
-                    }
-                }
+                operation,
+                publication,
+            } => forms::service(
+                environment,
+                kernel,
+                context,
+                ephemeral_work,
+                control,
+                interaction_control,
+                continuation,
+                operation,
+                publication,
+            ),
+            ResidentActorBoundary::RichView {
+                continuation,
+                view,
+                publication,
+            } => {
+                let slot = environment
+                    .actors
+                    .lock()
+                    .get(&context.actor)
+                    .filter(|record| record.owns_display_resources(&context))
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "rich display actor unavailable".into(),
+                        )
+                    })
+                    .and_then(|record| record.displays.lock().reserve_rich_slot());
                 Box::pin(async move {
-                    match admitted {
-                        Ok((group_id, group_path, reservations)) => {
-                            environment
-                                .runner
-                                .resume_fork_group(
-                                    context.clone(),
-                                    continuation,
-                                    group_id,
-                                    group_path,
-                                    reservations
-                                        .into_iter()
-                                        .map(|reservation| reservation.allocated.to_string())
-                                        .collect(),
-                                )
-                                .await
-                        }
-                        Err(detail) => {
-                            environment
-                                .runner
-                                .resume_fork_failure(context.clone(), continuation, detail)
-                                .await
-                        }
-                    }
+                    let slot = slot?;
+                    let host = environment.form_host.as_ref().ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "rich display has no host".into(),
+                        )
+                    })?;
+                    let publish = || host.display(&publication, slot, &view);
+                    let result = match interaction_control.as_ref() {
+                        Some(control) => control.admit_interaction(publish).ok_or_else(|| {
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "rich display cancelled before publication".into(),
+                            )
+                        })?,
+                        None => publish(),
+                    };
+                    result.map_err(|cause| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "rich display: {cause:?}"
+                        ))
+                    })?;
+                    environment.runner.resume_unit(context, continuation).await
                 })
             }
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
+            ResidentActorBoundary::Command {
                 continuation,
-                group,
-            }) if !matches!(
-                publication.boundary(),
-                Some(tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. })
-            ) =>
-            {
+                request,
+            } if commands::ownership_operation(&request) => self.prepare_command_ownership(
+                &kernel,
+                &context,
+                effect_owner,
+                continuation,
+                request,
+            ),
+            ResidentActorBoundary::ReplaceSpec {
+                continuation,
+                target,
+                definition,
+            } => {
+                let authorized =
+                    actor_can_control(context.actor, target, &environment.actors.lock());
+                let installed = self.installed_tools.clone();
+                let installation_context = self.context(context.actor);
+                let allowed = descriptor.capabilities().effect_keys().to_vec();
                 Box::pin(async move {
-                    let owned_boundary = environment
-                        .fork_groups
-                        .completion_boundary(group, context.actor);
-                    if !matches!(&owned_boundary, Ok(boundary) if boundary.as_ref() == publication.boundary())
+                    let result = if !authorized {
+                        Err(crate::SpecReplacementError::Unauthorized)
+                    } else if target == context.actor {
+                        install_explicit_replacement(
+                            environment.clone(),
+                            installation_context,
+                            installed,
+                            allowed,
+                            definition,
+                        )
+                        .await
+                    } else if let Some(actor) = kernel
+                        .resolve(target)
+                        .filter(|actor| actor.terminal().get().is_none())
                     {
-                        return environment
-                            .runner
-                            .resume_fork_failure(
-                                context.clone(),
-                                continuation,
-                                "fork group belongs to another execution boundary".into(),
-                            )
-                            .await;
-                    }
-                    let mut phase =
-                        match environment.fork_groups.request_commit(group, context.actor) {
-                            Ok(phase) => phase,
-                            Err(error) => {
-                                return environment
-                                    .runner
-                                    .resume_fork_failure(
-                                        context.clone(),
-                                        continuation,
-                                        error.to_string(),
-                                    )
-                                    .await;
-                            }
-                        };
-                    loop {
-                        let current = *phase.borrow();
-                        match current {
-                            crate::ForkGroupPhase::Ready | crate::ForkGroupPhase::Committed => {
-                                break;
-                            }
-                            crate::ForkGroupPhase::Aborted => {
-                                let children = environment
-                                    .fork_groups
-                                    .cleanup_failed(group, context.actor)
-                                    .map_err(|error| {
-                                        ResidentActorWorkbenchError::ActorProtocol(
-                                            error.to_string(),
-                                        )
-                                    })?;
-                                let children = selected_child_retirement_batch(
-                                    &kernel,
-                                    children,
-                                    "fork group admission failed",
-                                );
-                                for (child, terminal) in children.into_actors() {
-                                    if let Err(error) = child.shutdown(terminal).await {
-                                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                                    }
-                                }
-                                return environment
-                                    .runner
-                                    .resume_fork_failure(
-                                        context.clone(),
-                                        continuation,
-                                        format!(
-                                            "fork group {} was aborted while awaiting readiness",
-                                            group.0
-                                        ),
-                                    )
-                                    .await;
-                            }
-                            crate::ForkGroupPhase::Staging => {}
-                        }
-                        let cancelled = async {
-                            match &control {
-                                Some(control) => control.wait_for_cancellation().await,
-                                None => std::future::pending::<()>().await,
-                            }
-                        };
-                        let changed = tokio::select! {
-                            changed = phase.changed() => changed,
-                            () = cancelled => return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                "fork readiness interrupted by invocation cancellation".into(),
-                            )),
-                        };
-                        if changed.is_err() {
-                            return environment
-                                .runner
-                                .resume_fork_failure(
-                                    context.clone(),
-                                    continuation,
-                                    format!("fork group {} readiness channel closed", group.0),
-                                )
-                                .await;
-                        }
-                    }
-                    if control
-                        .as_ref()
-                        .is_some_and(|control| control.cancellation_requested())
-                    {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "fork readiness interrupted by invocation cancellation".into(),
-                        ));
-                    }
-                    // Resident actor handlers have no provider tool completion to
-                    // publish their children. Publish this admission before resuming
-                    // the handler, which may immediately await a child's reply.
-                    // Notebook groups remain fenced by their completion boundary.
-                    if matches!(publication, ForkPublication::Resident) {
-                        environment
-                            .fork_groups
-                            .publish_groups(&[group], context.actor)
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                            })?;
-                        tracing::info!(actor = ?context.actor, group = group.0, "resident fork admission published");
-                    }
+                        actor.replace_spec(definition).await
+                    } else {
+                        Err(crate::SpecReplacementError::Unavailable)
+                    };
                     environment
                         .runner
-                        .resume_fork_unit(context.clone(), continuation)
+                        .resume_spec_replacement(context, continuation, result)
                         .await
                 })
             }
+
             ResidentActorBoundary::DisplayAllowanceGranted {
                 continuation,
                 allowance,
@@ -6097,12 +5836,14 @@ where
             ResidentActorBoundary::WatchProgressPoll {
                 continuation,
                 watch,
+                path,
                 request,
                 after,
             } => Box::pin(async move {
-                let observation = environment.requests.observe_watch_progress(
+                let observation = environment.requests.observe_watch_snapshot_progress(
                     context.actor,
                     watch,
+                    &path,
                     request,
                     after,
                 );
@@ -6111,16 +5852,73 @@ where
                     .resume_progress_observation(context.clone(), continuation, observation)
                     .await
             }),
-            ResidentActorBoundary::CommandReportPoll { continuation, job } => {
-                Box::pin(async move {
-                    let report =
-                        command_settlement::CommandSettlements::new(&environment).report(&job);
-                    environment
-                        .runner
-                        .resume_value(context.clone(), continuation, report)
-                        .await
-                })
-            }
+            ResidentActorBoundary::WatchDecisionPoll {
+                continuation,
+                watch,
+                path,
+            } => Box::pin(async move {
+                let decision = environment
+                    .requests
+                    .observe_watch_snapshot_decision(watch, &path)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "retained watch decision unavailable: {error:?}"
+                        ))
+                    })?;
+                environment
+                    .runner
+                    .resume_value(context.clone(), continuation, decision)
+                    .await
+            }),
+            ResidentActorBoundary::CommandReportPoll {
+                continuation,
+                watch,
+                path,
+                job,
+            } => Box::pin(async move {
+                let report = environment
+                    .requests
+                    .observe_watch_snapshot_command(watch, &path, &job)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "watch command snapshot unavailable: {error:?}"
+                        ))
+                    })?;
+                environment
+                    .runner
+                    .resume_value(context.clone(), continuation, report)
+                    .await
+            }),
+            ResidentActorBoundary::WatchRelease(release) => Box::pin(async move {
+                let released = environment
+                    .requests
+                    .release_transient_watch(context.actor, release.watch);
+                if released.is_ok() || matches!(&released, Err(crate::ReplyError::Stale)) {
+                    if let Some(work) = ephemeral_work {
+                        work.release_transient_watch_membership(release.watch);
+                    }
+                }
+                let outcome = match released {
+                    Ok(notifications) => {
+                        publish_request_notifications(
+                            &environment.requests,
+                            &environment.deployments,
+                            notifications,
+                        )
+                        .await;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+                environment
+                    .runner
+                    .resume_value(
+                        context.clone(),
+                        release.continuation,
+                        crate::request_effect::ReplyResult(outcome),
+                    )
+                    .await
+            }),
             ResidentActorBoundary::WatchForget(forget) => Box::pin(async move {
                 let outcome = environment
                     .requests
@@ -6206,6 +6004,23 @@ where
             '_,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::ScopeResumed { outcome } => Box::pin(async move { Ok(outcome) }),
+            ResidentActorBoundary::ScopeRun {
+                continuation,
+                callback,
+            } => Box::pin(self.run_resource_scope(
+                kernel,
+                context,
+                effect_owner,
+                ancestry,
+                continuation,
+                callback,
+            )),
+            ResidentActorBoundary::ScopeDone { .. } => Box::pin(async {
+                Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "scope completion outside its owning delimiter".into(),
+                ))
+            }),
             ResidentActorBoundary::External { continuation, work } => Box::pin(async move {
                 owned_workbench::await_external(
                     self.environment.clone(),
@@ -6267,45 +6082,7 @@ where
                 crate::call_timing::add_exec_ms(started.elapsed().as_millis());
                 resolution.outcome
             }),
-            ResidentActorBoundary::AgentGroupList {
-                continuation,
-                group,
-            } => Box::pin(async move {
-                // Membership comes from exact admission ancestry, never a
-                // display label or Git branch prefix. Unavailable/unauthorized
-                // groups follow the existing optional inspection convention.
-                let members = self
-                    .environment
-                    .fork_groups
-                    .members(group, context.actor)
-                    .ok();
-                let records = self.environment.actors.lock().clone();
-                let roster = members.and_then(|members| {
-                    members
-                        .into_iter()
-                        .map(|actor| {
-                            let record = records.get(&actor)?;
-                            Some(crate::resident_workbench::AgentRosterProjection {
-                                received: self.environment.requests.received_counts(actor),
-                                requests: self.environment.requests.work_for_target(actor),
-                                actor,
-                                descriptor: record.descriptor.clone(),
-                                bound_worktree: record.bound_worktree.clone(),
-                                terminal: record.terminal.clone().or_else(|| {
-                                    kernel
-                                        .resolve(actor)
-                                        .and_then(|actor| actor.terminal().get())
-                                }),
-                                runtime: record.runtime_observation.snapshot(),
-                            })
-                        })
-                        .collect()
-                });
-                self.environment
-                    .runner
-                    .resume_group_roster(context.clone(), continuation, roster)
-                    .await
-            }),
+
             ResidentActorBoundary::AgentForget(forget) => Box::pin(async move {
                 let authorized_terminal = {
                     let records = self.environment.actors.lock();
@@ -6369,6 +6146,18 @@ where
                     .resume_agent_forget(context.clone(), forget.continuation, outcome)
                     .await
             }),
+            ResidentActorBoundary::AgentRetention {
+                continuation,
+                target,
+                lifetime,
+            } => Box::pin(async move {
+                let outcome =
+                    self.retain_agent_resource(kernel, context, &effect_owner, target, lifetime);
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), continuation, outcome)
+                    .await
+            }),
             ResidentActorBoundary::AgentStop(stop) => Box::pin(async move {
                 let (known, authorized) = {
                     let records = self.environment.actors.lock();
@@ -6421,281 +6210,8 @@ where
                     .resume_agent_stop(context.clone(), stop.continuation, outcome)
                     .await
             }),
-            ResidentActorBoundary::CleanupPlan {
-                continuation,
-                group,
-            } => Box::pin(async move {
-                let plan = self.cleanup_plan(kernel, context.actor, group);
-                self.environment
-                    .runner
-                    .resume_cleanup_plan(context.clone(), continuation, plan)
-                    .await
-            }),
-            ResidentActorBoundary::CleanupExecute {
-                continuation,
-                group,
-                inspected,
-            } => Box::pin(async move {
-                use crate::resident_workbench::{
-                    AgentStopProjection, CleanupReceiptProjection, CleanupStepProjection,
-                };
 
-                let admission = (|| {
-                    let actors = inspected
-                        .iter()
-                        .map(|(actor, _)| *actor)
-                        .collect::<Vec<_>>();
-                    let fork_guard = self
-                        .environment
-                        .fork_groups
-                        .begin_cleanup(group, context.actor, &actors)
-                        .map_err(|error| match error {
-                            crate::ForkGroupError::CleanupScopeChanged(_) => {
-                                CleanupStepProjection::StalePlan
-                            }
-                            other => CleanupStepProjection::Blocked(other.to_string()),
-                        })?;
-                    let revisions = inspected
-                        .iter()
-                        .filter(|(actor, _)| fork_guard.contains(actor))
-                        .copied()
-                        .collect::<Vec<_>>();
-                    let request_guard = self
-                        .environment
-                        .requests
-                        .begin_cleanup(context.actor, &revisions)
-                        .map_err(|error| match error {
-                            crate::request::CleanupAdmissionError::Stale => {
-                                CleanupStepProjection::StalePlan
-                            }
-                            crate::request::CleanupAdmissionError::Busy => {
-                                CleanupStepProjection::Blocked("cleanup already in progress".into())
-                            }
-                            crate::request::CleanupAdmissionError::Pending => {
-                                CleanupStepProjection::Blocked(
-                                    "subtree still has pending requests or watches".into(),
-                                )
-                            }
-                        })?;
-                    Ok::<_, CleanupStepProjection>((fork_guard, request_guard))
-                })();
-                let plan = self.cleanup_plan(kernel, context.actor, group);
-                let (_fork_guard, _request_guard) = match admission {
-                    Ok(guards) => guards,
-                    Err(refusal) => {
-                        return self
-                            .environment
-                            .runner
-                            .resume_cleanup_receipt(
-                                context.clone(),
-                                continuation,
-                                CleanupReceiptProjection {
-                                    plan,
-                                    steps: vec![refusal],
-                                    complete: false,
-                                },
-                            )
-                            .await;
-                    }
-                };
-                let mut steps = Vec::new();
-
-                if let Some(refusal) = &plan.refusal {
-                    return self
-                        .environment
-                        .runner
-                        .resume_cleanup_receipt(
-                            context.clone(),
-                            continuation,
-                            CleanupReceiptProjection {
-                                steps: vec![CleanupStepProjection::Blocked(refusal.clone())],
-                                plan,
-                                complete: false,
-                            },
-                        )
-                        .await;
-                }
-
-                let group_order = match self
-                    .environment
-                    .fork_groups
-                    .cleanup_group_order(group, context.actor)
-                {
-                    Ok(order) => order,
-                    Err(error) => {
-                        steps.push(CleanupStepProjection::Blocked(error.to_string()));
-                        return self
-                            .environment
-                            .runner
-                            .resume_cleanup_receipt(
-                                context.clone(),
-                                continuation,
-                                CleanupReceiptProjection {
-                                    plan,
-                                    steps,
-                                    complete: false,
-                                },
-                            )
-                            .await;
-                    }
-                };
-
-                let targets = plan
-                    .actors
-                    .iter()
-                    .map(|actor| actor.actor)
-                    .collect::<std::collections::HashSet<_>>();
-                let mut owners = targets.clone();
-                owners.insert(context.actor);
-                let mut forgotten_responses = Vec::new();
-                let mut forgotten_watches = Vec::new();
-                for owner in owners {
-                    let forgotten = self
-                        .environment
-                        .requests
-                        .cleanup_campaign_metadata(owner, &targets);
-                    forgotten_responses.extend(forgotten.forgotten_responses);
-                    forgotten_watches.extend(forgotten.forgotten_watches);
-                    self.publish_watch_notifications(forgotten.watch_notifications)
-                        .await;
-                }
-                forgotten_responses.sort_unstable();
-                forgotten_watches.sort_unstable();
-                if !forgotten_watches.is_empty() {
-                    steps.push(CleanupStepProjection::ForgotWatches(forgotten_watches));
-                }
-                if !forgotten_responses.is_empty() {
-                    steps.push(CleanupStepProjection::ForgotResponses(forgotten_responses));
-                }
-
-                let mut stop_failed = false;
-                let mut stopped = Vec::with_capacity(plan.actors.len());
-                for actor_plan in &plan.actors {
-                    let actor = actor_plan.actor;
-                    let outcome = if actor_plan.terminal {
-                        Some(AgentStopProjection::AlreadyStopped)
-                    } else if !self.idle_for_cleanup(actor) {
-                        stop_failed = true;
-                        Some(AgentStopProjection::Failed("provider is not confirmed idle; cleanup observation is stale or needs attention".into()))
-                    } else if let Some(target) = kernel.resolve(actor) {
-                        match target
-                            .retire_idle_by(
-                                context.actor,
-                                ActorTerminal {
-                                    kind: ActorExitKind::Cancelled,
-                                    summary: format!(
-                                        "campaign {} cleanup requested by {}@{}",
-                                        group.0, context.actor.id.0, context.actor.incarnation.0
-                                    ),
-                                    diagnostic: None,
-                                },
-                            )
-                            .await
-                        {
-                            Ok(terminal) => {
-                                self.publish_retired(actor, terminal);
-                                None
-                            }
-                            Err(error) => {
-                                stop_failed = true;
-                                Some(AgentStopProjection::Failed(error.to_string()))
-                            }
-                        }
-                    } else {
-                        stop_failed = true;
-                        Some(AgentStopProjection::Unavailable)
-                    };
-                    stopped.push((actor, outcome));
-                }
-                // `plan.actors` is deepest-first. Publish every admitted stop
-                // in that order before waiting for independently owned host
-                // releases; one slow release must not delay the next stop.
-                steps.extend(
-                    await_cleanup_releases(stopped, |actor| self.stopped_projection(actor)).await,
-                );
-
-                if !stop_failed {
-                    for actor in plan.actors.iter().map(|actor| actor.actor) {
-                        let displays = self
-                            .environment
-                            .actors
-                            .lock()
-                            .get(&actor)
-                            .map_or(0, |record| record.displays.lock().pending_count());
-                        if displays > 0 {
-                            stop_failed = true;
-                            steps.push(CleanupStepProjection::ActorOutputPending {
-                                actor,
-                                displays,
-                            });
-                            continue;
-                        }
-                        match self
-                            .environment
-                            .requests
-                            .forget_terminal_actor_metadata(actor)
-                        {
-                            Ok(notifications) => {
-                                self.publish_watch_notifications(notifications).await;
-                                self.environment.actors.lock().remove(&actor);
-                                self.environment.retired.lock().remove(&actor);
-                                let _ = kernel.forget_terminal_actor(actor);
-                                steps.push(CleanupStepProjection::ForgotActor(actor));
-                            }
-                            Err((requests, watches)) => {
-                                stop_failed = true;
-                                steps.push(CleanupStepProjection::ActorRetained {
-                                    actor,
-                                    requests,
-                                    watches,
-                                });
-                            }
-                        }
-                    }
-                }
-
-                let complete = if stop_failed {
-                    false
-                } else {
-                    let mut groups_complete = true;
-                    for (cleanup_group, group_owner) in group_order {
-                        match self
-                            .environment
-                            .fork_groups
-                            .cleanup_committed(cleanup_group, group_owner)
-                        {
-                            Ok(crate::ForkGroupCleanupOutcome::Cleaned) => {
-                                steps.push(CleanupStepProjection::GroupRetired(cleanup_group));
-                            }
-                            Ok(crate::ForkGroupCleanupOutcome::Active(active)) => {
-                                groups_complete = false;
-                                steps.push(CleanupStepProjection::Blocked(format!(
-                                    "fork group {} still has active descendants: {active:?}",
-                                    cleanup_group.0
-                                )));
-                            }
-                            Err(error) => {
-                                groups_complete = false;
-                                steps.push(CleanupStepProjection::Blocked(error.to_string()));
-                            }
-                        }
-                    }
-                    groups_complete
-                };
-                self.environment
-                    .runner
-                    .resume_cleanup_receipt(
-                        context.clone(),
-                        continuation,
-                        CleanupReceiptProjection {
-                            plan,
-                            steps,
-                            complete,
-                        },
-                    )
-                    .await
-            }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Checkpoint {
+            ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint {
                 continuation,
                 name,
             }) => Box::pin(async move {
@@ -6741,7 +6257,7 @@ where
                     if !matches!(after, Ok(ref layer) if layer.same_revision(&before)) {
                         self.environment
                             .runner
-                            .retire_fork_scopes(context.clone(), vec![scope])
+                            .retire_context_scopes(context.clone(), vec![scope])
                             .await
                             .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
                         return Err(crate::CheckpointRefusal::CaptureFailed);
@@ -6752,7 +6268,7 @@ where
                             Err(_) => {
                                 self.environment
                                     .runner
-                                    .retire_fork_scopes(context.clone(), vec![scope])
+                                    .retire_context_scopes(context.clone(), vec![scope])
                                     .await
                                     .map_err(|_| crate::CheckpointRefusal::CaptureFailed)?;
                                 return Err(crate::CheckpointRefusal::CaptureFailed);
@@ -6762,11 +6278,11 @@ where
                     };
                     Ok(self
                         .environment
-                        .fork_groups
+                        .actor_admissions
                         .capture_checkpoint_with_retained_scope(
                             name,
                             context.actor,
-                            self.descriptor.effective_role().clone(),
+                            self.descriptor.capabilities().clone(),
                             self.descriptor.model().cloned(),
                             self.descriptor.fork_effort(),
                             before,
@@ -6789,7 +6305,7 @@ where
                     let delivered = checkpoint_capture_delivered(&resumed);
                     let retired = self
                         .environment
-                        .fork_groups
+                        .actor_admissions
                         .settle_checkpoint(&token, context.placement.session, delivered)
                         .map_err(|error| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -6799,19 +6315,21 @@ where
                     if let Some(scope) = retired {
                         self.environment
                             .runner
-                            .retire_fork_scopes(context.clone(), vec![scope])
+                            .retire_context_scopes(context.clone(), vec![scope])
                             .await?;
                     }
                 }
                 resumed
             }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CheckCheckpoint {
-                continuation,
-                token,
-            }) => Box::pin(async move {
+            ResidentActorBoundary::ContextCheckpoint(
+                ContextCheckpointBoundary::CheckCheckpoint {
+                    continuation,
+                    token,
+                },
+            ) => Box::pin(async move {
                 let result: Result<(), crate::CheckpointRefusal> = self
                     .environment
-                    .fork_groups
+                    .actor_admissions
                     .checkpoint(&token, context.placement.session)
                     .map(|_| ());
                 self.environment
@@ -6819,13 +6337,15 @@ where
                     .resume_value(context.clone(), continuation, result)
                     .await
             }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::ReleaseCheckpoint {
-                continuation,
-                token,
-            }) => Box::pin(async move {
+            ResidentActorBoundary::ContextCheckpoint(
+                ContextCheckpointBoundary::ReleaseCheckpoint {
+                    continuation,
+                    token,
+                },
+            ) => Box::pin(async move {
                 let result = self
                     .environment
-                    .fork_groups
+                    .actor_admissions
                     .release_checkpoint(&token, context.placement.session);
                 let result: Result<(), crate::CheckpointRefusal> = match result {
                     Ok(Some(scope)) => {
@@ -6835,11 +6355,14 @@ where
                             .retire_checkpoint_scopes(context.placement.session, vec![scope])
                             .await;
                         match cleanup {
-                            Ok(()) => self.environment.fork_groups.confirm_checkpoint_release(
-                                &token,
-                                context.placement.session,
-                                scope,
-                            ),
+                            Ok(()) => self
+                                .environment
+                                .actor_admissions
+                                .confirm_checkpoint_release(
+                                    &token,
+                                    context.placement.session,
+                                    scope,
+                                ),
                             Err(_) => Err(crate::CheckpointRefusal::CaptureFailed),
                         }
                     }
@@ -6851,190 +6374,10 @@ where
                     .resume_value(context.clone(), continuation, result)
                     .await
             }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Preview {
-                continuation,
-                role,
-                effect_keys,
-                budget,
-                model,
-                effort,
-                context: fork_context,
-                instructions,
-                lifetime,
-            }) => Box::pin(async move {
-                let preview = self
-                    .validate_worker_context(lifetime, fork_context)
-                    .and_then(|()| {
-                        let child = role
-                            .effective_role(true)
-                            .with_effect_keys(effect_keys.into_iter().map(Into::into).collect());
-                        self.descriptor
-                            .effective_role()
-                            .preview_child(child, budget)
-                            .map(|role| {
-                                let budget = role.descendants();
-                                let row = role.haskell_effects_type();
-                                let launch = self
-                                    .environment
-                                    .launch_resolver
-                                    .as_ref()
-                                    .map(|resolve| {
-                                        resolve(&crate::WorkerLaunchRequest {
-                                            role,
-                                            model: model
-                                                .or_else(|| self.descriptor.model().cloned()),
-                                            effort: effort.or(self.descriptor.fork_effort()),
-                                            context: fork_context,
-                                            instructions,
-                                        })
-                                    })
-                                    .transpose()?;
-                                Ok((
-                                    (
-                                        row,
-                                        i64::from(budget.maximum_depth),
-                                        budget.maximum_active_children.map(i64::from),
-                                    ),
-                                    launch,
-                                ))
-                            })
-                            .and_then(|value| value)
-                    });
-                self.environment
-                    .runner
-                    .resume_value(context.clone(), continuation, preview)
-                    .await
-            }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
-                continuation,
-                group,
-            }) => Box::pin(async move {
-                if let Some(invocation) = effect_owner.invocation_work() {
-                    let children = self
-                        .environment
-                        .fork_groups
-                        .children_for_owner(group, context.actor)
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?;
-                    if children
-                        .into_iter()
-                        .any(|child| invocation.owns_worker(child))
-                    {
-                        let children = self
-                            .environment
-                            .fork_groups
-                            .abort(group, context.actor)
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                            })?;
-                        invocation.retain_aborted_children(kernel, &children);
-                        let children = selected_child_retirement_batch(
-                            kernel,
-                            children,
-                            "deferred invocation-owned worker refused",
-                        );
-                        for (child, terminal) in children.into_actors() {
-                            if let Err(error) = child.shutdown_with_cleanup(terminal).await {
-                                tracing::warn!(child = ?child.identity(), %error, "invocation-owned deferred worker cleanup was unconfirmed");
-                            }
-                        }
-                        return self
-                            .environment
-                            .runner
-                            .resume_fork_failure(
-                                context.clone(),
-                                continuation,
-                                "deferred workers require ActorOwned or SwarmOwned lifetime".into(),
-                            )
-                            .await;
-                    }
-                }
-                let prepared = self.prepare_deferred_commit(
-                    context,
-                    effect_owner.publication(),
-                    effect_owner.control(),
-                    continuation,
-                    group,
-                );
-                let ready = captured_commit::await_ready_deferred(
-                    self.environment.clone(),
-                    kernel.clone(),
-                    prepared,
-                )
-                .await;
-                let scopes = self.apply_ready_deferred_commit(kernel, ready);
-                let finalized =
-                    captured_commit::await_scopes(self.environment.clone(), scopes).await;
-                let release = self.apply_finalized_deferred_commit(kernel, finalized);
-                let completed = captured_commit::await_release(
-                    self.environment.clone(),
-                    kernel.clone(),
-                    release,
-                )
-                .await;
-                let resume = self.settle_captured_commit(completed);
-                captured_commit::resume(self.environment.clone(), kernel.clone(), resume).await
-            }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::CommitCaptured {
-                continuation,
-                group,
-            }) => Box::pin(async move {
-                self.commit_captured_group(
-                    kernel,
-                    context,
-                    effect_owner.publication(),
-                    effect_owner.control(),
-                    continuation,
-                    group,
-                )
-                .await
-            }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
-                continuation,
-                group,
-            }) => Box::pin(async move {
-                let children = match self.environment.fork_groups.abort(group, context.actor) {
-                    Ok(children) => children,
-                    Err(error) => {
-                        return self
-                            .environment
-                            .runner
-                            .resume_fork_failure(context.clone(), continuation, error.to_string())
-                            .await;
-                    }
-                };
-                if let Some(invocation) = effect_owner.invocation_work() {
-                    invocation.retain_aborted_children(kernel, &children);
-                }
-                let children = selected_child_retirement_batch(
-                    kernel,
-                    children,
-                    "fork group admission aborted",
-                );
-                for (child, terminal) in children.into_actors() {
-                    if let Err(error) = child.shutdown(terminal).await {
-                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                    }
-                }
-                self.environment
-                    .runner
-                    .resume_fork_unit(context.clone(), continuation)
-                    .await
-            }),
-            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Cleanup {
-                continuation,
-                group,
-            }) => Box::pin(async move {
-                let outcome = self
-                    .environment
-                    .fork_groups
-                    .cleanup_committed(group, context.actor);
-                self.environment
-                    .runner
-                    .resume_fork_cleanup(context.clone(), continuation, outcome)
-                    .await
-            }),
+
+            ResidentActorBoundary::ReplaceSpec { .. } => {
+                unreachable!("spec replacement was prepared as an independent effect")
+            }
             ResidentActorBoundary::Start(start) => {
                 Box::pin(self.start_child(kernel, context, effect_owner, start))
             }
@@ -7125,15 +6468,6 @@ where
                     .await
             }),
             ResidentActorBoundary::Poll(poll) => Box::pin(async move {
-                request_wait::guard_deferred_target(
-                    &self.environment.fork_groups,
-                    context.actor,
-                    effect_owner.publication().boundary(),
-                    poll.target,
-                )
-                .map_err(|refusal| {
-                    ResidentActorWorkbenchError::ActorProtocol(refusal.to_string())
-                })?;
                 let terminal = kernel
                     .resolve(poll.target)
                     .and_then(|target| target.terminal().get());
@@ -7170,7 +6504,7 @@ where
                 );
                 let permitted = self
                     .descriptor
-                    .effective_role()
+                    .capabilities()
                     .effect_keys()
                     .contains(&crate::ActorEffectKey::Notifications);
                 // `message` here is a decoded `String` (see
@@ -7213,7 +6547,7 @@ where
             } => Box::pin(async move {
                 let permitted = self
                     .descriptor
-                    .effective_role()
+                    .capabilities()
                     .effect_keys()
                     .contains(&crate::ActorEffectKey::Notifications);
                 let prepared = if permitted {
@@ -7258,25 +6592,98 @@ where
                         .await
                 })
             }
-            ResidentActorBoundary::RequestReservation(reservation) => Box::pin(async move {
-                crate::ActorPathSegment::new(&reservation.label).map_err(|error| {
-                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "invalid request label: {error}"
-                    ))
-                })?;
-                let request = self.environment.requests.reserve_for_operation(
-                    context.actor,
-                    reservation.target,
-                    reservation.label,
-                    reservation.notify_owner,
-                    effect_owner.reservation_owner(),
-                );
+            ResidentActorBoundary::RequestAdmissionRejected {
+                continuation,
+                error,
+            } => Box::pin(async move {
                 self.environment
                     .runner
-                    .resume_int(context.clone(), reservation.continuation, request.0)
+                    .resume_value(context.clone(), continuation, Err::<(), _>(error))
+                    .await
+            }),
+            ResidentActorBoundary::RequestReservation(reservation) => Box::pin(async move {
+                use crate::request_effect::RequestError;
+                let owner =
+                    match self.request_resource_owner(context, &effect_owner, reservation.lifetime)
+                    {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            return self
+                                .environment
+                                .runner
+                                .resume_value(
+                                    context.clone(),
+                                    reservation.continuation,
+                                    Err::<crate::RequestId, _>(
+                                        RequestError::RequestReservationRejected(error),
+                                    ),
+                                )
+                                .await;
+                        }
+                    };
+                if kernel.resolve(reservation.target).is_none() {
+                    return self
+                        .environment
+                        .runner
+                        .resume_value(
+                            context.clone(),
+                            reservation.continuation,
+                            Err::<crate::RequestId, _>(RequestError::RequestReservationRejected(
+                                crate::ReplyError::Stale,
+                            )),
+                        )
+                        .await;
+                }
+                let cleanup_owner = match reservation.lifetime {
+                    crate::WorkerLifetime::ActorOwned => {
+                        crate::request::ResourceCleanupOwner::Actor
+                    }
+                    crate::WorkerLifetime::RunOwned => crate::request::ResourceCleanupOwner::Run,
+                    _ => owner
+                        .as_ref()
+                        .expect("bounded lifetime resolved an owner")
+                        .resource_cleanup_owner(),
+                };
+                let reserve = || {
+                    self.environment.requests.reserve_for_cleanup_owner(
+                        context.actor,
+                        reservation.target,
+                        reservation.label.unwrap_or_default(),
+                        reservation.notify_owner,
+                        effect_owner.reservation_owner(),
+                        cleanup_owner,
+                    )
+                };
+                let admitted: Result<crate::RequestId, RequestError> = match owner {
+                    Some(owner) => owner.with_admission(reserve).map_err(|_| {
+                        RequestError::RequestReservationRejected(
+                            crate::ReplyError::CancellationRequested,
+                        )
+                    }),
+                    None => Ok(reserve()),
+                };
+                self.environment
+                    .runner
+                    .resume_value(context.clone(), reservation.continuation, admitted)
                     .await
             }),
             ResidentActorBoundary::RequestSubmission(submission) => Box::pin(async move {
+                use crate::request_effect::RequestError;
+                if let Err(error) = self
+                    .environment
+                    .requests
+                    .request_cleanup_owner(context.actor, submission.request)
+                {
+                    return self
+                        .environment
+                        .runner
+                        .resume_value(
+                            context.clone(),
+                            submission.continuation,
+                            Err::<(), _>(RequestError::RequestSubmissionRejected(error)),
+                        )
+                        .await;
+                }
                 let request_deadline = submission
                     .deadline
                     .map(crate::request::ActiveRequestDeadline::start)
@@ -7303,19 +6710,22 @@ where
                             target_context.placement.resource_scope,
                         )
                         .await?;
-                    self.environment
-                        .requests
-                        .mark_queued_with_deadline(
-                            context.actor,
-                            submission.target,
-                            submission.request,
-                            request_deadline.clone(),
-                        )
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "request submission was rejected: {error:?}"
-                            ))
-                        })?;
+                    if let Err(error) = self.environment.requests.mark_queued_with_deadline(
+                        context.actor,
+                        submission.target,
+                        submission.request,
+                        request_deadline.clone(),
+                    ) {
+                        return self
+                            .environment
+                            .runner
+                            .resume_value(
+                                context.clone(),
+                                submission.continuation,
+                                Err::<(), _>(RequestError::RequestSubmissionRejected(error)),
+                            )
+                            .await;
+                    }
                     if target
                         .address()
                         .send_message(KernelMessage::Cast {
@@ -7333,7 +6743,11 @@ where
                     let outcome = self
                         .environment
                         .runner
-                        .resume_unit(context.clone(), submission.continuation)
+                        .resume_value(
+                            context.clone(),
+                            submission.continuation,
+                            Ok::<(), RequestError>(()),
+                        )
                         .await;
                     if let Some(deadline) = request_deadline {
                         self.schedule_request_deadline(context.actor, submission.request, deadline);
@@ -7348,11 +6762,14 @@ where
                     let outcome = self
                         .environment
                         .runner
-                        .resume_unit(context.clone(), submission.continuation)
+                        .resume_value(
+                            context.clone(),
+                            submission.continuation,
+                            Err::<(), _>(RequestError::RequestSubmissionRejected(
+                                crate::ReplyError::Stale,
+                            )),
+                        )
                         .await;
-                    if let Some(deadline) = request_deadline {
-                        self.schedule_request_deadline(context.actor, submission.request, deadline);
-                    }
                     outcome
                 }
             }),
@@ -7379,25 +6796,16 @@ where
                     .resume_progress_publication(context.clone(), continuation, outcome)
                     .await
             }),
-            ResidentActorBoundary::RequestDetachment {
+            ResidentActorBoundary::RequestRetention {
                 continuation,
                 request,
+                lifetime,
             } => Box::pin(async move {
-                let detached = match effect_owner.invocation_work() {
-                    Some(invocation) => invocation.detach_request(
-                        &self.environment.requests,
-                        context.actor,
-                        request,
-                    ),
-                    None => self.environment.requests.detach_invocation_request(
-                        context.actor,
-                        request,
-                        None,
-                    ),
-                };
+                let retained =
+                    self.retain_request_resource(context, &effect_owner, request, lifetime);
                 self.environment
                     .runner
-                    .resume_request_update(context.clone(), continuation, detached)
+                    .resume_request_update(context.clone(), continuation, retained)
                     .await
             }),
             ResidentActorBoundary::RequestCancellation(cancellation) => Box::pin(async move {
@@ -7471,7 +6879,7 @@ where
                 let (watch, notifications) = self
                     .environment
                     .requests
-                    .register_watch_groups_with_route(
+                    .register_watch_plan_with_route(
                         context.actor,
                         registration.label,
                         dependencies.clone(),
@@ -7503,7 +6911,7 @@ where
                                 settlements.release(&dependencies);
                             }
                             registered.and_then(|watch| {
-                                if let Some(invocation) = effect_owner.invocation_work() {
+                                if let Some(invocation) = effect_owner.ephemeral_work() {
                                     if let Err(error) = invocation.register_transient_watch(watch) {
                                         let _ = self
                                             .environment
@@ -7527,11 +6935,6 @@ where
                         )
                         .await;
                 }
-                crate::ActorPathSegment::new(&registration.label).map_err(|error| {
-                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "invalid watch label: {error}"
-                    ))
-                })?;
                 let dependencies =
                     settlements
                         .resolve(registration.dependencies)
@@ -7543,11 +6946,7 @@ where
                 let (watch, notifications) = self
                     .environment
                     .requests
-                    .register_watch_requirement_groups(
-                        context.actor,
-                        registration.label,
-                        dependencies.clone(),
-                    )
+                    .register_watch_plan(context.actor, registration.label, dependencies.clone())
                     .map_err(|error| {
                         settlements.release(&dependencies);
                         ResidentActorWorkbenchError::ActorProtocol(watch_registration_refusal(
@@ -7571,7 +6970,6 @@ where
                     context.clone(),
                     control,
                     poll,
-                    effect_owner.publication().boundary().cloned(),
                 ))
             }
             other => Box::pin(async move {
@@ -7677,43 +7075,35 @@ where
                             &awaiting,
                         )?;
                         let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(local_policy);
-                        let fork_gate = self
-                            .descriptor
-                            .fork_group()
-                            .map(|group| self.environment.fork_groups.gate(group, context.actor))
-                            .transpose()
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                            })?;
+
                         let (checkpoint, checkpoint_attachment) = self
                             .admitted_checkpoint
                             .take()
                             .map_or((None, None), |(lease, attachment)| {
                                 (Some(lease), attachment)
                             });
-                        let checkpoint_attachment =
-                            checkpoint_attachment.or_else(|| self.inherited_host_attachment.take());
+                        let checkpoint_attachment = checkpoint_attachment;
                         let installation = LocalResidentInstallation {
                             prepared_tools: None,
                             toolset_acquisition: None,
                             actor,
-                            label: self.descriptor.label().to_owned(),
+                            label: self.descriptor.display_label().into_owned(),
                             policy,
                             initial_user_message: awaiting.initial_user_message.clone(),
+                            fresh_context_seed: self.fresh_context_seed.clone(),
+                            spawn_admission: self.spawn_admission.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
                             worktree_custody: self.worktree_custody.clone(),
-                            effective_role: self.descriptor.effective_role().clone(),
+                            capabilities: self.descriptor.capabilities().clone(),
                             fork_effort: self.descriptor.fork_effort(),
                             model: self.descriptor.model().cloned(),
                             instructions: self.descriptor.instructions().map(str::to_owned),
                             creator: self.descriptor.creator(),
-                            fork_boundary: self.descriptor.fork_boundary().cloned(),
+                            checkpoint_boundary: self.descriptor.checkpoint_boundary().cloned(),
                             checkpoint,
                             checkpoint_attachment,
                             supervisor_parent: self.descriptor.supervisor_parent(),
                             context_parent: self.descriptor.context_parent(),
-                            fork_group: self.descriptor.fork_group(),
-                            fork_gate,
                             runtime_observation: self.runtime_observation.clone(),
                         };
                         self.commit_interactive_installation(kernel, context, installation)?;
@@ -8215,13 +7605,29 @@ where
         );
         let compiler_owner =
             crate::resident_workbench::CompilerCloseOwner::Initialization(kernel.retained_exit());
-        let compiled_tools = compiler_owner
-            .scope(application_workbench.prepare_tools(
-                compile_context.clone(),
-                self.spec_installs,
-                self.descriptor.effective_role().effect_keys().to_vec(),
-            ))
-            .await;
+        let compiled_tools = match self.explicit_installer.as_ref() {
+            Some(installer) => compiler_owner
+                .scope(application_workbench.prepare_explicit_application(
+                    compile_context.clone(),
+                    self.spec_installs,
+                    self.descriptor.capabilities().effect_keys().to_vec(),
+                    Arc::clone(installer),
+                ))
+                .await
+                .map(|(tools, receiver)| {
+                    self.prepared_request_receiver = Some(receiver);
+                    tools
+                }),
+            None => {
+                compiler_owner
+                    .scope(application_workbench.prepare_tools(
+                        compile_context.clone(),
+                        self.spec_installs,
+                        self.descriptor.capabilities().effect_keys().to_vec(),
+                    ))
+                    .await
+            }
+        };
         tracing::info!(
             actor = %context.actor,
             phase = "startup",
@@ -8231,26 +7637,7 @@ where
             "agent spec preparation"
         );
         let compiled_tools = Arc::new(compiled_tools?);
-        if self.descriptor.effective_role().role() == crate::ActorRole::Root {
-            for row in application_workbench.preparation_rows() {
-                let row = row.clone();
-                let workbench = Arc::clone(&application_workbench);
-                let context = compile_context.clone();
-                let compiler_owner = compiler_owner.clone();
-                tokio::spawn(async move {
-                    let outcome = compiler_owner
-                        .scope(workbench.prepare_toolset_only(
-                            context,
-                            tidepool_toolchain::artifacts::CompileWorkload::Preparation,
-                            row,
-                        ))
-                        .await;
-                    if let Err(error) = outcome {
-                        tracing::info!(%error, "optional configured toolset preparation did not complete");
-                    }
-                });
-            }
-        }
+        self.explicit_installer.take();
         #[cfg(test)]
         if let Some(observer) = &self.activation_preview_observer {
             observer(
@@ -8268,512 +7655,37 @@ where
                 declarations,
                 self.installed_tools.clone(),
             ));
-        let fork_gate = self
-            .descriptor
-            .fork_group()
-            .map(|group| self.environment.fork_groups.gate(group, context.actor))
-            .transpose()
-            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+
         let (checkpoint, checkpoint_attachment) = self
             .admitted_checkpoint
             .take()
             .map_or((None, None), |(lease, attachment)| {
                 (Some(lease), attachment)
             });
-        let checkpoint_attachment =
-            checkpoint_attachment.or_else(|| self.inherited_host_attachment.take());
+        let checkpoint_attachment = checkpoint_attachment;
         Ok(LocalResidentInstallation {
             toolset_acquisition: prepared_tools.toolset_acquisition().cloned(),
             prepared_tools: Some(prepared_tools),
             actor,
-            label: self.descriptor.label().to_owned(),
+            label: self.descriptor.display_label().into_owned(),
             policy,
             initial_user_message,
+            fresh_context_seed: self.fresh_context_seed.clone(),
+            spawn_admission: self.spawn_admission.clone(),
             launch_worktrees: self.launch_worktrees.clone(),
             worktree_custody: self.worktree_custody.clone(),
-            effective_role: self.descriptor.effective_role().clone(),
+            capabilities: self.descriptor.capabilities().clone(),
             fork_effort: self.descriptor.fork_effort(),
             model: self.descriptor.model().cloned(),
             instructions: self.descriptor.instructions().map(str::to_owned),
             creator: self.descriptor.creator(),
-            fork_boundary: self.descriptor.fork_boundary().cloned(),
+            checkpoint_boundary: self.descriptor.checkpoint_boundary().cloned(),
             checkpoint,
             checkpoint_attachment,
             supervisor_parent: self.descriptor.supervisor_parent(),
             context_parent: self.descriptor.context_parent(),
-            fork_group: self.descriptor.fork_group(),
-            fork_gate,
             runtime_observation: self.runtime_observation.clone(),
         })
-    }
-
-    fn advance_child_release(
-        &mut self,
-        kernel: &KernelContext,
-        release: ForkChildRelease,
-    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
-        let refuse = |detail: &str| KernelInvocationFailure::Failed {
-            receipts: Vec::new(),
-            actor: kernel.identity(),
-            detail: detail.into(),
-            diagnostic: None,
-        };
-        if self.child_release.matches_replay(
-            &release,
-            kernel.identity(),
-            &self.descriptor,
-            self.child_scope_lease.as_ref(),
-        ) {
-            return Ok(crate::ActorAdvance::Complete(KernelStep::Continue(())));
-        }
-        if !release.matches(kernel.identity(), &self.descriptor) || self.boot.is_none() {
-            return Err(refuse(
-                "child allocation changed before release application",
-            ));
-        }
-        if let Some(terminal) = kernel.requested_shutdown() {
-            return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
-                output: (),
-                terminal,
-            }));
-        }
-        let preparation =
-            match (
-                self.worktree_custody.as_ref(),
-                self.prepared_workspace.take(),
-            ) {
-                (Some(custody), None) => {
-                    child_initialization::ChildWorkspacePreparation::Retained(Arc::clone(custody))
-                }
-                (None, Some(prepared)) => {
-                    child_initialization::ChildWorkspacePreparation::Prepared(prepared)
-                }
-                (None, None) => match self.launch_worktrees.as_slice() {
-                    [] => child_initialization::ChildWorkspacePreparation::None,
-                    [worktree] => child_initialization::ChildWorkspacePreparation::Bound {
-                        admission: self.environment.fork_workspaces.clone().ok_or_else(|| {
-                            refuse("pre-bootstrap worktree custody is unavailable")
-                        })?,
-                        worktree: worktree.clone(),
-                        role: self.descriptor.effective_role().role(),
-                    },
-                    _ => return Err(refuse("actor bootstrap requires at most one worktree")),
-                },
-                (Some(_), Some(_)) => {
-                    return Err(refuse(
-                        "child has both prepared and installed workspace custody",
-                    ));
-                }
-            };
-        let boot = self
-            .boot
-            .take()
-            .ok_or_else(|| refuse("deferred fork was already released"))?;
-        let accepted_release = child_initialization::ForkChildReleaseState::released(&release);
-        let (lexical, inherited) = release.into_context();
-        if let Some(inherited) = inherited {
-            self.descriptor.source_imports().release_capture();
-            self.descriptor = self.descriptor.clone().with_source_imports(inherited);
-        }
-        self.descriptor.set_lexical_scope(lexical.scope());
-        self.child_scope_lease = Some(Arc::clone(&lexical));
-        let context = self.context(kernel.identity());
-        kernel
-            .install_session_context(context.clone())
-            .map_err(|error| refuse(&error.to_string()))?;
-        let durable = if let Some(record) = self.environment.actors.lock().get_mut(&context.actor) {
-            record.descriptor = self.descriptor.clone();
-            match &record.public_owner {
-                ActorPublicOwnerPlane::Ephemeral(_) => {
-                    record.public_owner = ActorPublicOwnerPlane::Ephemeral(
-                        WorkbenchPublicOwner::issue(&context, &self.descriptor, None)
-                            .map_err(|error| refuse(&error.to_string()))?,
-                    );
-                    None
-                }
-                ActorPublicOwnerPlane::DurablePending(owner) => Some(owner.clone()),
-                _ => {
-                    return Err(refuse(
-                        "child release requires its original pending public owner",
-                    ));
-                }
-            }
-        } else {
-            return Err(refuse("released child has no registered allocation"));
-        };
-        self.child_release = accepted_release;
-        let frame = child_initialization::ChildInitializationFrame {
-            context,
-            boot,
-            lexical,
-            durable,
-            readiness: None,
-            checkpoint: self.admitted_checkpoint.clone(),
-        };
-        Ok(crate::ActorAdvance::Park(crate::OwnedActorTask::new(
-            Box::pin(async move {
-                let prepared = child_initialization::prepare_workspace(frame, preparation).await;
-                crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
-                    behavior.advance_prepared_child(kernel, prepared)
-                })
-            }),
-        )))
-    }
-
-    fn advance_prepared_child(
-        &mut self,
-        kernel: &KernelContext,
-        prepared: child_initialization::PreparedChildWorkspace,
-    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
-        let child_initialization::PreparedChildWorkspace { frame, result } = prepared;
-        let refuse = |detail: &str| KernelInvocationFailure::Failed {
-            receipts: Vec::new(),
-            actor: kernel.identity(),
-            detail: detail.into(),
-            diagnostic: None,
-        };
-        if self.context(kernel.identity()).placement != frame.context.placement
-            || self
-                .child_scope_lease
-                .as_ref()
-                .is_none_or(|lease| !Arc::ptr_eq(lease, &frame.lexical))
-        {
-            return Err(refuse(
-                "child placement changed during workspace preparation",
-            ));
-        }
-        self.worktree_custody = result.map_err(|error| refuse(&error.to_string()))?;
-        if let Some(terminal) = kernel.requested_shutdown() {
-            self.boot = Some(frame.boot);
-            return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
-                output: (),
-                terminal,
-            }));
-        }
-        if let Some(owner) = frame.durable.clone() {
-            let runner = self.environment.runner.clone();
-            let retirement = kernel.retained_exit();
-            return Ok(crate::ActorAdvance::Park(crate::OwnedActorTask::new(
-                Box::pin(async move {
-                    let mut frame = frame;
-                    let started = std::time::Instant::now();
-                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %frame.context.actor, phase = "child_durable_initialization_started", "actor phase");
-                    let result = runner
-                        .initialize_fork_child_public_owner(
-                            frame.context.clone(),
-                            owner.clone(),
-                            Arc::clone(&frame.lexical),
-                            retirement,
-                        )
-                        .await;
-                    let result = result.map(|publication| {
-                        let (outcome, readiness) = publication.into_parts();
-                        frame.readiness = readiness;
-                        outcome
-                    });
-                    tracing::info!(target: "exomonad_actor::workbench_phase", actor = %frame.context.actor, elapsed_ms = started.elapsed().as_millis(), phase = "child_durable_initialization_returned", "actor phase");
-                    crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
-                        behavior.advance_child_public_initialization(kernel, frame, result)
-                    })
-                }),
-            )));
-        }
-        self.begin_child_native_boot(frame)
-    }
-
-    fn validate_child_initialization_frame(
-        &self,
-        kernel: &KernelContext,
-        frame: &child_initialization::ChildInitializationFrame,
-    ) -> Result<(), KernelInvocationFailure> {
-        if self.context(kernel.identity()).placement != frame.context.placement
-            || frame.context.actor != kernel.identity()
-            || self
-                .child_scope_lease
-                .as_ref()
-                .is_none_or(|lease| !Arc::ptr_eq(lease, &frame.lexical))
-        {
-            return Err(KernelInvocationFailure::Failed {
-                receipts: Vec::new(),
-                actor: kernel.identity(),
-                detail: "child initialization no longer owns its original placement".into(),
-                diagnostic: None,
-            });
-        }
-        Ok(())
-    }
-
-    fn retain_published_child_initialization(
-        &mut self,
-        kernel: &KernelContext,
-        frame: child_initialization::ChildInitializationFrame,
-        detail: String,
-        confirmation_failure: Option<&str>,
-    ) -> Result<(), KernelInvocationFailure> {
-        self.validate_child_initialization_frame(kernel, &frame)?;
-        let owner = frame.durable.clone().ok_or_else(|| {
-            Self::invocation_failure(
-                kernel.identity(),
-                "published child initialization has no original durable owner",
-            )
-        })?;
-        let mut records = self.environment.actors.lock();
-        let record = records.get_mut(&frame.context.actor).ok_or_else(|| {
-            Self::invocation_failure(
-                kernel.identity(),
-                "published child allocation is no longer registered",
-            )
-        })?;
-        if record.descriptor.placement() != frame.context.placement
-            || !matches!(&record.public_owner,
-                ActorPublicOwnerPlane::DurablePending(actual)
-                | ActorPublicOwnerPlane::DurablePublishedUnconfirmed { owner: actual, .. }
-                if actual == &owner)
-        {
-            return Err(Self::invocation_failure(
-                kernel.identity(),
-                "published child owner changed during initialization",
-            ));
-        }
-        record.public_owner = ActorPublicOwnerPlane::DurablePublishedUnconfirmed {
-            owner,
-            detail: confirmation_failure.map_or_else(
-                || detail.clone(),
-                |failure| format!("{detail}; confirmation failed: {failure}"),
-            ),
-        };
-        self.pending_child_initialization =
-            Some(child_initialization::PublishedChildInitialization { frame, detail });
-        Ok(())
-    }
-
-    fn promote_child_public_owner(
-        &mut self,
-        kernel: &KernelContext,
-        frame: &child_initialization::ChildInitializationFrame,
-    ) -> Result<(), KernelInvocationFailure> {
-        self.validate_child_initialization_frame(kernel, frame)?;
-        let owner = frame.durable.clone().ok_or_else(|| {
-            Self::invocation_failure(
-                kernel.identity(),
-                "child durable readiness has no original durable owner",
-            )
-        })?;
-        let mut records = self.environment.actors.lock();
-        let record = records.get_mut(&frame.context.actor).ok_or_else(|| {
-            Self::invocation_failure(
-                kernel.identity(),
-                "child readiness allocation is no longer registered",
-            )
-        })?;
-        if record.terminal.is_some()
-            || record.descriptor.placement() != frame.context.placement
-            || !matches!(&record.public_owner,
-                ActorPublicOwnerPlane::DurablePending(actual)
-                | ActorPublicOwnerPlane::DurablePublishedUnconfirmed { owner: actual, .. }
-                if actual == &owner)
-        {
-            return Err(Self::invocation_failure(
-                kernel.identity(),
-                "child durable readiness requires its original pending owner",
-            ));
-        }
-        record.public_owner = ActorPublicOwnerPlane::DurableReady(
-            WorkbenchPublicOwner::issue(
-                &frame.context,
-                &record.descriptor,
-                frame.readiness.clone(),
-            )
-            .map_err(|error| Self::invocation_failure(kernel.identity(), error))?,
-        );
-        Ok(())
-    }
-
-    fn advance_child_public_initialization(
-        &mut self,
-        kernel: &KernelContext,
-        frame: child_initialization::ChildInitializationFrame,
-        result: Result<
-            tidepool_runtime::session::PublicManifestCommit,
-            ResidentActorWorkbenchError,
-        >,
-    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
-        self.validate_child_initialization_frame(kernel, &frame)?;
-        match result {
-            Ok(
-                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
-                    detail,
-                },
-            ) => {
-                self.retain_published_child_initialization(kernel, frame, detail, None)?;
-                if let Some(terminal) = kernel.requested_shutdown() {
-                    return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
-                        output: (),
-                        terminal,
-                    }));
-                }
-                let pending = self
-                    .pending_child_initialization
-                    .take()
-                    .expect("retained visible child initialization");
-                Ok(crate::ActorAdvance::Park(
-                    self.child_confirmation_task(kernel, pending),
-                ))
-            }
-            Ok(tidepool_runtime::session::PublicManifestCommit::Durable) => {
-                if let Some(terminal) = kernel.requested_shutdown() {
-                    self.boot = Some(frame.boot);
-                    return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
-                        output: (),
-                        terminal,
-                    }));
-                }
-                self.promote_child_public_owner(kernel, &frame)?;
-                self.begin_child_native_boot(frame)
-            }
-            Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)) => {
-                self.boot = Some(frame.boot);
-                Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
-                    output: (),
-                    terminal,
-                }))
-            }
-            result => {
-                if let Some(terminal) = kernel.requested_shutdown() {
-                    self.boot = Some(frame.boot);
-                    return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
-                        output: (),
-                        terminal,
-                    }));
-                }
-                Err(match result {
-                    Ok(outcome) => Self::invocation_failure(
-                        kernel.identity(),
-                        format!("child durable initialization was not published: {outcome:?}"),
-                    ),
-                    Err(error) => Self::invocation_failure(kernel.identity(), error),
-                })
-            }
-        }
-    }
-
-    fn child_confirmation_task(
-        &self,
-        kernel: &KernelContext,
-        pending: child_initialization::PublishedChildInitialization,
-    ) -> crate::OwnedActorTask<Self, ()> {
-        let runner = self.environment.runner.clone();
-        let retirement = kernel.retained_exit();
-        crate::OwnedActorTask::new(Box::pin(async move {
-            let mut pending = pending;
-            let owner = pending
-                .frame
-                .durable
-                .clone()
-                .expect("visible durable child retains original owner");
-            let started = std::time::Instant::now();
-            let mut attempts = 0;
-            let result = loop {
-                attempts += 1;
-                let result = tokio::select! {
-                    biased;
-                    terminal = retirement.wait_requested_shutdown() => Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)),
-                    result = tokio::time::timeout(std::time::Duration::from_secs(5),
-                        runner.confirm_initial_durable_public_owner(pending.frame.context.clone(), owner.clone())) => {
-                        result.unwrap_or_else(|_| Err(ResidentActorWorkbenchError::ActorProtocol("child durability confirmation timed out".into())))
-                    },
-                };
-                if result.is_ok()
-                    || matches!(
-                        result,
-                        Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(_))
-                    )
-                    || attempts == 3
-                {
-                    break result;
-                }
-                tokio::select! {
-                    biased;
-                    terminal = retirement.wait_requested_shutdown() => break Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)),
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(25 * attempts)) => {},
-                }
-            };
-            let result = result.map(|readiness| {
-                pending.frame.readiness = Some(readiness);
-            });
-            tracing::info!(target: "exomonad_actor::workbench_phase", actor = %pending.frame.context.actor, elapsed_ms = started.elapsed().as_millis(), phase = "child_durability_confirmation_returned", "actor phase");
-            crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
-                behavior.advance_child_confirmation(kernel, pending, result)
-            })
-        }))
-    }
-
-    fn advance_child_confirmation(
-        &mut self,
-        kernel: &KernelContext,
-        pending: child_initialization::PublishedChildInitialization,
-        result: Result<(), ResidentActorWorkbenchError>,
-    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
-        self.validate_child_initialization_frame(kernel, &pending.frame)?;
-        if let Some(terminal) = kernel.requested_shutdown() {
-            self.pending_child_initialization = Some(pending);
-            return Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
-                output: (),
-                terminal,
-            }));
-        }
-        match result {
-            Ok(()) => {
-                self.promote_child_public_owner(kernel, &pending.frame)?;
-                self.begin_child_native_boot(pending.frame)
-            }
-            Err(error) => {
-                self.retain_published_child_initialization(
-                    kernel,
-                    pending.frame,
-                    pending.detail,
-                    Some(&error.to_string()),
-                )?;
-                Ok(crate::ActorAdvance::Complete(KernelStep::Stop {
-                    output: (),
-                    terminal: ActorTerminal::failed(
-                        format!(
-                            "child durability confirmation unavailable after bounded retries: {error}"
-                        ),
-                        error.failure_diagnostic(),
-                    ),
-                }))
-            }
-        }
-    }
-
-    fn begin_child_native_boot(
-        &mut self,
-        frame: child_initialization::ChildInitializationFrame,
-    ) -> Result<crate::ActorAdvance<Self, ()>, KernelInvocationFailure> {
-        // Native boot stabilization still uses its original serial driver.
-        // Its workspace and entry are already captured; this cannot replay
-        // release admission or select another public/captured context.
-        Ok(crate::ActorAdvance::Park(crate::OwnedActorTask::serial(
-            move |mut behavior: Self, kernel| {
-                Box::pin(async move {
-                    let child_initialization::ChildInitializationFrame {
-                        context,
-                        boot,
-                        lexical,
-                        durable: _,
-                        readiness: _,
-                        checkpoint,
-                    } = frame;
-                    let result = behavior
-                        .initialize(&kernel, &context, boot)
-                        .await
-                        .map_err(|error| Self::invocation_failure(context.actor, error));
-                    drop((lexical, checkpoint));
-                    (behavior, crate::OwnedActorCompletion::new(move |_| result))
-                })
-            },
-        )))
     }
 
     async fn initialize(
@@ -8836,42 +7748,51 @@ where
                 );
             }
         }
-        if self.worktree_custody.is_none() {
-            match self.launch_worktrees.as_slice() {
-                [] => {}
-                [worktree] => {
-                    let admission = self.environment.fork_workspaces.as_ref().ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "pre-bootstrap worktree custody is unavailable".into(),
-                        )
-                    })?;
-                    let admission = admission.clone();
-                    let actor = context.actor;
-                    let worktree = worktree.clone();
-                    let role = self.descriptor.effective_role().role();
-                    self.worktree_custody = Some(
-                        tidepool_runtime::spawn_blocking_in_span(move || {
-                            admission.install_custody(actor, &worktree, role)
-                        })
-                        .await
-                        .map_err(ResidentActorWorkbenchError::Join)?
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                        })?,
-                    );
-                }
-                _ => {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "actor bootstrap requires at most one worktree".into(),
-                    ));
-                }
-            }
+        if self.worktree_custody.is_none() && !self.launch_worktrees.is_empty() {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "workspace metadata requires an authorized prepared attachment".into(),
+            ));
         }
+
         if let Some(terminal) = kernel.requested_shutdown() {
             return Ok(KernelStep::Stop {
                 output: (),
                 terminal,
             });
+        }
+        if matches!(boot, ResidentBoot::Workbench) && self.explicit_installer.is_some() {
+            let installation = self
+                .prepare_interactive_policy(kernel, context, None)
+                .await?;
+            let receiver = self.prepared_request_receiver.take().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "public spawn completed tools without its request receiver".into(),
+                )
+            })?;
+            // Receiver source custody survives replacement of the independently installed tools.
+            self.request_receiver_scope = Some(receiver.scope);
+            let outcome = self
+                .environment
+                .runner
+                .run_rooted_entry(
+                    context.clone(),
+                    receiver.entry,
+                    context.placement.resource_scope,
+                )
+                .await?;
+            let boundary = self
+                .environment
+                .runner
+                .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
+                .await?;
+            let ResidentActorBoundary::Receive(receiver) = boundary else {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "public spawn request driver did not install its mailbox receiver".into(),
+                ));
+            };
+            self.set_standing(context.actor, ResidentStanding::Receiving(receiver));
+            self.commit_interactive_installation(kernel, context, installation)?;
+            return Ok(KernelStep::Continue(()));
         }
         if matches!(boot, ResidentBoot::Workbench) {
             let source = self.freeze_installed_source(context.actor)?;
@@ -8900,29 +7821,11 @@ where
                     .await?
             }
             ResidentBoot::Entry(entry) => {
-                let mut outcome = match self.child_scope_lease.as_ref() {
-                    Some(lease) => {
-                        self.environment
-                            .runner
-                            .run_fork_child_rooted_entry(
-                                context.clone(),
-                                entry,
-                                context.placement.resource_scope,
-                                Arc::clone(lease),
-                            )
-                            .await?
-                    }
-                    None => {
-                        self.environment
-                            .runner
-                            .run_rooted_entry(
-                                context.clone(),
-                                entry,
-                                context.placement.resource_scope,
-                            )
-                            .await?
-                    }
-                };
+                let mut outcome = self
+                    .environment
+                    .runner
+                    .run_rooted_entry(context.clone(), entry, context.placement.resource_scope)
+                    .await?;
                 loop {
                     let startup_step = self
                         .environment
@@ -9436,6 +8339,19 @@ where
         unit: WorkbenchUnitExecution<'_>,
     ) -> Result<FragmentAdvance, ResidentActorWorkbenchError> {
         loop {
+            if !execution_state.park_effects {
+                if let Some(request) = current.native_start.take() {
+                    current.native_result = Some(
+                        owned_workbench::advance_fragment(
+                            workbench,
+                            &self.environment.runner,
+                            context.clone(),
+                            request,
+                        )
+                        .await,
+                    );
+                }
+            }
             self.runtime_observation.publish_workbench_posture(
                 crate::ActorWorkbenchPosture::RunningUnit {
                     input_unit_index: unit.input_unit_index,
@@ -9443,10 +8359,73 @@ where
                 },
             );
             let native = match current.native_result.take() {
-                Some(result) => result?,
+                Some(Ok(result)) => result,
+                Some(Err(error)) => {
+                    if current.scopes.is_empty() {
+                        return Err(error);
+                    }
+                    self.prepare_scope_finish(
+                        kernel,
+                        context,
+                        current,
+                        Err(
+                            tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                error.to_string(),
+                            ),
+                        ),
+                    )?;
+                    if execution_state.park_effects {
+                        return Ok(FragmentAdvance::ParkNative);
+                    }
+                    continue;
+                }
                 None => {
                     let request = match current.resume_failure.take() {
-                        Some(error) => return Err(error),
+                        Some(error) => {
+                            if current.scopes.is_empty() {
+                                return Err(error);
+                            }
+                            self.prepare_scope_finish(
+                                kernel,
+                                context,
+                                current,
+                                Err(
+                                    tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                        error.to_string(),
+                                    ),
+                                ),
+                            )?;
+                            if execution_state.park_effects {
+                                return Ok(FragmentAdvance::ParkNative);
+                            }
+                            continue;
+                        }
+                        None if !current.scopes.is_empty()
+                            || current
+                                .green
+                                .as_ref()
+                                .and_then(green::GreenInvocation::active_realm)
+                                .is_some() =>
+                        {
+                            owned_workbench::WorkbenchFragmentRequest::Scoped {
+                                fragment: current
+                                    .fragment
+                                    .take()
+                                    .expect("scope retains parent fragment"),
+                                outcome: current.outcome.take().expect("scope owns body frontier"),
+                                realm: current
+                                    .scopes
+                                    .last()
+                                    .map(|scope| scope.realm)
+                                    .or_else(|| {
+                                        current
+                                            .green
+                                            .as_ref()
+                                            .and_then(green::GreenInvocation::active_realm)
+                                    })
+                                    .expect("active native resource scope"),
+                            }
+                        }
                         None => owned_workbench::WorkbenchFragmentRequest::Settle {
                             fragment: current
                                 .fragment
@@ -9464,7 +8443,10 @@ where
                             "one captured native request"
                         );
                         current.native_start = Some(request);
-                        return Ok(FragmentAdvance::ParkNative);
+                        if execution_state.park_effects {
+                            return Ok(FragmentAdvance::ParkNative);
+                        }
+                        continue;
                     }
                     owned_workbench::advance_fragment(
                         workbench,
@@ -9476,12 +8458,180 @@ where
                 }
             };
             match native {
+                owned_workbench::WorkbenchFragmentAdvance::ScopeFailed { fragment, error } => {
+                    current.fragment = Some(fragment);
+                    if current.scopes.is_empty() {
+                        return Err(error);
+                    }
+                    self.prepare_scope_finish(
+                        kernel,
+                        context,
+                        current,
+                        Err(
+                            tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                error.to_string(),
+                            ),
+                        ),
+                    )?;
+                    if execution_state.park_effects {
+                        return Ok(FragmentAdvance::ParkNative);
+                    }
+                    continue;
+                }
                 owned_workbench::WorkbenchFragmentAdvance::Resumed(outcome) => {
                     current.outcome = Some(outcome);
                     continue;
                 }
                 owned_workbench::WorkbenchFragmentAdvance::Captured { fragment, boundary } => {
                     current.fragment = Some(fragment);
+                    let effect_owner = match current
+                        .scopes
+                        .last()
+                        .map(|frame| frame.work.clone())
+                        .or_else(|| {
+                            current
+                                .green
+                                .as_ref()
+                                .and_then(green::GreenInvocation::active_work)
+                        }) {
+                        Some(work) => CurrentEffectOwner::Scoped {
+                            base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
+                            scope: work,
+                            wait_control: current
+                                .green
+                                .as_ref()
+                                .and_then(green::GreenInvocation::active_wait_control),
+                        },
+                        None => CurrentEffectOwner::Workbench(execution_state),
+                    };
+                    let boundary = match boundary {
+                        ResidentActorBoundary::Green(boundary) => {
+                            if !execution_state.park_effects {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "async requires an independently admitted notebook execution"
+                                        .into(),
+                                ));
+                            }
+                            return self.prepare_green_boundary(
+                                kernel,
+                                context,
+                                &effect_owner,
+                                current,
+                                boundary,
+                            );
+                        }
+                        ResidentActorBoundary::Completed
+                            if current
+                                .green
+                                .as_ref()
+                                .and_then(green::GreenInvocation::active_realm)
+                                .is_some()
+                                && current.scopes.is_empty() =>
+                        {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                "async body completed without publishing its result marker".into(),
+                            ));
+                        }
+                        ResidentActorBoundary::ScopeResumed { outcome } => {
+                            current.outcome = Some(outcome);
+                            continue;
+                        }
+                        ResidentActorBoundary::ScopeRun {
+                            continuation,
+                            callback,
+                        } => {
+                            let (work, realm) = match self
+                                .register_resource_scope(context, &effect_owner)
+                            {
+                                Ok(registered) => registered,
+                                Err(detail) => {
+                                    let runner = self.environment.runner.clone();
+                                    let context = context.clone();
+                                    current.native_start = Some(
+                                        owned_workbench::WorkbenchFragmentRequest::ScopeResume {
+                                            fragment: current
+                                                .fragment
+                                                .take()
+                                                .expect("scope retains parent fragment"),
+                                            operation: Box::pin(async move {
+                                                runner.resume_value(context, continuation,
+                                            (Err::<(), _>(tidepool_bridge_effects::ScopeFailure::ScopeRejected(detail)), Ok::<(), tidepool_bridge_effects::CleanupError>(()))).await
+                                            }),
+                                        },
+                                    );
+                                    if execution_state.park_effects {
+                                        return Ok(FragmentAdvance::ParkNative);
+                                    }
+                                    continue;
+                                }
+                            };
+                            let frame = scopes::ScopeFrame {
+                                continuation,
+                                work,
+                                realm,
+                            };
+                            let token =
+                                frame.work.scope_token().expect("registered scope identity");
+                            let realm = frame.realm;
+                            let work = frame.work.clone();
+                            current.scopes.push(frame);
+                            current.native_start =
+                                Some(owned_workbench::WorkbenchFragmentRequest::ScopeStart {
+                                    fragment: current
+                                        .fragment
+                                        .take()
+                                        .expect("scope retains parent fragment"),
+                                    callback,
+                                    realm,
+                                    token,
+                                    work,
+                                });
+                            if execution_state.park_effects {
+                                return Ok(FragmentAdvance::ParkNative);
+                            }
+                            continue;
+                        }
+                        ResidentActorBoundary::ScopeDone { token, .. }
+                            if !current.scopes.is_empty() =>
+                        {
+                            let body = if current
+                                .scopes
+                                .last()
+                                .and_then(|frame| frame.work.scope_token())
+                                == Some(token)
+                            {
+                                Ok(())
+                            } else {
+                                Err(
+                                    tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                        "scope completion belongs to a different delimiter".into(),
+                                    ),
+                                )
+                            };
+                            self.prepare_scope_finish(kernel, context, current, body)?;
+                            if execution_state.park_effects {
+                                return Ok(FragmentAdvance::ParkNative);
+                            }
+                            continue;
+                        }
+                        ResidentActorBoundary::Completed if !current.scopes.is_empty() => {
+                            self.prepare_scope_finish(
+                                kernel,
+                                context,
+                                current,
+                                Err(
+                                    tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                        "scope body completed without its result marker".into(),
+                                    ),
+                                ),
+                            )?;
+                            if execution_state.park_effects {
+                                return Ok(FragmentAdvance::ParkNative);
+                            }
+                            continue;
+                        }
+                        boundary => boundary,
+                    };
                     let next_fragment = current
                         .fragment
                         .as_mut()
@@ -9551,11 +8701,19 @@ where
                         effect = %effect,
                         "effect boundary captured"
                     );
-                    let boundary = prepare_execution_effect(
-                        context,
-                        &CurrentEffectOwner::Workbench(execution_state),
-                        boundary,
-                    );
+                    let mut boundary = prepare_execution_effect(context, &effect_owner, boundary);
+                    match &mut boundary {
+                        ResidentActorBoundary::Form { publication, .. }
+                        | ResidentActorBoundary::RichView { publication, .. } => {
+                            publication.operation =
+                                unit.execution.map(|execution| WorkbenchOperationId {
+                                    execution: execution.clone(),
+                                    input_unit_index: unit.input_unit_index,
+                                    effect_ordinal: ordinal,
+                                });
+                        }
+                        _ => {}
+                    }
                     if execution_state.park_effects
                         && matches!(
                             &boundary,
@@ -9628,96 +8786,15 @@ where
                     }
                     let boundary = if execution_state.park_effects {
                         let captured = match boundary {
-                            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
-                                continuation,
-                                group,
-                            }) if matches!(
-                                execution_state.publication.boundary(),
-                                Some(
-                                    tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. }
-                                )
-                            ) =>
-                            {
-                                Ok(OwnedWorkbenchWait::DeferredCommit(
-                                    self.prepare_deferred_commit(
-                                        context,
-                                        &execution_state.publication,
-                                        execution_state.control.clone(),
-                                        continuation,
-                                        group,
-                                    ),
-                                ))
-                            }
-                            ResidentActorBoundary::ForkGroup(
-                                ForkGroupBoundary::CommitCaptured {
-                                    continuation,
-                                    group,
-                                },
-                            ) => Ok(OwnedWorkbenchWait::CapturedCommit(
-                                self.prepare_captured_commit(
-                                    context,
-                                    &execution_state.publication,
-                                    execution_state.control.clone(),
-                                    continuation,
-                                    group,
-                                ),
+                            ResidentActorBoundary::Start(start) => Ok(OwnedWorkbenchWait::Launch(
+                                self.prepare_child_launch(context, effect_owner.clone(), start),
                             )),
-                            ResidentActorBoundary::Start(start) => {
-                                Ok(OwnedWorkbenchWait::Launch(self.prepare_child_launch(
-                                    context,
-                                    CurrentEffectOwner::Workbench(execution_state),
-                                    start,
-                                )))
-                            }
-                            ResidentActorBoundary::Drain {
-                                continuation,
-                                target,
-                            } => Ok(OwnedWorkbenchWait::Drain {
-                                continuation,
-                                target: self.capture_drain_target(kernel, context, target)?,
-                            }),
-                            ResidentActorBoundary::Wait(wait) => {
-                                let terminal = self.capture_exit_target(
-                                    kernel,
-                                    &CurrentEffectOwner::Workbench(execution_state),
-                                    wait.target,
-                                )?;
-                                self.record_child_observation(wait.target);
-                                Ok(OwnedWorkbenchWait::Exit {
-                                    continuation: wait.continuation,
-                                    terminal,
-                                })
-                            }
-                            ResidentActorBoundary::Poll(poll) => {
-                                request_wait::guard_deferred_target(
-                                    &self.environment.fork_groups,
-                                    context.actor,
-                                    execution_state.publication.boundary(),
-                                    poll.target,
-                                )
-                                .map_err(|refusal| {
-                                    ResidentActorWorkbenchError::ActorProtocol(refusal.to_string())
-                                })?;
-                                let terminal = kernel
-                                    .resolve(poll.target)
-                                    .and_then(|target| target.terminal().get());
-                                Ok(OwnedWorkbenchWait::PollExit {
-                                    continuation: poll.continuation,
-                                    target: poll.target,
-                                    terminal,
-                                })
-                            }
-                            boundary => {
-                                match self.prepare_independent_effect(
-                                    kernel,
-                                    context,
-                                    &CurrentEffectOwner::Workbench(execution_state),
-                                    boundary,
-                                ) {
-                                    Ok(operation) => Ok(OwnedWorkbenchWait::Prepared(operation)),
-                                    Err(boundary) => OwnedWorkbenchWait::capture(boundary),
-                                }
-                            }
+                            boundary => self.prepare_invocation_wait(
+                                kernel,
+                                context,
+                                &effect_owner,
+                                boundary,
+                            )?,
                         };
                         match captured {
                             Ok(wait) => {
@@ -9729,7 +8806,7 @@ where
                                         | OwnedWorkbenchWait::Drain { .. }
                                 ) || matches!(&wait, OwnedWorkbenchWait::Command { request, .. }
                                     if commands::waits_for_completion(request)
-                                        && self.descriptor.effective_role().effect_keys().contains(&crate::ActorEffectKey::Commands))
+                                        && self.descriptor.capabilities().effect_keys().contains(&crate::ActorEffectKey::Commands))
                                 {
                                     execution_state
                                         .control
@@ -9953,7 +9030,7 @@ where
                                         display_remaining: *unit.display_remaining,
                                     },
                                     self.descriptor
-                                        .effective_role()
+                                        .capabilities()
                                         .effect_keys()
                                         .contains(&crate::ActorEffectKey::Commands),
                                 )
@@ -10001,7 +9078,7 @@ where
                                     self.resolve_effect(
                                         kernel,
                                         context,
-                                        CurrentEffectOwner::Workbench(execution_state),
+                                        effect_owner.clone(),
                                         &crate::CallAncestry::begin(context.actor),
                                         boundary,
                                     )
@@ -10046,7 +9123,14 @@ where
                                             }),
                                         ),
                                     );
-                                    return Err(error);
+                                    if current.scopes.is_empty() {
+                                        return Err(error);
+                                    }
+                                    self.prepare_scope_finish(kernel, context, current, Err(tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(error.to_string())))?;
+                                    if execution_state.park_effects {
+                                        return Ok(FragmentAdvance::ParkNative);
+                                    }
+                                    continue;
                                 }
                             });
                         }
@@ -10320,7 +9404,9 @@ where
                     .await?
                 {
                     FragmentAdvance::Settled(step) => step,
-                    FragmentAdvance::ParkEffect | FragmentAdvance::ParkNative => {
+                    FragmentAdvance::ParkEffect
+                    | FragmentAdvance::ParkNative
+                    | FragmentAdvance::ParkGreen => {
                         unreachable!("nested after-tool remains serial")
                     }
                 }
@@ -10573,79 +9659,7 @@ where
                         cursor.cell_display_remaining =
                             cursor.cell_display_remaining.saturating_sub(spent);
                     }
-                    if self.has_ready_groups(context.actor, effects.publication.boundary()) {
-                        let publication = match effects.publication.boundary() {
-                            None => self.environment.fork_groups.publish_ready_in_resident(context.actor),
-                            Some(boundary @ tidepool_runtime::session::WorkbenchForkBoundary::Execution { .. }) => {
-                                let groups = self.environment.fork_groups.ready_groups_at_boundary(context.actor, boundary)
-                                    .into_iter().map(|(group, _)| group).collect::<Vec<_>>();
-                                self.environment.fork_groups.publish_groups(&groups, context.actor).map(|_| groups)
-                            }
-                            Some(_) => Ok(Vec::new()),
-                        };
-                        if let Err(source) = publication {
-                            settle_prepared_operations(
-                                &mut cursor.unit.operations,
-                                WorkbenchOperationDisposition::Unknown,
-                            );
-                            return Err(workbench_failure_after_unit(
-                                &cursor.receipts,
-                                cursor.index,
-                                request.items.len(),
-                                ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
-                                std::mem::take(&mut cursor.unit.operations),
-                                &cursor.unit.recovered_bindings,
-                            ));
-                        }
-                        settle_prepared_operations(
-                            &mut cursor.unit.operations,
-                            WorkbenchOperationDisposition::Committed,
-                        );
-                    } else if self
-                        .has_incomplete_groups(context.actor, effects.publication.boundary())
-                    {
-                        self.abort_incomplete_groups(
-                            kernel,
-                            context.actor,
-                            effects.publication.boundary(),
-                            "Haskell input ended before unfold admission committed",
-                            Some(effects.invocation_work.as_ref()),
-                        )
-                        .await;
-                        settle_prepared_operations(
-                            &mut cursor.unit.operations,
-                            WorkbenchOperationDisposition::Rejected,
-                        );
-                        let mut failure_receipt = receipt;
-                        failure_receipt.status = if cursor.unit.recovered_bindings.is_empty() {
-                            WorkbenchItemStatus::Rejected
-                        } else {
-                            WorkbenchItemStatus::Stopped
-                        };
-                        failure_receipt.output = format!(
-                            "{}\nunfold admission ended without committing every fork group",
-                            failure_receipt.output
-                        );
-                        failure_receipt.operations = std::mem::take(&mut cursor.unit.operations);
-                        failure_receipt.failure_layer = Some(WorkbenchFailureLayer::Effect);
-                        merge_retained_bindings(
-                            &mut failure_receipt,
-                            &cursor.unit.recovered_bindings,
-                        );
-                        cursor.receipts.push(failure_receipt);
-                        return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(
-                            workbench_response(
-                                WorkbenchRunStatus::Rejected,
-                                std::mem::take(&mut cursor.receipts),
-                                cursor.index,
-                                request.items.len(),
-                                cursor
-                                    .cell_check
-                                    .as_ref()
-                                    .map(|checked| checked.items.as_slice()),
-                            ),
-                        )));
-                    }
+
                     receipt.operations = std::mem::take(&mut cursor.unit.operations);
                     cursor.receipts.push(receipt);
                     cursor.index += 1;
@@ -10697,6 +9711,9 @@ where
                             }
                             Ok(FragmentAdvance::ParkNative) => {
                                 return Ok(WorkbenchRunAdvance::ParkNative);
+                            }
+                            Ok(FragmentAdvance::ParkGreen) => {
+                                return Ok(WorkbenchRunAdvance::ParkGreen);
                             }
                             Ok(FragmentAdvance::Settled(step)) => settled = Some(Ok(step)),
                             Err(error) => settled = Some(Err(error)),
@@ -10832,14 +9849,6 @@ where
                     let started = match started {
                         Ok(step) => step,
                         Err(source) => {
-                            self.abort_incomplete_groups(
-                                kernel,
-                                context.actor,
-                                effects.publication.boundary(),
-                                "Haskell workbench failed during unfold admission",
-                                Some(effects.invocation_work.as_ref()),
-                            )
-                            .await;
                             return Err(workbench_failure(
                                 &cursor.receipts,
                                 cursor.index,
@@ -10889,15 +9898,10 @@ where
                             Ok(FragmentAdvance::ParkNative) => {
                                 return Ok(WorkbenchRunAdvance::ParkNative);
                             }
+                            Ok(FragmentAdvance::ParkGreen) => {
+                                return Ok(WorkbenchRunAdvance::ParkGreen);
+                            }
                             Err(source) => {
-                                self.abort_incomplete_groups(
-                                    kernel,
-                                    context.actor,
-                                    effects.publication.boundary(),
-                                    "Haskell workbench failed during unfold admission",
-                                    Some(effects.invocation_work.as_ref()),
-                                )
-                                .await;
                                 let mut failure = workbench_failure_after_unit(
                                     &cursor.receipts,
                                     cursor.index,
@@ -11066,14 +10070,7 @@ where
                             &mut cursor.unit.operations,
                             WorkbenchOperationDisposition::Rejected,
                         );
-                        self.abort_incomplete_groups(
-                            kernel,
-                            context.actor,
-                            effects.publication.boundary(),
-                            "Haskell input rejected during unfold admission",
-                            Some(effects.invocation_work.as_ref()),
-                        )
-                        .await;
+
                         let mut failure_receipt = WorkbenchItemReceipt {
                             diagnostics,
                             index: cursor.index,
@@ -11176,31 +10173,6 @@ where
                     ResidentWorkbenchStep::CancellationAcknowledged {
                         request: request_id,
                     } => {
-                        if self.has_incomplete_groups(context.actor, effects.publication.boundary())
-                        {
-                            self.abort_incomplete_groups(
-                                kernel,
-                                context.actor,
-                                effects.publication.boundary(),
-                                "request cancellation interrupted unfold admission",
-                                Some(effects.invocation_work.as_ref()),
-                            )
-                            .await;
-                            self.environment
-                                .requests
-                                .rollback_cancellation_acknowledgement(request_id);
-                            return Err(workbench_failure_after_unit(
-                            &cursor.receipts,
-                            cursor.index,
-                            request.items.len(),
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "an actor cannot acknowledge cancellation while an unfold group is unpublished"
-                                    .into(),
-                            ),
-                            std::mem::take(&mut cursor.unit.operations),
-                            &cursor.unit.recovered_bindings,
-                        ));
-                        }
                         if self.pending_program.is_some()
                             || self.pending_reply.is_some()
                             || self.pending_cancellation.is_some()
@@ -11412,9 +10384,9 @@ where
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> WorkbenchFinalization {
         let context = execution_state.effects.context.clone();
-        let checkpoint_boundary = execution_state.request.fork_boundary().cloned();
+        let checkpoint_boundary = execution_state.request.checkpoint_boundary().cloned();
         execution_state.effects.invocation_work.close();
-        self.fork_publication = ForkPublication::Resident;
+        self.checkpoint_publication = CheckpointPublication::Resident;
         match &result {
             Ok(KernelStep::Continue(_)) => self
                 .runtime_observation
@@ -11490,7 +10462,7 @@ where
         let retire_scopes = if checkpoint_failed {
             checkpoint_boundary.as_ref().map(|boundary| {
                 self.environment
-                    .fork_groups
+                    .actor_admissions
                     .settle_checkpoints(context.actor, boundary, false)
                     .into_iter()
                     .filter_map(|(session, scope)| {
@@ -11660,317 +10632,93 @@ where
         result
     }
 
+    // The admitted journal retains the same scope tree used by Green waits and
+    // child startup. Finalization observes its actual cleanup, including retries.
+    async fn settle_provider_resources(
+        &self,
+        kernel: &KernelContext,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> Result<(), KernelBehaviorError> {
+        if boundary.hosted().is_none() {
+            return Ok(());
+        }
+        let children = self
+            .workbench_executions
+            .lock()
+            .provider_children(boundary)?;
+        let retirement = workbench_ledger::provider_child_retirement_batch(kernel, children)?;
+        let work = self
+            .workbench_executions
+            .lock()
+            .provider_invocation_work(boundary)?;
+        if let Some(work) = work {
+            let cleanup = work.cleanup(&self.environment, kernel).await;
+            if let Some(detail) = cleanup.uncertainty() {
+                return Err(KernelBehaviorError::new(detail));
+            }
+        }
+        for (child, terminal) in retirement.into_actors() {
+            let identity = child.identity();
+            workbench_ledger::settle_provider_child_owner(child, terminal).await?;
+            self.workbench_executions
+                .lock()
+                .provider_child_released(boundary, identity)?;
+        }
+        Ok(())
+    }
+
     async fn abort_provider_boundary(
         &mut self,
         kernel: &KernelContext,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<(), KernelBehaviorError> {
-        if self.settled_fork_boundaries.contains(&boundary) {
-            return Ok(());
+        if self.settled_checkpoint_boundaries.contains(&boundary) {
+            return self.settle_provider_resources(kernel, &boundary).await;
         }
+        self.settle_provider_resources(kernel, &boundary).await?;
         let context = self.context(kernel.identity());
-        // Validate the original provider owner even when there are no children
-        // or group obligations. Nested cells cannot release enclosing custody.
-        let provider_children = if boundary.hosted().is_some()
-            && self
-                .workbench_executions
-                .lock()
-                .at_boundary(&boundary)
-                .is_some()
-        {
-            self.workbench_executions
-                .lock()
-                .provider_children(&boundary)?
-        } else {
-            Vec::new()
-        };
         let owner = WorkbenchExecutions::boundary_abort_owner(
             &self.workbench_executions,
             &boundary,
-            || {
-                self.environment
-                    .fork_groups
-                    .has_abort_work_at_boundary(context.actor, &boundary)
-            },
+            || true,
         )?;
         let Some(owner) = owner else {
-            self.workbench_executions
-                .lock()
-                .release_fork_source(&boundary);
-            self.settled_fork_boundaries.push(boundary);
+            self.settled_checkpoint_boundaries.push(boundary);
             return Ok(());
         };
         let mut cleanup = owner.collect_cleanup(|| {
             let scopes = self
                 .environment
-                .fork_groups
+                .actor_admissions
                 .settle_checkpoints(context.actor, &boundary, false)
                 .into_iter()
                 .filter_map(|(session, scope)| {
                     (session == context.placement.session).then_some(scope)
                 })
                 .collect();
-            let children = self
-                .environment
-                .fork_groups
-                .abort_unpublished_at_boundary(context.actor, &boundary);
-            workbench_ledger::BoundaryAbortCleanup { children, scopes }
-        });
-        let provider_count = provider_children.len();
-        let selected = provider_children
-            .into_iter()
-            .chain(cleanup.children.iter().rev().copied())
-            .collect();
-        let children = workbench_ledger::provider_child_retirement_batch(kernel, selected)?;
-        for (index, (child, terminal)) in children.into_actors().into_iter().enumerate() {
-            let identity = child.identity();
-            workbench_ledger::settle_provider_child_owner(child, terminal).await?;
-            if index < provider_count {
-                self.workbench_executions
-                    .lock()
-                    .provider_child_released(&boundary, identity)?;
-            } else {
-                cleanup.children.pop();
-                owner.retain_cleanup(cleanup.clone());
+            workbench_ledger::BoundaryAbortCleanup {
+                children: Vec::new(),
+                scopes,
             }
+        });
+        let retirement = workbench_ledger::provider_child_retirement_batch(
+            kernel,
+            cleanup.children.iter().rev().copied().collect(),
+        )?;
+        for (child, terminal) in retirement.into_actors() {
+            workbench_ledger::settle_provider_child_owner(child, terminal).await?;
+            cleanup.children.pop();
+            owner.retain_cleanup(cleanup.clone());
         }
         self.environment
             .runner
-            .retire_fork_scopes(context.clone(), cleanup.scopes.clone())
+            .retire_context_scopes(context, cleanup.scopes.clone())
             .await
             .map_err(Self::workbench_failure)?;
         cleanup.scopes.clear();
         owner.retain_cleanup(cleanup);
-        self.workbench_executions
-            .lock()
-            .release_fork_source(&boundary);
-        self.settled_fork_boundaries.push(boundary);
+        self.settled_checkpoint_boundaries.push(boundary);
         Ok(())
-    }
-
-    async fn abort_unpublished_groups(
-        &self,
-        kernel: &KernelContext,
-        owner: ActorRef,
-        summary: &str,
-    ) {
-        let children = selected_child_retirement_batch(
-            kernel,
-            self.environment.fork_groups.abort_unpublished(owner),
-            summary,
-        );
-        for (child, terminal) in children.into_actors() {
-            if let Err(error) = child.shutdown(terminal).await {
-                tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-            }
-        }
-    }
-    fn prepare_deferred_commit(
-        &mut self,
-        context: &ActorSessionContext,
-        publication: &ForkPublication,
-        control: Option<Arc<crate::WorkbenchExecutionControl>>,
-        continuation: ForkContinuation,
-        group: crate::ForkGroupId,
-    ) -> captured_commit::PreparedDeferredCommit {
-        captured_commit::prepare_deferred(
-            &self.environment,
-            context.clone(),
-            self.descriptor.clone(),
-            publication.clone(),
-            control,
-            continuation,
-            group,
-        )
-    }
-
-    fn apply_ready_deferred_commit(
-        &mut self,
-        kernel: &KernelContext,
-        ready: captured_commit::ReadyDeferredCommit,
-    ) -> captured_commit::PreparedDeferredScopes {
-        captured_commit::apply_ready_deferred(&self.environment, kernel, &self.descriptor, ready)
-    }
-
-    fn apply_finalized_deferred_commit(
-        &mut self,
-        kernel: &KernelContext,
-        finalized: captured_commit::FinalizedDeferredCommit,
-    ) -> captured_commit::CapturedCommitRelease {
-        let release =
-            captured_commit::apply_scopes(&self.environment, kernel, &self.descriptor, finalized);
-        captured_commit::retain_release(&mut self.pending_fork_publications, &release);
-        release
-    }
-
-    fn prepare_captured_commit(
-        &mut self,
-        context: &ActorSessionContext,
-        publication: &ForkPublication,
-        control: Option<Arc<crate::WorkbenchExecutionControl>>,
-        continuation: ForkContinuation,
-        group: crate::ForkGroupId,
-    ) -> captured_commit::PreparedCapturedCommit {
-        captured_commit::prepare(
-            &self.environment,
-            context.clone(),
-            self.descriptor.clone(),
-            publication.clone(),
-            control,
-            continuation,
-            group,
-        )
-    }
-
-    fn apply_captured_commit(
-        &mut self,
-        kernel: &KernelContext,
-        ready: captured_commit::ReadyCapturedCommit,
-    ) -> captured_commit::CapturedCommitRelease {
-        let release =
-            captured_commit::apply_ready(&self.environment, kernel, &self.descriptor, ready);
-        captured_commit::retain_release(&mut self.pending_fork_publications, &release);
-        release
-    }
-
-    fn settle_captured_commit(
-        &mut self,
-        completed: captured_commit::CompletedCapturedCommit,
-    ) -> captured_commit::CapturedCommitResume {
-        captured_commit::retain_completed(&mut self.pending_fork_publications, completed)
-    }
-
-    async fn commit_captured_group(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
-        publication: &ForkPublication,
-        control: Option<Arc<crate::WorkbenchExecutionControl>>,
-        continuation: ForkContinuation,
-        group: crate::ForkGroupId,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let prepared =
-            self.prepare_captured_commit(context, publication, control, continuation, group);
-        let ready =
-            captured_commit::await_ready(self.environment.clone(), kernel.clone(), prepared).await;
-        let release = self.apply_captured_commit(kernel, ready);
-        let completed =
-            captured_commit::await_release(self.environment.clone(), kernel.clone(), release).await;
-        let resume = self.settle_captured_commit(completed);
-        captured_commit::resume(self.environment.clone(), kernel.clone(), resume).await
-    }
-
-    async fn finish_pending_fork_publication(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
-    ) -> Result<(), KernelBehaviorError> {
-        while let Some(index) = self
-            .pending_fork_publications
-            .iter()
-            .position(|pending| pending.boundary.as_ref() == Some(boundary))
-        {
-            self.finish_pending_fork_publication_index(kernel, context, index)
-                .await?;
-        }
-        Ok(())
-    }
-
-    async fn finish_pending_fork_publication_index(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
-        index: usize,
-    ) -> Result<(), KernelBehaviorError> {
-        let source = match self.pending_fork_publications[index].boundary.as_ref() {
-            Some(boundary) => self
-                .workbench_executions
-                .lock()
-                .fork_source_at_boundary(boundary)?,
-            None => None,
-        };
-        let pending = self.pending_fork_publications.remove(index);
-        if pending.inherited.get().is_none() {
-            if let Some(source) = source {
-                pending.inherited.set(source).ok();
-            }
-        }
-        let (pending, result) = captured_commit::release_pending(
-            self.environment.clone(),
-            kernel.clone(),
-            context.clone(),
-            pending,
-        )
-        .await;
-        if result.is_err() {
-            self.pending_fork_publications.push(pending);
-        }
-        result
-    }
-
-    fn has_ready_groups(
-        &self,
-        owner: ActorRef,
-        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
-    ) -> bool {
-        match boundary {
-            Some(boundary) => self
-                .environment
-                .fork_groups
-                .has_ready_at_boundary(owner, boundary),
-            None => self.environment.fork_groups.has_ready_in_resident(owner),
-        }
-    }
-
-    fn has_incomplete_groups(
-        &self,
-        owner: ActorRef,
-        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
-    ) -> bool {
-        match boundary {
-            Some(boundary) => self
-                .environment
-                .fork_groups
-                .has_incomplete_at_boundary(owner, boundary),
-            None => self
-                .environment
-                .fork_groups
-                .has_incomplete_in_resident(owner),
-        }
-    }
-
-    async fn abort_incomplete_groups(
-        &self,
-        kernel: &KernelContext,
-        owner: ActorRef,
-        boundary: Option<&tidepool_runtime::session::WorkbenchForkBoundary>,
-        summary: &str,
-        invocation: Option<&InvocationWork>,
-    ) {
-        let selected = self
-            .active_route
-            .as_ref()
-            .map(|(_, groups)| groups.as_slice());
-        let children = match boundary {
-            Some(boundary) => self
-                .environment
-                .fork_groups
-                .abort_incomplete_at_boundary(owner, boundary),
-            None => self
-                .environment
-                .fork_groups
-                .abort_incomplete_in_resident(owner, selected),
-        };
-        if let Some(invocation) = invocation {
-            invocation.retain_aborted_children(kernel, &children);
-        }
-        let children = selected_child_retirement_batch(kernel, children, summary);
-        for (child, terminal) in children.into_actors() {
-            if let Err(error) = child.shutdown(terminal).await {
-                tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-            }
-        }
     }
 }
 
@@ -12179,12 +10927,20 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        // LocalActor inserted the exact identity and admitted scope custody
-        // before entering this initializer. Retirement now owns the session.
-        if let Some(lease) = self.child_session_startup.take() {
-            lease.admitted();
+        let placement_transfer = self
+            .child_placement_custody
+            .as_ref()
+            .map(|custody| {
+                custody.transfer_to_actor(kernel.identity(), self.descriptor.placement())
+            })
+            .transpose();
+        if placement_transfer.is_ok() {
+            if let Some(lease) = self.child_session_startup.take() {
+                lease.admitted();
+            }
         }
         Box::pin(async move {
+            placement_transfer.map_err(Self::failure)?;
             let context = self.context(kernel.identity());
             let public_owner = match self.descriptor.persistence_policy() {
                 crate::ActorPersistencePolicy::Ephemeral => ActorPublicOwnerPlane::Ephemeral(
@@ -12251,61 +11007,71 @@ where
                     displays: Default::default(),
                 },
             );
+            if let Some(admission) = &self.spawn_admission {
+                admission
+                    .bind(
+                        self.descriptor
+                            .creator()
+                            .ok_or_else(|| Self::failure("spawn has no creating actor"))?,
+                        context.actor,
+                    )
+                    .map_err(Self::failure)?;
+                if let Some(layers) = &self.environment.source_layers {
+                    let source = self
+                        .admitted_checkpoint
+                        .as_ref()
+                        .map(|(lease, _)| &lease.issuer_source_layer)
+                        .or(self.spawn_source.as_ref());
+                    if let Some(source) = source {
+                        layers
+                            .bind_checkpoint_for(
+                                context.actor.into(),
+                                self.spawn_helper_branch.as_deref().unwrap_or_default(),
+                                source,
+                            )
+                            .map_err(Self::failure)?;
+                    } else {
+                        layers.bind_for(context.actor.into(), "");
+                    }
+                }
+            }
             if self.root_startup.is_some() {
                 // The original boot stays resident and opaque until durable application binding.
                 return Ok(KernelStep::Continue(()));
             }
-            if self.descriptor.fork_boundary().is_some() {
-                let group = self
-                    .descriptor
-                    .fork_group()
-                    .ok_or_else(|| KernelBehaviorError {
-                        detail: "deferred fork has no group".into(),
-                        diagnostic: None,
-                    })?;
-                self.environment
-                    .fork_groups
-                    .gate(group, context.actor)
-                    .and_then(|gate| gate.mark_ready())
-                    .map_err(|error| KernelBehaviorError {
-                        detail: error.to_string(),
-                        diagnostic: None,
-                    })?;
-                return Ok(KernelStep::Continue(()));
-            }
+
             if self.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable
-                && self.descriptor.creator().is_none()
-                && self.descriptor.supervisor_parent().is_none()
-                && self.descriptor.context_parent().is_none()
-                && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
+                && (self.spawn_admission.is_some()
+                    || (self.descriptor.creator().is_none()
+                        && self.descriptor.supervisor_parent().is_none()
+                        && self.descriptor.context_parent().is_none()
+                        && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))))
             {
                 let owner = {
                     let records = self.environment.actors.lock();
                     let record = records.get(&context.actor).ok_or_else(|| {
-                        Self::failure("prepared root lost its original allocation")
+                        Self::failure("durable actor lost its original allocation")
                     })?;
                     match &record.public_owner {
                         ActorPublicOwnerPlane::DurablePending(owner) => owner.clone(),
                         _ => {
-                            return Err(Self::failure(
-                                "prepared durable root lost its pending owner",
-                            ));
+                            return Err(Self::failure("durable actor lost its pending owner"));
                         }
                     }
                 };
                 let (outcome, readiness) = self
                     .environment
                     .runner
-                    .bind_durable_root_public_owner(context.clone(), owner.clone())
+                    .initialize_durable_public_owner(context.clone(), owner.clone())
                     .await
                     .map_err(Self::workbench_failure)?
                     .into_parts();
                 {
                     let mut records = self.environment.actors.lock();
                     let record = records.get_mut(&context.actor).ok_or_else(|| {
-                        Self::failure("prepared root allocation retired before publication")
+                        Self::failure("durable actor allocation retired before publication")
                     })?;
-                    settle_root_public_owner_record(record, &context, &owner, &outcome, readiness)
+                    settle_public_owner_record(record, &context, &owner, &outcome, readiness)
                         .map_err(Self::workbench_failure)?;
                 }
                 match outcome {
@@ -12316,15 +11082,15 @@ where
                         ).await.map_err(Self::workbench_failure)?;
                         let mut records = self.environment.actors.lock();
                         let record = records.get_mut(&context.actor).ok_or_else(|| Self::failure(
-                            "prepared root allocation retired before confirmation",
+                            "durable actor allocation retired before confirmation",
                         ))?;
-                        settle_root_public_owner_record(record, &context, &owner,
+                        settle_public_owner_record(record, &context, &owner,
                             &tidepool_runtime::session::PublicManifestCommit::Durable,
                             Some(readiness),
                         ).map_err(Self::workbench_failure)?;
                     }
                     other => return Err(Self::failure(format!(
-                        "prepared root public owner was not published: {other:?}",
+                        "durable actor public owner was not published: {other:?}",
                     ))),
                 }
             }
@@ -12346,13 +11112,13 @@ where
     fn reconcile_workbench_boundary<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<crate::WorkbenchBoundaryReconciliation, KernelBehaviorError>,
     > {
         Box::pin(async move {
-            if self.settled_fork_boundaries.contains(&boundary) {
+            if self.settled_checkpoint_boundaries.contains(&boundary) {
                 return Ok(crate::WorkbenchBoundaryReconciliation::Settled);
             }
             let retained = self.workbench_executions.lock().at_boundary(&boundary);
@@ -12364,36 +11130,19 @@ where
                 None => None,
             };
             let context = self.context(kernel.identity());
-            let children = selected_child_retirement_batch(
-                kernel,
-                self.environment
-                    .fork_groups
-                    .abort_incomplete_at_boundary(context.actor, &boundary),
-                "fork admission stopped before interrupted tool settlement",
-            );
-            for (child, terminal) in children.into_actors() {
-                if let Err(error) = child.shutdown(terminal).await {
-                    tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                }
-            }
+
             if let Some(reply) = reply {
                 return Ok(crate::WorkbenchBoundaryReconciliation::Recovered { reply });
             }
-            if !self
-                .environment
-                .fork_groups
-                .ready_groups_at_boundary(context.actor, &boundary)
-                .is_empty()
-            {
-                return Ok(crate::WorkbenchBoundaryReconciliation::Pending);
-            }
-            let retired =
-                self.environment
-                    .fork_groups
-                    .settle_checkpoints(context.actor, &boundary, false);
+
+            let retired = self.environment.actor_admissions.settle_checkpoints(
+                context.actor,
+                &boundary,
+                false,
+            );
             self.environment
                 .runner
-                .retire_fork_scopes(
+                .retire_context_scopes(
                     context.clone(),
                     retired
                         .into_iter()
@@ -12404,7 +11153,7 @@ where
                 )
                 .await
                 .map_err(Self::workbench_failure)?;
-            self.settled_fork_boundaries.push(boundary);
+            self.settled_checkpoint_boundaries.push(boundary);
             Ok(crate::WorkbenchBoundaryReconciliation::Settled)
         })
     }
@@ -12412,7 +11161,7 @@ where
     fn tool_aborted<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
             let result = self.abort_provider_boundary(kernel, boundary.clone()).await;
@@ -12430,113 +11179,32 @@ where
     fn tool_completed<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
-            let proof_boundary = boundary.clone();
+            if !self
+                .workbench_executions
+                .lock()
+                .cell_allows_publication(&boundary)
+            {
+                return self.tool_aborted(kernel, boundary).await;
+            }
             let result = async {
-                if !self
-                    .workbench_executions
-                    .lock()
-                    .cell_allows_publication(&boundary)
-                {
-                    return self.tool_aborted(kernel, boundary).await;
-                }
+                self.settle_provider_resources(kernel, &boundary).await?;
                 let context = self.context(kernel.identity());
-                self.environment
-                    .fork_groups
-                    .settle_checkpoints(context.actor, &boundary, true);
-                self.finish_pending_fork_publication(kernel, &context, &boundary)
-                    .await?;
-                let incomplete = self
-                    .environment
-                    .fork_groups
-                    .abort_incomplete_at_boundary(context.actor, &boundary);
-                self.workbench_executions
-                    .lock()
-                    .retain_provider_children(&boundary, incomplete)?;
-                workbench_ledger::settle_provider_children(
-                    &self.workbench_executions,
-                    kernel,
+                self.environment.actor_admissions.settle_checkpoints(
+                    context.actor,
                     &boundary,
-                )
-                .await?;
-                let groups = self
-                    .environment
-                    .fork_groups
-                    .ready_groups_at_boundary(context.actor, &boundary);
-                let groups: Vec<_> = groups
-                    .into_iter()
-                    .filter(|(_, children)| {
-                        let actors = self.environment.actors.lock();
-                        children.iter().all(|child| {
-                            actors.get(child).is_some_and(|record| {
-                                // The group closes on this coordinator call. A checkpoint
-                                // child's provider ancestry names the earlier capture call.
-                                record.descriptor.fork_boundary() == Some(&boundary)
-                                    || record.descriptor.checkpoint_token().is_some()
-                            })
-                        })
-                    })
-                    .collect();
-                if groups.is_empty() {
-                    if !self.settled_fork_boundaries.contains(&boundary) {
-                        self.workbench_executions
-                            .lock()
-                            .release_fork_source(&boundary);
-                        self.settled_fork_boundaries.push(boundary);
-                    }
-                    return Ok(());
-                }
-                let children: Vec<_> = {
-                    let actors = self.environment.actors.lock();
-                    groups
-                        .iter()
-                        .flat_map(|(_, children)| children.iter().copied())
-                        .filter(|child| {
-                            actors
-                                .get(child)
-                                .is_some_and(|record| record.terminal.is_none())
-                                && kernel
-                                    .resolve(*child)
-                                    .is_some_and(|child| child.terminal().get().is_none())
-                        })
-                        .collect()
-                };
-                let releases = {
-                    let actors = self.environment.actors.lock();
-                    children
-                        .into_iter()
-                        .map(|child| PendingForkChildRelease {
-                            child,
-                            session: actors[&child].descriptor.placement().session,
-                            scope: actors[&child].descriptor.placement().lexical_scope,
-                            lexical: Arc::new(OnceLock::new()),
-                        })
-                        .collect()
-                };
-                self.pending_fork_publications.push(PendingForkPublication {
-                    boundary: Some(boundary.clone()),
-                    phase: PendingForkPublicationPhase::Prepared(
-                        groups.into_iter().map(|(group, _)| group).collect(),
-                    ),
-                    releases,
-                    unused_scopes: Vec::new(),
-                    inherited: Arc::new(OnceLock::new()),
-                });
-                self.finish_pending_fork_publication(kernel, &context, &boundary)
-                    .await?;
-                if !self.settled_fork_boundaries.contains(&boundary) {
-                    self.workbench_executions
-                        .lock()
-                        .release_fork_source(&boundary);
-                    self.settled_fork_boundaries.push(boundary);
+                    true,
+                );
+                if !self.settled_checkpoint_boundaries.contains(&boundary) {
+                    self.settled_checkpoint_boundaries.push(boundary.clone());
                 }
                 Ok(())
             }
             .await;
             self.workbench_executions.lock().finalize_provider_boundary(
-                &proof_boundary,
+                &boundary,
                 result
                     .as_ref()
                     .map(|()| crate::ProviderFinalizationKind::Completed)
@@ -12546,46 +11214,6 @@ where
         })
     }
 
-    fn dispatch_release_fork(
-        &mut self,
-        kernel: &KernelContext,
-        release: ForkChildRelease,
-    ) -> Result<crate::OwnedActorTask<Self, ()>, KernelBehaviorError> {
-        if self.child_release.matches_replay(
-            &release,
-            kernel.identity(),
-            &self.descriptor,
-            self.child_scope_lease.as_ref(),
-        ) {
-            return Ok(crate::OwnedActorTask::new(Box::pin(async {
-                crate::OwnedActorCompletion::new(|_| Ok(KernelStep::Continue(())))
-            })));
-        }
-        if !release.matches(kernel.identity(), &self.descriptor) || self.boot.is_none() {
-            return Err(Self::failure(
-                "fork release does not match this child's pending allocation",
-            ));
-        }
-        let context = self
-            .descriptor
-            .clone()
-            .with_lexical_scope(release.lexical().scope())
-            .session_context(kernel.identity());
-        let mut context = context;
-        if let Some(inherited) = release.inherited() {
-            context.source_imports = inherited.clone();
-        }
-        let runner = self.environment.runner.clone();
-        let lexical = Arc::clone(release.lexical());
-        Ok(crate::OwnedActorTask::new(Box::pin(async move {
-            let result = runner.validate_fork_child_scope(context, lexical).await;
-            crate::OwnedActorCompletion::advance(move |behavior: &mut Self, kernel| {
-                result.map_err(|error| Self::invocation_failure(kernel.identity(), error))?;
-                behavior.advance_child_release(kernel, release)
-            })
-        })))
-    }
-
     fn cast<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
@@ -12593,7 +11221,7 @@ where
         request: MailboxValue,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(async move {
-            self.fork_publication = ForkPublication::Resident;
+            self.checkpoint_publication = CheckpointPublication::Resident;
             let context = self.context(kernel.identity());
             self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(sender));
             let (_, step) = self
@@ -12619,7 +11247,7 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<MailboxValue>, KernelBehaviorError>>
     {
         Box::pin(async move {
-            self.fork_publication = ForkPublication::Resident;
+            self.checkpoint_publication = CheckpointPublication::Resident;
             let context = self.context(kernel.identity());
             self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(caller));
             let (reply, step) = self
@@ -12661,18 +11289,18 @@ where
                 .as_ref()
                 .and_then(|context| context.model_operation())
                 .map(|operation| {
-                    tidepool_runtime::session::WorkbenchForkBoundary::Hosted(operation.clone())
+                    tidepool_runtime::session::ContextCheckpointBoundary::Hosted(operation.clone())
                 })
-                .unwrap_or_else(
-                    || tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+                .unwrap_or_else(|| {
+                    tidepool_runtime::session::ContextCheckpointBoundary::Execution {
                         actor_id: actor.id.0,
                         incarnation: actor.incarnation.0,
                         execution_id: execution.clone(),
-                    },
-                );
+                    }
+                });
             WorkbenchRequest::for_tool(invocation.name.clone(), arguments)
                 .with_execution_id(execution.clone())
-                .with_fork_boundary(boundary)
+                .with_checkpoint_boundary(boundary)
         });
         if let (Some(execution), Some(request)) = (&execution, &request) {
             match self
@@ -12735,13 +11363,96 @@ where
                 Some(&control),
             );
         }
+        let work = InvocationWork::new(
+            actor,
+            control
+                .reservation_owner(actor)
+                .expect("admitted tool reservation"),
+        );
+        self.workbench_executions.lock().retain_invocation_work(
+            work.clone(),
+            execution.as_ref(),
+            key.as_ref(),
+        );
         crate::OwnedActorTask::serial(move |mut behavior: Self, kernel| {
             Box::pin(async move {
-                let result = crate::resident_workbench::with_execution_control(
-                    control.clone(),
-                    behavior.tool(&kernel, invocation, capture),
-                )
-                .await;
+                let context = behavior.context(actor);
+                let runner = behavior.environment.runner.clone();
+                let workbench = runner.application_workbench();
+                let guard = workbench.actor_invocation_cleanup(
+                    context.clone(),
+                    "tool invocation abandoned before standing custody".into(),
+                );
+                let registration = guard.registration();
+                let mut result = registration
+                    .scope(crate::resident_workbench::with_execution_control(
+                        control.clone(),
+                        behavior.tool(&kernel, invocation, capture),
+                    ))
+                    .await;
+                work.close();
+                let cleanup = registration
+                    .scope(work.cleanup(&behavior.environment, &kernel))
+                    .await;
+                if let Some(detail) = cleanup.uncertainty() {
+                    result = Err(KernelInvocationFailure::CleanupUnconfirmed {
+                        actor,
+                        publication: None,
+                        receipts: Vec::new(),
+                        detail: format!(
+                            "tool resource cleanup unconfirmed: {detail}; original outcome: {result:?}"
+                        ),
+                    });
+                }
+                let standing_can_transfer = !control
+                    .native_cancel()
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    && cleanup.uncertainty().is_none()
+                    && matches!(
+                        &behavior.standing,
+                        ResidentStanding::Tools(_) | ResidentStanding::Terminal
+                    )
+                    && matches!(
+                        &result,
+                        Ok(_) | Err(KernelInvocationFailure::Rejected { .. })
+                    );
+                let custody = if standing_can_transfer {
+                    workbench
+                        .settle_actor_invocation_custody(context.clone(), registration.clone())
+                        .await
+                } else {
+                    workbench
+                        .abort_owned_continuations(
+                            context.clone(),
+                            registration.clone(),
+                            "tool invocation did not settle successfully".into(),
+                        )
+                        .await
+                };
+                let cleanup_confirmed = cleanup.uncertainty().is_none() && custody.is_ok();
+                match custody {
+                    Ok(()) => guard.disarm(),
+                    Err(error) => {
+                        result = Err(KernelInvocationFailure::CleanupUnconfirmed {
+                            actor,
+                            publication: None,
+                            receipts: Vec::new(),
+                            detail: format!(
+                                "tool continuation cleanup unconfirmed: {error}; original outcome: {result:?}"
+                            ),
+                        });
+                    }
+                }
+                if cleanup_confirmed
+                    && control
+                        .native_cancel()
+                        .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    if control.cancellation_requested() {
+                        control.acknowledge_cancellation();
+                    }
+                    result = Err(KernelInvocationFailure::Cancelled { actor });
+                }
                 if result.is_err() {
                     if let Some(owner) = control.reservation_owner(actor) {
                         let (_, notifications) = behavior
@@ -12767,6 +11478,11 @@ where
                                     | KernelStep::Stop { output: value, .. } => value.clone(),
                                 })
                                 .map_err(Clone::clone),
+                        );
+                        control.finish_cell(
+                            execution.clone(),
+                            &reply.clone().map(KernelStep::Continue),
+                            cleanup_confirmed,
                         );
                         let cancellation =
                             control.cancellation_outcome(execution.clone(), reply.clone());
@@ -12801,7 +11517,7 @@ where
                 invocation_context
                     .model_operation()
                     .cloned()
-                    .map(tidepool_runtime::session::WorkbenchForkBoundary::Hosted)
+                    .map(tidepool_runtime::session::ContextCheckpointBoundary::Hosted)
             });
             if hosted_checkpoint_capture.is_some()
                 && hosted_boundary
@@ -12843,10 +11559,10 @@ where
                 exomonad_tool::ToolArguments::Raw(text) => serde_json::Value::String(text),
                 exomonad_tool::ToolArguments::Structured(value) => value,
             };
-            self.fork_publication = ForkPublication::Workbench {
+            self.checkpoint_publication = CheckpointPublication::Workbench {
                 boundary: hosted_boundary.or_else(|| {
                     crate::resident_workbench::execution_control().map(|control| {
-                        tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+                        tidepool_runtime::session::ContextCheckpointBoundary::Execution {
                             actor_id: context.actor.id.0,
                             incarnation: context.actor.incarnation.0,
                             execution_id: control.execution_id(context.actor),
@@ -12855,6 +11571,27 @@ where
                 }),
                 capture: hosted_checkpoint_capture,
             };
+            let control = crate::resident_workbench::execution_control().ok_or_else(|| {
+                Self::invocation_failure(
+                    context.actor,
+                    "tool execution has no original admission control",
+                )
+            })?;
+            let work = self
+                .workbench_executions
+                .lock()
+                .admitted_invocation_work(
+                    &control.execution_id(context.actor),
+                    control.invocation.as_ref(),
+                )
+                .ok_or_else(|| {
+                    Self::invocation_failure(
+                        context.actor,
+                        "tool execution lost its original resource owner",
+                    )
+                })?;
+            let mut cursor =
+                green_tool::ToolCursor::new(work, control, self.checkpoint_publication.clone());
             let mut outcome = self
                 .environment
                 .runner
@@ -12865,15 +11602,35 @@ where
                     arguments,
                 )
                 .await
-                .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
             let mut result = None;
             loop {
+                cursor
+                    .check_admission(kernel)
+                    .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                 let boundary = self
                     .environment
                     .runner
-                    .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
+                    .capture_boundary(
+                        context.clone(),
+                        outcome,
+                        cursor.realm(context.placement.resource_scope),
+                    )
                     .await
-                    .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                    .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
+                if !cursor.is_main_terminal()
+                    && matches!(
+                        &boundary,
+                        ResidentActorBoundary::ToolReply(_)
+                            | ResidentActorBoundary::ToolAwait(_)
+                            | ResidentActorBoundary::Completed
+                    )
+                {
+                    return Err(Self::invocation_failure(
+                        context.actor,
+                        "async tool child completed outside its result delimiter",
+                    ));
+                }
                 match boundary {
                     ResidentActorBoundary::ToolReply(reply) => {
                         if result.replace(reply.result).is_some() {
@@ -12889,7 +11646,7 @@ where
                             .runner
                             .resume_unit(context.clone(), reply.continuation)
                             .await
-                            .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                            .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                     }
                     ResidentActorBoundary::ToolAwait(next) => {
                         let result = result.ok_or_else(|| KernelInvocationFailure::Failed {
@@ -12898,7 +11655,7 @@ where
                             detail: "actor awaited another tool invocation without replying".into(),
                             diagnostic: None,
                         })?;
-                        self.fork_publication = ForkPublication::Resident;
+                        self.checkpoint_publication = CheckpointPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Tools(next));
                         let output = result.into_output().map_err(|error| {
                             KernelInvocationFailure::Rejected {
@@ -12917,7 +11674,7 @@ where
                             detail: "actor completed a tool invocation without replying".into(),
                             diagnostic: None,
                         })?;
-                        self.fork_publication = ForkPublication::Resident;
+                        self.checkpoint_publication = CheckpointPublication::Resident;
                         self.set_standing(context.actor, ResidentStanding::Terminal);
                         let output = result.into_output().map_err(|error| {
                             KernelInvocationFailure::Rejected {
@@ -12934,18 +11691,43 @@ where
                     }
                     boundary => {
                         outcome = self
-                            .resolve_effect(
-                                kernel,
-                                &context,
-                                self.actor_effect_owner(context.actor),
-                                &crate::CallAncestry::begin(context.actor),
-                                boundary,
-                            )
+                            .advance_tool_frontier(kernel, &context, &mut cursor, boundary)
                             .await
-                            .map_err(|error| Self::invocation_failure(context.actor, error))?;
+                            .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                     }
                 }
             }
+        })
+    }
+
+    fn replace_spec<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        definition: crate::SpecReplacementDefinition,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), crate::SpecReplacementError>> {
+        Box::pin(async move {
+            let target = kernel.identity();
+            let authorized =
+                actor_can_control(definition.caller, target, &self.environment.actors.lock());
+            if !authorized {
+                return Err(crate::SpecReplacementError::Unauthorized);
+            }
+            let outcome = install_explicit_replacement(
+                self.environment.clone(),
+                self.context(target),
+                self.installed_tools.clone(),
+                self.descriptor.capabilities().effect_keys().to_vec(),
+                definition,
+            )
+            .await;
+            if outcome.is_ok() {
+                self.spec_installs = self
+                    .installed_tools
+                    .current_tools()
+                    .map_or(self.spec_installs, |tools| tools.install);
+                self.after_tool.forget_failures();
+            }
+            outcome
         })
     }
 
@@ -13150,8 +11932,8 @@ where
                     admitted_source,
                     reservation_owner,
                     invocation_work,
-                    publication: ForkPublication::Workbench {
-                        boundary: request.fork_boundary().cloned(),
+                    publication: CheckpointPublication::Workbench {
+                        boundary: request.checkpoint_boundary().cloned(),
                         capture,
                     },
                     after_tool_active: false,
@@ -13199,8 +11981,18 @@ where
                     admitted_workbench.as_ref(),
                 )))
                 .await
-                .map(|advance| match advance {
-                    WorkbenchRunAdvance::Complete(step) => step,
+                .and_then(|advance| {
+                    match advance {
+                    WorkbenchRunAdvance::Complete(step) => Ok(step),
+                    WorkbenchRunAdvance::ParkGreen => Err(workbench_failure(
+                        &execution_state.cursor.receipts,
+                        execution_state.cursor.index,
+                        execution_state.request.items.len(),
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "async frontier reached a serial workbench without owned task admission"
+                                .into(),
+                        ),
+                    )),
                     WorkbenchRunAdvance::ParkEffect
                     | WorkbenchRunAdvance::ParkUnit
                     | WorkbenchRunAdvance::ParkNative
@@ -13208,6 +12000,7 @@ where
                     | WorkbenchRunAdvance::ParkAfterToolFinish => {
                         unreachable!("legacy workbench remains serial")
                     }
+                }
                 });
             let call_outcome = match &result {
                 Ok(
@@ -13246,19 +12039,21 @@ where
             let Some(entry) = self.environment.requests.take_route(context.actor, watch) else {
                 return Ok(KernelStep::Continue(()));
             };
-            self.active_route = Some((watch, Vec::new()));
             let reservation_owner = RequestReservationOwner::Route(watch);
+            let route_work = self
+                .workbench_executions
+                .lock()
+                .callback_root(context.actor, reservation_owner.clone());
             let previous_reservation_owner = self
                 .active_route_reservation_owner
                 .replace(reservation_owner.clone());
-            // This internal completion identity gates only selected-context children.
-            // It never authorizes or describes a provider-context fork.
-            let completion = tidepool_runtime::session::WorkbenchForkBoundary::Route {
+            // Route completion settles only checkpoints captured by this callback.
+            let completion = tidepool_runtime::session::ContextCheckpointBoundary::Route {
                 actor_id: context.actor.id.0,
                 incarnation: context.actor.incarnation.0,
                 watch_id: watch.0,
             };
-            self.fork_publication = ForkPublication::Route(completion.clone());
+            self.checkpoint_publication = CheckpointPublication::Route(completion.clone());
             let result = async {
                 let mut outcome = self
                     .environment
@@ -13287,7 +12082,7 @@ where
                             {
                                 Ok(()) => {
                                     let publication_boundary =
-                                        self.fork_publication.boundary().cloned();
+                                        self.checkpoint_publication.boundary().cloned();
                                     self.stage_request_reply(
                                         kernel,
                                         &context,
@@ -13343,33 +12138,12 @@ where
                     .await
                     .map_err(|error| error.to_string());
             }
-            if result.is_err() {
-                let groups = self
-                    .active_route
-                    .as_ref()
-                    .map(|(_, groups)| groups.as_slice())
-                    .unwrap_or_default();
-                let children = selected_child_retirement_batch(
-                    kernel,
-                    self.environment
-                        .fork_groups
-                        .abort_selected_unpublished(context.actor, groups),
-                    "route callback failed before publication",
-                );
-                for (child, terminal) in children.into_actors() {
-                    if let Err(error) = child.shutdown(terminal).await {
-                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                    }
-                }
-            }
+            // Projection and nested scope resources belong to this callback.
+            result = self
+                .finish_callback_resources(kernel, &route_work, result)
+                .await;
             self.active_route_reservation_owner = previous_reservation_owner;
-            let (_, notifications) = self
-                .environment
-                .requests
-                .abort_unsubmitted(context.actor, &reservation_owner);
-            self.publish_watch_notifications(notifications).await;
-            self.active_route = None;
-            self.fork_publication = ForkPublication::Resident;
+            self.checkpoint_publication = CheckpointPublication::Resident;
             let notification = self
                 .environment
                 .requests
@@ -13424,39 +12198,32 @@ where
             ));
         }
         if kind == crate::kernel::KernelResume::ConfirmChildDurability {
-            let Some(pending) = self.pending_child_initialization.take() else {
-                let context = self.context(kernel.identity());
-                let owner = self
-                    .environment
-                    .actors
-                    .lock()
-                    .get(&context.actor)
-                    .and_then(|record| match &record.public_owner {
-                        ActorPublicOwnerPlane::DurableReady(owner)
-                            if owner.matches_context(&context) =>
-                        {
-                            owner.durable().cloned()
-                        }
-                        _ => None,
-                    });
-                let runner = self.environment.runner.clone();
-                // Confirmation of a post-initialization write cannot resume
-                // the program or mint a different owner. Its shared native fact
-                // becomes ready even if delivery of this completion is lost.
-                return Ok(crate::OwnedActorTask::new(Box::pin(async move {
-                    if let Some(owner) = owner {
-                        if let Err(error) =
-                            runner.confirm_durable_public_owner(context, owner).await
-                        {
-                            tracing::warn!(%error, "child native publication remains unconfirmed");
-                        }
+            let context = self.context(kernel.identity());
+            let owner = self
+                .environment
+                .actors
+                .lock()
+                .get(&context.actor)
+                .and_then(|record| match &record.public_owner {
+                    ActorPublicOwnerPlane::DurableReady(owner)
+                        if owner.matches_context(&context) =>
+                    {
+                        owner.durable().cloned()
                     }
-                    crate::OwnedActorCompletion::new(|_| Ok(KernelStep::Continue(())))
-                })));
-            };
-            self.validate_child_initialization_frame(kernel, &pending.frame)
-                .map_err(KernelInvocationFailure::into_behavior_error)?;
-            return Ok(self.child_confirmation_task(kernel, pending));
+                    _ => None,
+                });
+            let runner = self.environment.runner.clone();
+            // Confirmation of a post-initialization write cannot resume
+            // the program or mint a different owner. Its shared native fact
+            // becomes ready even if delivery of this completion is lost.
+            return Ok(crate::OwnedActorTask::new(Box::pin(async move {
+                if let Some(owner) = owner {
+                    if let Err(error) = runner.confirm_durable_public_owner(context, owner).await {
+                        tracing::warn!(%error, "child native publication remains unconfirmed");
+                    }
+                }
+                crate::OwnedActorCompletion::new(|_| Ok(KernelStep::Continue(())))
+            })));
         }
         // Remaining program stabilization is still the original serial driver.
         Ok(crate::OwnedActorTask::serial(
@@ -13482,7 +12249,7 @@ where
             }
             let context = self.context(kernel.identity());
             if self.root_startup.is_none()
-                && self.descriptor.fork_boundary().is_none()
+                && self.descriptor.checkpoint_boundary().is_none()
                 && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))
             {
                 let boot = self
@@ -13705,12 +12472,7 @@ where
                 .requests
                 .actor_stopped(context.actor, terminal);
             self.publish_watch_notifications(notifications).await;
-            self.abort_unpublished_groups(
-                kernel,
-                context.actor,
-                "fork owner stopped before tool completion",
-            )
-            .await;
+
             // Hook admission and every realm/placement checkout below race the
             // same deadline `finish_actor` computed once: a busy machine can
             // no longer delay exit publication without bound, and a removed
@@ -13828,7 +12590,7 @@ where
             let session = self.descriptor.placement().session;
             let failed_scopes = self
                 .environment
-                .fork_groups
+                .actor_admissions
                 .failed_checkpoint_scopes(kernel.identity());
             if let Err(error) = self
                 .environment
@@ -13844,7 +12606,10 @@ where
             {
                 tracing::warn!(actor = ?kernel.identity(), %error, "failed checkpoint scope cleanup was retained");
             }
-            let pending_releases = self.environment.fork_groups.pending_release_scopes(session);
+            let pending_releases = self
+                .environment
+                .actor_admissions
+                .pending_release_scopes(session);
             if !pending_releases.is_empty() {
                 match self
                     .environment
@@ -13859,7 +12624,7 @@ where
                         for (token, scope) in pending_releases {
                             if let Err(error) = self
                                 .environment
-                                .fork_groups
+                                .actor_admissions
                                 .confirm_checkpoint_release(&token, session, scope)
                             {
                                 tracing::warn!(actor = ?kernel.identity(), ?error, "checkpoint release confirmation failed");
@@ -13876,7 +12641,7 @@ where
             // available after this actor's terminal record is written.
             let session_retained = self.environment.actors.lock().values().any(|record| {
                 record.descriptor.placement().session == session && record.terminal.is_none()
-            }) || self.environment.fork_groups.retains_session(session);
+            }) || self.environment.actor_admissions.retains_session(session);
             // A no-op check for every actor that never got a dedicated
             // child session (the shared session is never a member). One
             // bounded checkout, no wait for whoever still needs this
@@ -13940,13 +12705,13 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    spawn_resident_root_with_fork_admission(source, root, None).await
+    spawn_resident_root_with_workspace_admission(source, root, None).await
 }
 
-pub async fn spawn_resident_root_with_fork_admission<H, O>(
+pub async fn spawn_resident_root_with_workspace_admission<H, O>(
     source: ActorWorkbenchSource,
     root: ResidentActorRoot<H, O>,
-    fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
+    fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
 ) -> Result<
     (
         LocalActorRef,
@@ -13967,7 +12732,7 @@ where
 pub async fn spawn_resident_root_in_incarnation<H, O>(
     source: ActorWorkbenchSource,
     root: ResidentActorRoot<H, O>,
-    fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
+    fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
     incarnation: crate::Incarnation,
 ) -> Result<
     (
@@ -14036,7 +12801,7 @@ struct PreparedRootAdmission {
     replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
     identity: Option<ActorRef>,
     launch_worktrees: Vec<String>,
-    worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
+    worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
 }
 
 impl<H, O> ResidentForest<H, O>
@@ -14062,6 +12827,12 @@ where
     /// compiles against the deployment-wide include roots and nothing else.
     pub fn set_source_layers(&mut self, layers: crate::ActorSourceLayerResolver) {
         self.environment.source_layers = Some(layers);
+    }
+
+    /// Install the durable human interaction owner before actor admission.
+    pub fn with_form_host(mut self, host: Arc<dyn crate::FormHost>) -> Self {
+        self.environment.form_host = Some(host);
+        self
     }
 
     /// Install the immutable usage pointers supplied by the facade's shipped
@@ -14329,7 +13100,7 @@ where
                 "root public allocation retired before confirmation".into(),
             )
         })?;
-        settle_root_public_owner_record(record, &context, placement.owner(), outcome, readiness)
+        settle_public_owner_record(record, &context, placement.owner(), outcome, readiness)
     }
 
     /// Confirm only directory durability of the original visible root owner.
@@ -14394,7 +13165,7 @@ where
         let (outcome, readiness) = self
             .environment
             .runner
-            .bind_durable_root_public_owner(context, placement.owner().clone())
+            .initialize_durable_public_owner(context, placement.owner().clone())
             .await?
             .into_parts();
         self.settle_root_public_owner(&placement, &outcome, readiness)?;
@@ -14599,7 +13370,6 @@ where
             )
         })?;
         if record.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Ephemeral
-            && record.descriptor.fork_group().is_none()
             && record.descriptor.creator().is_some_and(|parent| {
                 records.get(&parent).is_none_or(|parent| {
                     parent.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable
@@ -14676,19 +13446,8 @@ where
         source: ActorWorkbenchSource,
         session: tidepool_repr::SessionId,
         machine: ResidentSession<H, O>,
-        fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
+        fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
         incarnation: crate::Incarnation,
-    ) -> (Self, mpsc::Receiver<LocalResidentDeployment>) {
-        Self::new_with_launch_resolver(source, session, machine, fork_workspaces, incarnation, None)
-    }
-
-    pub fn new_with_launch_resolver(
-        source: ActorWorkbenchSource,
-        session: tidepool_repr::SessionId,
-        machine: ResidentSession<H, O>,
-        fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
-        incarnation: crate::Incarnation,
-        launch_resolver: Option<crate::WorkerLaunchResolver>,
     ) -> (Self, mpsc::Receiver<LocalResidentDeployment>) {
         let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
         machines.insert_idle(session, Box::new(machine));
@@ -14700,14 +13459,15 @@ where
             deployments,
             retired: Arc::new(Mutex::new(std::collections::HashSet::new())),
             requests: Arc::new(RequestRegistry::default()),
-            fork_groups: crate::ForkGroupRegistry::new(crate::ActorLineageRegistry::default()),
+            actor_admissions: crate::ActorAdmissionRegistry::new(),
             actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             fork_workspaces,
             root_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
-            launch_resolver,
             source_layers: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
             cell_model_factory: None,
+            form_host: None,
+            form_registry: Arc::new(Mutex::new(Default::default())),
             release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             conversation_reader: None,
             usage_pointers: crate::UsagePointerTable::default(),
@@ -14827,7 +13587,7 @@ where
                     self.environment.requests.work_for_target(*actor);
                 ActorGraphNode {
                     actor: *actor,
-                    label: record.descriptor.label().to_owned(),
+                    label: record.descriptor.display_label().into_owned(),
                     model_actor: record.interactive_policy_installed,
                     creator: record.descriptor.creator(),
                     supervisor_parent: record.descriptor.supervisor_parent(),
@@ -14854,7 +13614,7 @@ where
     pub async fn new_program_root(
         &self,
         label: String,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
     ) -> Result<
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
@@ -14870,9 +13630,9 @@ where
     pub async fn recover_durable_program_root(
         &self,
         durable: &crate::DurableActorAdmission,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
-        worktree_custody: Option<Arc<dyn crate::ForkWorkspaceCustody>>,
+        worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
     ) -> Result<
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
@@ -14890,8 +13650,8 @@ where
             id: actor.id,
             incarnation: self.incarnation,
         };
-        let mut descriptor = ActorDescriptor::new(&durable.label, placement)
-            .with_effective_role(role)
+        let mut descriptor = ActorDescriptor::new_optional(durable.label.clone(), placement)
+            .with_capabilities(role)
             .with_model(durable.model.clone().map(crate::Model::Literal))
             .with_instructions(durable.instructions.clone())
             .with_fork_effort(durable.effort)
@@ -14946,7 +13706,7 @@ where
         &self,
         predecessor: ActorRef,
         label: String,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
     ) -> Result<
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
@@ -15016,7 +13776,7 @@ where
     async fn new_program_root_with_replay(
         &self,
         label: String,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
         replay: Option<Arc<Mutex<WorkbenchExecutions>>>,
         identity: Option<ActorRef>,
@@ -15035,7 +13795,7 @@ where
             .await?;
         match self
             .admit_prepared_root(
-                ActorDescriptor::new(label, placement).with_effective_role(role),
+                ActorDescriptor::new(label, placement).with_capabilities(role),
                 outcome,
                 &admission,
                 PreparedRootAdmission {
@@ -15059,7 +13819,7 @@ where
         }
     }
 
-    /// Cancel admitted members before draining staging and root-owned cleanup.
+    /// Fence every admitted member before draining run and root-owned cleanup.
     /// A forced actor stop remains unconfirmed even after its scheduler task exits.
     pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
         let retirement = self.directory.seal().cancel_all(ActorTerminal::new(
@@ -15067,8 +13827,12 @@ where
             "forest host shutdown",
         ));
         *self.environment.root_admission_closed.write().await = true;
+        self.directory.close_run_admission().await;
         let roots = retirement.into_roots();
-        let mut outcomes = Vec::with_capacity(roots.len());
+        let mut outcomes = Vec::with_capacity(roots.len() + 1);
+        outcomes.push(crate::ForestRootShutdown::RunResources(
+            self.directory.shutdown_run_resources().await,
+        ));
         for root in roots {
             outcomes.push(shutdown_forest_root(&root, std::time::Duration::from_secs(30)).await);
         }
@@ -15079,7 +13843,7 @@ where
     pub async fn new_workbench(
         &self,
         label: String,
-        role: crate::EffectiveRole,
+        role: crate::ActorCapabilities,
     ) -> Result<LocalActorRef, Box<dyn std::error::Error + Send + Sync>> {
         let admission = self.environment.root_admission_closed.read().await;
         if *admission {
@@ -15090,7 +13854,7 @@ where
             .runner
             .provision_root_scope(self.session)
             .await?;
-        let descriptor = ActorDescriptor::new(label, placement).with_effective_role(role);
+        let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
         let mut behavior = ResidentKernelBehavior::with_boot(
             descriptor,
             self.environment.clone(),
@@ -15235,7 +13999,7 @@ where
             || descriptor.creator().is_some()
             || descriptor.supervisor_parent().is_some()
             || descriptor.context_parent().is_some()
-            || descriptor.fork_boundary().is_some()
+            || descriptor.checkpoint_boundary().is_some()
         {
             return Err(refuse(
                 "pending root requires its exact independent durable placement",
@@ -15946,7 +14710,7 @@ mod tests {
         assert!(checkpoint_capture_delivered(&after_delivery));
         assert!(!checkpoint_capture_delivered(&before_delivery));
     }
-    use crate::resident_workbench::{AgentStopProjection, CleanupStepProjection};
+    use crate::resident_workbench::AgentStopProjection;
     use crate::{ActorId, ActorRef, Incarnation, ResidentActorWorkbenchError};
     use tidepool_runtime::session::{
         CellAnalysisItem, CellAnalysisSourceItem, CellCheck, CellSourceSpan, InfoEntry,
@@ -16001,37 +14765,37 @@ mod tests {
 
     #[test]
     fn synthetic_route_boundary_cannot_issue_provider_checkpoint() {
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::Route {
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::Route {
             actor_id: 1,
             incarnation: 1,
             watch_id: 9,
         };
-        assert!(super::ForkPublication::Route(boundary.clone())
+        assert!(super::CheckpointPublication::Route(boundary.clone())
             .hosted_boundary()
             .is_none());
-        assert!(super::ForkPublication::Workbench {
+        assert!(super::CheckpointPublication::Workbench {
             boundary: Some(boundary),
             capture: None,
         }
         .hosted_boundary()
         .is_none());
-        let direct = tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+        let direct = tidepool_runtime::session::ContextCheckpointBoundary::Execution {
             actor_id: 1,
             incarnation: 1,
             execution_id: WorkbenchExecutionId::from_digest([7; 16]),
         };
-        assert!(super::ForkPublication::Workbench {
+        assert!(super::CheckpointPublication::Workbench {
             boundary: Some(direct),
             capture: None
         }
         .hosted_boundary()
         .is_none());
-        let hosted = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let hosted = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "thread".into(),
             "request".into(),
             "call".into(),
         );
-        assert!(super::ForkPublication::Workbench {
+        assert!(super::CheckpointPublication::Workbench {
             boundary: Some(hosted),
             capture: None
         }
@@ -16117,87 +14881,6 @@ mod tests {
         };
         let (outcome, ()) = tokio::join!(observation, host);
         assert!(matches!(outcome, AgentStopProjection::StoppedReleasing));
-    }
-
-    #[tokio::test]
-    async fn cleanup_release_waits_are_concurrent_and_keep_stop_order() {
-        let actors = [2, 3, 4].map(|id| ActorRef::first(ActorId(id)));
-        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
-        let waits = actors.into_iter().map(|actor| (actor, None)).collect();
-        let outcomes = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            super::await_cleanup_releases(waits, |actor| {
-                let barrier = barrier.clone();
-                async move {
-                    barrier.wait().await;
-                    if actor == actors[1] {
-                        AgentStopProjection::StoppedRetaining("workspace retained".into())
-                    } else {
-                        AgentStopProjection::StoppedReleasing
-                    }
-                }
-            }),
-        )
-        .await
-        .expect("all release waits must be polled together");
-        assert_eq!(outcomes.len(), 3);
-        for (index, step) in outcomes.into_iter().enumerate() {
-            let CleanupStepProjection::StoppedActor(actor, outcome) = step else {
-                panic!("unexpected cleanup step");
-            };
-            assert_eq!(actor, actors[index]);
-            assert!(matches!(
-                outcome,
-                AgentStopProjection::StoppedReleasing | AgentStopProjection::StoppedRetaining(_)
-            ));
-            if index == 1 {
-                assert!(
-                    matches!(outcome, AgentStopProjection::StoppedRetaining(detail) if detail == "workspace retained")
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn cleanup_failed_stops_do_not_request_release() {
-        let actor = ActorRef::first(ActorId(2));
-        let outcomes = super::await_cleanup_releases(
-            vec![(
-                actor,
-                Some(AgentStopProjection::Failed("stop failed".into())),
-            )],
-            |_| async { panic!("failed stop cannot request release") },
-        )
-        .await;
-        assert!(matches!(
-            outcomes.as_slice(),
-            [CleanupStepProjection::StoppedActor(_, AgentStopProjection::Failed(detail))]
-                if detail == "stop failed"
-        ));
-    }
-
-    #[tokio::test]
-    async fn cleanup_release_wait_experiment() {
-        let actors = [2, 3, 4].map(|id| ActorRef::first(ActorId(id)));
-        let delay = std::time::Duration::from_millis(40);
-        let serial_start = std::time::Instant::now();
-        for _ in actors {
-            tokio::time::sleep(delay).await;
-        }
-        let serial = serial_start.elapsed();
-
-        let batch_start = std::time::Instant::now();
-        let outcomes = super::await_cleanup_releases(
-            actors.into_iter().map(|actor| (actor, None)).collect(),
-            |_| async move {
-                tokio::time::sleep(delay).await;
-                AgentStopProjection::StoppedNow
-            },
-        )
-        .await;
-        let batch = batch_start.elapsed();
-        assert_eq!(outcomes.len(), 3);
-        eprintln!("cleanup release wait experiment: serial={serial:?}, batched={batch:?}");
     }
 
     /// A reply fenced by an update still in delivery tells the model which
@@ -17343,7 +16026,7 @@ mod tests {
                     input_unit_index: 0,
                     effect_ordinal: 0,
                 },
-                effect: "commit context-fork group".into(),
+                effect: "spawn child".into(),
                 disposition: WorkbenchOperationDisposition::Prepared,
             }],
         );

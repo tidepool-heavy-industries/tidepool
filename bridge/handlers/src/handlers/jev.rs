@@ -54,6 +54,8 @@ pub enum JevFailure {
     Timeout,
     #[error("Jev returned HTTP {status}: {body}")]
     Http { status: u16, body: String },
+    #[error("Jev client setup failed: {0}")]
+    ClientSetup(String),
     #[error("Jev circuit open after HTTP {status}; retry after {retry_after_ms} ms")]
     CircuitOpen { status: u16, retry_after_ms: u64 },
     #[error("Jev response exceeded the {MAX_BODY}-byte cap")]
@@ -323,9 +325,7 @@ fn is_caller_error(failure: &JevFailure) -> bool {
 }
 
 impl JevClient {
-    /// Resolves the key from env/secrets. Building the underlying
-    /// `reqwest::Client` is infallible for this configuration, but errors
-    /// are threaded through as `JevFailure` for symmetry with `ask`.
+    /// Resolves the key from env/secrets and retains client construction errors.
     pub fn new(config: JevConfig) -> Result<Self, JevFailure> {
         Self::with_key(config, resolve_key())
     }
@@ -337,7 +337,7 @@ impl JevClient {
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .build()
-            .map_err(|e| JevFailure::Transport(e.to_string()))?;
+            .map_err(|e| JevFailure::ClientSetup(e.to_string()))?;
         Ok(Self {
             http,
             key,

@@ -31,7 +31,7 @@ pub(super) struct ModelFreeSession {
 impl ModelFreeSession {
     pub async fn start(
         config: &ActorHostConfig,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
     ) -> Result<Self> {
         Self::start_with_conversation(config, transform, None).await
     }
@@ -42,7 +42,7 @@ impl ModelFreeSession {
     /// `actor_host.rs`'s `with_conversation_reader`.
     pub async fn start_with_conversation(
         config: &ActorHostConfig,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         conversation: Option<exomonad_actor::ConversationReader>,
     ) -> Result<Self> {
         Self::start_with_model_factory(config, transform, conversation, None).await
@@ -50,7 +50,7 @@ impl ModelFreeSession {
 
     pub(super) async fn start_with_model_factory(
         config: &ActorHostConfig,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         conversation: Option<exomonad_actor::ConversationReader>,
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
     ) -> Result<Self> {
@@ -70,7 +70,7 @@ impl ModelFreeSession {
     #[cfg(test)]
     pub(super) async fn start_with_child_sessions(
         config: &ActorHostConfig,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         conversation: Option<exomonad_actor::ConversationReader>,
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
     ) -> Result<Self> {
@@ -85,9 +85,26 @@ impl ModelFreeSession {
         .await
     }
 
+    #[cfg(test)]
+    pub(super) async fn start_with_form_host(
+        config: &ActorHostConfig,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
+        host: Arc<dyn exomonad_actor::FormHost>,
+    ) -> Result<Self> {
+        Self::start_configured(
+            config,
+            transform,
+            None,
+            None,
+            ROOT_POLICY_INSTALL_TIMEOUT,
+            |forest, _, _| Ok(forest.with_form_host(host)),
+        )
+        .await
+    }
+
     async fn start_configured(
         config: &ActorHostConfig,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         conversation: Option<exomonad_actor::ConversationReader>,
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
         root_policy_install_timeout: std::time::Duration,
@@ -134,7 +151,7 @@ impl ModelFreeSession {
                 machine.run_startup_entry(entry)?
             }
         };
-        let (forest, mut deployments) = ResidentForest::new_with_launch_resolver(
+        let (forest, mut deployments) = ResidentForest::new(
             source,
             descriptor.placement().session,
             machine,
@@ -145,7 +162,6 @@ impl ModelFreeSession {
                 runtime_namespace(session_root.path()),
             ))),
             exomonad_actor::Incarnation::FIRST,
-            Some(worker_launch_resolver(config)),
         );
         let returned_child_session_factory = Arc::clone(&child_session_factory);
         let mut forest = forest

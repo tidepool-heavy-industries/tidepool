@@ -1,16 +1,19 @@
 ---
 name: exomonad-workbench
-description: "Compose notebook programs with Kleisli arrows, optics, local data types, closures and effectful continuations. Use to invent a small task language and its interpreter, connect agent RPC and Jev, inspect retained values, or resolve a cell's types and layout."
+description: Write Haskell notebook cells that typecheck the first time — Text vs String, Text labels, annotating polymorphic expressions, explicit value display, multi-line operator chains, and shell arguments. Load when a cell was rejected or a display needs expansion.
 ---
 
-Work directly in ordinary Haskell. Define a local vocabulary for the problem,
-compose a few functions, run them, inspect a useful projection, and keep building
-on the retained values. Author small languages and the machines that interpret
-them: commands and events in data types, behavior in functions, evolving state
-in a record actor. A notebook definition can be useful for a single task; it
-needs no library, tool registration or general-purpose framework. Tuples,
-records, sums, closures and partially applied functions are all working material.
-Introduce a type when it gives the next composition a useful shape or name.
+Send one cell of ordinary Haskell: declarations, bindings and expressions. GHC
+splits declarations from statements and checks the whole cell before any effect
+runs: typecheck rejection installs no bindings and executes nothing. Successful
+cells publish declarations and bindings together. Runtime failure or cancellation
+before publication publishes no cell names; completed effects and independently
+owned captures retain their receipts. Inspect the outcome before retry. Declarations are
+mutually recursive and visible to every statement, but a declaration cannot
+depend on a binding a statement in the same cell introduces. Expressions and
+bindings retain typed values without automatic rendering; declarations and
+bindings persist into later cells. Use `display value` for bounded structured
+output, and `display (show value)` for Haskell's textual `Show` form.
 
 The APIs in this skill are **shipped** and need no project module. Most names
 are already in scope; the raw lookup API below and `Jev` and `Commands`
@@ -26,74 +29,6 @@ renderFindingLocation finding = findingPath finding <> ":" <> T.pack (show (find
 let findings = [Finding "src/Retry.hs" 12, Finding "src/Fetch.hs" 44]
 display (map renderFindingLocation findings)
 ```
-
-## Compose behavior and data
-
-An effectful function `a -> Eff effects b` is a Kleisli arrow. Chain stages with
-`>=>` or `<=<`; use `do` when naming intermediate results makes the composition
-clearer. The notebook's `&&&` feeds one input to two effectful functions and pairs
-their results; `***` transforms the two sides of a pair; `|||` routes an `Either`
-to the matching function. `firstK` and `secondK` transform one side while carrying
-the other along. These operators act directly on effectful functions and sequence
-their effects. Choose `Tidepool.Async` when independent waits should overlap.
-
-Products combine information; sums choose a continuation. Use a record to carry
-an observation and its source together, or a local algebraic data type to name
-the outcomes your next function handles. Agent RPC (remote procedure calls)
-uses the same idea: choose an assignment and reply type, let a child compute the
-reply, then map, match or fold it like any other value. The request supplies
-`sessionInput` and `respond`; `exomonad-unfold` covers composing child branches.
-Request inputs and replies use Haskell types without JSON/schema derivations.
-Hosted `AgentSpec` tools and `typedTurn` have their own schema boundary; a child
-branch also needs a displayable assignment for its activation preview.
-
-Optics make a focus reusable. `Control.Lens` is in scope: lenses focus fields,
-prisms select constructors, traversals reach several nested values, and folds
-collect observations. Compose a focus once, then use `view`/`preview`, `over`,
-`toListOf` or `traverseOf` to read, transform, collect or act at that focus.
-`_1`, `_2`, `_Just`, `_Right`, `traversed` and `filtered` combine with JSON
-`key`, `values` and `_String`; `lens`, `prism'` and `iso` build custom focuses.
-Keep paths or indices alongside findings when the next stage needs to locate
-them. Record access and pattern matching are convenient for a one-off projection;
-optics are convenient when the focus itself composes or travels as an argument.
-
-Ordinary lists support `map`, `filter`, folds and comprehensions. `traverse` or
-`forM` sequences an effectful operation over the elements; `foldM` threads an
-evolving state, and `wither` combines an effectful transformation with selection.
-Applicative products combine independently specified inputs; monadic bind lets
-one result determine the next computation. Use `unfold` for agent branches and
-`Tidepool.Async` for invocation-local concurrency.
-
-Functions, closures and `Eff effects result` actions are values too. Build a
-reusable action or a list of candidate continuations before deciding which to
-run; bind with `<-` when the result is needed. A retained result is reusable
-data, while sequencing a retained action again repeats its effects. Prefer
-`Member Effect effects` constraints for reusable helpers so they compose wherever
-their effects are available; pin the concrete effects at an endpoint or actor
-definition.
-
-Use signatures and typed holes to expose the missing relationship when inference
-is ambiguous. Lazy values and higher-order functions need not be rendered in full:
-keep them bound and display the projection relevant to the next decision. For
-Jev's heterogeneous packets and typed action selection, load `exomonad-jev`.
-Let a Jev alternative carry a value, a closure or an action: semantic selection
-can connect directly to the next stage. A record actor can retain the same
-functions and data and interpret commands as events arrive; see
-`exomonad-define-actors`.
-
-## Cell execution and display
-
-Send declarations, bindings and expressions as raw Haskell. Declarations are
-mutually recursive and visible to every statement, but cannot depend on a
-same-cell statement binding. Imports, declarations and bound values persist
-after a successful cell. Values stay bound without automatic rendering; use
-`display value` for bounded structured output or `display (show value)` for
-Haskell's textual `Show` form.
-
-GHC checks the whole cell before execution. Rejection runs nothing; runtime
-failure or cancellation before publication installs no cell names. Completed
-effects and independently owned captures remain real, so inspect their receipts
-before retrying. Successful cells publish their declarations and bindings together.
 
 ## Look up a name from a cell
 
@@ -113,11 +48,12 @@ Leading `LANGUAGE` and `OPTIONS_GHC` pragmas apply to this cell only and must
 come first; imports persist. No pragmas or imports after executable source, no
 colon commands, no `:{` / `:}`.
 
-## Text at the API boundary
+## Text, not String
 
-Workbench paths, labels, output and messages use `Text`. `show` returns `String`;
-use `T.pack . show` when its result feeds a `Text` API. `T.unpack` converts in
-the other direction when composing with a function that expects `String`.
+`Text` is the currency of this workbench: paths, labels, output, messages. The
+one place `String` appears is `show`, so the conversion you will write over and
+over is `T.pack . show`. Going the other way is `T.unpack`, and it is almost
+always a sign that something should have stayed `Text`.
 
 ```haskell
 let attempts = 3 :: Int
@@ -134,25 +70,20 @@ let unreachable path = error ("no owner for " <> path) :: Text
 display ("annotated, and never forced" :: Text)
 ```
 
-`assignment` takes a validated `Label`, not free `Text`. Static assignment
-labels use `[label|revision|]`, which is checked at compile time. A `Text`
-computed at runtime needs `labelFromText`; handle its `Either` before launch.
-Campaign, fork-group and watch labels have their own constructors and validators.
-
-```haskell
-let laneLabel = ([label|consumer-tests|] :: Label)
-let dynamic = labelFromText ("work-" <> T.pack (show (2 :: Int)))
-display (laneLabel, dynamic)
-```
+Agent labels are optional ordinary `Text` used for description. They do not
+select an actor, workspace, permission, or group. Typed request sites determine
+the input and reply types; the installed `AgentSpec` provides tools and effects.
+Use raw typed values for requests.
 
 ## A cell splits into units
 
-A cell splits at column-1 lines into units that run in order. When a later unit
-fails, the receipt names what the earlier units did ("unit 1 submitted the
-reply", "unit 2 bound x"); read it before resubmitting. Keep `respond value` on
-one line with nothing after it: a trailing `.`, `$` or backquoted operator is
-rejected as a dangling operator, and a stray `) :: Text` on the next line is a
-separate unit that fails to parse.
+A cell splits at column-1 lines into ordered units, but the whole cell typechecks
+before any unit runs. A dangling `.`, `$` or backquoted operator, or a stray
+`) :: Text` on the next line, rejects the whole cell before execution. Runtime
+failure or cancellation before publication installs no names from that cell,
+though completed effects and independently owned captures remain real; inspect
+receipts before retrying. Keep `respond value` as its own single-line unit with
+nothing after it.
 
 ## Keep bindings and display selected evidence
 
@@ -195,7 +126,7 @@ display (either (const ("packet bound" :: Text)) (const "answered") answer)
 ```
 
 Parentheses around the whole chain work equally well and survive reindentation
-better. The same rule governs `<$>`/`<*>` chains inside an `unfold`.
+better. The same rule governs `<$>`/`<*>` chains over typed `Await` values.
 
 A packet stays polymorphic in whether it holds questions, answers or state
 fields, so one bound and never asked has no mode to settle on and fails to
@@ -275,23 +206,22 @@ resolves for the executing actor. If your build carries
 `IsString` for these types, a bare literal works too — the constructor form
 works either way.
 
-## Bind a result with `<-`; retain an action with `let`
+## Effectful reads bind with `<-`, never `let`
 
 `readFile :: FilePath -> Eff effs (Either FsError Text)` — `FilePath` is `Text`
-here. `let readIt = readFile p` retains an action for later composition; it does
-not read the file. If the next step needs the text, sequence the action with
-`<-` and handle its `Either`. `T.pack` cannot turn an unexecuted action into
-its result. The following refutable bind stops this cell on a failed read:
+here, and the result is an action, so `let d = readFile p` binds the action,
+not the text, and every later use is a type error a `T.pack` cannot rescue.
+Bind it, and pattern-match the success in the bind:
 
 ```haskell
 Right src <- readFile ".exomonad/config.toml"
 display (T.take 200 src)
 ```
 
-A refutable bind is useful when failure must stop the dependent suffix. Use
-`case` or `either` when failure should select recovery or remain in the returned
-evidence. `T.lines`, `T.splitOn` and `T.stripPrefix` compose directly with the
-`Text` returned by these APIs.
+A refutable bind like this fails the statement when the read fails, which is
+usually what you want in a cell; use `either` when the failure is a value you
+carry forward. Nothing here is ever `String`: `T.lines`, `T.splitOn`,
+`T.stripPrefix` do the path and output work.
 
 `Cmd.stdout` returns `Either OutputIssue Text`. Retain that result and handle
 the failure explicitly; substituting empty text would hide missing evidence.

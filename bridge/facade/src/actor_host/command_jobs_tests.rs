@@ -8,11 +8,15 @@ use tidepool_bridge_effects::*;
 
 pub(super) async fn committed(campaign: &TestCampaign, source: &str) -> serde_json::Value {
     let result = dispatch_haskell_script(campaign.root_installation.policy.as_ref(), source).await;
+    require_committed(&result);
+    result
+}
+
+fn require_committed(result: &serde_json::Value) {
     assert_eq!(result["status"], "committed", "{result}");
     for item in result["items"].as_array().unwrap() {
         assert_eq!(item["status"], "committed", "{result}");
     }
-    result
 }
 pub(super) use super::command_test_support::{backend_request, raw_backend_request};
 
@@ -131,7 +135,7 @@ async fn ordinary_command_report_skips_unrequested_source_probe() {
     let running = tokio::spawn(async move {
         dispatch_haskell_script(
             policy.as_ref(),
-            "job <- Cmd.background [bash|printf ordinary|]\nreport <- waitFor (Cmd.awaitFinished job)\nfmap Cmd.reportSource report",
+            "job <- Cmd.background [bash|printf ordinary|]\nreport <- await (Cmd.awaitFinished job)\nfmap Cmd.reportSource report",
         )
         .await
     });
@@ -804,13 +808,18 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
         .await
         .supply(Ok(backend.clone()));
 
-    committed(
-        &campaign,
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/inherited_command_observer.hs",
-        ),
-    )
-    .await;
+    let launch = {
+        let root = campaign.root_installation.policy.clone();
+        tokio::spawn(async move {
+            dispatch_haskell_script(
+                root.as_ref(),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/inherited_command_observer.hs",
+                ),
+            )
+            .await
+        })
+    };
     let child = campaign
         .next_deployment(
             "inherited command observer",
@@ -823,13 +832,18 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
     let _custody = child
         .worktree_custody
         .clone()
         .expect("child checkout binding remains live for this test");
-    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&child);
+    require_committed(&launch.await.unwrap());
     campaign
         .next_deployment(
             "inherited command observer ready",
@@ -947,13 +961,18 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
         ),
     )
     .await;
-    committed(
-        &campaign,
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/inherited_command_observer.hs",
-        ),
-    )
-    .await;
+    let launch = {
+        let root = campaign.root_installation.policy.clone();
+        tokio::spawn(async move {
+            dispatch_haskell_script(
+                root.as_ref(),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/inherited_command_observer.hs",
+                ),
+            )
+            .await
+        })
+    };
     let child = campaign
         .next_deployment(
             "inherited helper observer",
@@ -966,9 +985,14 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
-    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&child);
+    require_committed(&launch.await.unwrap());
     campaign
         .next_deployment(
             "inherited helper observer ready",
@@ -1035,13 +1059,18 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
 #[tokio::test]
 async fn extracted_effectful_closure_starts_work_in_receiver_after_response_release() {
     let mut campaign = TestCampaign::start().await;
-    committed(
-        &campaign,
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/inherited_effectful_producer.hs",
-        ),
-    )
-    .await;
+    let launch = {
+        let root = campaign.root_installation.policy.clone();
+        tokio::spawn(async move {
+            dispatch_haskell_script(
+                root.as_ref(),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/inherited_effectful_producer.hs",
+                ),
+            )
+            .await
+        })
+    };
     let producer = campaign
         .next_deployment(
             "effectful producer",
@@ -1054,9 +1083,14 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
         .await;
     campaign.authority.install_grant(
         producer.actor.identity().into(),
-        worktree_grant(producer.effective_role.role()),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
-    producer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&producer);
+    require_committed(&launch.await.unwrap());
     campaign
         .next_deployment(
             "effectful producer ready",
@@ -1068,13 +1102,18 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
         )
         .await;
 
-    committed(
-        &campaign,
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/inherited_effectful_observer.hs",
-        ),
-    )
-    .await;
+    let launch = {
+        let root = campaign.root_installation.policy.clone();
+        tokio::spawn(async move {
+            dispatch_haskell_script(
+                root.as_ref(),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/inherited_effectful_observer.hs",
+                ),
+            )
+            .await
+        })
+    };
     let observer = campaign
         .next_deployment(
             "effectful observer",
@@ -1087,9 +1126,14 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
         .await;
     campaign.authority.install_grant(
         observer.actor.identity().into(),
-        worktree_grant(observer.effective_role.role()),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
-    observer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&observer);
+    require_committed(&launch.await.unwrap());
     campaign
         .next_deployment(
             "effectful observer ready",
@@ -1103,7 +1147,7 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
 
     let replied = dispatch_haskell_script(
         producer.policy.as_ref(),
-        "respond ((\\() -> Cmd.start (Cmd.argv [\"pwd\"])) :: () -> Eff CodingEffects Cmd.Job)",
+        "respond ((\\() -> Cmd.start (Cmd.argv [\"pwd\"])) :: () -> Eff '[Replies, Commands, Lookup, BoundWorktree] Cmd.Job)",
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
@@ -1609,11 +1653,13 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
         "{recovered}"
     );
     policy
-        .complete_boxed(tidepool_runtime::session::WorkbenchForkBoundary::external(
-            "disconnected-command-wait".into(),
-            call_id.clone(),
-            call_id,
-        ))
+        .complete_boxed(
+            tidepool_runtime::session::ContextCheckpointBoundary::external(
+                "disconnected-command-wait".into(),
+                call_id.clone(),
+                call_id,
+            ),
+        )
         .await
         .unwrap();
     let retained = committed(&campaign, "Cmd.stdout (fst attempt)").await;
@@ -2685,13 +2731,18 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
         .await
         .supply(Ok(backend.clone()));
 
-    committed(
-        &campaign,
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/inherited_command_observer.hs",
-        ),
-    )
-    .await;
+    let launch = {
+        let root = campaign.root_installation.policy.clone();
+        tokio::spawn(async move {
+            dispatch_haskell_script(
+                root.as_ref(),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/inherited_command_observer.hs",
+                ),
+            )
+            .await
+        })
+    };
     let child = campaign
         .next_deployment(
             "sibling actor installation",
@@ -2704,13 +2755,18 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
     let _custody = child
         .worktree_custody
         .clone()
         .expect("child checkout binding remains live for this test");
-    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&child);
+    require_committed(&launch.await.unwrap());
     campaign
         .next_deployment(
             "sibling actor ready",

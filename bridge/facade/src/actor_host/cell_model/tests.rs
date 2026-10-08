@@ -1,4 +1,4 @@
-use super::super::test_campaign::{commit_workspace, dispatch_haskell_script, TestCampaign};
+use super::super::test_campaign::{TestCampaign, commit_workspace, dispatch_haskell_script};
 use super::*;
 use harness::{
     item::Item,
@@ -6,8 +6,8 @@ use harness::{
 };
 use serde_json::json;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tokio::sync::Notify;
 
@@ -136,7 +136,6 @@ async fn campaign() -> (TestCampaign, Arc<Store>, Arc<ScriptState>, HeldBinding)
         retained: retained.clone(),
     });
     let campaign = TestCampaign::start_with_model_factory(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         configure,
         None,
@@ -177,9 +176,11 @@ async fn resident_model_callback_and_hook_keep_caller_effects_and_retained_resul
     );
     let requests = script.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert!(requests
-        .iter()
-        .all(|request| request.model == "test-model" && request.pinned_effort == Effort::Low));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.model == "test-model" && request.pinned_effort == Effort::Low)
+    );
     drop(requests);
     let events = store.events(None).unwrap();
     let retained = events
@@ -189,10 +190,12 @@ async fn resident_model_callback_and_hook_keep_caller_effects_and_retained_resul
     assert_eq!(retained.len(), 1);
     let payload: serde_json::Value = serde_json::from_str(&retained[0].payload).unwrap();
     assert_eq!(payload["output"]["type"], "function_call_output");
-    assert!(payload["output"]["output"]
-        .as_str()
-        .unwrap()
-        .contains("hello"));
+    assert!(
+        payload["output"]["output"]
+            .as_str()
+            .unwrap()
+            .contains("hello")
+    );
     stop(campaign).await;
 }
 #[tokio::test]
@@ -299,9 +302,11 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
         2,
         "outer callback and nested model must settle before cancellation reply"
     );
-    assert!(receipts
-        .iter()
-        .all(|receipt| receipt["outcome"]["kind"] == "cancelled"));
+    assert!(
+        receipts
+            .iter()
+            .all(|receipt| receipt["outcome"]["kind"] == "cancelled")
+    );
     let _actual = tokio::time::timeout(std::time::Duration::from_secs(30), task)
         .await
         .unwrap()
@@ -338,7 +343,6 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         tmux_session: String::new(),
         model: "default-model".into(),
         effort: exomonad_actor::ForkEffort::Medium,
-        research_policy: Default::default(),
 
         pane_environment: Default::default(),
         jev: None,
@@ -393,7 +397,9 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         ),
         (16, 64, 128_000, 300)
     );
-    assert!(factory
-        .policy(&descriptor.with_model(Some(Model::Alias("not-admitted".into()))))
-        .is_err());
+    assert!(
+        factory
+            .policy(&descriptor.with_model(Some(Model::Alias("not-admitted".into()))))
+            .is_err()
+    );
 }

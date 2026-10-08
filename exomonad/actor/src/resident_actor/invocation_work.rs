@@ -1,12 +1,17 @@
-//! Invocation membership borrows resources from their original lifecycle owners.
+//! Resource cleanup membership borrows resources from their lifecycle owners.
 
 use super::*;
 use crate::command_jobs::{CommandControl, CommandJobs};
+use crate::request::ResourceCleanupOwner;
+use std::sync::Weak;
 use tidepool_bridge_effects::{CommandCleanup, CommandError, CommandResult, CommandStatus};
 
 pub(crate) struct InvocationWork {
     owner: ActorRef,
     reservation: RequestReservationOwner,
+    cleanup_owner: ResourceCleanupOwner,
+    scope_id: Option<i64>,
+    parent: Weak<InvocationWork>,
     state: Mutex<InvocationWorkState>,
     cleanup_lock: tokio::sync::Mutex<()>,
 }
@@ -24,16 +29,24 @@ enum InvocationWorkPhase {
 #[derive(Default)]
 struct InvocationWorkState {
     phase: InvocationWorkPhase,
+    scopes: Vec<Arc<InvocationWork>>,
     compilers: Vec<crate::termination::CompilerWorkReceipt>,
+    launch_revision: u64,
+    launch_placements: Vec<(
+        tidepool_repr::SessionId,
+        child_launch::ChildPlacementCustody,
+    )>,
     commands: Vec<String>,
     detached_commands: std::collections::HashSet<String>,
     workers: Vec<LocalActorRef>,
+    detached_workers: std::collections::HashSet<ActorRef>,
+    realms: Vec<(ActorSessionContext, tidepool_codegen::suspension::RealmId)>,
     unresolved_workers: Vec<ActorRef>,
     pending_workers: Vec<ActorRef>,
     pending_cancellations: Vec<crate::RequestCancellationNotification>,
     pending_watch_notifications: Vec<crate::request::WatchNotification>,
-    groups: Vec<crate::ForkGroupId>,
     watches: Vec<crate::WatchId>,
+    forms: Vec<Arc<crate::forms::FormCleanup>>,
     cleanup: Option<InvocationCleanup>,
 }
 
@@ -45,6 +58,7 @@ pub(super) struct InvocationCleanup {
     requests: Vec<InvocationRequestCleanup>,
     failures: Vec<String>,
     settlement_notifications_pending: bool,
+    scopes: Vec<(i64, InvocationCleanup)>,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +85,11 @@ struct InvocationRequestCleanup {
 impl InvocationCleanup {
     pub(super) fn uncertainty(&self) -> Option<String> {
         let mut details = self.failures.clone();
+        for (scope, cleanup) in &self.scopes {
+            if let Some(detail) = cleanup.uncertainty() {
+                details.push(format!("scope {scope}: {detail}"));
+            }
+        }
         for receipt in &self.compilers {
             let close = receipt.observation();
             if !close.is_confirmed() {
@@ -137,10 +156,195 @@ impl InvocationWork {
     pub(super) fn new(owner: ActorRef, reservation: RequestReservationOwner) -> Arc<Self> {
         Arc::new(Self {
             owner,
+            cleanup_owner: ResourceCleanupOwner::Invocation(reservation.clone()),
             reservation,
+            scope_id: None,
+            parent: Weak::new(),
             state: Mutex::new(Default::default()),
             cleanup_lock: tokio::sync::Mutex::new(()),
         })
+    }
+
+    pub(super) fn new_scope(self: &Arc<Self>) -> Result<Arc<Self>, String> {
+        static NEXT_SCOPE: OnceLock<std::sync::atomic::AtomicI64> = OnceLock::new();
+        let issuer = NEXT_SCOPE.get_or_init(|| {
+            let mut seed = [0; 8];
+            seed.copy_from_slice(&uuid::Uuid::new_v4().as_bytes()[..8]);
+            std::sync::atomic::AtomicI64::new((i64::from_le_bytes(seed) & (i64::MAX >> 1)) + 1)
+        });
+        self.with_admission_state(|state| {
+            let token = issuer
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |next| next.checked_add(1),
+                )
+                .map_err(|_| "resource scope identity exhausted".to_string())?;
+            let scope = Arc::new(Self {
+                owner: self.owner,
+                reservation: RequestReservationOwner::Scope(token),
+                cleanup_owner: ResourceCleanupOwner::Scope(token),
+                scope_id: Some(token),
+                parent: Arc::downgrade(self),
+                state: Mutex::new(Default::default()),
+                cleanup_lock: tokio::sync::Mutex::new(()),
+            });
+            state.scopes.push(scope.clone());
+            Ok(scope)
+        })?
+    }
+
+    pub(super) fn is_owned_by(&self, actor: ActorRef) -> bool {
+        self.owner == actor
+    }
+
+    pub(super) fn scope_token(&self) -> Option<i64> {
+        self.scope_id
+    }
+
+    pub(super) fn reservation_owner(&self) -> RequestReservationOwner {
+        self.reservation.clone()
+    }
+
+    pub(super) fn resource_cleanup_owner(&self) -> ResourceCleanupOwner {
+        self.cleanup_owner.clone()
+    }
+
+    pub(super) fn scopes(&self) -> Vec<Arc<Self>> {
+        self.state.lock().scopes.clone()
+    }
+
+    pub(super) fn find_scope(
+        self: &Arc<Self>,
+        caller: ActorRef,
+        token: i64,
+    ) -> Result<Arc<Self>, String> {
+        if caller != self.owner {
+            return Err("resource scope belongs to another actor incarnation".into());
+        }
+        let found = self
+            .find_retained_scope(token)
+            .ok_or_else(|| "resource scope is not retained by this owner".to_string())?;
+        found.with_admission(|| ())?;
+        Ok(found)
+    }
+
+    fn find_retained_scope(self: &Arc<Self>, token: i64) -> Option<Arc<Self>> {
+        if self.scope_id == Some(token) {
+            return Some(self.clone());
+        }
+        self.scopes()
+            .into_iter()
+            .find_map(|scope| scope.find_retained_scope(token))
+    }
+
+    /// Lock ancestry in one order so closing any ancestor fences child
+    /// admission. The callback must neither await nor reenter this owner.
+    pub(crate) fn with_admission<T>(&self, operation: impl FnOnce() -> T) -> Result<T, String> {
+        self.with_admission_state(|_| operation())
+    }
+
+    /// Lock shared ancestors once when moving membership between two owners.
+    /// The callback may access the request registry, never these owner states.
+    pub(super) fn with_transfer_admission<T>(
+        self: &Arc<Self>,
+        destination: &Arc<Self>,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        self.with_transfer_states(destination, |_, _, _| operation())
+    }
+
+    fn with_transfer_states<T>(
+        self: &Arc<Self>,
+        destination: &Arc<Self>,
+        operation: impl FnOnce(
+            &mut [parking_lot::MutexGuard<'_, InvocationWorkState>],
+            usize,
+            usize,
+        ) -> T,
+    ) -> Result<T, String> {
+        if self.owner != destination.owner {
+            return Err("resource cleanup transfer crosses actor authority".into());
+        }
+        let mut owners = Vec::new();
+        for leaf in [self, destination] {
+            let mut chain = vec![leaf.clone()];
+            let mut current = leaf.clone();
+            while current.scope_id.is_some() {
+                current = current
+                    .parent
+                    .upgrade()
+                    .ok_or_else(|| "resource scope parent is no longer retained".to_string())?;
+                chain.push(current.clone());
+            }
+            chain.reverse();
+            for (depth, owner) in chain.into_iter().enumerate() {
+                if !owners
+                    .iter()
+                    .any(|(_, existing)| Arc::ptr_eq(existing, &owner))
+                {
+                    owners.push((depth, owner));
+                }
+            }
+        }
+        owners.sort_by_key(|(depth, owner)| (*depth, Arc::as_ptr(owner) as usize));
+        let source_index = owners
+            .iter()
+            .position(|(_, owner)| Arc::ptr_eq(owner, self))
+            .ok_or_else(|| "source cleanup owner is not retained".to_string())?;
+        let destination_index = owners
+            .iter()
+            .position(|(_, owner)| Arc::ptr_eq(owner, destination))
+            .ok_or_else(|| "destination cleanup owner is not retained".to_string())?;
+        let mut states = Vec::new();
+        for (_, owner) in &owners {
+            let state = owner.state.lock();
+            if state.phase != InvocationWorkPhase::Active {
+                return Err("resource scope ownership is closed".into());
+            }
+            states.push(state);
+        }
+        Ok(operation(&mut states, source_index, destination_index))
+    }
+
+    fn with_admission_state<T>(
+        &self,
+        operation: impl FnOnce(&mut InvocationWorkState) -> T,
+    ) -> Result<T, String> {
+        self.with_phase_state(InvocationWorkPhase::Active, operation)
+    }
+
+    fn with_phase_state<T>(
+        &self,
+        phase: InvocationWorkPhase,
+        operation: impl FnOnce(&mut InvocationWorkState) -> T,
+    ) -> Result<T, String> {
+        let mut ancestors = Vec::new();
+        let mut parent = self.parent.upgrade();
+        if self.scope_id.is_some() && parent.is_none() {
+            return Err("resource scope parent is no longer retained".into());
+        }
+        while let Some(owner) = parent {
+            parent = owner.parent.upgrade();
+            if owner.scope_id.is_some() && parent.is_none() {
+                return Err("resource scope parent is no longer retained".into());
+            }
+            ancestors.push(owner);
+        }
+        ancestors.reverse();
+        let mut guards = Vec::new();
+        for ancestor in &ancestors {
+            let guard = ancestor.state.lock();
+            if guard.phase != InvocationWorkPhase::Active {
+                return Err("resource scope ownership is closed".into());
+            }
+            guards.push(guard);
+        }
+        let mut state = self.state.lock();
+        if state.phase != phase {
+            return Err("resource scope ownership is closed".into());
+        }
+        Ok(operation(&mut state))
     }
 
     pub(super) fn matches(&self, owner: ActorRef, reservation: &RequestReservationOwner) -> bool {
@@ -151,46 +355,110 @@ impl InvocationWork {
         &self,
         receipt: crate::termination::CompilerWorkReceipt,
     ) -> bool {
-        let mut state = self.state.lock();
-        if state.phase != InvocationWorkPhase::Active {
-            return false;
-        }
-        state.compilers.push(receipt);
-        true
+        self.with_admission_state(|state| state.compilers.push(receipt))
+            .is_ok()
     }
 
     pub(super) fn begin_publication(&self) -> bool {
-        let mut state = self.state.lock();
-        if state.phase != InvocationWorkPhase::Active {
-            return false;
-        }
-        state.phase = InvocationWorkPhase::Publishing;
-        true
+        self.with_admission_state(|state| state.phase = InvocationWorkPhase::Publishing)
+            .is_ok()
     }
 
     pub(crate) fn register_publication_compiler_work(
         &self,
         receipt: crate::termination::CompilerWorkReceipt,
     ) -> bool {
-        let mut state = self.state.lock();
-        if state.phase != InvocationWorkPhase::Publishing {
-            return false;
-        }
-        state.compilers.push(receipt);
-        true
+        self.with_phase_state(InvocationWorkPhase::Publishing, |state| {
+            state.compilers.push(receipt)
+        })
+        .is_ok()
     }
 
+    #[cfg(test)]
     pub(crate) fn register_command(&self, id: String) -> Result<(), CommandError> {
-        let mut state = self.state.lock();
-        if state.phase != InvocationWorkPhase::Active {
-            return Err(CommandError::CommandUnavailable(
-                "invocation ownership is closed".into(),
-            ));
+        self.with_admission_state(|state| {
+            if !state.commands.contains(&id) {
+                state.commands.push(id);
+            }
+        })
+        .map_err(CommandError::CommandUnavailable)
+    }
+
+    pub(super) fn find_command_owner(
+        self: &Arc<Self>,
+        marker: &crate::request::ResourceCleanupOwner,
+    ) -> Option<Arc<Self>> {
+        if &self.resource_cleanup_owner() == marker {
+            return Some(self.clone());
         }
-        if !state.commands.contains(&id) {
-            state.commands.push(id);
+        self.scopes()
+            .into_iter()
+            .find_map(|scope| scope.find_command_owner(marker))
+    }
+
+    pub(crate) fn register_command_with_jobs(
+        &self,
+        jobs: &CommandJobs,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        self.with_admission_state(|state| {
+            if state.commands.iter().any(|command| command == id) {
+                return if jobs.cleanup_owner(self.owner, id)? == self.resource_cleanup_owner() {
+                    Ok(())
+                } else {
+                    Err(CommandError::CommandUnauthorized)
+                };
+            }
+            jobs.transfer_cleanup_owner(
+                self.owner,
+                id,
+                &crate::request::ResourceCleanupOwner::Actor,
+                self.resource_cleanup_owner(),
+                |probe| {
+                    state.commands.push(id.into());
+                    if let Some(probe) = probe {
+                        if !state.commands.iter().any(|job| job == probe) {
+                            state.commands.push(probe.into());
+                        }
+                    }
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
+    }
+
+    pub(super) fn adopt_actor_command(
+        &self,
+        jobs: &CommandJobs,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        if caller != self.owner {
+            return Err(CommandError::CommandUnauthorized);
         }
-        Ok(())
+        self.with_admission_state(|state| {
+            jobs.transfer_cleanup_owner(
+                caller,
+                id,
+                &crate::request::ResourceCleanupOwner::Actor,
+                self.resource_cleanup_owner(),
+                |probe| {
+                    if !state.commands.iter().any(|command| command == id) {
+                        state.commands.push(id.into());
+                    }
+                    if let Some(probe) = probe {
+                        if !state.commands.iter().any(|job| job == probe) {
+                            state.commands.push(probe.into());
+                        }
+                    }
+                    state.detached_commands.remove(id);
+                    if let Some(probe) = probe {
+                        state.detached_commands.remove(probe);
+                    }
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
     }
 
     pub(super) fn detach_command(
@@ -202,28 +470,325 @@ impl InvocationWork {
         if caller != self.owner || jobs.owner(id)? != caller {
             return Err(CommandError::CommandUnauthorized);
         }
-        let probe = jobs.source_probe(id)?;
-        let mut state = self.state.lock();
-        if state.detached_commands.contains(id) {
-            return Ok(());
-        }
-        let Some(index) = state.commands.iter().position(|job| job == id) else {
-            return Err(CommandError::CommandUnauthorized);
-        };
-        if state.phase != InvocationWorkPhase::Active {
-            return Err(CommandError::CommandUnavailable(
-                "invocation cleanup has begun".into(),
-            ));
-        }
-        state.commands.remove(index);
-        state.detached_commands.insert(id.into());
-        if let Some(probe) = probe {
-            if let Some(index) = state.commands.iter().position(|job| job == &probe) {
-                state.commands.remove(index);
-                state.detached_commands.insert(probe);
+        self.with_admission_state(|state| {
+            if state.detached_commands.contains(id) {
+                return if jobs.cleanup_owner(caller, id)?
+                    == crate::request::ResourceCleanupOwner::Actor
+                {
+                    Ok(())
+                } else {
+                    Err(CommandError::CommandUnauthorized)
+                };
             }
+            if !state.commands.iter().any(|command| command == id) {
+                return Err(CommandError::CommandUnauthorized);
+            }
+            jobs.transfer_cleanup_owner(
+                caller,
+                id,
+                &self.resource_cleanup_owner(),
+                crate::request::ResourceCleanupOwner::Actor,
+                |probe| {
+                    state
+                        .commands
+                        .retain(|job| job != id && probe != Some(job.as_str()));
+                    state.detached_commands.insert(id.into());
+                    if let Some(probe) = probe {
+                        state.detached_commands.insert(probe.into());
+                    }
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
+    }
+
+    pub(super) fn transfer_command_to_run(
+        &self,
+        jobs: &CommandJobs,
+        kernel: &KernelContext,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        if caller != self.owner {
+            return Err(CommandError::CommandUnauthorized);
         }
-        Ok(())
+        self.with_admission_state(|state| {
+            if !state.commands.iter().any(|command| command == id) {
+                return Err(CommandError::CommandUnauthorized);
+            }
+            jobs.transfer_cleanup_owner_in_context(
+                kernel,
+                caller,
+                id,
+                &self.resource_cleanup_owner(),
+                ResourceCleanupOwner::Run,
+                |probe| {
+                    state
+                        .commands
+                        .retain(|job| job != id && probe != Some(job.as_str()));
+                    state.detached_commands.insert(id.into());
+                    if let Some(probe) = probe {
+                        state.detached_commands.insert(probe.into());
+                    }
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
+    }
+
+    pub(super) fn adopt_run_command(
+        &self,
+        jobs: &CommandJobs,
+        kernel: &KernelContext,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        if caller != self.owner {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        self.with_admission_state(|state| {
+            jobs.transfer_cleanup_owner_in_context(
+                kernel,
+                caller,
+                id,
+                &ResourceCleanupOwner::Run,
+                self.resource_cleanup_owner(),
+                |probe| {
+                    if !state.commands.iter().any(|job| job == id) {
+                        state.commands.push(id.into());
+                    }
+                    if let Some(probe) = probe {
+                        if !state.commands.iter().any(|job| job == probe) {
+                            state.commands.push(probe.into());
+                        }
+                    }
+                    state.detached_commands.remove(id);
+                    if let Some(probe) = probe {
+                        state.detached_commands.remove(probe);
+                    }
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
+    }
+
+    pub(super) fn transfer_command_to_actor(
+        &self,
+        jobs: &CommandJobs,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        self.detach_command(jobs, caller, id)
+    }
+
+    pub(super) fn transfer_command_to_owner(
+        self: &Arc<Self>,
+        destination: &Arc<Self>,
+        jobs: &CommandJobs,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        if caller != self.owner || jobs.owner(id)? != caller || destination.owner != caller {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        self.with_transfer_states(destination, |states, source, target| {
+            let Some(index) = states[source].commands.iter().position(|job| job == id) else {
+                return Err(CommandError::CommandUnauthorized);
+            };
+            jobs.transfer_cleanup_owner(
+                caller,
+                id,
+                &self.resource_cleanup_owner(),
+                destination.resource_cleanup_owner(),
+                |probe| {
+                    if source != target {
+                        let job = states[source].commands.remove(index);
+                        if !states[target].commands.contains(&job) {
+                            states[target].commands.push(job);
+                        }
+                        if let Some(probe) = probe {
+                            states[source].commands.retain(|command| command != probe);
+                            if !states[target].commands.iter().any(|job| job == probe) {
+                                states[target].commands.push(probe.into());
+                            }
+                        }
+                    }
+                    states[target].detached_commands.remove(id);
+                    if let Some(probe) = probe {
+                        states[target].detached_commands.remove(probe);
+                    }
+                },
+            )
+        })
+        .map_err(CommandError::CommandUnavailable)?
+    }
+
+    pub(super) fn owns_worker(&self, actor: ActorRef) -> bool {
+        let state = self.state.lock();
+        state
+            .workers
+            .iter()
+            .any(|worker| worker.identity() == actor)
+            || state.pending_workers.contains(&actor)
+            || state.unresolved_workers.contains(&actor)
+    }
+
+    pub(super) fn adopt_worker(
+        &self,
+        caller: ActorRef,
+        child: LocalActorRef,
+    ) -> Result<(), super::agent_retention::AgentRetentionError> {
+        use super::agent_retention::AgentRetentionError::*;
+        if caller != self.owner {
+            return Err(AgentRetainUnauthorized);
+        }
+        self.with_admission_state(|state| {
+            if !state
+                .workers
+                .iter()
+                .any(|worker| worker.identity() == child.identity())
+            {
+                state.detached_workers.remove(&child.identity());
+                state.workers.push(child);
+            }
+        })
+        .map_err(|_| AgentRetainOwnerClosed)
+    }
+
+    pub(super) fn release_worker_cleanup(
+        &self,
+        caller: ActorRef,
+        actor: ActorRef,
+    ) -> Result<(), super::agent_retention::AgentRetentionError> {
+        use super::agent_retention::AgentRetentionError::*;
+        if caller != self.owner {
+            return Err(AgentRetainUnauthorized);
+        }
+        self.with_admission_state(|state| {
+            let index = state
+                .workers
+                .iter()
+                .position(|worker| worker.identity() == actor)
+                .ok_or(AgentRetainOwnerUnavailable)?;
+            state.workers.remove(index);
+            state.detached_workers.insert(actor);
+            Ok(())
+        })
+        .map_err(|_| AgentRetainOwnerClosed)?
+    }
+
+    pub(super) fn transfer_worker_to_owner(
+        self: &Arc<Self>,
+        destination: &Arc<Self>,
+        caller: ActorRef,
+        actor: ActorRef,
+    ) -> Result<(), super::agent_retention::AgentRetentionError> {
+        use super::agent_retention::AgentRetentionError::*;
+        if caller != self.owner || caller != destination.owner {
+            return Err(AgentRetainUnauthorized);
+        }
+        self.with_transfer_states(destination, |states, source, target| {
+            let index = states[source]
+                .workers
+                .iter()
+                .position(|worker| worker.identity() == actor)
+                .ok_or(AgentRetainOwnerUnavailable)?;
+            if source != target {
+                let child = states[source].workers.remove(index);
+                states[source].detached_workers.insert(actor);
+                states[target].detached_workers.remove(&actor);
+                states[target].workers.push(child);
+            }
+            Ok(())
+        })
+        .map_err(|_| AgentRetainOwnerClosed)?
+    }
+
+    pub(super) fn transfer_worker_to_actor(
+        &self,
+        caller: ActorRef,
+        actor: ActorRef,
+    ) -> Result<(), String> {
+        if caller != self.owner {
+            return Err("worker cleanup transfer is unauthorized".into());
+        }
+        self.with_admission_state(|state| {
+            if state.detached_workers.contains(&actor) {
+                return Ok(());
+            }
+            let index = state
+                .workers
+                .iter()
+                .position(|worker| worker.identity() == actor)
+                .ok_or_else(|| "worker is not admitted to this cleanup owner".to_string())?;
+            state.workers.remove(index);
+            state.detached_workers.insert(actor);
+            Ok(())
+        })?
+    }
+
+    /// Construction custody belongs to the invoking journal until startup
+    /// transfers the placement, independently of the selected child lifetime.
+    pub(super) fn retain_launch_placement(
+        &self,
+        context: &ActorSessionContext,
+        placement: child_launch::ChildPlacementCustody,
+    ) -> Result<(), String> {
+        if context.actor != self.owner {
+            return Err("launch placement owner is unauthorized".into());
+        }
+        // The placement was already minted by the checked-out effect. Even
+        // late refusal retains it and invalidates every enclosing proof under
+        // the same root-first ancestry lock order as ordinary admission.
+        let mut ancestors = Vec::new();
+        let mut parent = self.parent.upgrade();
+        let mut retained_parent = self.scope_id.is_none() || parent.is_some();
+        while let Some(owner) = parent {
+            parent = owner.parent.upgrade();
+            retained_parent &= owner.scope_id.is_none() || parent.is_some();
+            ancestors.push(owner);
+        }
+        ancestors.reverse();
+        let mut guards: Vec<_> = ancestors.iter().map(|owner| owner.state.lock()).collect();
+        let mut state = self.state.lock();
+        let admitted = retained_parent
+            && state.phase == InvocationWorkPhase::Active
+            && guards
+                .iter()
+                .all(|guard| guard.phase == InvocationWorkPhase::Active);
+        for guard in &mut guards {
+            guard.cleanup = None;
+            guard.launch_revision += 1;
+        }
+        state
+            .launch_placements
+            .push((context.placement.session, placement));
+        state.cleanup = None;
+        state.launch_revision += 1;
+        if admitted {
+            Ok(())
+        } else {
+            Err("resource scope ownership is closed".into())
+        }
+    }
+
+    pub(super) fn register_scope_realm(
+        &self,
+        context: ActorSessionContext,
+        realm: tidepool_codegen::suspension::RealmId,
+    ) -> Result<(), String> {
+        if context.actor != self.owner || self.scope_id.is_none() {
+            return Err("resource scope realm is unauthorized".into());
+        }
+        self.with_admission_state(|state| {
+            if !state
+                .realms
+                .iter()
+                .any(|(existing, existing_realm)| existing == &context && *existing_realm == realm)
+            {
+                state.realms.push((context, realm));
+            }
+        })
     }
 
     pub(super) fn detach_request(
@@ -235,41 +800,69 @@ impl InvocationWork {
         if caller != self.owner {
             return Err(crate::ReplyError::Unauthorized);
         }
-        let state = self.state.lock();
-        if state.phase != InvocationWorkPhase::Active {
-            return Err(crate::ReplyError::CancellationRequested);
+        self.with_admission(|| {
+            if self.scope_id.is_some() {
+                requests.transfer_request_cleanup_owner(
+                    caller,
+                    request,
+                    &self.cleanup_owner,
+                    ResourceCleanupOwner::Actor,
+                )
+            } else {
+                requests.detach_invocation_request(caller, request, Some(&self.reservation))
+            }
+        })
+        .map_err(|_| crate::ReplyError::CancellationRequested)?
+    }
+
+    pub(super) fn transfer_request_to_owner(
+        self: &Arc<Self>,
+        destination: &Arc<Self>,
+        requests: &RequestRegistry,
+        caller: ActorRef,
+        request: crate::RequestId,
+    ) -> Result<(), crate::ReplyError> {
+        if caller != self.owner || caller != destination.owner {
+            return Err(crate::ReplyError::Unauthorized);
         }
-        requests.detach_invocation_request(caller, request, Some(&self.reservation))
+        self.with_transfer_admission(destination, || {
+            requests.transfer_request_cleanup_owner(
+                caller,
+                request,
+                &self.cleanup_owner,
+                destination.cleanup_owner.clone(),
+            )
+        })
+        .map_err(|_| crate::ReplyError::CancellationRequested)?
     }
 
     pub(super) fn register_transient_watch(
         &self,
         watch: crate::WatchId,
     ) -> Result<(), crate::ReplyError> {
-        let mut state = self.state.lock();
-        if state.phase != InvocationWorkPhase::Active {
-            return Err(crate::ReplyError::CancellationRequested);
-        }
-        if !state.watches.contains(&watch) {
-            state.watches.push(watch);
-        }
-        Ok(())
+        self.with_admission_state(|state| {
+            if !state.watches.contains(&watch) {
+                state.watches.push(watch);
+            }
+        })
+        .map_err(|_| crate::ReplyError::CancellationRequested)
+    }
+
+    pub(super) fn release_transient_watch_membership(&self, watch: crate::WatchId) {
+        self.state.lock().watches.retain(|member| *member != watch);
     }
 
     #[cfg(test)]
     fn register_worker(&self, child: LocalActorRef) -> Result<(), String> {
-        let mut state = self.state.lock();
-        if state.phase != InvocationWorkPhase::Active {
-            return Err("invocation ownership is closed".into());
-        }
-        if !state
-            .workers
-            .iter()
-            .any(|worker| worker.identity() == child.identity())
-        {
-            state.workers.push(child);
-        }
-        Ok(())
+        self.with_admission_state(|state| {
+            if !state
+                .workers
+                .iter()
+                .any(|worker| worker.identity() == child.identity())
+            {
+                state.workers.push(child);
+            }
+        })
     }
 
     pub(super) fn retain_aborted_children(&self, kernel: &KernelContext, children: &[ActorRef]) {
@@ -289,35 +882,61 @@ impl InvocationWork {
         }
     }
 
-    pub(super) fn owns_worker(&self, actor: ActorRef) -> bool {
-        self.state
-            .lock()
-            .workers
-            .iter()
-            .any(|worker| worker.identity() == actor)
-    }
-
-    pub(super) fn register_group(&self, group: crate::ForkGroupId) -> Result<(), String> {
-        let mut state = self.state.lock();
-        if state.phase != InvocationWorkPhase::Active {
-            return Err("invocation ownership is closed".into());
-        }
-        if !state.groups.contains(&group) {
-            state.groups.push(group);
-        }
-        Ok(())
-    }
-
     pub(super) fn is_closed(&self) -> bool {
         self.state.lock().phase == InvocationWorkPhase::Closing
     }
 
+    pub(super) fn admit_form(
+        &self,
+        form: Arc<crate::forms::FormCleanup>,
+        open: impl FnOnce() -> Result<(), tidepool_bridge_effects::FormCause>,
+    ) -> Result<(), tidepool_bridge_effects::FormCause> {
+        self.with_admission_state(|state| {
+            open()?;
+            state.forms.push(form);
+            Ok(())
+        })
+        .map_err(|_| tidepool_bridge_effects::FormCause::FormClosed)?
+    }
+
     pub(super) fn close(&self) {
-        self.state.lock().phase = InvocationWorkPhase::Closing;
+        let scopes = {
+            let mut state = self.state.lock();
+            state.phase = InvocationWorkPhase::Closing;
+            state.scopes.clone()
+        };
+        for scope in scopes {
+            scope.close();
+        }
     }
 
     pub(super) fn cleanup_observation(&self) -> Option<InvocationCleanup> {
         self.state.lock().cleanup.clone()
+    }
+
+    fn retirement_members(&self, kernel: &KernelContext) -> Vec<LocalActorRef> {
+        let (mut members, pending, scopes) = {
+            let state = self.state.lock();
+            (
+                state.workers.clone(),
+                state
+                    .pending_workers
+                    .iter()
+                    .chain(&state.unresolved_workers)
+                    .copied()
+                    .collect::<Vec<_>>(),
+                state.scopes.clone(),
+            )
+        };
+        members.extend(
+            pending
+                .into_iter()
+                .filter_map(|actor| kernel.resolve(actor)),
+        );
+        for scope in scopes {
+            members.extend(scope.retirement_members(kernel));
+        }
+        members
     }
 
     pub(super) async fn cleanup<H, O>(
@@ -330,7 +949,7 @@ impl InvocationWork {
         O: OutputSink + Sync + 'static,
     {
         let _cleanup = self.cleanup_lock.lock().await;
-        let (commands, mut workers, groups, watches) = {
+        let (commands, mut workers, watches, launch_revision) = {
             let mut state = self.state.lock();
             state.phase = InvocationWorkPhase::Closing;
             if let Some(cleanup) = &state.cleanup {
@@ -341,93 +960,44 @@ impl InvocationWork {
             (
                 state.commands.clone(),
                 state.workers.clone(),
-                state.groups.clone(),
                 state.watches.clone(),
+                state.launch_revision,
             )
         };
-        let mut cleanup = InvocationCleanup {
-            compilers: self.state.lock().compilers.clone(),
-            ..InvocationCleanup::default()
-        };
-        {
-            let mut state = self.state.lock();
-            let pending = std::mem::take(&mut state.pending_workers);
-            for actor in pending {
-                if let Some(child) = kernel.resolve(actor) {
-                    if !state
-                        .workers
-                        .iter()
-                        .any(|worker| worker.identity() == actor)
-                    {
-                        state.workers.push(child);
-                    }
-                } else {
-                    state.pending_workers.push(actor);
-                    cleanup.failures.push(format!(
-                        "worker {actor:?} admission cleanup remains unconfirmed"
-                    ));
-                }
-            }
-        }
-
-        for group in groups {
-            match environment.fork_groups.abort(group, self.owner) {
-                Ok(children) => self.retain_aborted_children(kernel, &children),
-                Err(
-                    crate::ForkGroupError::Unknown(_) | crate::ForkGroupError::AlreadyCommitted(_),
-                ) => {}
-                Err(error) => cleanup
-                    .failures
-                    .push(format!("fork group {} release: {error}", group.0)),
-            }
-        }
-        {
-            let mut state = self.state.lock();
-            for child in &state.workers {
-                if !workers
-                    .iter()
-                    .any(|worker| worker.identity() == child.identity())
-                {
-                    workers.push(child.clone());
-                }
-            }
-            let unresolved = std::mem::take(&mut state.unresolved_workers);
-            for actor in unresolved {
-                if let Some(child) = kernel.resolve(actor) {
-                    if !state
-                        .workers
-                        .iter()
-                        .any(|worker| worker.identity() == actor)
-                    {
-                        state.workers.push(child.clone());
-                    }
-                    if !workers.iter().any(|worker| worker.identity() == actor) {
-                        workers.push(child);
-                    }
-                } else {
-                    state.unresolved_workers.push(actor);
-                    cleanup.failures.push(format!("worker {actor:?} has no retained lifecycle owner; cleanup remains unconfirmed"));
-                }
-            }
-        }
-        let workers = crate::kernel::RetirementBatch::issue(
-            workers
+        self.close();
+        // Scope and Form cleanup can wake authored waits. Fence the complete
+        // retained subtree first, using its existing worker custody.
+        let _retirement = crate::kernel::RetirementBatch::issue(
+            self.retirement_members(kernel)
                 .into_iter()
                 .map(|child| {
                     (
                         child,
-                        ActorTerminal {
-                            kind: ActorExitKind::Cancelled,
-                            summary: "owning tool invocation ended".into(),
-                            diagnostic: None,
-                        },
+                        ActorTerminal::new(ActorExitKind::Cancelled, "owning resource scope ended"),
                     )
                 })
                 .collect(),
         );
-        // Roll back unsubmitted reservations, including detached branches,
-        // before dispatching request cancellation notifications. Worker intent
-        // is already fenced; it does not settle these request reservations.
+        let mut cleanup = InvocationCleanup {
+            compilers: self.state.lock().compilers.clone(),
+            ..InvocationCleanup::default()
+        };
+        for form in self.state.lock().forms.clone() {
+            if let Err(cause) = form.close() {
+                cleanup
+                    .failures
+                    .push(format!("form {} cleanup: {cause:?}", form.mount));
+            }
+        }
+        for scope in self.scopes() {
+            let child_cleanup = Box::pin(scope.cleanup(environment, kernel)).await;
+            if let Some(token) = scope.scope_token() {
+                cleanup.scopes.push((token, child_cleanup));
+            }
+        }
+        // Reserved identities never reached a target. Preserve the original
+        // rollback fence even after cleanup ownership transfers, before target
+        // cancellation changes any request state.
         let (_, notifications) = environment
             .requests
             .abort_unsubmitted(self.owner, &self.reservation);
@@ -476,7 +1046,7 @@ impl InvocationWork {
         let mut request_cancellations = Vec::new();
         for request in environment
             .requests
-            .invocation_requests(self.owner, &self.reservation)
+            .cleanup_owner_requests(self.owner, &self.cleanup_owner)
         {
             let cancellation = environment
                 .requests
@@ -523,16 +1093,20 @@ impl InvocationWork {
                 )),
             }
         }
+        let mut watch_notifications = Vec::new();
         for watch in watches {
-            if let Err(error) = environment
+            match environment
                 .requests
                 .release_transient_watch(self.owner, watch)
             {
-                if error != crate::ReplyError::Stale {
-                    cleanup
-                        .failures
-                        .push(format!("transient watch {} release: {error:?}", watch.0));
+                Ok(notifications) => {
+                    self.release_transient_watch_membership(watch);
+                    watch_notifications.extend(notifications);
                 }
+                Err(error) if error != crate::ReplyError::Stale => cleanup
+                    .failures
+                    .push(format!("transient watch {} release: {error:?}", watch.0)),
+                Err(_) => self.release_transient_watch_membership(watch),
             }
         }
         if tokio::time::timeout(
@@ -540,7 +1114,7 @@ impl InvocationWork {
             publish_request_notifications(
                 &environment.requests,
                 &environment.deployments,
-                Vec::new(),
+                watch_notifications,
             ),
         )
         .await
@@ -548,6 +1122,35 @@ impl InvocationWork {
         {
             cleanup.settlement_notifications_pending =
                 environment.requests.has_settlement_notifications();
+        }
+        {
+            let mut state = self.state.lock();
+            for child in &state.workers {
+                if !workers
+                    .iter()
+                    .any(|worker| worker.identity() == child.identity())
+                {
+                    workers.push(child.clone());
+                }
+            }
+            let unresolved = std::mem::take(&mut state.unresolved_workers);
+            for actor in unresolved {
+                if let Some(child) = kernel.resolve(actor) {
+                    if !state
+                        .workers
+                        .iter()
+                        .any(|worker| worker.identity() == actor)
+                    {
+                        state.workers.push(child.clone());
+                    }
+                    if !workers.iter().any(|worker| worker.identity() == actor) {
+                        workers.push(child);
+                    }
+                } else {
+                    state.unresolved_workers.push(actor);
+                    cleanup.failures.push(format!("worker {actor:?} has no retained lifecycle owner; cleanup remains unconfirmed"));
+                }
+            }
         }
         let command_cleanup =
             futures_util::future::join_all(commands.into_iter().map(|job| async move {
@@ -592,6 +1195,22 @@ impl InvocationWork {
                         )),
                     })
             }));
+        let terminal_summary = if self.scope_id.is_some() {
+            "owning resource scope ended"
+        } else {
+            "owning tool invocation ended"
+        };
+        let workers = crate::kernel::RetirementBatch::issue(
+            workers
+                .into_iter()
+                .map(|child| {
+                    (
+                        child,
+                        ActorTerminal::new(ActorExitKind::Cancelled, terminal_summary),
+                    )
+                })
+                .collect(),
+        );
         let worker_cleanup = futures_util::future::join_all(workers.into_actors().into_iter().map(
             |(child, terminal)| async move {
                 let actor = child.identity();
@@ -661,19 +1280,55 @@ impl InvocationWork {
                     .request_cleanup_state(self.owner, request),
             })
             .collect();
-        self.state.lock().cleanup = Some(cleanup.clone());
+        let launch_placements = self.state.lock().launch_placements.clone();
+        for (parent_session, placement) in launch_placements {
+            match tokio::time::timeout(
+                RELEASE_WAIT,
+                placement.cleanup(&environment.runner, parent_session),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                outcome => cleanup.failures.push(format!(
+                    "launch placement cleanup remains unconfirmed: {outcome:?}"
+                )),
+            }
+        }
+        let realms = self.state.lock().realms.clone();
+        for (context, realm) in realms {
+            match tokio::time::timeout(
+                RELEASE_WAIT,
+                environment.runner.close_realm(context.clone(), realm),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    self.state
+                        .lock()
+                        .realms
+                        .retain(|(pending_context, pending_realm)| {
+                            pending_context != &context || *pending_realm != realm
+                        })
+                }
+                outcome => cleanup.failures.push(format!(
+                    "resource scope realm {realm:?} cleanup remains unconfirmed: {outcome:?}"
+                )),
+            }
+        }
+        let mut state = self.state.lock();
+        if state.launch_revision != launch_revision {
+            cleanup
+                .failures
+                .push("late launch placement remains for cleanup retry".into());
+        }
+        state.cleanup = Some(cleanup.clone());
         cleanup
     }
 }
 
 impl crate::local_actor::WorkerStartupAdmission for InvocationWork {
     fn reserve(&self, actor: ActorRef) -> Result<(), String> {
-        let mut state = self.state.lock();
-        if state.phase != InvocationWorkPhase::Active {
-            return Err("invocation closed before worker admission".into());
-        }
-        state.pending_workers.push(actor);
-        Ok(())
+        self.with_admission_state(|state| state.pending_workers.push(actor))
     }
 
     fn admit(&self, actor: LocalActorRef) -> Result<(), String> {
@@ -688,10 +1343,8 @@ impl crate::local_actor::WorkerStartupAdmission for InvocationWork {
         {
             state.workers.push(actor);
         }
-        if state.phase != InvocationWorkPhase::Active {
-            return Err("invocation closed before worker initialization".into());
-        }
-        Ok(())
+        drop(state);
+        self.with_admission(|| ())
     }
 }
 

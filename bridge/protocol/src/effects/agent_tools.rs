@@ -28,7 +28,11 @@ pub fn agent_tools() -> Effect {
         default_row_args: &[],
         extra_imports: &[],
         type_defs: Vec::new(),
-        external_types: &[],
+        external_types: &[crate::schema::ExternalType {
+            haskell_name: "RequestSite",
+            rust_wire: "i64",
+            core_module: Some("Tidepool.Internal.RequestSite"),
+        }],
         errors: None,
         verbs: vec![
             Verb {
@@ -47,6 +51,34 @@ pub fn agent_tools() -> Effect {
                             HsType::app(
                                 HsType::app(HsType::Named("Eff"), HsType::Var("toolEffs")),
                                 HsType::Text,
+                            ),
+                        ),
+                        rust: RustBinding::HaskellValue,
+                    },
+                ],
+                ret: HsType::Unit,
+                errors: None,
+                handling: HandlingClass::Actor,
+            },
+            Verb {
+                ctor: "AgentToolsInstallReceiverWith",
+                method: "agent_tools_install_receiver_with",
+                args: vec![
+                    Arg {
+                        name: "site",
+                        ty: HsType::app(
+                            HsType::app(HsType::Named("RequestSite"), HsType::TypeList(vec![])),
+                            HsType::Unit,
+                        ),
+                        rust: RustBinding::External,
+                    },
+                    Arg {
+                        name: "receiver",
+                        ty: HsType::func(
+                            HsType::Int,
+                            HsType::app(
+                                HsType::app(HsType::Named("Eff"), HsType::Var("receiverEffs")),
+                                HsType::Unit,
                             ),
                         ),
                         rust: RustBinding::HaskellValue,

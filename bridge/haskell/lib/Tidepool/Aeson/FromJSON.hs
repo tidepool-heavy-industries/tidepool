@@ -408,9 +408,7 @@ instance (Ord a, FromJSON a) => FromJSON (Set.Set a) where
   parseJSON (Array xs) = Set.fromList <$> traverse parseJSON xs
   parseJSON v          = mismatch "array" v
 
--- | JSON @null@, matching this package's 'ToJSON ()' instance and the unit
--- schema exposed to agents. Keeping one spelling matters here: @askUser @()@
--- feeds operator JSON straight back through this decoder.
+-- | JSON @null@, matching this package's 'ToJSON ()' instance.
 instance FromJSON () where
   parseJSON Null = Success ()
   parseJSON v    = mismatch "null" v

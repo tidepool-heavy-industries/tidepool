@@ -24,7 +24,12 @@ rust_filegroup(
         "src/conversation.rs": "exomonad/actor/src/conversation.rs",
         "src/descriptor.rs": "exomonad/actor/src/descriptor.rs",
         "src/external_application.rs": "exomonad/actor/src/external_application.rs",
+        "src/fixtures/AwaitRuntime.hs": "exomonad/actor/src/fixtures/AwaitRuntime.hs",
+        "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
+        "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
+        "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
+        "src/forms.rs": "exomonad/actor/src/forms.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_rs]": "exomonad/actor/src/generated/actor.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_context_rs]": "exomonad/actor/src/generated/actor_context.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_kernel_rs]": "exomonad/actor/src/generated/actor_kernel.rs",
@@ -34,10 +39,11 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_agent_launch_rs]": "exomonad/actor/src/generated/agent_launch.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_agent_session_rs]": "exomonad/actor/src/generated/agent_session.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_agent_tools_rs]": "exomonad/actor/src/generated/agent_tools.rs",
+        "//bridge/protocol:generated[exomonad_actor_src_generated_ask_user_rs]": "exomonad/actor/src/generated/ask_user.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_commands_rs]": "exomonad/actor/src/generated/commands.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_console_rs]": "exomonad/actor/src/generated/console.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_context_read_write_rs]": "exomonad/actor/src/generated/context_read_write.rs",
-        "//bridge/protocol:generated[exomonad_actor_src_generated_forks_rs]": "exomonad/actor/src/generated/forks.rs",
+        "//bridge/protocol:generated[exomonad_actor_src_generated_green_rs]": "exomonad/actor/src/generated/green.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_introspection_rs]": "exomonad/actor/src/generated/introspection.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_jev_rs]": "exomonad/actor/src/generated/jev.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_lookup_rs]": "exomonad/actor/src/generated/lookup.rs",
@@ -45,6 +51,7 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_model_call_rs]": "exomonad/actor/src/generated/model_call.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_notifications_rs]": "exomonad/actor/src/generated/notifications.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_reflect_rs]": "exomonad/actor/src/generated/reflect.rs",
+        "//bridge/protocol:generated[exomonad_actor_src_generated_resource_scopes_rs]": "exomonad/actor/src/generated/resource_scopes.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_sleep_rs]": "exomonad/actor/src/generated/sleep.rs",
         "src/hosted_lifecycle.rs": "exomonad/actor/src/hosted_lifecycle.rs",
         "src/identity.rs": "exomonad/actor/src/identity.rs",
@@ -54,7 +61,7 @@ rust_filegroup(
         "src/lib.rs": "exomonad/actor/src/lib.rs",
         "src/lineage.rs": "exomonad/actor/src/lineage.rs",
         "src/lineage/capture_lifetime_tests.rs": "exomonad/actor/src/lineage/capture_lifetime_tests.rs",
-        "src/lineage/captured_tests.rs": "exomonad/actor/src/lineage/captured_tests.rs",
+        "src/lineage/spawn_admission.rs": "exomonad/actor/src/lineage/spawn_admission.rs",
         "src/local_actor.rs": "exomonad/actor/src/local_actor.rs",
         "src/local_actor/terminal_transfer_tests.rs": "exomonad/actor/src/local_actor/terminal_transfer_tests.rs",
         "src/local_actor/workbench_step.rs": "exomonad/actor/src/local_actor/workbench_step.rs",
@@ -73,6 +80,7 @@ rust_filegroup(
         "src/request/activation.rs": "exomonad/actor/src/request/activation.rs",
         "src/request/activation/phase_properties.rs": "exomonad/actor/src/request/activation/phase_properties.rs",
         "src/request/invocation.rs": "exomonad/actor/src/request/invocation.rs",
+        "src/request/readiness.rs": "exomonad/actor/src/request/readiness.rs",
         "src/request/routes.rs": "exomonad/actor/src/request/routes.rs",
         "src/request/sources.rs": "exomonad/actor/src/request/sources.rs",
         "src/request/updates.rs": "exomonad/actor/src/request/updates.rs",
@@ -80,9 +88,7 @@ rust_filegroup(
         "src/resident_actor.rs": "exomonad/actor/src/resident_actor.rs",
         "src/resident_actor/activation_publication_tests.rs": "exomonad/actor/src/resident_actor/activation_publication_tests.rs",
         "src/resident_actor/after_tool_wait.rs": "exomonad/actor/src/resident_actor/after_tool_wait.rs",
-        "src/resident_actor/captured_commit.rs": "exomonad/actor/src/resident_actor/captured_commit.rs",
-        "src/resident_actor/captured_commit/deferred.rs": "exomonad/actor/src/resident_actor/captured_commit/deferred.rs",
-        "src/resident_actor/child_initialization.rs": "exomonad/actor/src/resident_actor/child_initialization.rs",
+        "src/resident_actor/agent_retention.rs": "exomonad/actor/src/resident_actor/agent_retention.rs",
         "src/resident_actor/child_launch.rs": "exomonad/actor/src/resident_actor/child_launch.rs",
         "src/resident_actor/clock_wait.rs": "exomonad/actor/src/resident_actor/clock_wait.rs",
         "src/resident_actor/clock_wait_tests.rs": "exomonad/actor/src/resident_actor/clock_wait_tests.rs",
@@ -91,9 +97,13 @@ rust_filegroup(
         "src/resident_actor/commands.rs": "exomonad/actor/src/resident_actor/commands.rs",
         "src/resident_actor/display_settlement.rs": "exomonad/actor/src/resident_actor/display_settlement.rs",
         "src/resident_actor/drain_wait.rs": "exomonad/actor/src/resident_actor/drain_wait.rs",
-        "src/resident_actor/inherited_host_tests.rs": "exomonad/actor/src/resident_actor/inherited_host_tests.rs",
+        "src/resident_actor/forms.rs": "exomonad/actor/src/resident_actor/forms.rs",
+        "src/resident_actor/green.rs": "exomonad/actor/src/resident_actor/green.rs",
+        "src/resident_actor/green_notebook.rs": "exomonad/actor/src/resident_actor/green_notebook.rs",
+        "src/resident_actor/green_tool.rs": "exomonad/actor/src/resident_actor/green_tool.rs",
         "src/resident_actor/inspection_wait.rs": "exomonad/actor/src/resident_actor/inspection_wait.rs",
         "src/resident_actor/inspection_wait_tests.rs": "exomonad/actor/src/resident_actor/inspection_wait_tests.rs",
+        "src/resident_actor/invocation_effects.rs": "exomonad/actor/src/resident_actor/invocation_effects.rs",
         "src/resident_actor/invocation_work.rs": "exomonad/actor/src/resident_actor/invocation_work.rs",
         "src/resident_actor/invocation_work_tests.rs": "exomonad/actor/src/resident_actor/invocation_work_tests.rs",
         "src/resident_actor/owned_workbench.rs": "exomonad/actor/src/resident_actor/owned_workbench.rs",
@@ -103,6 +113,7 @@ rust_filegroup(
         "src/resident_actor/replacement.rs": "exomonad/actor/src/resident_actor/replacement.rs",
         "src/resident_actor/request_wait.rs": "exomonad/actor/src/resident_actor/request_wait.rs",
         "src/resident_actor/request_wait_tests.rs": "exomonad/actor/src/resident_actor/request_wait_tests.rs",
+        "src/resident_actor/scopes.rs": "exomonad/actor/src/resident_actor/scopes.rs",
         "src/resident_actor/status_rendering.rs": "exomonad/actor/src/resident_actor/status_rendering.rs",
         "src/resident_actor/terminal_transfer_tests.rs": "exomonad/actor/src/resident_actor/terminal_transfer_tests.rs",
         "src/resident_actor/terminal_wait.rs": "exomonad/actor/src/resident_actor/terminal_wait.rs",
@@ -127,6 +138,7 @@ rust_filegroup(
         "src/workbench_display.rs": "exomonad/actor/src/workbench_display.rs",
         "src/workbench_display_tests.rs": "exomonad/actor/src/workbench_display_tests.rs",
         "//exomonad/prompts:doc_actors": "exomonad/prompts/docs/actors.md",
+        "//exomonad/prompts:doc_agents": "exomonad/prompts/docs/agents.md",
         "//exomonad/prompts:doc_cleanup": "exomonad/prompts/docs/cleanup.md",
         "//exomonad/prompts:doc_deadline": "exomonad/prompts/docs/deadline.md",
         "//exomonad/prompts:doc_jev": "exomonad/prompts/docs/jev.md",
@@ -136,7 +148,6 @@ rust_filegroup(
         "//exomonad/prompts:doc_reflect": "exomonad/prompts/docs/reflect.md",
         "//exomonad/prompts:doc_request": "exomonad/prompts/docs/request.md",
         "//exomonad/prompts:doc_tree": "exomonad/prompts/docs/tree.md",
-        "//exomonad/prompts:doc_unfold": "exomonad/prompts/docs/unfold.md",
         "//exomonad/prompts:doc_watch": "exomonad/prompts/docs/watch.md",
         "//exomonad/prompts:doc_workbench": "exomonad/prompts/docs/workbench.md",
         "//exomonad/prompts:haskell_tool_instructions": "exomonad/prompts/haskell-tool-instructions.md",
@@ -157,6 +168,7 @@ tidepool_rust_library(
         "//bridge/mcp:tidepool_mcp",
         "//exomonad/model:exomonad_model",
         "//exomonad/tool:exomonad_tool",
+        "//exomonad/worktree:exomonad_worktree",
         "//third-party/rust:blake3",
         "//third-party/rust:futures-util",
         "//third-party/rust:parking_lot",
@@ -184,6 +196,7 @@ tidepool_rust_library(
 rust_filegroup(
     name = "exomonad_actor_unit_tests_sources",
     mapped_srcs = {
+        "//bridge/haskell:rust_input_examples_model_turns_Examples_JevFormWorkflow_hs": "bridge/haskell/examples/model-turns/Examples/JevFormWorkflow.hs",
         "Cargo.toml": "exomonad/actor/Cargo.toml",
         "src/after_tool.rs": "exomonad/actor/src/after_tool.rs",
         "src/agent_spec.rs": "exomonad/actor/src/agent_spec.rs",
@@ -198,7 +211,12 @@ rust_filegroup(
         "src/conversation.rs": "exomonad/actor/src/conversation.rs",
         "src/descriptor.rs": "exomonad/actor/src/descriptor.rs",
         "src/external_application.rs": "exomonad/actor/src/external_application.rs",
+        "src/fixtures/AwaitRuntime.hs": "exomonad/actor/src/fixtures/AwaitRuntime.hs",
+        "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
+        "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
+        "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
+        "src/forms.rs": "exomonad/actor/src/forms.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_rs]": "exomonad/actor/src/generated/actor.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_context_rs]": "exomonad/actor/src/generated/actor_context.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_kernel_rs]": "exomonad/actor/src/generated/actor_kernel.rs",
@@ -208,10 +226,11 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_agent_launch_rs]": "exomonad/actor/src/generated/agent_launch.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_agent_session_rs]": "exomonad/actor/src/generated/agent_session.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_agent_tools_rs]": "exomonad/actor/src/generated/agent_tools.rs",
+        "//bridge/protocol:generated[exomonad_actor_src_generated_ask_user_rs]": "exomonad/actor/src/generated/ask_user.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_commands_rs]": "exomonad/actor/src/generated/commands.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_console_rs]": "exomonad/actor/src/generated/console.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_context_read_write_rs]": "exomonad/actor/src/generated/context_read_write.rs",
-        "//bridge/protocol:generated[exomonad_actor_src_generated_forks_rs]": "exomonad/actor/src/generated/forks.rs",
+        "//bridge/protocol:generated[exomonad_actor_src_generated_green_rs]": "exomonad/actor/src/generated/green.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_introspection_rs]": "exomonad/actor/src/generated/introspection.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_jev_rs]": "exomonad/actor/src/generated/jev.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_lookup_rs]": "exomonad/actor/src/generated/lookup.rs",
@@ -219,6 +238,7 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_model_call_rs]": "exomonad/actor/src/generated/model_call.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_notifications_rs]": "exomonad/actor/src/generated/notifications.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_reflect_rs]": "exomonad/actor/src/generated/reflect.rs",
+        "//bridge/protocol:generated[exomonad_actor_src_generated_resource_scopes_rs]": "exomonad/actor/src/generated/resource_scopes.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_sleep_rs]": "exomonad/actor/src/generated/sleep.rs",
         "src/hosted_lifecycle.rs": "exomonad/actor/src/hosted_lifecycle.rs",
         "src/identity.rs": "exomonad/actor/src/identity.rs",
@@ -228,7 +248,7 @@ rust_filegroup(
         "src/lib.rs": "exomonad/actor/src/lib.rs",
         "src/lineage.rs": "exomonad/actor/src/lineage.rs",
         "src/lineage/capture_lifetime_tests.rs": "exomonad/actor/src/lineage/capture_lifetime_tests.rs",
-        "src/lineage/captured_tests.rs": "exomonad/actor/src/lineage/captured_tests.rs",
+        "src/lineage/spawn_admission.rs": "exomonad/actor/src/lineage/spawn_admission.rs",
         "src/local_actor.rs": "exomonad/actor/src/local_actor.rs",
         "src/local_actor/reply_settlement_history.rs": "exomonad/actor/src/local_actor/reply_settlement_history.rs",
         "src/local_actor/terminal_transfer_tests.rs": "exomonad/actor/src/local_actor/terminal_transfer_tests.rs",
@@ -248,6 +268,8 @@ rust_filegroup(
         "src/request/activation.rs": "exomonad/actor/src/request/activation.rs",
         "src/request/activation/phase_properties.rs": "exomonad/actor/src/request/activation/phase_properties.rs",
         "src/request/invocation.rs": "exomonad/actor/src/request/invocation.rs",
+        "src/request/readiness.rs": "exomonad/actor/src/request/readiness.rs",
+        "src/request/readiness/tests.rs": "exomonad/actor/src/request/readiness/tests.rs",
         "src/request/routes.rs": "exomonad/actor/src/request/routes.rs",
         "src/request/sequence_tests.rs": "exomonad/actor/src/request/sequence_tests.rs",
         "src/request/sources.rs": "exomonad/actor/src/request/sources.rs",
@@ -256,10 +278,9 @@ rust_filegroup(
         "src/resident_actor.rs": "exomonad/actor/src/resident_actor.rs",
         "src/resident_actor/activation_publication_tests.rs": "exomonad/actor/src/resident_actor/activation_publication_tests.rs",
         "src/resident_actor/after_tool_wait.rs": "exomonad/actor/src/resident_actor/after_tool_wait.rs",
+        "src/resident_actor/agent_retention.rs": "exomonad/actor/src/resident_actor/agent_retention.rs",
+        "src/resident_actor/capture_workspace_declarations.hs": "exomonad/actor/src/resident_actor/capture_workspace_declarations.hs",
         "src/resident_actor/capture_workspace_tests.rs": "exomonad/actor/src/resident_actor/capture_workspace_tests.rs",
-        "src/resident_actor/captured_commit.rs": "exomonad/actor/src/resident_actor/captured_commit.rs",
-        "src/resident_actor/captured_commit/deferred.rs": "exomonad/actor/src/resident_actor/captured_commit/deferred.rs",
-        "src/resident_actor/child_initialization.rs": "exomonad/actor/src/resident_actor/child_initialization.rs",
         "src/resident_actor/child_launch.rs": "exomonad/actor/src/resident_actor/child_launch.rs",
         "src/resident_actor/clock_wait.rs": "exomonad/actor/src/resident_actor/clock_wait.rs",
         "src/resident_actor/clock_wait_tests.rs": "exomonad/actor/src/resident_actor/clock_wait_tests.rs",
@@ -269,11 +290,32 @@ rust_filegroup(
         "src/resident_actor/display_settlement.rs": "exomonad/actor/src/resident_actor/display_settlement.rs",
         "src/resident_actor/drain_wait.rs": "exomonad/actor/src/resident_actor/drain_wait.rs",
         "src/resident_actor/forest_shutdown_tests.rs": "exomonad/actor/src/resident_actor/forest_shutdown_tests.rs",
-        "src/resident_actor/inherited_host_tests.rs": "exomonad/actor/src/resident_actor/inherited_host_tests.rs",
+        "src/resident_actor/forms.rs": "exomonad/actor/src/resident_actor/forms.rs",
+        "src/resident_actor/green.rs": "exomonad/actor/src/resident_actor/green.rs",
+        "src/resident_actor/green_notebook.rs": "exomonad/actor/src/resident_actor/green_notebook.rs",
+        "src/resident_actor/green_runtime_cancel.hs": "exomonad/actor/src/resident_actor/green_runtime_cancel.hs",
+        "src/resident_actor/green_runtime_expression_reverse.hs": "exomonad/actor/src/resident_actor/green_runtime_expression_reverse.hs",
+        "src/resident_actor/green_runtime_expression_single.hs": "exomonad/actor/src/resident_actor/green_runtime_expression_single.hs",
+        "src/resident_actor/green_runtime_failure.hs": "exomonad/actor/src/resident_actor/green_runtime_failure.hs",
+        "src/resident_actor/green_runtime_parent_cancel.hs": "exomonad/actor/src/resident_actor/green_runtime_parent_cancel.hs",
+        "src/resident_actor/green_runtime_reverse.hs": "exomonad/actor/src/resident_actor/green_runtime_reverse.hs",
+        "src/resident_actor/green_runtime_setup.hs": "exomonad/actor/src/resident_actor/green_runtime_setup.hs",
+        "src/resident_actor/green_runtime_single.hs": "exomonad/actor/src/resident_actor/green_runtime_single.hs",
+        "src/resident_actor/green_runtime_tests.rs": "exomonad/actor/src/resident_actor/green_runtime_tests.rs",
+        "src/resident_actor/green_tests.rs": "exomonad/actor/src/resident_actor/green_tests.rs",
+        "src/resident_actor/green_tool.rs": "exomonad/actor/src/resident_actor/green_tool.rs",
         "src/resident_actor/inspection_wait.rs": "exomonad/actor/src/resident_actor/inspection_wait.rs",
         "src/resident_actor/inspection_wait_tests.rs": "exomonad/actor/src/resident_actor/inspection_wait_tests.rs",
+        "src/resident_actor/invocation_effects.rs": "exomonad/actor/src/resident_actor/invocation_effects.rs",
         "src/resident_actor/invocation_work.rs": "exomonad/actor/src/resident_actor/invocation_work.rs",
         "src/resident_actor/invocation_work_tests.rs": "exomonad/actor/src/resident_actor/invocation_work_tests.rs",
+        "src/resident_actor/jev_authored_dialogue.hs": "exomonad/actor/src/resident_actor/jev_authored_dialogue.hs",
+        "src/resident_actor/jev_form_runtime_failure.hs": "exomonad/actor/src/resident_actor/jev_form_runtime_failure.hs",
+        "src/resident_actor/jev_form_runtime_request.json": "exomonad/actor/src/resident_actor/jev_form_runtime_request.json",
+        "src/resident_actor/jev_form_runtime_response.json": "exomonad/actor/src/resident_actor/jev_form_runtime_response.json",
+        "src/resident_actor/jev_form_runtime_success.hs": "exomonad/actor/src/resident_actor/jev_form_runtime_success.hs",
+        "src/resident_actor/jev_form_runtime_tests.rs": "exomonad/actor/src/resident_actor/jev_form_runtime_tests.rs",
+        "src/resident_actor/jev_response_semantics.hs": "exomonad/actor/src/resident_actor/jev_response_semantics.hs",
         "src/resident_actor/owned_workbench.rs": "exomonad/actor/src/resident_actor/owned_workbench.rs",
         "src/resident_actor/owned_workbench/model_tests.rs": "exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs",
         "src/resident_actor/owned_workbench/publication_tests.rs": "exomonad/actor/src/resident_actor/owned_workbench/publication_tests.rs",
@@ -282,6 +324,14 @@ rust_filegroup(
         "src/resident_actor/replacement.rs": "exomonad/actor/src/resident_actor/replacement.rs",
         "src/resident_actor/request_wait.rs": "exomonad/actor/src/resident_actor/request_wait.rs",
         "src/resident_actor/request_wait_tests.rs": "exomonad/actor/src/resident_actor/request_wait_tests.rs",
+        "src/resident_actor/scope_runtime_cancel.hs": "exomonad/actor/src/resident_actor/scope_runtime_cancel.hs",
+        "src/resident_actor/scope_runtime_declarations.hs": "exomonad/actor/src/resident_actor/scope_runtime_declarations.hs",
+        "src/resident_actor/scope_runtime_failure.hs": "exomonad/actor/src/resident_actor/scope_runtime_failure.hs",
+        "src/resident_actor/scope_runtime_normal.hs": "exomonad/actor/src/resident_actor/scope_runtime_normal.hs",
+        "src/resident_actor/scope_runtime_setup.hs": "exomonad/actor/src/resident_actor/scope_runtime_setup.hs",
+        "src/resident_actor/scope_runtime_tests.rs": "exomonad/actor/src/resident_actor/scope_runtime_tests.rs",
+        "src/resident_actor/scope_runtime_uncertain.hs": "exomonad/actor/src/resident_actor/scope_runtime_uncertain.hs",
+        "src/resident_actor/scopes.rs": "exomonad/actor/src/resident_actor/scopes.rs",
         "src/resident_actor/status_rendering.rs": "exomonad/actor/src/resident_actor/status_rendering.rs",
         "src/resident_actor/terminal_transfer_tests.rs": "exomonad/actor/src/resident_actor/terminal_transfer_tests.rs",
         "src/resident_actor/terminal_wait.rs": "exomonad/actor/src/resident_actor/terminal_wait.rs",
@@ -307,6 +357,7 @@ rust_filegroup(
         "src/workbench_display.rs": "exomonad/actor/src/workbench_display.rs",
         "src/workbench_display_tests.rs": "exomonad/actor/src/workbench_display_tests.rs",
         "//exomonad/prompts:doc_actors": "exomonad/prompts/docs/actors.md",
+        "//exomonad/prompts:doc_agents": "exomonad/prompts/docs/agents.md",
         "//exomonad/prompts:doc_cleanup": "exomonad/prompts/docs/cleanup.md",
         "//exomonad/prompts:doc_deadline": "exomonad/prompts/docs/deadline.md",
         "//exomonad/prompts:doc_jev": "exomonad/prompts/docs/jev.md",
@@ -316,7 +367,6 @@ rust_filegroup(
         "//exomonad/prompts:doc_reflect": "exomonad/prompts/docs/reflect.md",
         "//exomonad/prompts:doc_request": "exomonad/prompts/docs/request.md",
         "//exomonad/prompts:doc_tree": "exomonad/prompts/docs/tree.md",
-        "//exomonad/prompts:doc_unfold": "exomonad/prompts/docs/unfold.md",
         "//exomonad/prompts:doc_watch": "exomonad/prompts/docs/watch.md",
         "//exomonad/prompts:doc_workbench": "exomonad/prompts/docs/workbench.md",
         "//exomonad/prompts:haskell_tool_instructions": "exomonad/prompts/haskell-tool-instructions.md",
@@ -339,6 +389,7 @@ tidepool_rust_binary(
         "//bridge/testing:tidepool_testing",
         "//exomonad/model:exomonad_model",
         "//exomonad/tool:exomonad_tool",
+        "//exomonad/worktree:exomonad_worktree",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",
         "//third-party/rust:futures-util",
@@ -383,7 +434,9 @@ tidepool_rust_test_cases(
         "//build/package:tidepool_extract_runtime_libraries",
         "//build/rust:workspace_git_bundle",
         "//build/rust:workspace_gitlink",
+        "//exomonad/examples/workspace:facade_test_sources",
         "toolchains//:exomonad_runtime_tools",
+        "toolchains//:jev_sources",
     ],
     resource_env = {
         "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
@@ -393,6 +446,8 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_JEV_SOURCE_DIR": "$(location toolchains//:jev_sources)",
+        "TIDEPOOL_JEV_WORKSPACE_DIR": "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
         "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
         "TIDEPOOL_WORKSPACE_TEST_GIT": "$(location toolchains//:exomonad_runtime_tools)/bin/git",
@@ -495,10 +550,11 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_agent_launch_rs]": "exomonad/actor/src/generated/agent_launch.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_agent_session_rs]": "exomonad/actor/src/generated/agent_session.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_agent_tools_rs]": "exomonad/actor/src/generated/agent_tools.rs",
+        "//bridge/protocol:generated[exomonad_actor_src_generated_ask_user_rs]": "exomonad/actor/src/generated/ask_user.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_commands_rs]": "exomonad/actor/src/generated/commands.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_console_rs]": "exomonad/actor/src/generated/console.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_context_read_write_rs]": "exomonad/actor/src/generated/context_read_write.rs",
-        "//bridge/protocol:generated[exomonad_actor_src_generated_forks_rs]": "exomonad/actor/src/generated/forks.rs",
+        "//bridge/protocol:generated[exomonad_actor_src_generated_green_rs]": "exomonad/actor/src/generated/green.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_introspection_rs]": "exomonad/actor/src/generated/introspection.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_jev_rs]": "exomonad/actor/src/generated/jev.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_lookup_rs]": "exomonad/actor/src/generated/lookup.rs",
@@ -506,6 +562,7 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_model_call_rs]": "exomonad/actor/src/generated/model_call.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_notifications_rs]": "exomonad/actor/src/generated/notifications.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_reflect_rs]": "exomonad/actor/src/generated/reflect.rs",
+        "//bridge/protocol:generated[exomonad_actor_src_generated_resource_scopes_rs]": "exomonad/actor/src/generated/resource_scopes.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_sleep_rs]": "exomonad/actor/src/generated/sleep.rs",
         "tests/exact_source_membrane.rs": "exomonad/actor/tests/exact_source_membrane.rs",
         "tests/prepared_render_probe.rs": "exomonad/actor/tests/prepared_render_probe.rs",
@@ -555,6 +612,7 @@ tidepool_rust_isolated_test(
         "//bridge/testing:tidepool_testing",
         "//exomonad/model:exomonad_model",
         "//exomonad/tool:exomonad_tool",
+        "//exomonad/worktree:exomonad_worktree",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",
         "//third-party/rust:futures-util",
@@ -627,7 +685,12 @@ filegroup(
         "exomonad/actor/src/conversation.rs": "src/conversation.rs",
         "exomonad/actor/src/descriptor.rs": "src/descriptor.rs",
         "exomonad/actor/src/external_application.rs": "src/external_application.rs",
+        "exomonad/actor/src/fixtures/AwaitRuntime.hs": "src/fixtures/AwaitRuntime.hs",
+        "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs": "src/fixtures/captured-spec-installer-bind.hs",
+        "exomonad/actor/src/fixtures/captured-spec-installer.hs": "src/fixtures/captured-spec-installer.hs",
+        "exomonad/actor/src/fixtures/scope-live-result.hs": "src/fixtures/scope-live-result.hs",
         "exomonad/actor/src/fork_workspace.rs": "src/fork_workspace.rs",
+        "exomonad/actor/src/forms.rs": "src/forms.rs",
         "exomonad/actor/src/hosted_lifecycle.rs": "src/hosted_lifecycle.rs",
         "exomonad/actor/src/identity.rs": "src/identity.rs",
         "exomonad/actor/src/interactive_session.rs": "src/interactive_session.rs",
@@ -636,7 +699,7 @@ filegroup(
         "exomonad/actor/src/lib.rs": "src/lib.rs",
         "exomonad/actor/src/lineage.rs": "src/lineage.rs",
         "exomonad/actor/src/lineage/capture_lifetime_tests.rs": "src/lineage/capture_lifetime_tests.rs",
-        "exomonad/actor/src/lineage/captured_tests.rs": "src/lineage/captured_tests.rs",
+        "exomonad/actor/src/lineage/spawn_admission.rs": "src/lineage/spawn_admission.rs",
         "exomonad/actor/src/local_actor.rs": "src/local_actor.rs",
         "exomonad/actor/src/local_actor/reply_settlement_history.rs": "src/local_actor/reply_settlement_history.rs",
         "exomonad/actor/src/local_actor/terminal_transfer_tests.rs": "src/local_actor/terminal_transfer_tests.rs",
@@ -656,6 +719,8 @@ filegroup(
         "exomonad/actor/src/request/activation.rs": "src/request/activation.rs",
         "exomonad/actor/src/request/activation/phase_properties.rs": "src/request/activation/phase_properties.rs",
         "exomonad/actor/src/request/invocation.rs": "src/request/invocation.rs",
+        "exomonad/actor/src/request/readiness.rs": "src/request/readiness.rs",
+        "exomonad/actor/src/request/readiness/tests.rs": "src/request/readiness/tests.rs",
         "exomonad/actor/src/request/routes.rs": "src/request/routes.rs",
         "exomonad/actor/src/request/sequence_tests.rs": "src/request/sequence_tests.rs",
         "exomonad/actor/src/request/sources.rs": "src/request/sources.rs",
@@ -664,10 +729,9 @@ filegroup(
         "exomonad/actor/src/resident_actor.rs": "src/resident_actor.rs",
         "exomonad/actor/src/resident_actor/activation_publication_tests.rs": "src/resident_actor/activation_publication_tests.rs",
         "exomonad/actor/src/resident_actor/after_tool_wait.rs": "src/resident_actor/after_tool_wait.rs",
+        "exomonad/actor/src/resident_actor/agent_retention.rs": "src/resident_actor/agent_retention.rs",
+        "exomonad/actor/src/resident_actor/capture_workspace_declarations.hs": "src/resident_actor/capture_workspace_declarations.hs",
         "exomonad/actor/src/resident_actor/capture_workspace_tests.rs": "src/resident_actor/capture_workspace_tests.rs",
-        "exomonad/actor/src/resident_actor/captured_commit.rs": "src/resident_actor/captured_commit.rs",
-        "exomonad/actor/src/resident_actor/captured_commit/deferred.rs": "src/resident_actor/captured_commit/deferred.rs",
-        "exomonad/actor/src/resident_actor/child_initialization.rs": "src/resident_actor/child_initialization.rs",
         "exomonad/actor/src/resident_actor/child_launch.rs": "src/resident_actor/child_launch.rs",
         "exomonad/actor/src/resident_actor/clock_wait.rs": "src/resident_actor/clock_wait.rs",
         "exomonad/actor/src/resident_actor/clock_wait_tests.rs": "src/resident_actor/clock_wait_tests.rs",
@@ -677,11 +741,32 @@ filegroup(
         "exomonad/actor/src/resident_actor/display_settlement.rs": "src/resident_actor/display_settlement.rs",
         "exomonad/actor/src/resident_actor/drain_wait.rs": "src/resident_actor/drain_wait.rs",
         "exomonad/actor/src/resident_actor/forest_shutdown_tests.rs": "src/resident_actor/forest_shutdown_tests.rs",
-        "exomonad/actor/src/resident_actor/inherited_host_tests.rs": "src/resident_actor/inherited_host_tests.rs",
+        "exomonad/actor/src/resident_actor/forms.rs": "src/resident_actor/forms.rs",
+        "exomonad/actor/src/resident_actor/green.rs": "src/resident_actor/green.rs",
+        "exomonad/actor/src/resident_actor/green_notebook.rs": "src/resident_actor/green_notebook.rs",
+        "exomonad/actor/src/resident_actor/green_runtime_cancel.hs": "src/resident_actor/green_runtime_cancel.hs",
+        "exomonad/actor/src/resident_actor/green_runtime_expression_reverse.hs": "src/resident_actor/green_runtime_expression_reverse.hs",
+        "exomonad/actor/src/resident_actor/green_runtime_expression_single.hs": "src/resident_actor/green_runtime_expression_single.hs",
+        "exomonad/actor/src/resident_actor/green_runtime_failure.hs": "src/resident_actor/green_runtime_failure.hs",
+        "exomonad/actor/src/resident_actor/green_runtime_parent_cancel.hs": "src/resident_actor/green_runtime_parent_cancel.hs",
+        "exomonad/actor/src/resident_actor/green_runtime_reverse.hs": "src/resident_actor/green_runtime_reverse.hs",
+        "exomonad/actor/src/resident_actor/green_runtime_setup.hs": "src/resident_actor/green_runtime_setup.hs",
+        "exomonad/actor/src/resident_actor/green_runtime_single.hs": "src/resident_actor/green_runtime_single.hs",
+        "exomonad/actor/src/resident_actor/green_runtime_tests.rs": "src/resident_actor/green_runtime_tests.rs",
+        "exomonad/actor/src/resident_actor/green_tests.rs": "src/resident_actor/green_tests.rs",
+        "exomonad/actor/src/resident_actor/green_tool.rs": "src/resident_actor/green_tool.rs",
         "exomonad/actor/src/resident_actor/inspection_wait.rs": "src/resident_actor/inspection_wait.rs",
         "exomonad/actor/src/resident_actor/inspection_wait_tests.rs": "src/resident_actor/inspection_wait_tests.rs",
+        "exomonad/actor/src/resident_actor/invocation_effects.rs": "src/resident_actor/invocation_effects.rs",
         "exomonad/actor/src/resident_actor/invocation_work.rs": "src/resident_actor/invocation_work.rs",
         "exomonad/actor/src/resident_actor/invocation_work_tests.rs": "src/resident_actor/invocation_work_tests.rs",
+        "exomonad/actor/src/resident_actor/jev_authored_dialogue.hs": "src/resident_actor/jev_authored_dialogue.hs",
+        "exomonad/actor/src/resident_actor/jev_form_runtime_failure.hs": "src/resident_actor/jev_form_runtime_failure.hs",
+        "exomonad/actor/src/resident_actor/jev_form_runtime_request.json": "src/resident_actor/jev_form_runtime_request.json",
+        "exomonad/actor/src/resident_actor/jev_form_runtime_response.json": "src/resident_actor/jev_form_runtime_response.json",
+        "exomonad/actor/src/resident_actor/jev_form_runtime_success.hs": "src/resident_actor/jev_form_runtime_success.hs",
+        "exomonad/actor/src/resident_actor/jev_form_runtime_tests.rs": "src/resident_actor/jev_form_runtime_tests.rs",
+        "exomonad/actor/src/resident_actor/jev_response_semantics.hs": "src/resident_actor/jev_response_semantics.hs",
         "exomonad/actor/src/resident_actor/owned_workbench.rs": "src/resident_actor/owned_workbench.rs",
         "exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs": "src/resident_actor/owned_workbench/model_tests.rs",
         "exomonad/actor/src/resident_actor/owned_workbench/publication_tests.rs": "src/resident_actor/owned_workbench/publication_tests.rs",
@@ -690,6 +775,14 @@ filegroup(
         "exomonad/actor/src/resident_actor/replacement.rs": "src/resident_actor/replacement.rs",
         "exomonad/actor/src/resident_actor/request_wait.rs": "src/resident_actor/request_wait.rs",
         "exomonad/actor/src/resident_actor/request_wait_tests.rs": "src/resident_actor/request_wait_tests.rs",
+        "exomonad/actor/src/resident_actor/scope_runtime_cancel.hs": "src/resident_actor/scope_runtime_cancel.hs",
+        "exomonad/actor/src/resident_actor/scope_runtime_declarations.hs": "src/resident_actor/scope_runtime_declarations.hs",
+        "exomonad/actor/src/resident_actor/scope_runtime_failure.hs": "src/resident_actor/scope_runtime_failure.hs",
+        "exomonad/actor/src/resident_actor/scope_runtime_normal.hs": "src/resident_actor/scope_runtime_normal.hs",
+        "exomonad/actor/src/resident_actor/scope_runtime_setup.hs": "src/resident_actor/scope_runtime_setup.hs",
+        "exomonad/actor/src/resident_actor/scope_runtime_tests.rs": "src/resident_actor/scope_runtime_tests.rs",
+        "exomonad/actor/src/resident_actor/scope_runtime_uncertain.hs": "src/resident_actor/scope_runtime_uncertain.hs",
+        "exomonad/actor/src/resident_actor/scopes.rs": "src/resident_actor/scopes.rs",
         "exomonad/actor/src/resident_actor/status_rendering.rs": "src/resident_actor/status_rendering.rs",
         "exomonad/actor/src/resident_actor/terminal_transfer_tests.rs": "src/resident_actor/terminal_transfer_tests.rs",
         "exomonad/actor/src/resident_actor/terminal_wait.rs": "src/resident_actor/terminal_wait.rs",
@@ -748,9 +841,9 @@ filegroup(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f66697874757265732f466f726b5265706c79436f6e7472616374732e6873",
-    src = "src/fixtures/ForkReplyContracts.hs",
-    out = "ForkReplyContracts.hs",
+    name = "haskell_test_fixture_7372632f66697874757265732f417761697452756e74696d652e6873",
+    src = "src/fixtures/AwaitRuntime.hs",
+    out = "AwaitRuntime.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -779,6 +872,20 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f50726f677265737352756e74696d652e6873",
     src = "src/fixtures/ProgressRuntime.hs",
     out = "ProgressRuntime.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f63617074757265642d737065632d696e7374616c6c65722d62696e642e6873",
+    src = "src/fixtures/captured-spec-installer-bind.hs",
+    out = "captured-spec-installer-bind.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f63617074757265642d737065632d696e7374616c6c65722e6873",
+    src = "src/fixtures/captured-spec-installer.hs",
+    out = "captured-spec-installer.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -853,16 +960,16 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f6c6f63616c5f6163746f722f6661696c7572655f6f726967696e2e6873",
-    src = "src/local_actor/failure_origin.hs",
-    out = "failure_origin.hs",
+    name = "haskell_test_fixture_7372632f66697874757265732f73636f70652d6c6976652d726573756c742e6873",
+    src = "src/fixtures/scope-live-result.hs",
+    out = "scope-live-result.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f7061727469616c5f737461727475705f6661696c7572652e6873",
-    src = "src/resident_actor/capture_partial_startup_failure.hs",
-    out = "capture_partial_startup_failure.hs",
+    name = "haskell_test_fixture_7372632f6c6f63616c5f6163746f722f6661696c7572655f6f726967696e2e6873",
+    src = "src/local_actor/failure_origin.hs",
+    out = "failure_origin.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -874,16 +981,135 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f63617074757265645f7265616465725f72657573652e6873",
-    src = "src/resident_actor/captured_reader_reuse.hs",
-    out = "captured_reader_reuse.hs",
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f776f726b73706163655f6465636c61726174696f6e732e6873",
+    src = "src/resident_actor/capture_workspace_declarations.hs",
+    out = "capture_workspace_declarations.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f63617074757265645f726561646572735f706172656e742e6873",
-    src = "src/resident_actor/captured_readers_parent.hs",
-    out = "captured_readers_parent.hs",
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f63616e63656c2e6873",
+    src = "src/resident_actor/green_runtime_cancel.hs",
+    out = "green_runtime_cancel.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f65787072657373696f6e5f726576657273652e6873",
+    src = "src/resident_actor/green_runtime_expression_reverse.hs",
+    out = "green_runtime_expression_reverse.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f65787072657373696f6e5f73696e676c652e6873",
+    src = "src/resident_actor/green_runtime_expression_single.hs",
+    out = "green_runtime_expression_single.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f6661696c7572652e6873",
+    src = "src/resident_actor/green_runtime_failure.hs",
+    out = "green_runtime_failure.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f706172656e745f63616e63656c2e6873",
+    src = "src/resident_actor/green_runtime_parent_cancel.hs",
+    out = "green_runtime_parent_cancel.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f726576657273652e6873",
+    src = "src/resident_actor/green_runtime_reverse.hs",
+    out = "green_runtime_reverse.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f73657475702e6873",
+    src = "src/resident_actor/green_runtime_setup.hs",
+    out = "green_runtime_setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f677265656e5f72756e74696d655f73696e676c652e6873",
+    src = "src/resident_actor/green_runtime_single.hs",
+    out = "green_runtime_single.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f617574686f7265645f6469616c6f6775652e6873",
+    src = "src/resident_actor/jev_authored_dialogue.hs",
+    out = "jev_authored_dialogue.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f666f726d5f72756e74696d655f6661696c7572652e6873",
+    src = "src/resident_actor/jev_form_runtime_failure.hs",
+    out = "jev_form_runtime_failure.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f666f726d5f72756e74696d655f737563636573732e6873",
+    src = "src/resident_actor/jev_form_runtime_success.hs",
+    out = "jev_form_runtime_success.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f726573706f6e73655f73656d616e746963732e6873",
+    src = "src/resident_actor/jev_response_semantics.hs",
+    out = "jev_response_semantics.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f63616e63656c2e6873",
+    src = "src/resident_actor/scope_runtime_cancel.hs",
+    out = "scope_runtime_cancel.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f6465636c61726174696f6e732e6873",
+    src = "src/resident_actor/scope_runtime_declarations.hs",
+    out = "scope_runtime_declarations.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f6661696c7572652e6873",
+    src = "src/resident_actor/scope_runtime_failure.hs",
+    out = "scope_runtime_failure.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f6e6f726d616c2e6873",
+    src = "src/resident_actor/scope_runtime_normal.hs",
+    out = "scope_runtime_normal.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f73657475702e6873",
+    src = "src/resident_actor/scope_runtime_setup.hs",
+    out = "scope_runtime_setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f756e6365727461696e2e6873",
+    src = "src/resident_actor/scope_runtime_uncertain.hs",
+    out = "scope_runtime_uncertain.hs",
     visibility = ["PUBLIC"],
 )
 

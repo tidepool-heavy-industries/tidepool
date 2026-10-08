@@ -132,6 +132,8 @@ pub type KernelCallReply = Result<MailboxValue, KernelCallFailure>;
 pub enum KernelInvocationFailure {
     #[error("actor {0} has exited")]
     ActorExited(ActorRef),
+    #[error("actor {actor} invocation was cancelled")]
+    Cancelled { actor: ActorRef },
     #[error("actor {actor} rejected the invocation: {detail}")]
     Rejected {
         actor: ActorRef,
@@ -189,7 +191,7 @@ impl KernelInvocationFailure {
             | Self::Failed { receipts, .. }
             | Self::CleanupUnconfirmed { receipts, .. } => receipts,
             Self::TerminalTransferFailed { source, .. } => source.receipts(),
-            Self::ActorExited(_) => &[],
+            Self::ActorExited(_) | Self::Cancelled { .. } => &[],
         }
     }
 
@@ -212,7 +214,7 @@ impl KernelInvocationFailure {
             | Self::Failed { receipts, .. }
             | Self::CleanupUnconfirmed { receipts, .. } => Some(receipts),
             Self::TerminalTransferFailed { source, .. } => source.receipts_mut(),
-            Self::ActorExited(_) => None,
+            Self::ActorExited(_) | Self::Cancelled { .. } => None,
         }
     }
 }
@@ -242,7 +244,11 @@ impl std::fmt::Display for KernelWorkbenchFailure {
             tidepool_runtime::session::WorkbenchFailurePoint::Publication {
                 completed_input_units,
             } => match self.publication.as_ref() {
-                Some(tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed { .. }) => write!(
+                Some(
+                    tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+                        ..
+                    },
+                ) => write!(
                     formatter,
                     "actor {} workbench publication durability remains unconfirmed after {} completed input units: {}",
                     self.actor, completed_input_units, self.detail
@@ -368,6 +374,10 @@ pub enum KernelResume {
 /// remains a Ractor control signal; `Shutdown` is the cooperative typed-hook
 /// path.
 pub enum KernelMessage {
+    ReplaceSpec {
+        definition: Box<crate::SpecReplacementDefinition>,
+        reply: RpcReplyPort<Result<(), crate::SpecReplacementError>>,
+    },
     Replace {
         definition: Box<crate::ActorReplacementDefinition>,
         reply: RpcReplyPort<Result<LocalActorRef, KernelInvocationFailure>>,
@@ -426,19 +436,16 @@ pub enum KernelMessage {
         reply: RpcReplyPort<crate::WorkbenchCancellationOutcome>,
     },
     ReconcileWorkbenchBoundary {
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
         reply: RpcReplyPort<crate::WorkbenchBoundaryReconciliation>,
     },
     ToolCompleted {
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     ToolAborted {
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
         reply: RpcReplyPort<KernelInvocationReply>,
-    },
-    ReleaseFork {
-        release: crate::ForkChildRelease,
     },
     /// Drain one mailbox request retained while the resident behavior was
     /// parked on an external interaction rather than on `receive`.
@@ -464,6 +471,7 @@ impl KernelMessage {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Replace { .. } => "Replace",
+            Self::ReplaceSpec { .. } => "ReplaceSpec",
             Self::Drain { .. } => "Drain",
             Self::DrainFence => "DrainFence",
             Self::ReplacementFence => "ReplacementFence",
@@ -482,7 +490,6 @@ impl KernelMessage {
             Self::ReconcileWorkbenchBoundary { .. } => "ReconcileWorkbenchBoundary",
             Self::ToolCompleted { .. } => "ToolCompleted",
             Self::ToolAborted { .. } => "ToolAborted",
-            Self::ReleaseFork { .. } => "ReleaseFork",
             Self::DrainMailbox => "DrainMailbox",
             Self::Resume { .. } => "Resume",
             Self::ExternalApplicationFailed { .. } => "ExternalApplicationFailed",
@@ -495,6 +502,7 @@ impl std::fmt::Debug for KernelMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Replace { .. } => formatter.write_str("Replace"),
+            Self::ReplaceSpec { .. } => formatter.write_str("ReplaceSpec"),
             Self::Drain { .. } => formatter.write_str("Drain"),
             Self::DrainFence => formatter.write_str("DrainFence"),
             Self::ReplacementFence => formatter.write_str("ReplacementFence"),
@@ -555,9 +563,6 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_tuple("ToolAborted")
                 .field(boundary)
                 .finish(),
-            Self::ReleaseFork { release } => {
-                formatter.debug_tuple("ReleaseFork").field(release).finish()
-            }
             Self::DrainMailbox => formatter.write_str("DrainMailbox"),
             Self::Resume { kind } => formatter.debug_tuple("Resume").field(kind).finish(),
             Self::ExternalApplicationFailed { failure, .. } => formatter
@@ -779,7 +784,7 @@ impl HostedCellPublications {
 
     pub(crate) fn retained_boundary(
         &self,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> Result<crate::HostedOperationSettlement, String> {
         let entries = self.0.lock();
         let mut matches = entries
@@ -923,7 +928,7 @@ impl NativeProviderAdmission {
         let mut state = self.owner.state.lock();
         match state.phase {
             AdmissionPhase::IdleRetirementClaim => {
-                return Err(NativeProviderStartError::RetirementPending)
+                return Err(NativeProviderStartError::RetirementPending);
             }
             AdmissionPhase::Closed => return Err(NativeProviderStartError::Closed),
             AdmissionPhase::Open => {}
@@ -1249,6 +1254,27 @@ impl LocalActorRef {
             return Ok(());
         }
         result
+    }
+
+    pub(crate) async fn replace_spec(
+        &self,
+        definition: crate::SpecReplacementDefinition,
+    ) -> Result<(), crate::SpecReplacementError> {
+        if self.terminal.get().is_some() {
+            return Err(crate::SpecReplacementError::Unavailable);
+        }
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.address
+            .send_message(KernelMessage::ReplaceSpec {
+                definition: Box::new(definition),
+                reply: reply.into(),
+            })
+            .map_err(|_| crate::SpecReplacementError::Unavailable)?;
+        receive.await.map_err(|_| {
+            crate::SpecReplacementError::Failed(
+                "spec replacement outcome unavailable; inspect target before retrying".into(),
+            )
+        })?
     }
 
     pub(crate) async fn replace(

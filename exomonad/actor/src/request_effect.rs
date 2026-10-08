@@ -85,7 +85,7 @@ pub(crate) enum RepliesReq {
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     CurrentRequestWith(i64),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
-    ReserveRequestWith(String, (i64, i64), bool),
+    ReserveRequestWith(Option<String>, (i64, i64), bool, crate::WorkerLifetime),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     // Duration reaches Core through its generated constructor representation.
     SubmitRequestWith(i64, HaskellValue, (i64, i64), Option<RequestDuration>),
@@ -100,7 +100,7 @@ pub(crate) enum RepliesReq {
     ObserveResponseWith(i64),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     CancelRequestWith(i64),
-    DetachRequestWith(i64),
+    RetainRequestWith(i64, crate::WorkerLifetime),
     AbandonResponseWith(i64),
     ForgetResponseWith(i64),
     ObserveReplyWith(i64),
@@ -151,15 +151,10 @@ impl ToHaskell for RequestScopeRefusal {
 )]
 pub(crate) enum WatchesReq {
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
-    RegisterWatchWith(String, Vec<AwaitDependency>),
-    RegisterWatchGroupsWith(String, Vec<Vec<AwaitDependency>>),
-    RegisterAwaitWith(Vec<Vec<AwaitDependency>>),
-    RegisterRouteWith(String, tidepool_bridge::HaskellValue, Vec<AwaitDependency>),
-    RegisterRouteGroupsWith(
-        String,
-        tidepool_bridge::HaskellValue,
-        Vec<Vec<AwaitDependency>>,
-    ),
+    RegisterWatchWith(String, AwaitPlan),
+    RegisterAwaitWith(AwaitPlan),
+    ReleaseAwaitWith(i64),
+    RegisterRouteWith(String, tidepool_bridge::HaskellValue, AwaitPlan),
     ObserveRouteWith(i64),
     ListRoutesWith,
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
@@ -167,8 +162,9 @@ pub(crate) enum WatchesReq {
     #[haskell(module = "Tidepool.Agent.Watch.Internal")]
     AwaitWatchWith(i64),
     ForgetWatchWith(i64),
-    ObserveWatchProgressWith(i64, i64, i64, i64),
-    ObserveCommandWith(String),
+    ObserveWatchProgressWith(i64, i64, Vec<i64>, i64, i64),
+    ObserveWatchDecisionWith(i64, Vec<i64>),
+    ObserveWatchCommandWith(i64, Vec<i64>, String),
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
@@ -181,6 +177,62 @@ pub(crate) enum AwaitDependency {
     AwaitDependency(i64, bool),
     AwaitProgress(i64, i64),
     AwaitCommand(String),
+    AwaitWatching(i64),
+}
+
+#[derive(tidepool_bridge_derive::FromHaskell)]
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum AwaitPlan {
+    #[haskell(module = "Tidepool.Agent.Watch.Internal")]
+    AwaitPlan(Vec<AwaitNode>, i64),
+}
+
+#[derive(tidepool_bridge_derive::FromHaskell)]
+pub(crate) enum AwaitNode {
+    #[haskell(module = "Tidepool.Agent.Watch.Internal")]
+    ReadyNode,
+    LeafNode(AwaitDependency),
+    AllNode(i64, i64),
+    EitherNode(i64, i64),
+}
+
+pub(crate) fn projection_path(path: Vec<i64>) -> Result<Vec<usize>, BridgeError> {
+    path.into_iter()
+        .map(|node| {
+            usize::try_from(node)
+                .map_err(|_| BridgeError::UnsupportedType("negative observation path".into()))
+        })
+        .collect()
+}
+
+impl AwaitPlan {
+    pub(crate) fn checked(
+        self,
+    ) -> Result<
+        crate::request::readiness::Plan<(WatchSubject, crate::request::WatchRequirement)>,
+        BridgeError,
+    > {
+        use crate::request::readiness::{Node, Plan};
+        let Self::AwaitPlan(nodes, root) = self;
+        let index = |value: i64| {
+            usize::try_from(value).map_err(|_| {
+                BridgeError::UnsupportedType("negative readiness node reference".into())
+            })
+        };
+        let nodes = nodes
+            .into_iter()
+            .map(|node| {
+                Ok(match node {
+                    AwaitNode::ReadyNode => Node::Ready,
+                    AwaitNode::LeafNode(dependency) => Node::Leaf(dependency.checked()?),
+                    AwaitNode::AllNode(left, right) => Node::All(index(left)?, index(right)?),
+                    AwaitNode::EitherNode(left, right) => Node::Either(index(left)?, index(right)?),
+                })
+            })
+            .collect::<Result<Vec<_>, BridgeError>>()?;
+        Plan::checked(nodes, index(root)?)
+            .map_err(|_| BridgeError::UnsupportedType("invalid readiness graph".into()))
+    }
 }
 
 /// What one watch dependency names before registration. A command job is
@@ -189,6 +241,7 @@ pub(crate) enum AwaitDependency {
 pub(crate) enum WatchSubject {
     Request(RequestId),
     Command(String),
+    Watch(WatchId),
 }
 
 impl AwaitDependency {
@@ -206,6 +259,12 @@ impl AwaitDependency {
                     |_| BridgeError::UnsupportedType("negative progress cursor".into()),
                 )?),
             ),
+            Self::AwaitWatching(watch) => (
+                WatchSubject::Watch(watch_id(watch)?),
+                crate::request::WatchRequirement::Response {
+                    allow_failure: false,
+                },
+            ),
             Self::AwaitCommand(job) => (
                 WatchSubject::Command(job),
                 crate::request::WatchRequirement::Response {
@@ -216,11 +275,20 @@ impl AwaitDependency {
     }
 }
 
+#[derive(Debug, tidepool_bridge_derive::ToHaskell)]
+#[haskell(module = "Tidepool.Agent.Reply.Internal")]
+pub(crate) enum RequestError {
+    RequestReservationRejected(ReplyError),
+    RequestSubmissionRejected(ReplyError),
+    RequestInvalidDeadline(String),
+}
+
 pub(crate) struct RequestReservation {
     pub continuation: ResidentHole,
     pub target: ActorRef,
-    pub label: String,
+    pub label: Option<String>,
     pub notify_owner: bool,
+    pub lifetime: crate::WorkerLifetime,
 }
 
 pub(crate) struct RequestSubmission {
@@ -277,7 +345,8 @@ pub(crate) struct CancellationAcknowledgement {
 pub(crate) struct WatchRegistration {
     pub transient: bool,
     pub continuation: ResidentHole,
-    pub dependencies: Vec<Vec<(WatchSubject, crate::request::WatchRequirement)>>,
+    pub dependencies:
+        crate::request::readiness::Plan<(WatchSubject, crate::request::WatchRequirement)>,
     pub label: String,
 }
 
@@ -310,6 +379,7 @@ fn reply_error_name(error: ReplyError) -> &'static str {
         ReplyError::AlreadySettled => "ReplyAlreadySettled",
         ReplyError::Unauthorized => "ReplyUnauthorized",
         ReplyError::WrongIncarnation => "ReplyWrongIncarnation",
+        ReplyError::InvalidReadiness => "ReplyInvalidReadiness",
         ReplyError::ProgressTypeMismatch => "ReplyProgressTypeMismatch",
         ReplyError::CancellationRequested => "ReplySettlementCancelled",
     }
@@ -445,7 +515,8 @@ impl ToHaskell for RequestAnswer {
             Self::Watch(Ok(WatchObservation::Pending(progress))) => {
                 emit!("RawWatchPending", progress)
             }
-            Self::Watch(Ok(WatchObservation::Ready(failures))) => emit!("RawWatchReady", failures),
+            Self::Watch(Ok(WatchObservation::Rejected(error))) => emit!("RawWatchRejected", error),
+            Self::Watch(Ok(WatchObservation::Ready(decision))) => emit!("RawWatchReady", decision),
             Self::Watch(Ok(WatchObservation::Unavailable { request, failure })) => {
                 emit!("RawWatchUnavailable", request, failure)
             }
@@ -550,7 +621,83 @@ impl ToHaskell for WatchId {
 
 #[cfg(test)]
 mod tests {
-    use super::RequestDuration;
+    use super::{RequestDuration, RequestError};
+    use crate::{ReplyError, RequestId};
+    use tidepool_bridge::{BridgeError, HaskellValue, ToHaskell};
+    use tidepool_repr::{DataCon, DataConId, DataConTable, Literal};
+
+    fn reservation_answer_table() -> DataConTable {
+        let mut table = DataConTable::new();
+        for (id, qualified_name, rep_arity) in [
+            (1, "Data.Either.Right", 1),
+            (2, "Data.Either.Left", 1),
+            (3, "GHC.Types.I#", 1),
+            (4, "GHC.Types.W#", 1),
+            (
+                5,
+                "Tidepool.Agent.Reply.Internal.RequestReservationRejected",
+                1,
+            ),
+            (6, "Tidepool.Agent.Reply.Internal.ReplyStale", 0),
+        ] {
+            table.insert(DataCon {
+                id: DataConId(id),
+                name: qualified_name.rsplit('.').next().unwrap().into(),
+                tag: 1,
+                rep_arity,
+                field_bangs: Vec::new(),
+                qualified_name: Some(qualified_name.into()),
+                type_name: String::new(),
+            });
+        }
+        table
+    }
+
+    #[test]
+    fn reservation_reply_emits_int_carrier_and_preserves_typed_refusal() {
+        let table = reservation_answer_table();
+        for value in [1_i64, i64::MAX] {
+            let answer: Result<RequestId, RequestError> =
+                Ok(RequestId(u64::try_from(value).unwrap()));
+            let encoded = answer.to_value(&table).unwrap();
+            let HaskellValue::Con(right, fields) = &encoded else {
+                panic!("reservation reply must be Right")
+            };
+            assert_eq!(*right, DataConId(1));
+            let [HaskellValue::Con(integer, payload)] = fields.as_slice() else {
+                panic!("reservation reply must contain a boxed Int")
+            };
+            assert_eq!(*integer, DataConId(3));
+            assert!(
+                matches!(payload.as_slice(), [HaskellValue::Lit(Literal::LitInt(actual))] if *actual == value)
+            );
+        }
+
+        let rejected: Result<RequestId, RequestError> =
+            Err(RequestError::RequestReservationRejected(ReplyError::Stale));
+        let encoded = rejected.to_value(&table).unwrap();
+        let HaskellValue::Con(left, fields) = &encoded else {
+            panic!("reservation refusal must be Left")
+        };
+        assert_eq!(*left, DataConId(2));
+        let [HaskellValue::Con(rejection, fields)] = fields.as_slice() else {
+            panic!("reservation refusal must retain RequestError")
+        };
+        assert_eq!(*rejection, DataConId(5));
+        assert!(
+            matches!(fields.as_slice(), [HaskellValue::Con(stale, fields)] if *stale == DataConId(6) && fields.is_empty())
+        );
+    }
+
+    #[test]
+    fn reservation_reply_refuses_request_id_above_haskell_int_max() {
+        let answer: Result<RequestId, RequestError> =
+            Ok(RequestId(u64::try_from(i64::MAX).unwrap() + 1));
+        assert!(matches!(
+            answer.to_value(&reservation_answer_table()),
+            Err(BridgeError::UnsupportedType(_))
+        ));
+    }
 
     #[test]
     fn request_duration_preserves_authored_units_and_checks_conversion() {
@@ -579,5 +726,32 @@ mod tests {
                 .unwrap(),
             900_000
         );
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for crate::request::readiness::Decision {}
+impl ToHaskell for crate::request::readiness::Decision {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let leaves = self
+            .leaves
+            .iter()
+            .map(|(node, failure)| (*node as i64, failure.clone()))
+            .collect::<Vec<_>>();
+        let choices = self
+            .choices
+            .iter()
+            .map(|(node, left)| (*node as i64, *left))
+            .collect::<Vec<_>>();
+        visit_constructor(
+            table,
+            visitor,
+            "Tidepool.Agent.Watch.Internal",
+            "AwaitDecision",
+            &[&leaves, &choices],
+        )
     }
 }

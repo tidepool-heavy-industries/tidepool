@@ -1,4 +1,13 @@
-let observerCampaign = "inherited-response" :: CampaignLabel
-let observerWave = "observer" :: ForkGroupLabel
-let observerLabel = [label|observer|]
-observer <- unfoldDeferred (batch observerCampaign observerWave) (child (withLifetime ActorOwned (narrowed @'[Replies, Watches] @(Response (Text, Int -> Int)) knownEffects (codingPolicy currentCheckout) (assignment observerLabel ("observe" :: Text)))))
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+
+import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Actors.Exomonad
+
+Right seed <- checkpoint "capture the producer request for its observer"
+Right observerAgent <- spawnSubagent (ForkCtx seed) (ForkWorktree currentCheckout)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Watches, Commands, Lookup, BoundWorktree]))
+    { spawnLabel = Just "observer", spawnLifetime = ActorOwned })
+Right observer <- request @Text observerAgent ("observe the inherited request" :: Text)
+  (defaultRequestOptions { requestLabel = Just "observer" })

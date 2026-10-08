@@ -1,11 +1,17 @@
-let campaign = "route-check" :: CampaignLabel
-let wave = "workers" :: ForkGroupLabel
-let producerLabel = [label|producer|]
-let consumerLabel = [label|consumer|]
-(producer, consumer) <- unfoldDeferred (batch campaign wave) ((,) <$> child (withLifetime ActorOwned (coding @Text projectHead (assignment producerLabel ("candidate" :: Text)))) <*> child (withLifetime ActorOwned (coding @Text projectHead (assignment consumerLabel ("reviewer ready" :: Text)))))
-let forwardedLabel = [label|review-candidate|]
-forwarding <- route (awaitSettled producer) (\settlement -> case settlement of { ReplyAvailable answer -> do { forwarded <- request @Text (responseActor consumer) (assignment forwardedLabel (responseValue answer)); Right () <- detachRequest forwarded; pure () }; ReplyUnavailable failure -> error (T.pack (show failure)) })
-broken <- route (awaitSettled producer) (\_ -> error "deliberate route failure")
-let reviewWave = "independent-review" :: ForkGroupLabel
-let reviewLabel = [label|review|]
-reviewLaunch <- route (awaitSettled producer) (\settlement -> case settlement of { ReplyAvailable answer -> do { _ <- unfold (batch campaign reviewWave) (child (withLifetime ActorOwned (withContext (selected id) (withModel (Literal "gpt-6-sol") (coding @Text projectHead (assignment reviewLabel (responseValue answer))))))); pure () }; ReplyUnavailable _ -> pure () })
+import qualified Tidepool.Agent.Contract as A
+Right captured <- checkpoint "route workers"
+Right producerActor <- spawnSubagent (ForkCtx captured) (ForkWorktree projectHead)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "producer" })
+Right consumerActor <- spawnSubagent (ForkCtx captured) (ForkWorktree projectHead)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnLabel = Just "consumer" })
+Right producer <- request @Text producerActor ("candidate" :: Text) defaultRequestOptions
+Right consumer <- request @Text consumerActor ("reviewer ready" :: Text) defaultRequestOptions
+forwarding <- route (settlement producer) (\settled -> case settled of { Right answer -> do { Right _ <- request @Text consumerActor answer defaultRequestOptions; pure () }; Left failure -> error (T.pack (show failure)) })
+broken <- route (settlement producer) (\_ -> error "deliberate route failure")
+reviewLaunch <- route (settlement producer) (\settled -> case settled of
+  Right answer -> do
+    Right reviewer <- spawnSubagent (FreshCtx answer) (ForkWorktree projectHead)
+      ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies])) { spawnModel = Just (Literal "gpt-6-sol"), spawnLabel = Just "review" })
+    Right _ <- request @Text reviewer answer defaultRequestOptions
+    pure ()
+  Left _ -> pure ())

@@ -48,11 +48,15 @@ redPreserved = do
   void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
     , "import qualified Project.MergeChecks as Fixture"
+    , "import Tidepool.Worktree (workspaceFor)"
     , "Right sourceTree <- createWorktree (fromRef \"recipe/red-preserved\" \"red-source\")"
     , "Right integration <- createWorktree (fromRef \"recipe/red-preserved\" \"red-preserved\")"
-    , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/red-preserved\") [\"sh\", \"-c\", \"printf 'staged-check\\n' > red-preserved.txt; git add -- red-preserved.txt; printf 'working-check\\n' > red-preserved.txt; printf intentional-red >&2; exit 7\"])"
-    , "sourceProbe <- R.start (R.withWorktree (worktreeId sourceTree) Fixture.mergeProbe)"
-    , "integrationProbe <- R.start (R.withWorktree (worktreeId integration) Fixture.mergeProbe)"
+    , "Right sourceWorkspace <- workspaceFor sourceTree"
+    , "Right integrationWorkspace <- workspaceFor integration"
+    , "Right integrationProbeWorkspace <- workspaceFor integration"
+    , "merger <- R.start (M.mergeInto integrationWorkspace (Just \"recipe/red-preserved\") [\"sh\", \"-c\", \"printf 'staged-check\\n' > red-preserved.txt; git add -- red-preserved.txt; printf 'working-check\\n' > red-preserved.txt; printf intentional-red >&2; exit 7\"])"
+    , "sourceProbe <- R.start (R.withWorkspace sourceWorkspace Fixture.mergeProbe)"
+    , "integrationProbe <- R.start (R.withWorkspace integrationProbeWorkspace Fixture.mergeProbe)"
     ]
   void $ turn owner $ Text.unlines
     [ "let commandAt :: R.ActorHandle Fixture.MergeProbe -> [Text] -> Eff RootEffects Cmd.RunResult; commandAt probe args = R.call (Fixture.probeCommand (R.client probe)) args"
@@ -113,10 +117,12 @@ greenReceipt = do
   void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
     , "import qualified Project.MergeChecks as Fixture"
+    , "import Tidepool.Worktree (workspaceFor)"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"green-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"green-receipt\")"
+    , "Right integrationWorkspace <- workspaceFor integration"
     , "let command = [\"sh\", \"-c\", \"mkdir -p ignored-build; printf artifact > ignored-build/output; printf zero-tests\"]"
-    , "merger <- R.start (M.mergeInto (worktreeId integration) Nothing command)"
+    , "merger <- R.start (M.mergeInto integrationWorkspace Nothing command)"
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"green receipt\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"green receipt\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
     ]
@@ -135,9 +141,11 @@ commandFailure = do
   void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
     , "import qualified Project.MergeChecks as Fixture"
+    , "import Tidepool.Worktree (workspaceFor)"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"git-failure-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"git-failure\")"
-    , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/missing-publication-branch\") [\"sh\", \"-c\", \"touch should-not-run\"])"
+    , "Right integrationWorkspace <- workspaceFor integration"
+    , "merger <- R.start (M.mergeInto integrationWorkspace (Just \"recipe/missing-publication-branch\") [\"sh\", \"-c\", \"touch should-not-run\"])"
     , "let request = M.PublishRequest \"git failure\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"git failure\""
     , "result <- R.call (M.publish (R.client merger)) request"
     , "headAfter <- worktreeHead integration"
@@ -145,7 +153,7 @@ commandFailure = do
     ]
   assertCell owner "failed Git lookup preserves head and admits no integration command"
     ("(headAfter == Right " <> gitOidLiteral before <> " && case result of { M.MergeFailed _ -> case M.mergeHistory view of { [M.MergeHistory _ candidate (M.PublishFailed _)] -> candidate == Just (M.publishCandidate request); _ -> False }; _ -> False })")
-  void $ turn owner "integrationProbe <- R.start (R.withWorktree (worktreeId integration) Fixture.mergeProbe)\nstatus <- R.call (Fixture.probeCommand (R.client integrationProbe)) [\"git\", \"status\", \"--short\"]\nR.finish integrationProbe"
+  void $ turn owner "Right integrationProbeWorkspace <- workspaceFor integration\nintegrationProbe <- R.start (R.withWorkspace integrationProbeWorkspace Fixture.mergeProbe)\nstatus <- R.call (Fixture.probeCommand (R.client integrationProbe)) [\"git\", \"status\", \"--short\"]\nR.finish integrationProbe"
   assertCell owner "integration command never ran after failed Git lookup"
     "Cmd.stdout status == Right \"\""
   void $ turn owner "R.finish merger"
@@ -161,9 +169,11 @@ checkedHeadChanged = do
   void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
     , "import qualified Project.MergeChecks as Fixture"
+    , "import Tidepool.Worktree (workspaceFor)"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"changed-head-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"changed-head\")"
-    , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/changed-check-head\") [\"git\", \"-c\", \"user.name=Recipe\", \"-c\", \"user.email=recipe@example.invalid\", \"commit\", \"--allow-empty\", \"-m\", \"unchecked command commit\"])"
+    , "Right integrationWorkspace <- workspaceFor integration"
+    , "merger <- R.start (M.mergeInto integrationWorkspace (Just \"recipe/changed-check-head\") [\"git\", \"-c\", \"user.name=Recipe\", \"-c\", \"user.email=recipe@example.invalid\", \"commit\", \"--allow-empty\", \"-m\", \"unchecked command commit\"])"
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"changed head\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"changed head\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
     , "headAfter <- worktreeHead integration"
@@ -185,11 +195,12 @@ dirtyAfterSuccess = do
   void $ turn owner $ Text.unlines
     [ "import qualified Exomonad.Contrib.Merge as M"
     , "import qualified Project.MergeChecks as Fixture"
-    , "import Tidepool.Worktree (SubmissionObservation (..), WorkingState (..), DirtySummary (..))"
+    , "import Tidepool.Worktree (SubmissionObservation (..), WorkingState (..), DirtySummary (..), workspaceFor)"
     , "Right sourceTree <- createWorktree (fromRef \"HEAD\" \"dirty-success-source\")"
     , "Right integration <- createWorktree (fromRef \"HEAD\" \"dirty-success\")"
+    , "Right integrationWorkspace <- workspaceFor integration"
     , "let command = [\"sh\", \"-c\", \"printf staged > checked-source.txt; git add -- checked-source.txt; printf working > checked-source.txt; printf untracked > unchecked-source.txt; printf successful-dirty-check\"]"
-    , "merger <- R.start (M.mergeInto (worktreeId integration) (Just \"recipe/dirty-success\") command)"
+    , "merger <- R.start (M.mergeInto integrationWorkspace (Just \"recipe/dirty-success\") command)"
     , "result <- R.call (M.publish (R.client merger)) (M.PublishRequest \"dirty source\" (worktreeId sourceTree) " <> gitOidLiteral before <> " \"dirty source\")"
     , "view <- R.call (M.mergeView (R.client merger)) ()"
     , "headAfter <- worktreeHead integration"
@@ -198,7 +209,7 @@ dirtyAfterSuccess = do
     ("(headAfter == Right " <> gitOidLiteral before <> " && case (result, reverse (M.mergeHistory view)) of { (M.MergeBlocked _, M.MergeHistory _ _ (M.IntegrationBlocked evidence _) : _) -> M.integrationHead evidence == " <> gitOidLiteral before <> " && M.integrationArgv evidence == command && M.integrationPassed evidence && Cmd.stdout (M.integrationReceipt evidence) == Right \"successful-dirty-check\" && case M.integrationSubmission evidence of { Just submission -> case changes (workingState submission) of { DirtySummary staged unstaged untracked _ -> all (not . null) [staged, unstaged, untracked] }; Nothing -> False }; _ -> False })")
   published <- git owner ["rev-parse", "refs/heads/" <> branch]
   check "dirty tested source is not published as its original commit" (published == before)
-  void $ turn owner "integrationProbe <- R.start (R.withWorktree (worktreeId integration) Fixture.mergeProbe)\nstatus <- R.call (Fixture.probeCommand (R.client integrationProbe)) [\"git\", \"status\", \"--short\"]\nR.finish integrationProbe"
+  void $ turn owner "Right integrationProbeWorkspace <- workspaceFor integration\nintegrationProbe <- R.start (R.withWorkspace integrationProbeWorkspace Fixture.mergeProbe)\nstatus <- R.call (Fixture.probeCommand (R.client integrationProbe)) [\"git\", \"status\", \"--short\"]\nR.finish integrationProbe"
   assertCell owner "text: blocked publication preserves tracked and untracked diagnostic edits"
     "case Cmd.stdout status of { Right text -> \"MM checked-source.txt\" `T.isInfixOf` text && \"?? unchecked-source.txt\" `T.isInfixOf` text; _ -> False }"
   void $ turn owner "R.finish merger"

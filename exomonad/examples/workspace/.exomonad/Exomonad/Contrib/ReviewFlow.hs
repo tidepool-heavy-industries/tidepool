@@ -3,10 +3,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MonoLocalBinds #-}
-{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -39,22 +37,23 @@ module Exomonad.Contrib.ReviewFlow
 import GHC.Generics (Generic)
 import Control.Monad.Freer (Eff, Member, raise)
 import qualified Control.Monad.Freer.State as S
-import Data.List (nub)
+import Data.List (find, nubBy)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Exomonad
-import Tidepool.Effects.Core (GitRef (..), Jev, WorktreeHandle (..), WorktreeIntegration, ActorLocal, Commands)
+import Tidepool.Effects.Core (GitRef (..), Jev, WorktreeHandle (..), WorktreeIntegration, ActorLocal, Commands, Lookup)
 import Tidepool.Actors.Worktree (boundWorktree)
-import Tidepool.Worktree (WorktreeReceipt (..), renderGitOid, renderWorktreeError, renderWorktreeId)
+import Tidepool.Worktree (WorktreeReceipt (..), renderGitOid, renderWorktreeError, renderWorktreeId, workspaceFor)
 import qualified Exomonad.Contrib.Merge as Merge
 import Tidepool.Agent.Reply (requestIdNumber)
 import Exomonad.Contrib.CheckResults
 import Exomonad.Contrib.CheckPlan (PlanCheck (..), PlanStart (..), PlanReport (..), startCheckPlanInto, planPassed, planSummary)
 import Exomonad.Contrib.Types
 import Exomonad.Contrib.Routing (WorkEvent, workChange, workQuestionsMessage)
+import Project.Work (WorkAdmissionError (..))
 
 data ReviewChoice = HonorReview | EscalateReview Text
   deriving (Show, Eq)
@@ -99,7 +98,9 @@ data ReviewFlowPolicy = ReviewFlowPolicy
   -- implementer's original request identity for correlation.
   , flowCompleted :: Maybe (R.Send ReviewCompletion)
   , flowIntegration :: Maybe Merge.MergeTarget
-  , flowReviewer :: ReviewSourcePlan -> ReviewRequest -> Text -> Branch ResearchLeafEffects ReviewRequest (Outcome ReviewDecision)
+  , flowReviewer :: forall effects. (Member AgentLaunch effects, Member Replies effects)
+      => ReviewSourcePlan -> ReviewRequest -> Text
+      -> Eff effects (Either WorkAdmissionError (Request (Outcome ReviewDecision), Progress WorkProgress))
   , flowCorrectionInstructions :: Text
   , flowRepairInstructions :: Text
   }
@@ -116,7 +117,8 @@ data ReviewStop
   | SourceAttachmentRefused RequestId R.AttachmentError
   | InvalidRepairLimit Int
   | ReviewerUnavailable ResponseFailure
-  | ReviewerAdmissionRefused Text
+  | ReviewerAdmissionRefused WorkAdmissionError
+  | RequestAdmissionRefused AgentRef RequestError
   | ReviewerBlocked Text [Text]
   | ReviewerSourceRefused Text
   | ReviewerReceiptMismatch RequestId RequestId
@@ -159,7 +161,7 @@ data ReviewCleanupResult
   = ReviewCleanupNotOwner ActorInputOrigin
   | ReviewCleanupPending ReviewStage
   | ReviewCleanupNoReviewer
-  | ReviewCleanupAttempted [(ForkGroupHandle, [CleanupReceipt])]
+  | ReviewCleanupAttempted [(AgentRef, [StopOutcome])]
   deriving (Show)
 
 data ReviewCleanupRequest = ReviewCleanupOnce | ReviewCleanupRetryRefused
@@ -170,10 +172,11 @@ data ReviewFlowState = ReviewFlowState
   , flowRepairCount :: Int
   , flowCorrectionUsed :: Bool
   , flowCandidateReceipts :: [Either ResponseFailure (ResponseResult (Outcome Candidate))]
-  , flowReviewerRequests :: [Response (Outcome ReviewDecision)]
+  , flowReviewerRequests :: [Request (Outcome ReviewDecision)]
+  , flowReviewerAgents :: [AgentRef]
   , flowReviewerUpdates :: [Progress WorkProgress]
   , flowReviewerReceipts :: [(RequestId, Either ResponseFailure (ResponseResult (Outcome ReviewDecision)))]
-  , flowRepairRequests :: [Response (Outcome Candidate)]
+  , flowRepairRequests :: [Request (Outcome Candidate)]
   , flowRepairUpdates :: [Progress WorkProgress]
   , flowAttachments :: [(RequestId, Either R.AttachmentError ())]
   , flowProgressUpdates :: [(RequestId, ProgressState WorkProgress)]
@@ -205,8 +208,8 @@ instance Show ReviewFlowState where
 -- Dynamic sources carry their original handle, so an older settlement cannot
 -- advance a later repair or correction. Attachments are retained before use.
 data ReviewEvent
-  = ReviewerSettled (Response (Outcome ReviewDecision)) (Either ResponseFailure (ResponseResult (Outcome ReviewDecision)))
-  | RepairSettled (Response (Outcome Candidate)) (Either ResponseFailure (ResponseResult (Outcome Candidate)))
+  = ReviewerSettled (Request (Outcome ReviewDecision)) (Either ResponseFailure (ResponseResult (Outcome ReviewDecision)))
+  | RepairSettled (Request (Outcome Candidate)) (Either ResponseFailure (ResponseResult (Outcome Candidate)))
   | WorkUpdated RequestId (ProgressState WorkProgress)
 
 data ReviewFlow mode = ReviewFlow
@@ -218,8 +221,10 @@ data ReviewFlow mode = ReviewFlow
   , reviewEvents :: mode :- Event ReviewEvent
   } deriving Generic
 
-type ReviewFlowEffects = R.LocalEffects ReviewFlow ResearchEffects
-type CheckedReviewEffects = R.LocalEffects ReviewFlow (WorktreeIntegration ': ResearchEffects)
+type ReviewFlowEffects = R.LocalEffects ReviewFlow
+  '[Replies, Watches, ActorContext, AgentLaunch, AgentControl, BoundWorktree
+   , WorktreeIntegration, Notifications, Jev, Commands, Actor, Reflect, Lookup]
+type CheckedReviewEffects = ReviewFlowEffects
 
 data ReviewRun = ReviewRun
   { reviewRunFlow :: R.ActorHandle ReviewFlow
@@ -230,8 +235,9 @@ data ReviewRun = ReviewRun
 -- reusable operation. It never waits for the implementer in the admission cell.
 startReviewFlow
   :: (Member Actor effects, Member WorktreeAllocation effects, Member BoundWorktree effects,
+      Member WorktreeRegistry effects,
       Member Replies effects)
-  => AgentRef -> Task -> ReviewFlowPolicy -> Response (Outcome Candidate) -> [PlanCheck]
+  => AgentRef -> Task -> ReviewFlowPolicy -> Request (Outcome Candidate) -> [PlanCheck]
   -> Eff effects (Either Text ReviewRun)
 startReviewFlow owner task policy = startReviewFlowWith
   (\context -> pure (ReviewRouteResult
@@ -240,9 +246,10 @@ startReviewFlow owner task policy = startReviewFlowWith
 
 startReviewFlowWith
   :: (Member Actor effects, Member WorktreeAllocation effects, Member BoundWorktree effects,
+      Member WorktreeRegistry effects,
       Member Replies effects)
   => (forall selected. Member Jev selected => ReviewContext -> Eff selected ReviewRouteResult)
-  -> AgentRef -> Task -> ReviewFlowPolicy -> Response (Outcome Candidate) -> [PlanCheck]
+  -> AgentRef -> Task -> ReviewFlowPolicy -> Request (Outcome Candidate) -> [PlanCheck]
   -> Eff effects (Either Text ReviewRun)
 startReviewFlowWith choose owner task policy worker checks
   | null checks = pure (Left "startReviewFlow: declare focused checks")
@@ -258,14 +265,18 @@ startReviewFlowWith choose owner task policy worker checks
           case allocated of
             Left issue -> pure (Left (renderWorktreeError issue))
             Right tree -> do
-              flow <- R.start (R.withWorktree (worktreeId tree)
-                (checkedReviewFlow owner task policy worker checks choose))
-              pure (Right (ReviewRun flow tree))
+              workspace <- workspaceFor tree
+              case workspace of
+                Left issue -> pure (Left (renderWorktreeError issue))
+                Right grant -> do
+                  flow <- R.start (R.withWorkspace grant
+                    (checkedReviewFlow owner task policy worker checks choose))
+                  pure (Right (ReviewRun flow tree))
 
 -- The caller retains the dedicated managed worktree. The definition subscribes
 -- to the original implementer, including when its response already settled.
 reviewFlow
-  :: AgentRef -> Task -> ReviewFlowPolicy -> Response (Outcome Candidate)
+  :: AgentRef -> Task -> ReviewFlowPolicy -> Request (Outcome Candidate)
   -> ActorSpec ReviewFlow ReviewFlowEffects
 reviewFlow owner task policy implementer =
   reviewFlowWith owner task policy implementer $ \context ->
@@ -274,10 +285,10 @@ reviewFlow owner task policy implementer =
       DeterministicRoute)
 
 -- The callback can ask Jev but cannot access the coordinator's private state
--- or exercise its fork, control, command, and notification effects. The
+-- or exercise its spawn, control, command, and notification effects. The
 -- coordinator alone records the result and changes the flow stage.
 reviewFlowWith
-  :: AgentRef -> Task -> ReviewFlowPolicy -> Response (Outcome Candidate)
+  :: AgentRef -> Task -> ReviewFlowPolicy -> Request (Outcome Candidate)
   -> (forall effects. Member Jev effects => ReviewContext -> Eff effects ReviewRouteResult)
   -> ActorSpec ReviewFlow ReviewFlowEffects
 reviewFlowWith owner task policy implementer =
@@ -287,7 +298,7 @@ reviewFlowWith owner task policy implementer =
 -- fast-forward, and routes original counted check evidence before review.
 -- Check failures and review findings share flowRepairLimit.
 checkedReviewFlow
-  :: AgentRef -> Task -> ReviewFlowPolicy -> Response (Outcome Candidate)
+  :: AgentRef -> Task -> ReviewFlowPolicy -> Request (Outcome Candidate)
   -> [PlanCheck]
   -> (forall effects. Member Jev effects => ReviewContext -> Eff effects ReviewRouteResult)
   -> ActorSpec ReviewFlow CheckedReviewEffects
@@ -296,13 +307,13 @@ checkedReviewFlow owner task policy implementer checks =
 
 buildReviewFlow
   :: (Member Replies effects, Member Actor effects, Member Notifications effects
-     , Member Forks effects, Member AgentInspection effects, Member AgentControl effects
-     , Member BoundWorktree effects, Member Commands effects, Member Jev effects
-     , Subset ResearchLeafEffects (S.State ReviewFlowState ': effects)
+     , Member AgentLaunch effects, Member AgentControl effects
+  , Member BoundWorktree effects, Member WorktreeIntegration effects
+     , Member Commands effects, Member Jev effects
      , Member (ActorLocal (R.Message ReviewFlow)) effects)
   => Actor.EffectProfile (R.Message ReviewFlow) effects
   -> (Candidate -> WorktreeEvidence -> Eff effects (Either Text ()))
-  -> AgentRef -> Task -> ReviewFlowPolicy -> Response (Outcome Candidate)
+  -> AgentRef -> Task -> ReviewFlowPolicy -> Request (Outcome Candidate)
   -> Maybe [PlanCheck]
   -> (forall selected. Member Jev selected => ReviewContext -> Eff selected ReviewRouteResult)
   -> ActorSpec ReviewFlow effects
@@ -310,7 +321,8 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
   R.definition "review-flow" profile ReviewFlow
     { flowStateField = ReviewFlowState
         { flowStage = AwaitingCandidate, flowRepairCount = 0, flowCorrectionUsed = False
-        , flowCandidateReceipts = [], flowReviewerRequests = [], flowReviewerUpdates = []
+        , flowCandidateReceipts = [], flowReviewerRequests = [], flowReviewerAgents = []
+        , flowReviewerUpdates = []
         , flowReviewerReceipts = [], flowRepairRequests = []
         , flowRepairUpdates = [], flowAttachments = [], flowProgressUpdates = []
         , flowProgress = [], flowNotices = []
@@ -404,6 +416,7 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
         { flowStage = if correction then AwaitingReviewCorrection candidate else ReviewingCandidate candidate
         , flowCorrectionUsed = correction
         , flowReviewerRequests = flowReviewerRequests state ++ [reviewer]
+        , flowReviewerAgents = flowReviewerAgents state ++ [responseActor reviewer]
         , flowReviewerUpdates = flowReviewerUpdates state ++ [updates] })
       attachRequest own identity
         (fmap (WorkUpdated identity) (R.progress updates)
@@ -421,30 +434,31 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
           <> fmap (RepairSettled attempt) (R.settlement attempt))
 
     cleanupReviewers request state = do
-      let groups = nub [ group
-            | reviewer <- flowReviewerRequests state
-            , Just group <- [forkGroupHandle reviewer] ]
+      let agents = nubBy (\left right -> agentIdentity left == agentIdentity right)
+            (flowReviewerAgents state)
           prior = case flowCleanupResult state of
             Just (ReviewCleanupAttempted receipts) -> receipts
             _ -> []
-      result <- case groups of
+      result <- case agents of
         [] -> pure ReviewCleanupNoReviewer
-        _ -> ReviewCleanupAttempted <$> mapM (cleanupGroup request prior) groups
+        _ -> ReviewCleanupAttempted <$> mapM (cleanupAgent request prior) agents
       R.modify' (\current -> current { flowCleanupResult = Just result })
       pure result
 
-    cleanupGroup request prior group = case lookup group prior of
-      Just receipts | not (shouldRetry request receipts) -> pure (group, receipts)
+    cleanupAgent request prior agent = case snd <$> find
+      (\(previous, _) -> agentIdentity previous == agentIdentity agent) prior of
+      Just receipts | not (shouldRetry request receipts) -> pure (agent, receipts)
       earlier -> do
-        receipt <- executeCleanup =<< planCleanup group
-        pure (group, maybe [] id earlier ++ [receipt])
+        outcome <- stopAgent agent
+        pure (agent, maybe [] id earlier ++ [outcome])
 
     shouldRetry ReviewCleanupOnce _ = False
     shouldRetry ReviewCleanupRetryRefused receipts = case reverse receipts of
-      latest : _ -> case cleanupReceiptSteps latest of
-        [CleanupBlocked _] -> True
-        [CleanupStalePlan] -> True
-        _ -> False
+      StoppedRetaining _ : _ -> True
+      StoppedReleasing : _ -> True
+      StopUnavailable : _ -> True
+      StopFailed _ : _ -> True
+      _ : _ -> False
       [] -> True
 
     checkReviewer own selected reviewer result = case result of
@@ -615,10 +629,14 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
       reports <- R.gets flowCheckReports
       let evidence = Text.intercalate "\n" [planSummary report | (candidate, report) <- reports, candidate == exact]
           request = ReviewRequest (AssignedTask task) exact OwnerRepairs
-      launched <- attemptUnfold (taskGroup task) $
-        childWithProgress @WorkProgress @(Outcome ReviewDecision) (flowReviewer policy (flowSourcePlan policy) request evidence)
-      case launched of
-        Left refusal -> publish (ReviewStopped (ReviewerAdmissionRefused (renderUnfoldError refusal)))
+      admitted <- flowReviewer policy (flowSourcePlan policy) request evidence
+      case admitted of
+        Left refusal -> do
+          case refusal of
+            WorkSpawnRefused _ -> pure ()
+            WorkRequestRefused agent _ -> R.modify' (\state -> state
+              { flowReviewerAgents = flowReviewerAgents state ++ [agent] })
+          publish (ReviewStopped (ReviewerAdmissionRefused refusal))
         Right (reviewer, updates) -> retainReviewer own False exact reviewer updates
 
     acceptReview own selected reviewer result = case result of
@@ -663,12 +681,17 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
             [] -> publish (ReviewStopped ReviewerWithoutRequest)
             reviewer : _ -> do
               let request = ReviewRequest (AssignedTask task) candidate OwnerRepairs
-              _ <- requestWithProgressInto @WorkProgress @(Outcome ReviewDecision)
-                (responseActor reviewer)
-                ((assignment [label|review-correction|] request)
-                  { guidance = Just (flowCorrectionInstructions policy), report = Silent })
-                (\(attempt, updates) -> retainReviewer own True candidate attempt updates)
-              pure ()
+                  recipient = responseActor reviewer
+                  options = defaultRequestOptions
+                    { requestLabel = Just "review-correction"
+                    , requestGuidance = Just (flowCorrectionInstructions policy)
+                    , requestReporting = Silent
+                    }
+              admitted <- requestWithProgress @WorkProgress @(Outcome ReviewDecision)
+                recipient request options
+              case admitted of
+                Left issue -> publish (ReviewStopped (RequestAdmissionRefused recipient issue))
+                Right (attempt, updates) -> retainReviewer own True candidate attempt updates
 
     sourceCheck selected decision = case decision of
       Accepted reviewed
@@ -690,12 +713,18 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
       if count >= flowRepairLimit policy
         then publish (ReviewStopped (RepairBudgetSpent count candidate findings))
         else do
-          _ <- requestWithProgressInto @WorkProgress @(Outcome Candidate)
-            (responseActor implementer)
-            ((assignment [label|repair|] (RepairTask task candidate findings))
-              { guidance = Just (flowRepairInstructions policy), report = Silent })
-            (\(attempt, updates) -> retainRepair own candidate attempt updates)
-          pure ()
+          let recipient = responseActor implementer
+              request = RepairTask task candidate findings
+              options = defaultRequestOptions
+                { requestLabel = Just "repair"
+                , requestGuidance = Just (flowRepairInstructions policy)
+                , requestReporting = Silent
+                }
+          admitted <- requestWithProgress @WorkProgress @(Outcome Candidate)
+            recipient request options
+          case admitted of
+            Left issue -> publish (ReviewStopped (RequestAdmissionRefused recipient issue))
+            Right (attempt, updates) -> retainRepair own candidate attempt updates
 
 -- Never reset or publish a branch. tryMerge owns checkout mutation; an
 -- ancestry check ensures this is a fast-forward, and HEAD is checked again.

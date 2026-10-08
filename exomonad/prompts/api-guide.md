@@ -13,6 +13,70 @@ and `expand handle key` displays one field independently. Use
 `display (show value)` when you want the textual `Show` form. Unsupported
 fields stay opaque.
 
+`Tidepool.View` builds pure presentation values; it does not send a message by
+itself. Compose text, Markdown, inspection, rows, columns, captions, SVG, and
+images with `V.*`, then pass the result to `display` or embed it in a form with
+`F.present`. A human form is one `Functor`/`Applicative` description and one
+submission. `F.askUser` returns `Submitted value`, `Dismissed`, or
+`FormUnavailable cause`; branch on that result before constructing a dependent
+next form. The answered card and its answer remain in chat, and later views or
+forms append as the cell continues.
+`F.note` posts non-blocking narration through `Console`; `F.askUser` suspends
+on `AskUser` until its mounted form is submitted, dismissed, or unavailable.
+
+```haskell source=human-forms
+import qualified Tidepool.Form as F
+import qualified Tidepool.View as V
+
+let evidence = [True, False]
+F.note "I will ask two related questions."
+_ <- display (V.column [V.markdown "Review the current evidence.", V.inspect evidence])
+scopeAnswer <- F.askUser $
+  (\() scope -> scope) <$> F.present (V.markdown "Which part should I check?")
+    <*> F.textInput "Scope" Nothing
+case scopeAnswer of
+  F.Submitted scope -> do
+    reasonAnswer <- F.askUser $
+      (\() reason -> (scope, reason))
+        <$> F.present (V.column [V.markdown "Why this part?", V.text scope])
+        <*> F.textInput "Reason" Nothing
+    case reasonAnswer of
+      F.Submitted (chosenScope, reason) -> do
+        _ <- display (V.column [V.markdown "Recorded", V.text chosenScope, V.text reason])
+        pure ()
+      F.Dismissed -> do
+        _ <- display (V.text "The second form was dismissed.")
+        pure ()
+      F.FormUnavailable _ -> do
+        _ <- display (V.text "The second form is unavailable.")
+        pure ()
+  F.Dismissed -> do
+    _ <- display (V.text "The first form was dismissed.")
+    pure ()
+  F.FormUnavailable _ -> do
+    _ <- display (V.text "The first form is unavailable.")
+    pure ()
+```
+
+The form builders are pure, so independent fields use ordinary Applicative
+composition. An answer-dependent question belongs after the submission in the
+same `Eff` program. Independent blocking forms can use `concurrently` from
+`Tidepool.Async` when the row admits `Green`; a Jev-selected branch can return a
+continuation that performs the next form.
+
+Keep a Jev response as a typed value: inspecting it, mapping its payload, or
+applying another policy uses the original judgment without another service
+call. `J.prepare` retains one checked request and its original decoder;
+each `J.executePrepared` explicitly sends that request again. The Jev skill
+owns the complete calling and settlement interface.
+
+For a choice that Jev or a person may make, define its domain alternatives
+once. Each alternative can carry its semantic condition, human-facing `View`
+and original value or action. Project those rows into `J.many` and `F.option`;
+both paths return the original row. Ordinary `case` and `do` then choose when
+to run it. The compiled shared module `Examples.JevFormWorkflow` demonstrates
+that composition, including retained responses and dependent forms.
+
 ## Compose the program
 
 Compose effectful functions with `>=>` or `do`; use the notebook's `&&&`, `***`
@@ -36,144 +100,121 @@ are not inherited. Calls in one cell share its model budget. Match `modelOutcome
 retain `modelReceipt`, and handle typed failure before cleanup. An absent admitted
 service returns a typed boundary failure.
 
-Every function tool in an installed `AgentSpec` selects its model-facing text
-explicitly: use `presentWith id` for `Text`, `presentWith presentJson` for JSON,
-or `presentWith presentDisplay` for a `Display` value. For example,
-`lookup = presentWith id $ tool description handler`. The hook receives
-`toolResultValue` as semantic JSON and `toolResultOutput` as the selected text;
-it does not render or replace the tool's text.
+Each hosted function handler field (`Call`, `RawCall`, `Notify`, and their
+`Sync` forms) in an installed `AgentSpec` must use `presentWith`, which returns
+an abstract `Presented handler`. This required finishing constructor selects
+model-facing text while preserving the handler's semantic result. Use
+`presentWith id` for `Text`, `presentWith presentJson` for JSON, or
+`presentWith presentDisplay` for a `Display` value. For example,
+`lookup = presentWith id $ tool description handler`. A bare handler fails
+Haskell typechecking because the hosted field requires `Presented`. Native
+`HaskellCell`/`HaskellTool` fields and programmatic actor handlers do not use
+this wrapper. The after-tool hook receives `toolResultValue` as semantic JSON
+and `toolResultOutput` as the selected text; it does not render or replace the
+tool's text.
 
-## Delegate and inspect
+## Agent work
 
-Typed requests and context unfolds compose agent work. For Git project
-implementation, load `exomonad-project-work` for the default recursive delivery
-workflow; `exomonad-fork` and `exomonad-coordinate` explain its Project helpers.
+Create one idle child with `spawnSubagent context workspace
+(defaultSpawnOptions actualSpec)`. The context is a captured `ForkCtx checkpoint`
+or an explicit `FreshCtx prompt`. The workspace is `SameDir`, an opaque
+`ExistingWorkspace` handle, or a `ForkWorktree` selected from a committed seed.
+The options carry the actual typed `AgentSpec`, model and effort choices,
+instructions, an optional ordinary text label, lifetime, and limits. Labels are
+descriptive only; they do not identify actors, workspaces, or groups. `spawnLimits`
+is an optional `SpawnLimits` record whose `maximumDescendantDepth` and
+`maximumActiveDescendants` fields use opaque `DescendantDepth` and
+`ActiveDescendants` quantities. Construct those quantities with
+`descendantDepth` and `activeDescendants`; each accepts values from zero through
+65,535, and zero forbids descendants. Active descendants include pending
+admissions throughout the sponsored subtree. `Nothing` inherits the caller's
+attenuated caps, including unbounded width; an explicit cap can only narrow them.
 
-```haskell
-let task = "Remove the stale path and report the focused check." :: Text
-(worker, ready) <- spawnWatched "implementation-ready" (batch "cleanup" "implementation") $
-  child @Text $ withLifetime ActorOwned $ withContext (selected id) $
-    coding projectHead $
-      assignment [label|remove-stale-path|] task
-display ready
+A successful spawn returns an idle `AgentRef`. It has not run inference. Its
+first typed request or a human message activates it. A typed request supplies raw
+input and request options. `request @Text agent rawInput defaultRequestOptions`
+returns an `Either RequestError (Request Text)`; `requestWithProgress` also
+returns an independent typed progress handle.
+
+```haskell source=request
+Right worker <- spawnSubagent (FreshCtx prompt) SameDir (defaultSpawnOptions spec)
+Right pending <- request @Text worker input defaultRequestOptions
+Right answer <- await (result pending)
+display answer
 ```
 
-`spawnWatched` combines immediate `unfold` and a named settlement watch.
-Explicit `ActorOwned` branches survive the cell. Default `InvocationOwned` branches
-must settle within its creating invocation; returning handles does not extend it.
-A wave composes independent children with `<$>` and `<*>`. Capture an exact
-checkpoint to reuse your current reasoning:
+Here `spec` is the actual typed `AgentSpec` that installs the child's tools and
+effects. `@Text` selects the request's reply type, while `input :: Text` is its
+raw input; `prompt` is also `Text`. Spawn and request default to actor
+ownership. Returning a handle does not transfer ownership. A runtime scope is
+an explicit delimiter; a resource joins it only when its options use
+`InScope scope`.
 
-```haskell
-let parserTask = "Implement the parser." :: Text
-let consumerTask = "Update its consumer." :: Text
-let reviewTask = "Review the interface." :: Text
-Right captured <- checkpoint "feature-scaffold"
-(parser, consumer, review) <- unfold (batch "feature" "wave-1") $ (,,)
-  <$> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|parser|] parserTask))))
-  <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (coding currentCheckout (assignment [label|consumer|] consumerTask))))
-  <*> child @Text (withLifetime ActorOwned (withContext (fromCheckpoint captured) (researching currentCheckout (assignment [label|contract-review|] reviewTask))))
-```
-For another wave, `subgroup "wave-2"` nests under your path; pass only the
-new segment.
+`result request` projects a typed `Await` value. Use the single `await` operation
+to observe it. `Await` supports ordinary functor, applicative, and traversal
+composition; `eitherOf` chooses the first terminal branch, including failure,
+while an all-branches wait requires each branch to succeed. Settlement projections
+let collectors retain failures as values. Progress is an independent typed
+observation. Scope results keep callback and cleanup outcomes separate.
 
-Await immediate children with `waitFor`; use explicit `ActorOwned` branches for
-work spanning model turns. `unfoldDeferred` starts children after the enclosing
-call returns with its real result; never await them inside that invocation. See
-`doc unfold` for settlement watches and child status.
+`spawnSubagent context workspace (defaultSpawnOptions actualSpec)` returns
+`Either SpawnError AgentRef`. `request @Answer agent rawInput defaultRequestOptions`
+returns `Either RequestError (Request Answer)`. `requestWithProgress @Progress
+@Answer agent rawInput defaultRequestOptions` returns an `Either RequestError`
+containing the request and an independent `Progress Progress` handle.
+`result :: Request a -> Await a`; `await` observes an `Await` as either
+`AwaitError` or its typed result.
 
-```haskell
-settled <- watch "wave-1-settled" (awaitAnySettled [parser, consumer, review])
-```
+Use `response :: Request a -> Await (ResponseResult a)` when the full result
+matters: it retains the typed value together with its execution receipt and
+worktree evidence. `settledResponse` returns the same result inside
+`Either ResponseFailure`; `result` projects only its typed value, and
+`settlement` projects the value while preserving `ResponseFailure`. An
+`AwaitError` remains a separate failure of observation. In record actors,
+`R.settlement request` is an event source for
+`Either ResponseFailure (ResponseResult a)`.
 
-Record actors (`R.*`) collect and route events without model inference;
-`R.start` creates persistent services.
+The short request fence above shows only successful admission and reply. In the
+example workspace's optional Project package,
+[`Project.WorkflowExamples`](../examples/workspace/.exomonad/Project/WorkflowExamples.hs)
+shows how `admitCandidates` retains admissions in `candidateAdmissions` and the
+checkpoint-release outcome in `candidateCheckpointRelease`.
+`awaitCandidates` returns either `CandidateObservationFailed AwaitError` or
+`CandidateObservationReady` with every `CandidateSettlement`, including
+`CandidateSpawnNotAdmitted`, `CandidateRequestNotAdmitted`,
+`CandidateResponseUnavailable`, and `CandidateResponseReceived`. The last
+contains a full `ResponseResult`; an authored `Blocked` outcome stays inside
+its `responseValue`. `scopedCandidates` returns `ScopeOutcome CandidateRunReport`
+with `runAdmissions` and `runObservation`, preserving body and cleanup outcomes
+separately. `nextCandidateEvent` chooses between a terminal result and a
+progress update. `AwaitError`, `ResponseFailure`, and an authored blocked result
+remain distinct layers.
 
-`currentCheckout` seeds the executing actor's checkout; `projectHead` selects
-the project source and `atRef` an explicit commit. Live-source admission checkpoints
-eligible edits without checks; inspect omission receipts before using that source.
+The workspace's `Project.Work.WorkspaceEffects` is a local alias of generated
+`ActorEffects`. A task, prompt, or label does not select or narrow that installed
+profile; the actual supplied `AgentSpec` and runtime grants determine the child's
+tools and effects.
 
-`withModel "luna"` selects a workspace alias; `withModel (Literal "provider-model")`
-selects an explicit model (`luna`: cheap tier; `executor`: `gpt-6.1-sol`). `withEffort Medium` sets effort. `previewBranch` shows resolved policy.
-`withContext (selected render)` selects fresh context; `fromCheckpoint` uses an
-exact retained capture. Immediate admission refuses unresolved `inherited`
-context before allocation; use `unfoldDeferred` with explicit `ActorOwned` for
-the enclosing call's completed context. Use `[label|orbit-motif|]`
-for compile-checked static assignment labels; use `labelFromText` for dynamic
-labels and handle its `Either`.
-
-Default `haskell` and `haskell_sync` share effects. Only an explicit synchronous
-profile declares `ContextReadWrite` (`import qualified Tidepool.Agent.Context as C`).
-`editableTexts` traverses authored text and eligible visible message/result
-bodies, not display previews; tool source/input and function
-arguments stay pinned. `C.trimText reason retained` prefixes exact retained
-text with an ordinary `[Trimmed: reason]` marker. Context, model and effort
-commit together on whole-cell success. Same-model continuation forwards opaque
-reasoning unchanged; incompatible cross-model history fails explicitly.
-Restoring a saved context cannot remove current required native groups. For
-curation then delegation, `unfoldDeferred` starts actor-owned children after
-commit; they inherit context and Haskell bindings and cannot be awaited inside
-their creating cell. See `doc workbench` and the compiled
-`bridge/haskell/examples/model-turns/ContextWorkflow.hs`.
-
-The activation supplies typed `sessionInput`, its reply declaration, and the
-roster of siblings admitted with you; use `display sessionInput` to inspect it.
-`respond`, `sessionReply` and `sessionInput` exist only while
-a request is pending; discovery shows them then. A root has none of them.
-`request @Report (responseActor worker) (assignment [label|revision|] input)`
-assigns invocation-owned follow-up work. Await it before returning or explicitly
-`detachRequest` for a request spanning turns. `pollRequestUpdate` inspects updates.
-Requests notify their owner unless a watch/route takes over; record actor
-settlement sources require `report = Silent`.
-
-You may inspect another actor's response, command output, progress, or
-worktree state, but reads never transfer control: ask the owner to cancel,
-publish, release, write stdin, or mutate its worktree.
-
-## Review and integrate
-
-For Git project delivery, `exomonad-project-work` owns review and integration
-policy. `responseWorktree` and Git expose the exact submission; `tryMerge`
-integrates managed worktrees. Load `exomonad-review` for review/repair operations
-and `exomonad-unfold` for submission observations. Reviewers running checks need
-coding authority.
-
-## Core signatures
-
-```haskell signatures
-assignment :: Label -> input -> Assignment input
-currentCheckout :: WorktreeSeed
-coding :: WorktreeSeed -> Assignment input -> Branch CodingEffects input result
-researching :: WorktreeSeed -> Assignment input -> Branch ResearchEffects input result
-child :: (KnownEffects child, Subset child parent)
-      => Branch child input result -> Unfold parent (Response result)
-unfold :: (Member Forks effects, Member Replies effects, Member AgentInspection effects)
-       => ForkGroupPath -> Unfold effects result -> Eff effects result
-request :: Member Replies effects
-        => AgentRef -> Assignment input -> Eff effects (Response result)
-spawnWatched :: WatchLabel -> ForkGroupPath -> Unfold effects (Response result)
-             -> Eff effects (Response result, Watch (Settlement result))
-awaitSettled :: Response result -> Await (Settlement result)
-awaitAnySettled :: [Response result] -> Await [Maybe (Settlement result)]
-waitFor :: Member Watches effects => Await result -> Eff effects (Either WatchFailure result)
-watch :: Member Watches effects => WatchLabel -> Await result -> Eff effects (Watch result)
-pollWatch :: Member Watches effects => Watch result -> Eff effects (WatchState result)
-pollResponse :: Member Replies effects => Response result -> Eff effects (ResponseState result)
-```
+For Git project implementation and delivery, `exomonad-project-work` describes
+an optional authored workflow for scaffolding, assigning ready work, reviewing
+exact candidates, repairing, and integrating with checks. General exploration
+and actor programming do not require project roles or group names. Check any declaration details not shown here with targeted lookup before using
+them in a workspace.
 
 ## Compose commands and judgment
 
 `Cmd.run` returns a retained result: `Cmd.stdout` is complete successful stdout
 or an explicit issue; inspect failed outcomes and stderr. `J.ask` batches
 judgments over supplied evidence; load `exomonad-jev` for composition. `me` is
-lexically captured. `parentAgent` is your supervisor, receiving `sendMessage`
-and settling requests, or `Nothing` for a root.
+lexically captured. `parentAgent` returns your supervisor, or `Nothing` for a
+root. `sendMessage recipient text` addresses the chosen actor. `respond value`
+settles the active typed request for its caller, who may differ from your supervisor.
 
 Run a shell string with `Cmd.run (Cmd.bashCommand "git status --short")`;
 `[bash|...|]` is a literal Bash quotation that constructs the same `Command`.
 Use `Cmd.withArguments` to pass dynamic values as positional arguments.
 
-```haskell
+```haskell source=command
 result <- Cmd.run (Cmd.bashCommand "git status --short")
 display (Cmd.stdout result)
 ```
@@ -208,7 +249,7 @@ supplies it. When the admitted notebook lists `Lookup`, use
 `Prelude.lookup` performs ordinary list lookup. `doc topics` lists guides and
 skills; load an installed skill from `.agents/skills/<name>/SKILL.md` first.
 
-```haskell
+```haskell source=lookup
 topics <- LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])
 display (show topics)
 ```

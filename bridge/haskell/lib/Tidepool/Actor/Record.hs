@@ -30,7 +30,7 @@ module Tidepool.Actor.Record
   , on, progress, settlement, lifecycle, command, attach
   , get, gets, put, modify'
   , start, client, send, trySend, call, finish, replace
-  , definition, withWorktree
+  , definition, withWorkspace
   , self, sender, ActorInputOrigin (..)
   , LocalEffects, Forwarding, forwardResult, forwardingExit
   -- Named by exported signatures ('definition', 'self', 'sender',
@@ -54,7 +54,8 @@ import qualified Tidepool.Actor.Source as Source
 import Tidepool.Command.Types (Job)
 import Tidepool.Effects.Core (CommandResult)
 import Tidepool.Agent.Reply.Internal
-  ( Progress, ProgressState, Response, ResponseFailure, ResponseResult )
+  ( Progress, ProgressState, ResponseFailure, ResponseResult )
+import qualified Tidepool.Agent.Reply.Internal as AgentReply
 import Tidepool.Effects.Core (Actor, ActorLocal, ActorInputOrigin (..))
 import qualified Tidepool.Effects.Core as Core
 import qualified Tidepool.Internal.ActorRef as Internal
@@ -157,7 +158,7 @@ command job = EventSource (\receive -> [Source.commandSource job receive])
 progress :: Progress p -> EventSource (ProgressState p)
 progress handle = EventSource (\receive -> [Actor.progressSource handle receive])
 
-settlement :: Response r -> EventSource (Either ResponseFailure (ResponseResult r))
+settlement :: AgentReply.Request r -> EventSource (Either ResponseFailure (ResponseResult r))
 settlement handle = EventSource (\receive -> [Actor.settlementSource handle receive])
 
 lifecycle :: ActorHandle api -> EventSource Actor.ActorLifecycle
@@ -312,7 +313,7 @@ data ActorSpec api effects = ActorSpec
   { specLabel :: Text
   , specProfile :: EffectProfile (Message api) effects
   , specRecord :: api (Definition (Handler (ActorState api) effects))
-  , specWorktree :: Maybe Core.WorktreeId
+  , specWorkspace :: Maybe Core.WorkspaceHandle
   }
 
 definition
@@ -322,14 +323,10 @@ definition
   -> ActorSpec api effects
 definition label profile record = ActorSpec label profile record Nothing
 
--- | Start the actor holding one registered worktree. Ownership is exclusive and
--- integrate authority follows the owned handle, so this is how a record actor comes
--- to own the tree it merges into: the parent creates the worktree and hands
--- the (still unbound) id here. An actor with a worktree resolves to the
--- coding role; one without resolves to research. The host admits at most one
--- worktree per actor, so a second call replaces the first.
-withWorktree :: Core.WorktreeId -> ActorSpec api effects -> ActorSpec api effects
-withWorktree tree spec = spec { specWorktree = Just tree }
+-- | Select an opaque workspace grant for startup. Its actual access is
+-- inherited by the new actor; behavior replacement keeps the existing attachment.
+withWorkspace :: Core.WorkspaceHandle -> ActorSpec api effects -> ActorSpec api effects
+withWorkspace workspace spec = spec { specWorkspace = Just workspace }
 
 type Derive api effects =
   ( Generic (api Shape)
@@ -355,12 +352,12 @@ lower
   :: forall api effects. Derive api effects
   => ActorSpec api effects
   -> (Actor.ActorDefinition (ActorState api) (Message api) (ActorState api), ActorState api)
-lower ActorSpec { specLabel = label, specProfile = profile, specRecord = record, specWorktree = worktree } =
+lower ActorSpec { specLabel = label, specProfile = profile, specRecord = record, specWorkspace = workspace } =
   let spec = View (from record)
       step :: forall result. ActorState api -> Message api result
            -> Eff effects (result, ActorState api)
       step state message = S.runState state (dispatch message spec)
-      hold = maybe id (\(Core.WorktreeId raw) -> ActorInternal.withLaunchWorktree raw) worktree
+      hold = maybe id ActorInternal.withLaunchWorkspace workspace
       actor = hold (Actor.withSources (sources @api @(Schema api) spec id)
         (Actor.stateful label profile step))
   in case states @api @(Schema api) spec of
@@ -417,7 +414,7 @@ forwardingExit (Forwarding ref) = Actor.pollExit ref
 
 forwardResult
   :: Member Actor effects
-  => Response value
+  => AgentReply.Request value
   -> Send (Either ResponseFailure (ResponseResult value))
   -> Eff effects (Forwarding value)
 forwardResult response endpoint = Forwarding <$> Actor.startActor

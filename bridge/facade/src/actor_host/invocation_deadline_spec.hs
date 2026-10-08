@@ -1,6 +1,8 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 module AgentSpec (agentSpec) where
 
@@ -9,7 +11,7 @@ import Data.Text (Text)
 import GHC.Generics (Generic)
 import Tidepool.Agent.Contract
 import Tidepool.Actors.Exomonad
-  ( AgentLaunch, WorkerLifetime (..), readonlyAgent, startAgent, withAgentLifetime )
+import qualified Tidepool.Agent.Contract as A
 import qualified Tidepool.Command as Cmd
 
 newtype LifetimeTools mode = LifetimeTools
@@ -29,6 +31,8 @@ afterProbe :: (Member AgentLaunch effects, Member Cmd.Commands effects)
 afterProbe call _
   | toolCallName call /= "lifetimeProbe" = pure NoAnnotation
   | otherwise = do
-      _ <- startAgent (withAgentLifetime InvocationOwned (readonlyAgent "invocation-deadline-child"))
+      _ <- spawnSubagent (FreshCtx "invocation deadline child") SameDir
+        ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
+          { spawnLabel = Just "invocation-deadline-child", spawnLifetime = InvocationOwned })
       _ <- Cmd.quiet (Cmd.run (Cmd.argv ["printf", "unreachable-slot-result"]))
       pure (Annotated "slot-finished")

@@ -1,12 +1,5 @@
-//! One worktree, one agent.
-//!
-//! Every agent gets its own managed worktree, all agents are isolated, and a
-//! managed worktree is the only workspace an agent can receive: at most one
-//! agent is ever bound to a worktree at a time, so there is no lease to
-//! acquire, no read-only mode to police, and no shared-directory coexistence
-//! to reason about. A reviewer of a child's work is isolated like everyone
-//! else: it gets its own worktree created from the child's branch. This
-//! module is the small amount of bookkeeping that remains.
+//! Exact actor-incarnation memberships in canonical workspace backings.
+//! Sharing a directory never shares attachment custody or actor identity.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -58,6 +51,20 @@ impl std::fmt::Display for AgentRef {
     }
 }
 
+/// Concrete filesystem permission, independent of effect membership.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceAccess {
+    ReadOnly,
+    #[default]
+    ReadWrite,
+}
+
+impl WorkspaceAccess {
+    pub fn permits(self, requested: Self) -> bool {
+        self == Self::ReadWrite || requested == Self::ReadOnly
+    }
+}
+
 /// Where a binding is in its life.
 ///
 /// `Terminal` and `Released` are distinct because they arise differently — an
@@ -66,7 +73,7 @@ impl std::fmt::Display for AgentRef {
 /// waiting for it".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BindingState {
-    /// The agent owns this worktree. No other agent may bind.
+    /// The actor has an active attachment to this workspace.
     Active,
     /// The agent reached a terminal state. Rebinding is permitted.
     Terminal,
@@ -111,6 +118,9 @@ pub struct Binding {
     worktree: WorktreeId,
     agent: AgentRef,
     state: BindingState,
+    access: WorkspaceAccess,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predecessor: Option<AgentRef>,
     bound_at_ms: i64,
 }
 
@@ -123,6 +133,14 @@ impl Binding {
         &self.agent
     }
 
+    pub fn predecessor(&self) -> Option<&AgentRef> {
+        self.predecessor.as_ref()
+    }
+
+    pub fn access(&self) -> WorkspaceAccess {
+        self.access
+    }
+
     pub fn state(&self) -> BindingState {
         self.state
     }
@@ -131,12 +149,15 @@ impl Binding {
         worktree: WorktreeId,
         agent: AgentRef,
         state: BindingState,
+        access: WorkspaceAccess,
         bound_at_ms: i64,
     ) -> Self {
         Self {
             worktree,
             agent,
             state,
+            access,
+            predecessor: None,
             bound_at_ms,
         }
     }
@@ -172,18 +193,18 @@ impl ActiveBinding {
     }
 }
 
-/// Tracks which agent owns which worktree.
+/// Tracks independently owned actor attachments to workspace backings.
 ///
 /// Durable alongside the registry: a restart that forgot its bindings would
-/// happily hand a retained worktree to a second writer while the first is still
-/// running. There is deliberately no in-memory-only constructor — every
+/// issue replacement custody while a retained participant may still be
+/// running. Sharing is explicit; it never provides process-stop evidence. There is deliberately no in-memory-only constructor — every
 /// binding decision this table makes has to survive a crash, so `open` (not
 /// `new`) is the only way to get one.
 ///
 /// One JSON file per worktree id under `root`, holding that worktree's full
 /// lease history (every agent that ever bound to it, each entry's `state`
 /// its outcome) — an append for `bind`, an in-place state edit for `settle`.
-/// The full history loads into memory at `open` so [`Self::current`] can stay
+/// The full history loads into memory at `open` so [`Self::membership`] can stay
 /// a cheap borrow; every mutation re-persists just the affected worktree's
 /// file with the same temp-file/fsync/rename discipline as the registry.
 #[derive(Debug)]
@@ -247,17 +268,45 @@ impl BindingTable {
         now_ms: i64,
     ) -> Result<ActiveBinding, WorktreeError> {
         self.ensure_writable()?;
+        // A transferred predecessor may later reattach as an independent
+        // peer. Reclaim the exact published successor before considering a
+        // predecessor row that would require a new transfer.
         let current = self
             .bindings
             .iter()
             .rposition(|entry| {
                 entry.binding.worktree() == worktree
                     && entry.binding.state() == BindingState::Active
+                    && entry.binding.agent() == successor
+                    && entry.binding.predecessor() == Some(predecessor)
+            })
+            .or_else(|| {
+                self.bindings.iter().rposition(|entry| {
+                    entry.binding.worktree() == worktree
+                        && entry.binding.state() == BindingState::Active
+                        && entry.binding.agent() == predecessor
+                })
             })
             .ok_or_else(|| WorktreeError::StorageFailure {
                 path: self.path_for(worktree),
                 detail: format!("worktree {worktree} has no durable Active binding to recover"),
             })?;
+        if self.bindings[current].generation.is_some() {
+            return Err(storage_failure(
+                &self.path_for(worktree),
+                "recovery cannot duplicate a live attachment receipt",
+            ));
+        }
+        if self.bindings.iter().enumerate().any(|(index, entry)| {
+            index != current
+                && entry.binding.state() == BindingState::Active
+                && entry.binding.agent() == successor
+        }) {
+            return Err(WorktreeError::WorktreeAuthorityDenied(
+                "successor already has an active workspace attachment".into(),
+            ));
+        }
+        let access = self.bindings[current].binding.access();
         let generation = self.next_generation;
         self.next_generation += 1;
         if self.bindings[current].binding.agent() == successor {
@@ -274,13 +323,16 @@ impl BindingTable {
             });
         }
         self.bindings[current].binding.state = BindingState::Released;
+        let mut binding = Binding::new(
+            worktree.clone(),
+            successor.clone(),
+            BindingState::Active,
+            access,
+            now_ms,
+        );
+        binding.predecessor = Some(predecessor.clone());
         self.bindings.push(BindingEntry {
-            binding: Binding::new(
-                worktree.clone(),
-                successor.clone(),
-                BindingState::Active,
-                now_ms,
-            ),
+            binding,
             generation: Some(generation),
         });
         if let Err(error) = self.persist(worktree) {
@@ -303,16 +355,28 @@ impl BindingTable {
         now_ms: i64,
     ) -> Result<(), WorktreeError> {
         let previous = self.active_index(lease)?;
+        if self.bindings.iter().any(|entry| {
+            entry.binding.state() == BindingState::Active && entry.binding.agent() == successor
+        }) {
+            return Err(WorktreeError::WorktreeAuthorityDenied(
+                "successor already has an active workspace attachment".into(),
+            ));
+        }
+        let access = self.bindings[previous].binding.access();
         let generation = self.next_generation;
         self.next_generation += 1;
+        let predecessor = self.bindings[previous].binding.agent().clone();
         self.bindings[previous].binding.state = BindingState::Released;
+        let mut binding = Binding::new(
+            lease.worktree.clone(),
+            successor.clone(),
+            BindingState::Active,
+            access,
+            now_ms,
+        );
+        binding.predecessor = Some(predecessor);
         self.bindings.push(BindingEntry {
-            binding: Binding::new(
-                lease.worktree.clone(),
-                successor.clone(),
-                BindingState::Active,
-                now_ms,
-            ),
+            binding,
             generation: Some(generation),
         });
         lease.generation = generation;
@@ -335,7 +399,9 @@ impl BindingTable {
             .iter()
             .rev()
             .find(|binding| {
-                binding.binding.agent() == agent && binding.binding.state() == BindingState::Active
+                binding.binding.agent() == agent
+                    && binding.binding.state() == BindingState::Active
+                    && binding.generation.is_some()
             })
             .map(|entry| entry.binding.worktree())
     }
@@ -409,6 +475,18 @@ impl BindingTable {
             }));
         }
 
+        let mut active_agents = std::collections::BTreeSet::new();
+        for entry in &bindings {
+            if entry.binding.state() == BindingState::Active
+                && !active_agents.insert(entry.binding.agent().clone())
+            {
+                return Err(storage_failure(
+                    root,
+                    "durable history contains multiple active primary attachments for one actor",
+                ));
+            }
+        }
+
         Ok(Self {
             dir,
             bindings,
@@ -441,21 +519,22 @@ impl BindingTable {
     /// Bind an agent to a worktree, returning the [`ActiveBinding`] lease
     /// for the row just created.
     ///
-    /// [`WorktreeError::WorktreeBusy`] when an `Active` binding already exists,
-    /// naming the current holder — the failure has to be explicit enough that
-    /// the resident can act on it, which means saying who is in the way.
+    /// A workspace may have many independently writable participants. An exact
+    /// actor may have one primary attachment; duplicate admission is refused.
     pub fn bind(
         &mut self,
         worktree: &WorktreeId,
         agent: &AgentRef,
+        access: WorkspaceAccess,
         now_ms: i64,
     ) -> Result<ActiveBinding, WorktreeError> {
         self.ensure_writable()?;
-        if let Some(current) = self.current(worktree) {
-            return Err(WorktreeError::WorktreeBusy {
-                worktree: worktree.clone(),
-                holder: current.agent().to_string(),
-            });
+        if self.bindings.iter().any(|entry| {
+            entry.binding.agent() == agent && entry.binding.state() == BindingState::Active
+        }) {
+            return Err(WorktreeError::WorktreeAuthorityDenied(format!(
+                "actor {agent} already has an active workspace attachment"
+            )));
         }
         let generation = self.next_generation;
         self.next_generation += 1;
@@ -464,6 +543,7 @@ impl BindingTable {
                 worktree.clone(),
                 agent.clone(),
                 BindingState::Active,
+                access,
                 now_ms,
             ),
             generation: Some(generation),
@@ -491,7 +571,7 @@ impl BindingTable {
     /// settled (and, since then, rebound) fails loud instead of silently
     /// settling the NEW occupant. That case is a genuine invariant violation
     /// rather than a normal outcome (a live `ActiveBinding` is, by
-    /// construction, the only receipt for its worktree until consumed — see
+    /// construction, the only receipt for its membership generation until consumed — see
     /// the type's docs), reported as a storage invariant failure.
     fn settle(&mut self, lease: ActiveBinding, to: BindingTerminal) -> Result<(), WorktreeError> {
         let i = self.active_index(&lease)?;
@@ -530,9 +610,9 @@ impl BindingTable {
         Ok(())
     }
 
-    /// Only confirmed active bindings. An uncertain table grants no authority;
-    /// retained rows are diagnostic until exclusive reopen reconciles disk.
-    pub fn current(&self, worktree: &WorktreeId) -> Option<&Binding> {
+    /// Exact confirmed attachment authority. Reopened rows require explicit
+    /// process-stop recovery before they authorize commands or resource grants.
+    pub fn membership(&self, worktree: &WorktreeId, agent: &AgentRef) -> Option<&Binding> {
         if self.write_uncertain {
             return None;
         }
@@ -540,9 +620,28 @@ impl BindingTable {
             .iter()
             .find(|entry| {
                 entry.binding.worktree() == worktree
+                    && entry.binding.agent() == agent
                     && entry.binding.state() == BindingState::Active
+                    && entry.generation.is_some()
             })
             .map(|entry| &entry.binding)
+    }
+
+    /// Durable active participants, including unrecovered diagnostic rows.
+    /// Persistence uncertainty is a refusal, never an empty backing.
+    pub fn participants<'a>(
+        &'a self,
+        worktree: &'a WorktreeId,
+    ) -> Result<impl Iterator<Item = &'a Binding>, WorktreeError> {
+        self.ensure_writable()?;
+        Ok(self
+            .bindings
+            .iter()
+            .filter(move |entry| {
+                entry.binding.worktree() == worktree
+                    && entry.binding.state() == BindingState::Active
+            })
+            .map(|entry| &entry.binding))
     }
 }
 
@@ -570,15 +669,17 @@ mod tests {
 
         let mut table = BindingTable::open(&dir_anchor, "").unwrap();
         // Bound, then dropped WITHOUT settling: the degraded-cleanup shape.
-        let _retained = table.bind(&tree, &previous_run, 1).unwrap();
+        let _retained = table
+            .bind(&tree, &previous_run, WorkspaceAccess::ReadWrite, 1)
+            .unwrap();
         drop(_retained);
         drop(table);
 
         let table = BindingTable::open(&dir_anchor, "").unwrap();
         assert_eq!(
             table.active_for_agent(&previous_run),
-            Some(&tree),
-            "the retained row is still that run's own custody"
+            None,
+            "reopened durable history does not issue live custody"
         );
         assert_eq!(
             table.active_for_agent(&AgentRef::exact_actor("run-b", 2, 1)),
@@ -586,10 +687,39 @@ mod tests {
             "a later run's actor 2/1 must not inherit run-a's retained worktree"
         );
         assert_eq!(
-            table.current(&tree).map(Binding::agent),
+            table
+                .participants(&tree)
+                .unwrap()
+                .next()
+                .map(Binding::agent),
             Some(&previous_run),
             "the retained row still names its holder, so rebinding fails loud"
         );
+    }
+
+    #[test]
+    fn recovery_cannot_claim_an_unrelated_peer_as_the_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(dir.path()).unwrap();
+        let tree = WorktreeId::from_raw("shared-recovery");
+        let predecessor = AgentRef::exact_actor("run", 1, 1);
+        let peer = AgentRef::exact_actor("run", 2, 1);
+        let mut table = BindingTable::open(&anchor, "").unwrap();
+        drop(
+            table
+                .bind(&tree, &predecessor, WorkspaceAccess::ReadWrite, 1)
+                .unwrap(),
+        );
+        drop(
+            table
+                .bind(&tree, &peer, WorkspaceAccess::ReadOnly, 2)
+                .unwrap(),
+        );
+        drop(table);
+        let mut table = BindingTable::open(&anchor, "").unwrap();
+        assert!(table.recover_active(&tree, &predecessor, &peer, 3).is_err());
+        assert!(table.membership(&tree, &peer).is_none());
+        assert_eq!(table.participants(&tree).unwrap().count(), 2);
     }
 
     #[test]
@@ -601,14 +731,25 @@ mod tests {
         let successor = AgentRef::exact_actor("run", 2, 2);
 
         let mut table = BindingTable::open(&dir_anchor, "").unwrap();
-        drop(table.bind(&tree, &predecessor, 1).unwrap());
+        drop(
+            table
+                .bind(&tree, &predecessor, WorkspaceAccess::ReadWrite, 1)
+                .unwrap(),
+        );
         drop(table);
 
         let mut table = BindingTable::open(&dir_anchor, "").unwrap();
         let recovered = table
             .recover_active(&tree, &predecessor, &successor, 2)
             .unwrap();
-        assert_eq!(table.current(&tree).map(Binding::agent), Some(&successor));
+        assert_eq!(
+            table
+                .participants(&tree)
+                .unwrap()
+                .next()
+                .map(Binding::agent),
+            Some(&successor)
+        );
         drop(recovered);
         drop(table);
 
@@ -617,7 +758,7 @@ mod tests {
             .recover_active(&tree, &predecessor, &successor, 3)
             .unwrap();
         reclaimed.complete(&mut table).unwrap();
-        assert!(table.current(&tree).is_none());
+        assert!(table.participants(&tree).unwrap().next().is_none());
     }
 
     #[test]
@@ -629,13 +770,17 @@ mod tests {
         let predecessor = AgentRef::exact_actor("run", 2, 1);
         let successor = AgentRef::exact_actor("run", 2, 2);
         let mut table = BindingTable::open(&dir_anchor, "").unwrap();
-        drop(table.bind(&tree, &holder, 1).unwrap());
+        drop(
+            table
+                .bind(&tree, &holder, WorkspaceAccess::ReadWrite, 1)
+                .unwrap(),
+        );
         drop(table);
 
         let mut table = BindingTable::open(&dir_anchor, "").unwrap();
         assert!(matches!(
             table.recover_active(&tree, &predecessor, &successor, 2),
-            Err(WorktreeError::WorktreeBusy { holder: actual, .. }) if actual == holder.to_string()
+            Err(WorktreeError::StorageFailure { .. })
         ));
     }
 }

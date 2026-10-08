@@ -8,6 +8,7 @@ pub fn bound_worktree_decl() -> crate::EffectDecl {
         description: "Granular Exomonad capability delegated to the canonical Worktree handler.",
         prompt_card: None,
         constructors: &[
+            "BoundWorkspaceGet :: BoundWorktree (Either WorktreeError WorkspaceHandle)",
             "BoundWorktreeGet :: BoundWorktree (Either WorktreeError WorktreeHandle)",
             "BoundWorktreeLookup :: WorktreeId -> BoundWorktree (Either WorktreeError WorktreeHandle)",
             "BoundWorktreeBranchOf :: WorktreeId -> BoundWorktree (Either WorktreeError BranchName)",

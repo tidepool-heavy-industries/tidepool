@@ -207,7 +207,7 @@ impl HostedOperationSettlement {
             ProviderNativeCustody::Computing(_) => {
                 return Err(ResidentToolError::Unavailable(
                     "native operation is still computing".into(),
-                ))
+                ));
             }
             ProviderNativeCustody::Finished(control) => {
                 let reply = control.terminal_reply().ok_or_else(|| {
@@ -247,14 +247,14 @@ mod tests {
     use super::*;
     use crate::{ActorId, ActorRef, CellExitCause, KernelStep};
     use exomonad_tool::{ConversationOrigin, OriginalOperation, ToolInvocationOrigin};
-    use tidepool_runtime::session::{WorkbenchForkBoundary, WorkbenchRunStatus};
+    use tidepool_runtime::session::{ContextCheckpointBoundary, WorkbenchRunStatus};
 
     fn issued(
         call: &str,
     ) -> (
         ActorRef,
         Arc<WorkbenchExecutionControl>,
-        WorkbenchForkBoundary,
+        ContextCheckpointBoundary,
     ) {
         let actor = ActorRef::first(ActorId(7));
         let original = OriginalOperation {
@@ -271,7 +271,7 @@ mod tests {
             call_id: call.into(),
             namespace: None,
         }));
-        (actor, control, WorkbenchForkBoundary::Hosted(original))
+        (actor, control, ContextCheckpointBoundary::Hosted(original))
     }
 
     fn native_finish(

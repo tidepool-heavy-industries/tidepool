@@ -58,15 +58,9 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 3);
     let (provider, mut requests) = hosted_script_provider();
-    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
-        config.research_policy = exomonad_actor::ResearchPolicy {
-            maximum_depth: 1,
-            maximum_active_children: Some(2),
-            default_depth: 1,
-        };
-    })
-    .await
-    .expect("production checkpoint host starts");
+    let host = HostedTestRuntime::start_configured(&settings, &provider, |_| {})
+        .await
+        .expect("production checkpoint host starts");
     host.run_scenario(|host| {
         Box::pin(async move {
             host.input("Exercise issuer retirement and checkpoint release.")

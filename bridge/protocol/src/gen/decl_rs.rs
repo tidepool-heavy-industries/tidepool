@@ -63,7 +63,7 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         let mut hidden = Vec::new();
         for type_def in &effect.type_defs {
             if !effect.authored_surface.includes_type_def(type_def.name) {
-                hidden.push(type_def.name);
+                hidden.extend(type_def.surface_names());
             }
         }
         for verb in &effect.verbs {
@@ -105,6 +105,49 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         }
     }
     contents.push_str("];\n");
+    contents.push_str("\n/// Import items that hide complete private data declarations.\n");
+    contents.push_str("pub(crate) const AUTHORED_HIDING_IMPORTS: &[&str] = &[\n");
+    for effect in effects {
+        for type_def in &effect.type_defs {
+            if !effect.authored_surface.includes_type_def(type_def.name) {
+                contents.push_str(&format!(
+                    "    {},\n",
+                    rust_string_literal(&format!("{}(..)", type_def.name))
+                ));
+            }
+        }
+        for verb in &effect.verbs {
+            if !effect.authored_surface.includes_verb(verb.ctor) {
+                contents.push_str(&format!("    {},\n", rust_string_literal(verb.ctor)));
+            }
+        }
+        for helper in &effect.helpers {
+            if !effect.authored_surface.includes_helper(helper.name) {
+                contents.push_str(&format!("    {},\n", rust_string_literal(helper.name)));
+            }
+        }
+    }
+    contents.push_str("];\n");
+    contents.push_str("\n/// Capability types reimported without constructors into Authored.\n");
+    let abstract_types: Vec<_> = effects
+        .iter()
+        .flat_map(|effect| effect.authored_surface.abstract_types())
+        .map(|name| rust_string_literal(name))
+        .collect();
+    let compact = format!(
+        "pub(crate) const AUTHORED_ABSTRACT_TYPES: &[&str] = &[{}];",
+        abstract_types.join(", ")
+    );
+    if compact.len() <= 100 {
+        contents.push_str(&compact);
+        contents.push('\n');
+    } else {
+        contents.push_str("pub(crate) const AUTHORED_ABSTRACT_TYPES: &[&str] = &[\n");
+        for name in abstract_types {
+            contents.push_str(&format!("    {name},\n"));
+        }
+        contents.push_str("];\n");
+    }
     GeneratedFile {
         path: "bridge/mcp/src/generated/mod.rs".to_string(),
         contents,

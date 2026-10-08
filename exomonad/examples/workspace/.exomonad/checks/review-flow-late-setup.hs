@@ -1,9 +1,10 @@
 {-# LANGUAGE QuasiQuotes #-}
 import Tidepool.Effects.Core (GitRef (..))
-let campaign = campaignName :: CampaignLabel
-let task = Task (batch campaign "component") "plans/component.md" sourceHead
-      "Implement one component" "Exercise fresh review and bounded repair"
-      ["review-flow.txt"] "Read exact committed source" []
-(worker, _updates) <- unfold (taskGroup task)
-  (childWithProgress @WorkProgress @(Outcome Candidate)
-    (withLifetime ActorOwned $ withContext (selected taskContext) $ coding (atRef (GitRef (renderGitOid sourceHead))) (assignment [label|implement|] task)))
+let work = (task "implement" "Implement one component" ["review-flow.txt"] "Read exact committed source" sourceHead)
+      { planPath = "plans/component.md", rationale = "Exercise fresh review and bounded repair" }
+Right workerAgent <- spawnSubagent (FreshCtx (taskContext work))
+  (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
+Right (worker, _updates) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions

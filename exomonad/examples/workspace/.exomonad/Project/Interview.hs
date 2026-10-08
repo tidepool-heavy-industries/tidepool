@@ -21,7 +21,7 @@ import Exomonad.Contrib.Types
 
 data InterviewItem
   = KnownAnswer Question (ResponseResult DesignAnswer)
-  | AwaitAnswer Question (Response DesignAnswer)
+  | AwaitAnswer Question (Request DesignAnswer)
 
 data InterviewFinding
   = Answered Question (ResponseResult DesignAnswer)

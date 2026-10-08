@@ -1,21 +1,26 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+
+import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Actors.Exomonad
+
 do
   Just seed <- R.call (readSeed (R.client seedStore)) ()
-  (alpha, beta) <- unfold (batch ("embedded-checkpoint" :: CampaignLabel)
-    ("checkpoint-readers" :: ForkGroupLabel))
-    ( (,) <$> child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
-        (researching @Text projectHead
-          (assignment [label|checkpoint-alpha|] ("read the captured Haskell context" :: Text)))))
-        <*> child (withLifetime ActorOwned (withContext (fromCheckpoint seed)
-        (researching @Text projectHead
-          (assignment [label|checkpoint-beta|] ("read the captured Haskell context" :: Text)))))
-    )
+  let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
+  Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
+    ((defaultSpawnOptions workerSpec) { spawnLabel = Just "checkpoint-alpha", spawnLifetime = ActorOwned })
+  Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
+    ((defaultSpawnOptions workerSpec) { spawnLabel = Just "checkpoint-beta", spawnLifetime = ActorOwned })
+  Right alphaRequest <- request @Text alpha ("read the captured Haskell context" :: Text)
+    (defaultRequestOptions { requestLabel = Just "checkpoint-alpha" })
+  Right betaRequest <- request @Text beta ("read the captured Haskell context" :: Text)
+    (defaultRequestOptions { requestLabel = Just "checkpoint-beta" })
+  R.send (storeAgents (R.client groupStore)) [alpha, beta]
   firstRelease <- releaseCheckpoint seed
   secondRelease <- releaseCheckpoint seed
-  refusal <- attemptUnfold (batch ("embedded-checkpoint" :: CampaignLabel)
-    ("after-release" :: ForkGroupLabel))
-    (child (withContext (fromCheckpoint seed)
-      (researching @Text projectHead
-        (assignment [label|after-release|] ("must not be admitted" :: Text)))))
+  refusal <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
+    (defaultSpawnOptions workerSpec)
   case (firstRelease, secondRelease, refusal) of
-    (Right (), Right (), Left (UnfoldCheckpointRefused ReleasedCheckpoint)) -> pure True
+    (Right (), Right (), Left (SpawnRefused _)) -> pure True
     _ -> error "checkpoint release/refusal contract failed" >> pure True

@@ -86,6 +86,44 @@ class ComponentProjectionTests(unittest.TestCase):
                     configurations=[dict(phase=phase, flags={"test-tools": phase != "production", "benchmarks": phase == "benchmarks"}, components=list(values))
                                     for phase, values in zip(("production", "tests", "benchmarks"), (production, tests, benchmarks))])
 
+    def test_workspace_runtime_resources_have_owning_native_exports(self):
+        workspace_package = G.WORKSPACE.parent
+        exports = []
+        environment = {
+            "load": lambda *args: None,
+            "export_file": lambda **rule: exports.append(rule),
+            "filegroup": lambda **rule: None,
+            "glob": lambda patterns: sorted({
+                path.relative_to(workspace_package).as_posix()
+                for pattern in patterns for path in workspace_package.glob(pattern)
+                if path.is_file()
+            }),
+        }
+        for filename in ("authored_sources.bzl", "BUCK"):
+            path = workspace_package / filename
+            exec(compile(path.read_text(), str(path), "exec"), environment)
+        declared = {"//exomonad/examples/workspace:" + rule["name"]: rule for rule in exports}
+        suite = component("workspace-resources", "test-suite", "tests",
+                          (str(G.WORKSPACE),), (), main="checks/automation-helper-contract.hs")
+        rendered = ast.parse(G.render(self.metadata(tests=[suite])))
+        resource_call = next(node for node in ast.walk(rendered)
+                             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                             and node.func.id == "filegroup"
+                             and any(keyword.arg == "name"
+                                     and ast.literal_eval(keyword.value) == "workspace_resources_resources"
+                                     for keyword in node.keywords))
+        resources = ast.literal_eval(next(keyword.value for keyword in resource_call.keywords
+                                          if keyword.arg == "srcs"))
+        selected = {relative: target for relative, target in resources.items()
+                    if target.startswith("//exomonad/examples/workspace:")}
+        self.assertIn("workspace/.exomonad/checks/usage-examples.json", selected)
+        for relative, target in selected.items():
+            with self.subTest(resource=relative):
+                path = G.WORKSPACE / relative.removeprefix("workspace/.exomonad/")
+                export = declared[target]
+                self.assertEqual(export["src"], path.relative_to(workspace_package).as_posix())
+                self.assertEqual(export["out"], path.name)
+
     def test_project_libraries_are_edges_and_installed_packages_are_roots(self):
         library = component("internal", dependencies=[dependency("ghc"), dependency("cryptohash-sha256")])
         consumer = component("control", "test-suite", "tests", ("test",), (),

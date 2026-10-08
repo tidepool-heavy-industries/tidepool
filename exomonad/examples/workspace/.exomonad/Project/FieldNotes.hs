@@ -6,9 +6,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 
--- | Record root-side observations about completed tool calls. The hook is
--- stateless: cadence comes from the runtime-issued result ordinal, and only a
--- theory that crosses its policy creates a journal entry.
+-- | Record observations about completed tool calls where this hook is installed.
+-- Cadence comes from the runtime-issued result ordinal, and only a theory that
+-- crosses its policy creates a journal entry.
 module Project.FieldNotes
   ( Rubric (..)
   , Policy (..)
@@ -33,14 +33,12 @@ import qualified Jev.Operators as J
 import Jev.Operators (Packet ((:=), (:&)))
 import Tidepool.Agent.Contract (Annotation (..), ToolCall (..), ToolResult (..))
 import Tidepool.Actors.Exomonad
-  ( ActorContextInfo (..)
-  , ActorContextRole (..)
-  , ConversationRole (..)
+  ( ConversationRole (..)
   , ConversationTurn (..)
   , TurnItem (..)
   )
 import Tidepool.Aeson.Value (Value (..), object, (.=), toJSON)
-import Tidepool.Effects.Core (ActorContext, Jev, Journal, Reflect, actorContext, reflect)
+import Tidepool.Effects.Core (Jev, Journal, Reflect, reflect)
 import Tidepool.Journal (record)
 import qualified Data.Map.Strict as Map
 
@@ -93,7 +91,7 @@ type ChoiceOptions =
         J.:|: ("fourth" J.::> Int)))
 
 fieldNotes
-  :: (Member Jev effects, Member ActorContext effects, Member Reflect effects, Member Journal effects)
+  :: (Member Jev effects, Member Reflect effects, Member Journal effects)
   => Int
   -> Theories
   -> ToolCall
@@ -101,13 +99,8 @@ fieldNotes
   -> Eff effects Annotation
 fieldNotes cadence theories call result
   | cadence <= 0 = pure (Abstained "field-note cadence must be positive")
-  | otherwise = do
-      context <- actorContext
-      if contextRole context /= ContextRoot
-        then pure (Abstained "field notes are installed on the root only")
-        else if not (shouldObserveOrdinal cadence (toolResultOrdinal result))
-          then pure NoAnnotation
-          else judgeTheories
+  | not (shouldObserveOrdinal cadence (toolResultOrdinal result)) = pure NoAnnotation
+  | otherwise = judgeTheories
   where
     judgeTheories = do
       reflected <- reflect 4
@@ -303,7 +296,7 @@ coreTheories = Theories
       ]
   , choiceTheories =
       [ ChoiceTheory "current-mode"
-          "Which mode best describes the root's current tool activity?"
+          "Which mode best describes this actor's current tool activity?"
           ("stuck", "exploring", "finishing", "waiting on a child")
           (WhenIn ["stuck", "waiting on a child"])
       ]

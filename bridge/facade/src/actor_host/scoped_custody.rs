@@ -149,7 +149,7 @@ fn remaining(deadline: Instant) -> Result<std::time::Duration, ScopedProcessErro
 pub(super) struct ScopedHostRetention {
     // Keep the exact installed lease owner alive without requiring production
     // callers to reconstruct its concrete Arc from the erased kernel handle.
-    _custody: Option<Arc<dyn exomonad_actor::ForkWorkspaceCustody>>,
+    _custody: Option<Arc<dyn exomonad_actor::WorkspaceCustody>>,
     #[cfg(test)]
     state: Arc<parking_lot::Mutex<CustodyState>>,
     pub(super) slot: Arc<parking_lot::Mutex<ScopedProcessSlot>>,
@@ -167,7 +167,7 @@ pub(super) fn reserve_source_checkout() -> ScopedHostRetention {
 }
 
 pub(super) fn reserve(
-    custody: Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
+    custody: Arc<dyn exomonad_actor::WorkspaceCustody>,
     actor: ActorRef,
 ) -> Result<ScopedHostRetention, ScopedClaimError> {
     let _state = {

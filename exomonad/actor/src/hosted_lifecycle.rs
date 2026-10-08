@@ -50,6 +50,7 @@ impl ResidentCleanupOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForestRootShutdown {
+    RunResources(CleanupComponentOutcome),
     Settled(ResidentShutdown),
     Failed {
         actor: ActorRef,
@@ -62,7 +63,8 @@ pub enum ForestRootShutdown {
 
 impl ForestRootShutdown {
     pub fn is_confirmed(&self) -> bool {
-        matches!(self, Self::Settled(shutdown) if shutdown.cleanup.is_confirmed())
+        matches!(self, Self::RunResources(CleanupComponentOutcome::Confirmed))
+            || matches!(self, Self::Settled(shutdown) if shutdown.cleanup.is_confirmed())
     }
 }
 

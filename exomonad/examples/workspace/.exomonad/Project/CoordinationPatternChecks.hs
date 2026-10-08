@@ -46,7 +46,7 @@ construction = do
       _ -> False)
   check "the shared packet composes with a local question"
     (case lookupCase "review-mixed" of
-      [input] -> isRight (J.request J.jevLatest (comparisonState input)
+      [input] -> isRight (J.prepare J.jevLatest (comparisonState input)
         (comparisonPacket reviewedCandidateCriteria J.:&
           #needs_source J.:= J.noul "Is another source needed to interpret this review?"))
       _ -> False)
@@ -57,7 +57,7 @@ construction = do
 liveCases
   :: Member Jev effects
   => Eff effects [(Text, ComparisonResult,
-    Either ComparisonResult (Either J.JevError ComparisonRun))]
+    Either ComparisonResult (Either (J.JevError J.JevCallError) ComparisonRun))]
 liveCases = mapM run exampleCases
   where
     run (name, criteria, input, expected) = do

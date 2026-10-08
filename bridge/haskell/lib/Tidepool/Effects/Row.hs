@@ -17,12 +17,15 @@ import Data.Kind (Type)
 import Tidepool.Agent.Reply (Replies)
 import Tidepool.Agent.Watch (Watches)
 import Tidepool.Effects.Core
-  ( Journal
+  ( ResourceScopes
+  , Journal
   , RepoEvent
   , ActorContext
   , AgentControl
   , Commands
   , Console
+  , AskUser
+  , Green
   , Notifications
   , Jev
   , ModelCall
@@ -32,7 +35,6 @@ import Tidepool.Effects.Core
   , AgentInspection
   , AgentLaunch
   , BoundWorktree
-  , Forks
   , Reflect
   , Source
   , WorktreeAllocation
@@ -81,10 +83,11 @@ instance KnownEffect BoundWorktree where effectWitness = EffectWitness EffectBou
 instance KnownEffect WorktreeRegistry where effectWitness = EffectWitness EffectWorktreeRegistry
 instance KnownEffect WorktreeAllocation where effectWitness = EffectWitness EffectWorktreeAllocation
 instance KnownEffect WorktreeIntegration where effectWitness = EffectWitness EffectWorktreeIntegration
-instance KnownEffect Forks where effectWitness = EffectWitness EffectForks
 instance KnownEffect Sleep where effectWitness = EffectWitness EffectSleep
 instance KnownEffect Commands where effectWitness = EffectWitness EffectCommands
 instance KnownEffect Console where effectWitness = EffectWitness EffectConsole
+instance KnownEffect AskUser where effectWitness = EffectWitness EffectAskUser
+instance KnownEffect Green where effectWitness = EffectWitness EffectGreen
 instance KnownEffect Notifications where effectWitness = EffectWitness EffectNotifications
 instance KnownEffect Jev where effectWitness = EffectWitness EffectJev
 instance KnownEffect ModelCall where effectWitness = EffectWitness EffectModelCall
@@ -94,3 +97,5 @@ instance KnownEffect Lookup where effectWitness = EffectWitness EffectLookup
 instance KnownEffect Source where effectWitness = EffectWitness EffectSource
 instance KnownEffect RepoEvent where effectWitness = EffectWitness EffectRepoEvent
 instance KnownEffect Journal where effectWitness = EffectWitness EffectJournal
+
+instance KnownEffect ResourceScopes where effectWitness = EffectWitness EffectResourceScopes

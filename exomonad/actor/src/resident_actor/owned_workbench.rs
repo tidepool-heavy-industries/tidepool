@@ -373,6 +373,25 @@ where
 }
 
 pub(super) enum WorkbenchFragmentRequest {
+    Scoped {
+        fragment: ResidentWorkbenchFragment,
+        outcome: ResidentOutcome,
+        realm: RealmId,
+    },
+    ScopeStart {
+        fragment: ResidentWorkbenchFragment,
+        callback: RootCustody,
+        realm: RealmId,
+        token: i64,
+        work: Arc<InvocationWork>,
+    },
+    ScopeResume {
+        fragment: ResidentWorkbenchFragment,
+        operation: futures_util::future::BoxFuture<
+            'static,
+            Result<ResidentOutcome, ResidentActorWorkbenchError>,
+        >,
+    },
     Settle {
         fragment: ResidentWorkbenchFragment,
         outcome: ResidentOutcome,
@@ -384,6 +403,10 @@ pub(super) enum WorkbenchFragmentRequest {
 }
 
 pub(super) enum WorkbenchFragmentAdvance {
+    ScopeFailed {
+        fragment: ResidentWorkbenchFragment,
+        error: ResidentActorWorkbenchError,
+    },
     Captured {
         fragment: ResidentWorkbenchFragment,
         boundary: ResidentActorBoundary,
@@ -404,11 +427,74 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    let scoped = match request {
+        WorkbenchFragmentRequest::Scoped {
+            fragment,
+            outcome,
+            realm,
+        } => Some((fragment, Ok(outcome), Some(realm))),
+        WorkbenchFragmentRequest::ScopeStart {
+            fragment,
+            callback,
+            realm,
+            token,
+            work,
+        } => Some((
+            fragment,
+            runner
+                .run_owned_scope_callback(context.clone(), callback, realm, token, work)
+                .await,
+            Some(realm),
+        )),
+        WorkbenchFragmentRequest::ScopeResume {
+            fragment,
+            operation,
+        } => {
+            return Ok(match operation.await {
+                Ok(outcome) => WorkbenchFragmentAdvance::Captured {
+                    fragment,
+                    boundary: ResidentActorBoundary::ScopeResumed { outcome },
+                },
+                Err(error) => WorkbenchFragmentAdvance::ScopeFailed { fragment, error },
+            });
+        }
+        request => return advance_unscoped(workbench, runner, context, request).await,
+    };
+    let (fragment, outcome, realm) = scoped.expect("scoped request");
+    let boundary = match outcome {
+        Ok(outcome) => {
+            runner
+                .capture_boundary(context, outcome, realm.expect("body realm"))
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    Ok(match boundary {
+        Ok(boundary) => WorkbenchFragmentAdvance::Captured { fragment, boundary },
+        Err(error) => WorkbenchFragmentAdvance::ScopeFailed { fragment, error },
+    })
+}
+
+async fn advance_unscoped<H, O>(
+    workbench: &crate::ResidentActorWorkbench<H, O>,
+    runner: &ResidentActorRunner<H, O>,
+    context: ActorSessionContext,
+    request: WorkbenchFragmentRequest,
+) -> Result<WorkbenchFragmentAdvance, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
     let step = match request {
         WorkbenchFragmentRequest::Settle { fragment, outcome } => {
             workbench
                 .settle_item(context.clone(), fragment, outcome)
                 .await?
+        }
+        WorkbenchFragmentRequest::Scoped { .. }
+        | WorkbenchFragmentRequest::ScopeStart { .. }
+        | WorkbenchFragmentRequest::ScopeResume { .. } => {
+            unreachable!("scoped request routed before fragment settlement")
         }
         WorkbenchFragmentRequest::ReplyRejection {
             continuation,
@@ -889,8 +975,8 @@ where
                     admitted_source,
                     reservation_owner,
                     invocation_work,
-                    publication: ForkPublication::Workbench {
-                        boundary: request.fork_boundary().cloned(),
+                    publication: CheckpointPublication::Workbench {
+                        boundary: request.checkpoint_boundary().cloned(),
                         capture,
                     },
                     after_tool_active: false,
@@ -1186,6 +1272,7 @@ where
                         Ok(WorkbenchRunAdvance::ParkEffect) => {
                             behavior.owned_effect_task(owned, kernel.clone())
                         }
+                        Ok(WorkbenchRunAdvance::ParkGreen) => behavior.owned_green_task(owned),
                         Ok(WorkbenchRunAdvance::ParkUnit) => Self::owned_unit_task(owned),
                         Ok(WorkbenchRunAdvance::ParkNative) => behavior.owned_fragment_task(owned),
                         Ok(WorkbenchRunAdvance::ParkAfterToolStart) => {
@@ -1662,117 +1749,7 @@ where
                     },
                 );
             }
-            OwnedWorkbenchWait::DeferredCommit(prepared) => {
-                let environment = self.environment.clone();
-                let readiness_kernel = kernel.clone();
-                return Self::owned_step_task(
-                    owned,
-                    move |_| {
-                        Box::pin(captured_commit::await_ready_deferred(
-                            environment,
-                            readiness_kernel,
-                            prepared,
-                        ))
-                    },
-                    move |behavior, kernel, owned, ready| {
-                        let scopes = behavior.apply_ready_deferred_commit(kernel, ready);
-                        let environment = behavior.environment.clone();
-                        Ok(WorkbenchAdvance::Park(Self::owned_step_task(
-                            owned,
-                            move |_| Box::pin(captured_commit::await_scopes(environment, scopes)),
-                            move |behavior, kernel, owned, finalized| {
-                                let release =
-                                    behavior.apply_finalized_deferred_commit(kernel, finalized);
-                                let environment = behavior.environment.clone();
-                                let release_kernel = kernel.clone();
-                                Ok(WorkbenchAdvance::Park(Self::owned_step_task(
-                                    owned,
-                                    move |_| {
-                                        Box::pin(captured_commit::await_release(
-                                            environment,
-                                            release_kernel,
-                                            release,
-                                        ))
-                                    },
-                                    move |behavior, kernel, owned, completed| {
-                                        let resume = behavior.settle_captured_commit(completed);
-                                        let operation = Box::pin(captured_commit::resume(
-                                            behavior.environment.clone(),
-                                            kernel.clone(),
-                                            resume,
-                                        ));
-                                        let pending = ParkedWorkbenchEffect {
-                                            display: pending.display,
-                                            wait: OwnedWorkbenchWait::Prepared(operation),
-                                            ordinal: pending.ordinal,
-                                            effect: pending.effect,
-                                            started: pending.started,
-                                            success_disposition: pending.success_disposition,
-                                        };
-                                        Ok(WorkbenchAdvance::Park(
-                                            behavior.resume_owned_effect_task(
-                                                owned,
-                                                kernel.clone(),
-                                                pending,
-                                            ),
-                                        ))
-                                    },
-                                )))
-                            },
-                        )))
-                    },
-                );
-            }
-            OwnedWorkbenchWait::CapturedCommit(prepared) => {
-                let environment = self.environment.clone();
-                let readiness_kernel = kernel.clone();
-                return Self::owned_step_task(
-                    owned,
-                    move |_| {
-                        Box::pin(captured_commit::await_ready(
-                            environment,
-                            readiness_kernel,
-                            prepared,
-                        ))
-                    },
-                    move |behavior, kernel, owned, ready| {
-                        let release = behavior.apply_captured_commit(kernel, ready);
-                        let environment = behavior.environment.clone();
-                        let release_kernel = kernel.clone();
-                        Ok(WorkbenchAdvance::Park(Self::owned_step_task(
-                            owned,
-                            move |_| {
-                                Box::pin(captured_commit::await_release(
-                                    environment,
-                                    release_kernel,
-                                    release,
-                                ))
-                            },
-                            move |behavior, kernel, owned, completed| {
-                                let resume = behavior.settle_captured_commit(completed);
-                                let operation = Box::pin(captured_commit::resume(
-                                    behavior.environment.clone(),
-                                    kernel.clone(),
-                                    resume,
-                                ));
-                                let pending = ParkedWorkbenchEffect {
-                                    display: pending.display,
-                                    wait: OwnedWorkbenchWait::Prepared(operation),
-                                    ordinal: pending.ordinal,
-                                    effect: pending.effect,
-                                    started: pending.started,
-                                    success_disposition: pending.success_disposition,
-                                };
-                                Ok(WorkbenchAdvance::Park(behavior.resume_owned_effect_task(
-                                    owned,
-                                    kernel.clone(),
-                                    pending,
-                                )))
-                            },
-                        )))
-                    },
-                );
-            }
+
             OwnedWorkbenchWait::Launch(prepared) => {
                 let environment = self.environment.clone();
                 let launch_kernel = kernel.clone();
@@ -1836,7 +1813,7 @@ where
             let environment = self.environment.clone();
             let permitted = self
                 .descriptor
-                .effective_role()
+                .capabilities()
                 .effect_keys()
                 .contains(&crate::ActorEffectKey::Commands);
             return OwnedWorkbenchTask::new(Box::pin(async move {
@@ -1975,7 +1952,7 @@ where
         let environment = self.environment.clone();
         let commands_permitted = self
             .descriptor
-            .effective_role()
+            .capabilities()
             .effect_keys()
             .contains(&crate::ActorEffectKey::Commands);
         let context = owned.state.effects.context.clone();
@@ -2033,7 +2010,53 @@ where
             .unwrap_or_else(crate::WorkbenchExecutionControl::untracked);
         let invocation = owned.state.effects.invocation_work.clone();
         let model = owned.state.effects.model.clone();
-        let boundary = owned.state.effects.publication.boundary().cloned();
+        if owned
+            .state
+            .cursor
+            .running
+            .as_ref()
+            .is_some_and(|current| current.green.is_some())
+        {
+            let (wait, receipt) = green_notebook::EffectReceipt::split(pending);
+            let control = owned
+                .state
+                .cursor
+                .running
+                .as_ref()
+                .and_then(|current| current.green.as_ref())
+                .and_then(green::GreenInvocation::active_wait_control)
+                .unwrap_or(control);
+            // Each child's expiry claim is independent. Whole-cell cancellation
+            // is still observed by the original owned Green task.
+            control.arm_sleep();
+            let operation = Box::pin(await_effect(
+                environment,
+                kernel,
+                context,
+                control,
+                wait,
+                commands_permitted,
+                invocation,
+                model,
+            ));
+            let mut owned = owned;
+            let current = owned
+                .state
+                .cursor
+                .running
+                .as_mut()
+                .expect("async original fragment");
+            current.inflight_effect = None;
+            current
+                .green
+                .as_mut()
+                .expect("async frontiers")
+                .enqueue_frontier(
+                    std::mem::take(&mut current.scopes),
+                    Box::pin(async move { receipt.attach(operation.await) }),
+                );
+            return self.owned_green_task(owned);
+        }
         let observed_child = pending.wait.observe_after_resume();
         Self::owned_step_task(
             owned,
@@ -2047,7 +2070,6 @@ where
                     commands_permitted,
                     invocation,
                     model,
-                    boundary,
                 ))
             },
             move |behavior, _kernel, mut owned, mut result| {
@@ -2134,6 +2156,57 @@ where
                     Err(error) => current.resume_failure = Some(error),
                 }
                 Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned)))
+            },
+        )
+    }
+
+    fn owned_green_task(&self, owned: OwnedExecution<H, O>) -> OwnedWorkbenchTask<Self> {
+        Self::owned_step_task(
+            owned,
+            |owned| {
+                Box::pin(async move {
+                    let control = owned
+                        .state
+                        .effects
+                        .control
+                        .clone()
+                        .expect("original async cancellation owner");
+                    let green = owned
+                        .state
+                        .cursor
+                        .running
+                        .as_mut()
+                        .expect("original async fragment")
+                        .green
+                        .as_mut()
+                        .expect("async frontiers");
+                    tokio::select! {
+                        biased;
+                        () = control.wait_for_cancellation() => {
+                            green.cancel_parent();
+                            Err(ResidentActorWorkbenchError::InvocationCancelled)
+                        }
+                        ready = green.next() => ready,
+                    }
+                })
+            },
+            |behavior, kernel, mut owned, result| {
+                let applied = result.and_then(|completion| {
+                    behavior.apply_green_completion(&mut owned.state, completion)
+                });
+                match applied {
+                    Ok(true) => Ok(WorkbenchAdvance::Park(Self::continue_owned_task(owned))),
+                    Ok(false) => Ok(WorkbenchAdvance::Park(behavior.owned_green_task(owned))),
+                    Err(error) => {
+                        let failure = workbench_failure(
+                            &owned.state.cursor.receipts,
+                            owned.state.cursor.index,
+                            owned.state.request.items.len(),
+                            error,
+                        );
+                        Self::begin_owned_finalization(behavior, kernel, owned, Err(failure))
+                    }
+                }
             },
         )
     }
@@ -2252,7 +2325,6 @@ where
         result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     ) -> OwnedWorkbenchTask<Self> {
         let runner = environment.runner.clone();
-        let capture_environment = environment.clone();
         Self::owned_step_task(
             owned,
             move |owned| {
@@ -2262,52 +2334,10 @@ where
                     .expect("publication retains original private admission")
                     .clone();
                 let context = owned.state.effects.context.clone();
-                let boundary = owned.state.effects.publication.boundary().cloned();
                 Box::pin(async move {
                     let actor = context.actor;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_started", "workbench phase");
-                    let children = boundary
-                        .as_ref()
-                        .map(|boundary| {
-                            capture_environment
-                                .fork_groups
-                                .ready_groups_at_boundary(actor, boundary)
-                                .into_iter()
-                                .flat_map(|(_, children)| children)
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    let retain_fork_source = {
-                        let actors = capture_environment.actors.lock();
-                        let mut needed = false;
-                        for child in children {
-                            if let Some(record) = actors
-                                .get(&child)
-                                .filter(|record| record.terminal.is_none())
-                            {
-                                let descriptor = &record.descriptor;
-                                if descriptor.creator() == Some(actor)
-                                    && descriptor.fork_boundary() == boundary.as_ref()
-                                    && descriptor.checkpoint_token().is_none()
-                                    && descriptor
-                                        .source_imports()
-                                        .inherited_scope()
-                                        .map_err(|error| {
-                                            ResidentActorWorkbenchError::ActorProtocol(
-                                                error.to_string(),
-                                            )
-                                        })?
-                                        .is_some()
-                                {
-                                    needed = true;
-                                }
-                            }
-                        }
-                        needed
-                    };
-                    let published = runner
-                        .publish_private_execution(context, private, retain_fork_source)
-                        .await;
+                    let published = runner.publish_private_execution(context, private).await;
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %actor, phase = "private_publish_completed", "workbench phase");
                     published
                 })
@@ -2315,21 +2345,6 @@ where
             move |behavior, _kernel, owned, published| {
                 use crate::resident_workbench::PrivateExecutionPublication;
                 use tidepool_runtime::session::PublicManifestCommit;
-                if let Ok(PrivateExecutionPublication::Manifest {
-                    fork_source: Some(source),
-                    ..
-                }) = &published
-                {
-                    behavior.workbench_executions.lock().retain_fork_source(
-                        owned
-                            .state
-                            .request
-                            .execution_id()
-                            .expect("publication retains admitted execution identity"),
-                        owned.state.invocation.as_ref(),
-                        source.clone(),
-                    );
-                }
                 match published {
                     Ok(PrivateExecutionPublication::Manifest {
                         commit: PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral,
@@ -2671,7 +2686,7 @@ fn terminal_task<B: 'static>(
     })))
 }
 
-async fn await_effect<H, O>(
+pub(super) async fn await_effect<H, O>(
     environment: ResidentEnvironment<H, O>,
     kernel: KernelContext,
     context: ActorSessionContext,
@@ -2680,17 +2695,13 @@ async fn await_effect<H, O>(
     commands_permitted: bool,
     invocation: Arc<InvocationWork>,
     model: Option<Arc<dyn crate::CellModelBinding>>,
-    boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
 ) -> commands::CommandResolution
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
     let result = match wait {
-        OwnedWorkbenchWait::Launch(_)
-        | OwnedWorkbenchWait::Display { .. }
-        | OwnedWorkbenchWait::CapturedCommit(_)
-        | OwnedWorkbenchWait::DeferredCommit(_) => {
+        OwnedWorkbenchWait::Launch(_) | OwnedWorkbenchWait::Display { .. } => {
             unreachable!("child launch requires fenced actor application")
         }
         OwnedWorkbenchWait::Prepared(operation) => operation.await,
@@ -2728,6 +2739,7 @@ where
         OwnedWorkbenchWait::Exit {
             continuation,
             terminal,
+            ..
         } => {
             terminal_wait::await_exit(
                 environment,
@@ -2750,7 +2762,7 @@ where
                 .await
         }
         OwnedWorkbenchWait::Watch(poll) => {
-            request_wait::await_watch(environment, kernel, context, control, poll, boundary).await
+            request_wait::await_watch(environment, kernel, context, control, poll).await
         }
         OwnedWorkbenchWait::Sleep {
             continuation,
@@ -2972,11 +2984,11 @@ mod authority_tests {
                 .ok_or_else(|| "foreign source issuer".into())
         }
 
-        fn layer_include(&self, _: &[String]) -> Result<Vec<PathBuf>, String> {
+        fn layer_include_for(&self, _: &str) -> Result<Vec<PathBuf>, String> {
             Ok(Vec::new())
         }
 
-        fn bind(&self, _: tidepool_repr::PrincipalId, _: &[String]) {}
+        fn bind_for(&self, _: tidepool_repr::PrincipalId, _: &str) {}
     }
 
     fn context() -> crate::ActorSessionContext {

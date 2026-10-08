@@ -73,6 +73,7 @@ rust_filegroup(
         "src/actor_host/delivery.rs": "bridge/facade/src/actor_host/delivery.rs",
         "src/actor_host/display_output.rs": "bridge/facade/src/actor_host/display_output.rs",
         "src/actor_host/effect_vocabulary.rs": "bridge/facade/src/actor_host/effect_vocabulary.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_policy.rs": "bridge/facade/src/actor_host/embedded_policy.rs",
@@ -80,6 +81,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -118,14 +120,9 @@ rust_filegroup(
         "src/run_map/mod.rs": "bridge/facade/src/run_map/mod.rs",
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -200,6 +197,7 @@ rust_filegroup(
         "src/actor_host/delivery.rs": "bridge/facade/src/actor_host/delivery.rs",
         "src/actor_host/display_output.rs": "bridge/facade/src/actor_host/display_output.rs",
         "src/actor_host/effect_vocabulary.rs": "bridge/facade/src/actor_host/effect_vocabulary.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_policy.rs": "bridge/facade/src/actor_host/embedded_policy.rs",
@@ -207,6 +205,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -249,14 +248,9 @@ rust_filegroup(
         "src/run_map/mod.rs": "bridge/facade/src/run_map/mod.rs",
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -332,6 +326,7 @@ rust_filegroup(
         "src/actor_host/delivery.rs": "bridge/facade/src/actor_host/delivery.rs",
         "src/actor_host/display_output.rs": "bridge/facade/src/actor_host/display_output.rs",
         "src/actor_host/effect_vocabulary.rs": "bridge/facade/src/actor_host/effect_vocabulary.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_policy.rs": "bridge/facade/src/actor_host/embedded_policy.rs",
@@ -339,6 +334,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -381,14 +377,9 @@ rust_filegroup(
         "src/run_map/mod.rs": "bridge/facade/src/run_map/mod.rs",
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -464,6 +455,7 @@ rust_filegroup(
         "src/actor_host/delivery.rs": "bridge/facade/src/actor_host/delivery.rs",
         "src/actor_host/display_output.rs": "bridge/facade/src/actor_host/display_output.rs",
         "src/actor_host/effect_vocabulary.rs": "bridge/facade/src/actor_host/effect_vocabulary.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_policy.rs": "bridge/facade/src/actor_host/embedded_policy.rs",
@@ -471,6 +463,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -513,14 +506,9 @@ rust_filegroup(
         "src/run_map/mod.rs": "bridge/facade/src/run_map/mod.rs",
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -596,6 +584,7 @@ rust_filegroup(
         "src/actor_host/delivery.rs": "bridge/facade/src/actor_host/delivery.rs",
         "src/actor_host/display_output.rs": "bridge/facade/src/actor_host/display_output.rs",
         "src/actor_host/effect_vocabulary.rs": "bridge/facade/src/actor_host/effect_vocabulary.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_policy.rs": "bridge/facade/src/actor_host/embedded_policy.rs",
@@ -603,6 +592,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -645,14 +635,9 @@ rust_filegroup(
         "src/run_map/mod.rs": "bridge/facade/src/run_map/mod.rs",
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -728,6 +713,7 @@ rust_filegroup(
         "src/actor_host/delivery.rs": "bridge/facade/src/actor_host/delivery.rs",
         "src/actor_host/display_output.rs": "bridge/facade/src/actor_host/display_output.rs",
         "src/actor_host/effect_vocabulary.rs": "bridge/facade/src/actor_host/effect_vocabulary.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_policy.rs": "bridge/facade/src/actor_host/embedded_policy.rs",
@@ -735,6 +721,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -782,14 +769,9 @@ rust_filegroup(
         "src/run_map/mod.rs": "bridge/facade/src/run_map/mod.rs",
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -882,6 +864,7 @@ rust_filegroup(
         "src/actor_host/delivery.rs": "bridge/facade/src/actor_host/delivery.rs",
         "src/actor_host/display_output.rs": "bridge/facade/src/actor_host/display_output.rs",
         "src/actor_host/effect_vocabulary.rs": "bridge/facade/src/actor_host/effect_vocabulary.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_policy.rs": "bridge/facade/src/actor_host/embedded_policy.rs",
@@ -889,6 +872,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -936,14 +920,9 @@ rust_filegroup(
         "src/run_map/mod.rs": "bridge/facade/src/run_map/mod.rs",
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -1036,6 +1015,7 @@ rust_filegroup(
         "src/actor_host/delivery.rs": "bridge/facade/src/actor_host/delivery.rs",
         "src/actor_host/display_output.rs": "bridge/facade/src/actor_host/display_output.rs",
         "src/actor_host/effect_vocabulary.rs": "bridge/facade/src/actor_host/effect_vocabulary.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_policy.rs": "bridge/facade/src/actor_host/embedded_policy.rs",
@@ -1043,6 +1023,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -1090,14 +1071,9 @@ rust_filegroup(
         "src/run_map/mod.rs": "bridge/facade/src/run_map/mod.rs",
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -1190,6 +1166,7 @@ rust_filegroup(
         "src/actor_host/delivery.rs": "bridge/facade/src/actor_host/delivery.rs",
         "src/actor_host/display_output.rs": "bridge/facade/src/actor_host/display_output.rs",
         "src/actor_host/effect_vocabulary.rs": "bridge/facade/src/actor_host/effect_vocabulary.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_policy.rs": "bridge/facade/src/actor_host/embedded_policy.rs",
@@ -1197,6 +1174,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/m1_browser_process.rs": "bridge/facade/src/actor_host/m1_browser_process.rs",
@@ -1244,14 +1222,9 @@ rust_filegroup(
         "src/run_map/mod.rs": "bridge/facade/src/run_map/mod.rs",
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -1334,9 +1307,6 @@ tidepool_rust_isolated_test(
 rust_filegroup(
     name = "tidepool_unit_tests_sources",
     mapped_srcs = {
-        "//:facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md": ".exomonad/workspace/skills/exomonad-jev/SKILL.md",
-        "//:facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md": ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md",
-        "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md": ".exomonad/workspace/skills/exomonad-workbench/SKILL.md",
         "//bridge/atomic-write:directory_fault_fixture": "bridge/atomic-write/tests/fixtures/directory_fault.c",
         "Cargo.toml": "bridge/facade/Cargo.toml",
         "src/actor_host.rs": "bridge/facade/src/actor_host.rs",
@@ -1361,6 +1331,7 @@ rust_filegroup(
         "src/actor_host/embedded_agent_spec_tests.rs": "bridge/facade/src/actor_host/embedded_agent_spec_tests.rs",
         "src/actor_host/embedded_cancel_receipt_tests.rs": "bridge/facade/src/actor_host/embedded_cancel_receipt_tests.rs",
         "src/actor_host/embedded_captured_unfold_tests.rs": "bridge/facade/src/actor_host/embedded_captured_unfold_tests.rs",
+        "src/actor_host/embedded_checkpoint_capture.hs": "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs",
         "src/actor_host/embedded_checkpoint_children_survive_later_failure_tests.rs": "bridge/facade/src/actor_host/embedded_checkpoint_children_survive_later_failure_tests.rs",
         "src/actor_host/embedded_checkpoint_children_tests.rs": "bridge/facade/src/actor_host/embedded_checkpoint_children_tests.rs",
         "src/actor_host/embedded_checkpoint_release_tests.rs": "bridge/facade/src/actor_host/embedded_checkpoint_release_tests.rs",
@@ -1379,12 +1350,37 @@ rust_filegroup(
         "src/actor_host/embedded_restart_driver_tests.rs": "bridge/facade/src/actor_host/embedded_restart_driver_tests.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
         "src/actor_host/embedded_shutdown_tests.rs": "bridge/facade/src/actor_host/embedded_shutdown_tests.rs",
+        "src/actor_host/fixtures/api-guide/command.hs": "bridge/facade/src/actor_host/fixtures/api-guide/command.hs",
+        "src/actor_host/fixtures/api-guide/human-forms.hs": "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs",
+        "src/actor_host/fixtures/api-guide/lookup.hs": "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs",
+        "src/actor_host/fixtures/api-guide/reflect.hs": "bridge/facade/src/actor_host/fixtures/api-guide/reflect.hs",
+        "src/actor_host/fixtures/api-guide/request-setup.hs": "bridge/facade/src/actor_host/fixtures/api-guide/request-setup.hs",
+        "src/actor_host/fixtures/api-guide/request.hs": "bridge/facade/src/actor_host/fixtures/api-guide/request.hs",
+        "src/actor_host/fixtures/captured_context_original_owner_setup.hs": "bridge/facade/src/actor_host/fixtures/captured_context_original_owner_setup.hs",
+        "src/actor_host/fixtures/child_attachment_alias_failure.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_alias_failure.hs",
+        "src/actor_host/fixtures/child_attachment_observe_reply.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_observe_reply.hs",
+        "src/actor_host/fixtures/child_attachment_valid_request.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_valid_request.hs",
+        "src/actor_host/fixtures/context_acceptance_idle_request.hs": "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_request.hs",
+        "src/actor_host/fixtures/context_acceptance_idle_spawn.hs": "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_spawn.hs",
         "src/actor_host/fixtures/spec_reload_flake.lock": "bridge/facade/src/actor_host/fixtures/spec_reload_flake.lock",
         "src/actor_host/fixtures/spec_reload_flake.nix": "bridge/facade/src/actor_host/fixtures/spec_reload_flake.nix",
+        "src/actor_host/fixtures/supplied_live_observe.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe.hs",
+        "src/actor_host/fixtures/supplied_live_observe_again.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe_again.hs",
+        "src/actor_host/fixtures/supplied_live_observe_immediate.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe_immediate.hs",
+        "src/actor_host/fixtures/supplied_live_refuse.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_refuse.hs",
+        "src/actor_host/fixtures/supplied_live_replace.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_replace.hs",
+        "src/actor_host/fixtures/supplied_live_request.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_request.hs",
+        "src/actor_host/fixtures/supplied_live_request_again.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_request_again.hs",
+        "src/actor_host/fixtures/supplied_live_root.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_root.hs",
+        "src/actor_host/fixtures/supplied_live_spawn.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_spawn.hs",
+        "src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs",
+        "src/actor_host/fixtures/supplied_live_tools.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_tools.hs",
+        "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/fresh_child_tests.rs": "bridge/facade/src/actor_host/fresh_child_tests.rs",
         "src/actor_host/host_incarnation.rs": "bridge/facade/src/actor_host/host_incarnation.rs",
         "src/actor_host/hosted_test_context.rs": "bridge/facade/src/actor_host/hosted_test_context.rs",
         "src/actor_host/hosted_tools_tests.rs": "bridge/facade/src/actor_host/hosted_tools_tests.rs",
+        "src/actor_host/inherited_response_released.hs": "bridge/facade/src/actor_host/inherited_response_released.hs",
         "src/actor_host/invocation_lifetime_tests.rs": "bridge/facade/src/actor_host/invocation_lifetime_tests.rs",
         "src/actor_host/jev_tests.rs": "bridge/facade/src/actor_host/jev_tests.rs",
         "src/actor_host/lookup_availability_tests.rs": "bridge/facade/src/actor_host/lookup_availability_tests.rs",
@@ -1411,7 +1407,6 @@ rust_filegroup(
         "src/actor_host/provider_attachment.rs": "bridge/facade/src/actor_host/provider_attachment.rs",
         "src/actor_host/recipe_checks.rs": "bridge/facade/src/actor_host/recipe_checks.rs",
         "src/actor_host/recipe_checks/prepared_contract_tests.rs": "bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs",
-        "src/actor_host/research_policy_tests.rs": "bridge/facade/src/actor_host/research_policy_tests.rs",
         "src/actor_host/root_declaration_recovery.rs": "bridge/facade/src/actor_host/root_declaration_recovery.rs",
         "src/actor_host/scaffold_admission_tests.rs": "bridge/facade/src/actor_host/scaffold_admission_tests.rs",
         "src/actor_host/scoped_custody.rs": "bridge/facade/src/actor_host/scoped_custody.rs",
@@ -1420,6 +1415,7 @@ rust_filegroup(
         "src/actor_host/test_campaign.rs": "bridge/facade/src/actor_host/test_campaign.rs",
         "src/actor_host/tests.rs": "bridge/facade/src/actor_host/tests.rs",
         "src/actor_host/workspace.rs": "bridge/facade/src/actor_host/workspace.rs",
+        "src/actor_host/workspace_admission_tests.rs": "bridge/facade/src/actor_host/workspace_admission_tests.rs",
         "src/actor_host/workspace_cleanup.rs": "bridge/facade/src/actor_host/workspace_cleanup.rs",
         "src/compile_report/classify.rs": "bridge/facade/src/compile_report/classify.rs",
         "src/compile_report/mod.rs": "bridge/facade/src/compile_report/mod.rs",
@@ -1448,19 +1444,10 @@ rust_filegroup(
         "src/run_map/review.rs": "bridge/facade/src/run_map/review.rs",
         "src/run_map/trace.rs": "bridge/facade/src/run_map/trace.rs",
         "//exomonad/examples/workspace:facade_test_sources": "exomonad/examples/workspace",
+        "//exomonad/prompts:agent_prompt": "exomonad/prompts/agent.md",
         "//exomonad/prompts:api_guide_prompt": "exomonad/prompts/api-guide.md",
         "//exomonad/prompts:base_prompt": "exomonad/prompts/base.md",
-        "//exomonad/prompts:doc_deadline": "exomonad/prompts/docs/deadline.md",
         "//exomonad/prompts:doc_reflect": "exomonad/prompts/docs/reflect.md",
-        "//exomonad/prompts:doc_request": "exomonad/prompts/docs/request.md",
-        "//exomonad/prompts:doc_watch": "exomonad/prompts/docs/watch.md",
-        "//exomonad/prompts:doc_workbench": "exomonad/prompts/docs/workbench.md",
-        "//exomonad/prompts:integration_agent_prompt": "exomonad/prompts/integration-agent.md",
-        "//exomonad/prompts:readonly_agent_prompt": "exomonad/prompts/readonly-agent.md",
-        "//exomonad/prompts:recreated_root_prompt": "exomonad/prompts/recreated-root.md",
-        "//exomonad/prompts:root_prompt": "exomonad/prompts/root.md",
-        "//exomonad/prompts:scaffolding_agent_prompt": "exomonad/prompts/scaffolding-agent.md",
-        "//exomonad/prompts:worktree_agent_prompt": "exomonad/prompts/worktree-agent.md",
     },
     visibility = ["PUBLIC"],
 )
@@ -2029,19 +2016,18 @@ rust_filegroup(
         "tests/exomonad_action_surface.rs": "bridge/facade/tests/exomonad_action_surface.rs",
         "tests/exomonad_action_surface/ExternalRowProtocol.hs": "bridge/facade/tests/exomonad_action_surface/ExternalRowProtocol.hs",
         "tests/exomonad_action_surface/async_without_green.hs": "bridge/facade/tests/exomonad_action_surface/async_without_green.hs",
-        "tests/exomonad_action_surface/coding_can_unfold.hs": "bridge/facade/tests/exomonad_action_surface/coding_can_unfold.hs",
-        "tests/exomonad_action_surface/coding_children_admit_as_siblings.hs": "bridge/facade/tests/exomonad_action_surface/coding_children_admit_as_siblings.hs",
-        "tests/exomonad_action_surface/deliberation_absent.hs": "bridge/facade/tests/exomonad_action_surface/deliberation_absent.hs",
-        "tests/exomonad_action_surface/errand.hs": "bridge/facade/tests/exomonad_action_surface/errand.hs",
-        "tests/exomonad_action_surface/errand_needs_launch.hs": "bridge/facade/tests/exomonad_action_surface/errand_needs_launch.hs",
-        "tests/exomonad_action_surface/label_polymorphism.hs": "bridge/facade/tests/exomonad_action_surface/label_polymorphism.hs",
-        "tests/exomonad_action_surface/narrow_research_cannot_control.hs": "bridge/facade/tests/exomonad_action_surface/narrow_research_cannot_control.hs",
+        "tests/exomonad_action_surface/cannot_control_without_agent_control.hs": "bridge/facade/tests/exomonad_action_surface/cannot_control_without_agent_control.hs",
+        "tests/exomonad_action_surface/cannot_spawn_without_agent_launch.hs": "bridge/facade/tests/exomonad_action_surface/cannot_spawn_without_agent_launch.hs",
+        "tests/exomonad_action_surface/delegate_request.hs": "bridge/facade/tests/exomonad_action_surface/delegate_request.hs",
+        "tests/exomonad_action_surface/helper_needs_spawn_effect.hs": "bridge/facade/tests/exomonad_action_surface/helper_needs_spawn_effect.hs",
+        "tests/exomonad_action_surface/independent_children.hs": "bridge/facade/tests/exomonad_action_surface/independent_children.hs",
+        "tests/exomonad_action_surface/minimal_spawn.hs": "bridge/facade/tests/exomonad_action_surface/minimal_spawn.hs",
+        "tests/exomonad_action_surface/ordinary_labels.hs": "bridge/facade/tests/exomonad_action_surface/ordinary_labels.hs",
         "tests/exomonad_action_surface/public_agents.hs": "bridge/facade/tests/exomonad_action_surface/public_agents.hs",
         "tests/exomonad_action_surface/request_type_diagnostic.hs": "bridge/facade/tests/exomonad_action_surface/request_type_diagnostic.hs",
-        "tests/exomonad_action_surface/research_can_unfold.hs": "bridge/facade/tests/exomonad_action_surface/research_can_unfold.hs",
-        "tests/exomonad_action_surface/research_leaf_cannot_unfold.hs": "bridge/facade/tests/exomonad_action_surface/research_leaf_cannot_unfold.hs",
         "tests/exomonad_action_surface/reusable_helper_rows.hs": "bridge/facade/tests/exomonad_action_surface/reusable_helper_rows.hs",
         "tests/exomonad_action_surface/skill_promised_names.hs": "bridge/facade/tests/exomonad_action_surface/skill_promised_names.hs",
+        "tests/exomonad_action_surface/spawn_context_workspace_choices.hs": "bridge/facade/tests/exomonad_action_surface/spawn_context_workspace_choices.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -2343,6 +2329,7 @@ filegroup(
         "bridge/facade/src/actor_host/embedded_agent_spec_tests.rs": "src/actor_host/embedded_agent_spec_tests.rs",
         "bridge/facade/src/actor_host/embedded_cancel_receipt_tests.rs": "src/actor_host/embedded_cancel_receipt_tests.rs",
         "bridge/facade/src/actor_host/embedded_captured_unfold_tests.rs": "src/actor_host/embedded_captured_unfold_tests.rs",
+        "bridge/facade/src/actor_host/embedded_checkpoint_capture.hs": "src/actor_host/embedded_checkpoint_capture.hs",
         "bridge/facade/src/actor_host/embedded_checkpoint_children_survive_later_failure_tests.rs": "src/actor_host/embedded_checkpoint_children_survive_later_failure_tests.rs",
         "bridge/facade/src/actor_host/embedded_checkpoint_children_tests.rs": "src/actor_host/embedded_checkpoint_children_tests.rs",
         "bridge/facade/src/actor_host/embedded_checkpoint_release_tests.rs": "src/actor_host/embedded_checkpoint_release_tests.rs",
@@ -2361,12 +2348,37 @@ filegroup(
         "bridge/facade/src/actor_host/embedded_restart_driver_tests.rs": "src/actor_host/embedded_restart_driver_tests.rs",
         "bridge/facade/src/actor_host/embedded_service.rs": "src/actor_host/embedded_service.rs",
         "bridge/facade/src/actor_host/embedded_shutdown_tests.rs": "src/actor_host/embedded_shutdown_tests.rs",
+        "bridge/facade/src/actor_host/fixtures/api-guide/command.hs": "src/actor_host/fixtures/api-guide/command.hs",
+        "bridge/facade/src/actor_host/fixtures/api-guide/human-forms.hs": "src/actor_host/fixtures/api-guide/human-forms.hs",
+        "bridge/facade/src/actor_host/fixtures/api-guide/lookup.hs": "src/actor_host/fixtures/api-guide/lookup.hs",
+        "bridge/facade/src/actor_host/fixtures/api-guide/reflect.hs": "src/actor_host/fixtures/api-guide/reflect.hs",
+        "bridge/facade/src/actor_host/fixtures/api-guide/request-setup.hs": "src/actor_host/fixtures/api-guide/request-setup.hs",
+        "bridge/facade/src/actor_host/fixtures/api-guide/request.hs": "src/actor_host/fixtures/api-guide/request.hs",
+        "bridge/facade/src/actor_host/fixtures/captured_context_original_owner_setup.hs": "src/actor_host/fixtures/captured_context_original_owner_setup.hs",
+        "bridge/facade/src/actor_host/fixtures/child_attachment_alias_failure.hs": "src/actor_host/fixtures/child_attachment_alias_failure.hs",
+        "bridge/facade/src/actor_host/fixtures/child_attachment_observe_reply.hs": "src/actor_host/fixtures/child_attachment_observe_reply.hs",
+        "bridge/facade/src/actor_host/fixtures/child_attachment_valid_request.hs": "src/actor_host/fixtures/child_attachment_valid_request.hs",
+        "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_request.hs": "src/actor_host/fixtures/context_acceptance_idle_request.hs",
+        "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_spawn.hs": "src/actor_host/fixtures/context_acceptance_idle_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/spec_reload_flake.lock": "src/actor_host/fixtures/spec_reload_flake.lock",
         "bridge/facade/src/actor_host/fixtures/spec_reload_flake.nix": "src/actor_host/fixtures/spec_reload_flake.nix",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_observe.hs": "src/actor_host/fixtures/supplied_live_observe.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_observe_again.hs": "src/actor_host/fixtures/supplied_live_observe_again.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_observe_immediate.hs": "src/actor_host/fixtures/supplied_live_observe_immediate.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_refuse.hs": "src/actor_host/fixtures/supplied_live_refuse.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_replace.hs": "src/actor_host/fixtures/supplied_live_replace.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_request.hs": "src/actor_host/fixtures/supplied_live_request.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_request_again.hs": "src/actor_host/fixtures/supplied_live_request_again.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_root.hs": "src/actor_host/fixtures/supplied_live_root.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_spawn.hs": "src/actor_host/fixtures/supplied_live_spawn.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs": "src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs",
+        "bridge/facade/src/actor_host/fixtures/supplied_live_tools.hs": "src/actor_host/fixtures/supplied_live_tools.hs",
+        "bridge/facade/src/actor_host/form_output.rs": "src/actor_host/form_output.rs",
         "bridge/facade/src/actor_host/fresh_child_tests.rs": "src/actor_host/fresh_child_tests.rs",
         "bridge/facade/src/actor_host/host_incarnation.rs": "src/actor_host/host_incarnation.rs",
         "bridge/facade/src/actor_host/hosted_test_context.rs": "src/actor_host/hosted_test_context.rs",
         "bridge/facade/src/actor_host/hosted_tools_tests.rs": "src/actor_host/hosted_tools_tests.rs",
+        "bridge/facade/src/actor_host/inherited_response_released.hs": "src/actor_host/inherited_response_released.hs",
         "bridge/facade/src/actor_host/invocation_lifetime_tests.rs": "src/actor_host/invocation_lifetime_tests.rs",
         "bridge/facade/src/actor_host/jev_tests.rs": "src/actor_host/jev_tests.rs",
         "bridge/facade/src/actor_host/lookup_availability_tests.rs": "src/actor_host/lookup_availability_tests.rs",
@@ -2393,7 +2405,6 @@ filegroup(
         "bridge/facade/src/actor_host/provider_attachment.rs": "src/actor_host/provider_attachment.rs",
         "bridge/facade/src/actor_host/recipe_checks.rs": "src/actor_host/recipe_checks.rs",
         "bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs": "src/actor_host/recipe_checks/prepared_contract_tests.rs",
-        "bridge/facade/src/actor_host/research_policy_tests.rs": "src/actor_host/research_policy_tests.rs",
         "bridge/facade/src/actor_host/root_declaration_recovery.rs": "src/actor_host/root_declaration_recovery.rs",
         "bridge/facade/src/actor_host/scaffold_admission_tests.rs": "src/actor_host/scaffold_admission_tests.rs",
         "bridge/facade/src/actor_host/scoped_custody.rs": "src/actor_host/scoped_custody.rs",
@@ -2402,6 +2413,7 @@ filegroup(
         "bridge/facade/src/actor_host/test_campaign.rs": "src/actor_host/test_campaign.rs",
         "bridge/facade/src/actor_host/tests.rs": "src/actor_host/tests.rs",
         "bridge/facade/src/actor_host/workspace.rs": "src/actor_host/workspace.rs",
+        "bridge/facade/src/actor_host/workspace_admission_tests.rs": "src/actor_host/workspace_admission_tests.rs",
         "bridge/facade/src/actor_host/workspace_cleanup.rs": "src/actor_host/workspace_cleanup.rs",
         "bridge/facade/src/bin/exomonad-view-helper.rs": "src/bin/exomonad-view-helper.rs",
         "bridge/facade/src/bin/exomonad.rs": "src/bin/exomonad.rs",
@@ -2435,19 +2447,18 @@ filegroup(
         "bridge/facade/tests/exomonad_action_surface.rs": "tests/exomonad_action_surface.rs",
         "bridge/facade/tests/exomonad_action_surface/ExternalRowProtocol.hs": "tests/exomonad_action_surface/ExternalRowProtocol.hs",
         "bridge/facade/tests/exomonad_action_surface/async_without_green.hs": "tests/exomonad_action_surface/async_without_green.hs",
-        "bridge/facade/tests/exomonad_action_surface/coding_can_unfold.hs": "tests/exomonad_action_surface/coding_can_unfold.hs",
-        "bridge/facade/tests/exomonad_action_surface/coding_children_admit_as_siblings.hs": "tests/exomonad_action_surface/coding_children_admit_as_siblings.hs",
-        "bridge/facade/tests/exomonad_action_surface/deliberation_absent.hs": "tests/exomonad_action_surface/deliberation_absent.hs",
-        "bridge/facade/tests/exomonad_action_surface/errand.hs": "tests/exomonad_action_surface/errand.hs",
-        "bridge/facade/tests/exomonad_action_surface/errand_needs_launch.hs": "tests/exomonad_action_surface/errand_needs_launch.hs",
-        "bridge/facade/tests/exomonad_action_surface/label_polymorphism.hs": "tests/exomonad_action_surface/label_polymorphism.hs",
-        "bridge/facade/tests/exomonad_action_surface/narrow_research_cannot_control.hs": "tests/exomonad_action_surface/narrow_research_cannot_control.hs",
+        "bridge/facade/tests/exomonad_action_surface/cannot_control_without_agent_control.hs": "tests/exomonad_action_surface/cannot_control_without_agent_control.hs",
+        "bridge/facade/tests/exomonad_action_surface/cannot_spawn_without_agent_launch.hs": "tests/exomonad_action_surface/cannot_spawn_without_agent_launch.hs",
+        "bridge/facade/tests/exomonad_action_surface/delegate_request.hs": "tests/exomonad_action_surface/delegate_request.hs",
+        "bridge/facade/tests/exomonad_action_surface/helper_needs_spawn_effect.hs": "tests/exomonad_action_surface/helper_needs_spawn_effect.hs",
+        "bridge/facade/tests/exomonad_action_surface/independent_children.hs": "tests/exomonad_action_surface/independent_children.hs",
+        "bridge/facade/tests/exomonad_action_surface/minimal_spawn.hs": "tests/exomonad_action_surface/minimal_spawn.hs",
+        "bridge/facade/tests/exomonad_action_surface/ordinary_labels.hs": "tests/exomonad_action_surface/ordinary_labels.hs",
         "bridge/facade/tests/exomonad_action_surface/public_agents.hs": "tests/exomonad_action_surface/public_agents.hs",
         "bridge/facade/tests/exomonad_action_surface/request_type_diagnostic.hs": "tests/exomonad_action_surface/request_type_diagnostic.hs",
-        "bridge/facade/tests/exomonad_action_surface/research_can_unfold.hs": "tests/exomonad_action_surface/research_can_unfold.hs",
-        "bridge/facade/tests/exomonad_action_surface/research_leaf_cannot_unfold.hs": "tests/exomonad_action_surface/research_leaf_cannot_unfold.hs",
         "bridge/facade/tests/exomonad_action_surface/reusable_helper_rows.hs": "tests/exomonad_action_surface/reusable_helper_rows.hs",
         "bridge/facade/tests/exomonad_action_surface/skill_promised_names.hs": "tests/exomonad_action_surface/skill_promised_names.hs",
+        "bridge/facade/tests/exomonad_action_surface/spawn_context_workspace_choices.hs": "tests/exomonad_action_surface/spawn_context_workspace_choices.hs",
         "bridge/facade/tests/exomonad_namespace_entry.rs": "tests/exomonad_namespace_entry.rs",
         "bridge/facade/tests/exomonad_workspace_check.rs": "tests/exomonad_workspace_check.rs",
     },
@@ -2840,6 +2851,48 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f636f6d6d616e642e6873",
+    src = "src/actor_host/fixtures/api-guide/command.hs",
+    out = "command.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f68756d616e2d666f726d732e6873",
+    src = "src/actor_host/fixtures/api-guide/human-forms.hs",
+    out = "human-forms.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f6c6f6f6b75702e6873",
+    src = "src/actor_host/fixtures/api-guide/lookup.hs",
+    out = "lookup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f7265666c6563742e6873",
+    src = "src/actor_host/fixtures/api-guide/reflect.hs",
+    out = "reflect.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f726571756573742d73657475702e6873",
+    src = "src/actor_host/fixtures/api-guide/request-setup.hs",
+    out = "request-setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6170692d67756964652f726571756573742e6873",
+    src = "src/actor_host/fixtures/api-guide/request.hs",
+    out = "request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f626f6f7473747261705f776f726b73706163655f7769746e6573732e6873",
     src = "src/actor_host/fixtures/bootstrap_workspace_witness.hs",
     out = "bootstrap_workspace_witness.hs",
@@ -2854,9 +2907,37 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f63617074757265645f636f6e746578745f6f726967696e616c5f6f776e65725f73657475702e6873",
+    src = "src/actor_host/fixtures/captured_context_original_owner_setup.hs",
+    out = "captured_context_original_owner_setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f63656c6c5f6d6f64656c2e6873",
     src = "src/actor_host/fixtures/cell_model.hs",
     out = "cell_model.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6174746163686d656e745f616c6961735f6661696c7572652e6873",
+    src = "src/actor_host/fixtures/child_attachment_alias_failure.hs",
+    out = "child_attachment_alias_failure.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6174746163686d656e745f6f6273657276655f7265706c792e6873",
+    src = "src/actor_host/fixtures/child_attachment_observe_reply.hs",
+    out = "child_attachment_observe_reply.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6174746163686d656e745f76616c69645f726571756573742e6873",
+    src = "src/actor_host/fixtures/child_attachment_valid_request.hs",
+    out = "child_attachment_valid_request.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -2906,6 +2987,20 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f6e746578745f616363657074616e63655f6661696c7572652e6873",
     src = "src/actor_host/fixtures/context_acceptance_failure.hs",
     out = "context_acceptance_failure.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f6e746578745f616363657074616e63655f69646c655f726571756573742e6873",
+    src = "src/actor_host/fixtures/context_acceptance_idle_request.hs",
+    out = "context_acceptance_idle_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f6e746578745f616363657074616e63655f69646c655f737061776e2e6873",
+    src = "src/actor_host/fixtures/context_acceptance_idle_spawn.hs",
+    out = "context_acceptance_idle_spawn.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -3078,6 +3173,83 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f6f6273657276652e6873",
+    src = "src/actor_host/fixtures/supplied_live_observe.hs",
+    out = "supplied_live_observe.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f6f6273657276655f616761696e2e6873",
+    src = "src/actor_host/fixtures/supplied_live_observe_again.hs",
+    out = "supplied_live_observe_again.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f6f6273657276655f696d6d6564696174652e6873",
+    src = "src/actor_host/fixtures/supplied_live_observe_immediate.hs",
+    out = "supplied_live_observe_immediate.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f7265667573652e6873",
+    src = "src/actor_host/fixtures/supplied_live_refuse.hs",
+    out = "supplied_live_refuse.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f7265706c6163652e6873",
+    src = "src/actor_host/fixtures/supplied_live_replace.hs",
+    out = "supplied_live_replace.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f726571756573742e6873",
+    src = "src/actor_host/fixtures/supplied_live_request.hs",
+    out = "supplied_live_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f726571756573745f616761696e2e6873",
+    src = "src/actor_host/fixtures/supplied_live_request_again.hs",
+    out = "supplied_live_request_again.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f726f6f742e6873",
+    src = "src/actor_host/fixtures/supplied_live_root.hs",
+    out = "supplied_live_root.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f737061776e2e6873",
+    src = "src/actor_host/fixtures/supplied_live_spawn.hs",
+    out = "supplied_live_spawn.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f737061776e5f726571756573745f73616d655f63656c6c2e6873",
+    src = "src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs",
+    out = "supplied_live_spawn_request_same_cell.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f746f6f6c732e6873",
+    src = "src/actor_host/fixtures/supplied_live_tools.hs",
+    out = "supplied_live_tools.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f746f6f6c5f64697370617463685f666978747572652e6873",
     src = "src/actor_host/fixtures/tool_dispatch_fixture.hs",
     out = "tool_dispatch_fixture.hs",
@@ -3158,6 +3330,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f696e686572697465645f726573706f6e73655f726561642e6873",
     src = "src/actor_host/inherited_response_read.hs",
     out = "inherited_response_read.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f696e686572697465645f726573706f6e73655f72656c65617365642e6873",
+    src = "src/actor_host/inherited_response_released.hs",
+    out = "inherited_response_released.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -3319,13 +3498,6 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f6e6f7465626f6f6b5f6c656173655f7375666669782e6873",
     src = "src/actor_host/notebook_lease_suffix.hs",
     out = "notebook_lease_suffix.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f6e6f7465626f6f6b5f6c65745f6c61796f75742e6873",
-    src = "src/actor_host/notebook_let_layout.hs",
-    out = "notebook_let_layout.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -3540,48 +3712,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f72657365617263685f706f6c6963795f657363616c6174696f6e2e6873",
-    src = "src/actor_host/research_policy_escalation.hs",
-    out = "research_policy_escalation.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f72657365617263685f706f6c6963795f6578686175737465642e6873",
-    src = "src/actor_host/research_policy_exhausted.hs",
-    out = "research_policy_exhausted.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f72657365617263685f706f6c6963795f6e65737465642e6873",
-    src = "src/actor_host/research_policy_nested.hs",
-    out = "research_policy_nested.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f72657365617263685f706f6c6963795f707265766965772e6873",
-    src = "src/actor_host/research_policy_preview.hs",
-    out = "research_policy_preview.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f72657365617263685f706f6c6963795f73657475702e6873",
-    src = "src/actor_host/research_policy_setup.hs",
-    out = "research_policy_setup.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f72657365617263685f706f6c6963795f77696474682e6873",
-    src = "src/actor_host/research_policy_width.hs",
-    out = "research_policy_width.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f726573746172745f6566666563745f6f6e63652e6873",
     src = "src/actor_host/restart_effect_once.hs",
     out = "restart_effect_once.hs",
@@ -3687,20 +3817,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f77617463685f646f63756d656e746174696f6e5f70726f67726573732e6873",
-    src = "src/actor_host/watch_documentation_progress.hs",
-    out = "watch_documentation_progress.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73742f77617463685f646f63756d656e746174696f6e5f736574746c65642e6873",
-    src = "src/actor_host/watch_documentation_settled.hs",
-    out = "watch_documentation_settled.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f776f726b5f6e6f74696669636174696f6e2e6873",
     src = "src/actor_host/work_notification.hs",
     out = "work_notification.hs",
@@ -3711,62 +3827,6 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f61637469766174696f6e5f707265766965775f73657475702e6873",
     src = "src/actor_host_fixtures/generic_actor/activation_preview_setup.hs",
     out = "activation_preview_setup.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f64656665727265645f636865636b706f696e745f6f726967696e616c5f6f776e65722e6873",
-    src = "src/actor_host_fixtures/generic_actor/deferred_checkpoint_original_owner.hs",
-    out = "deferred_checkpoint_original_owner.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f64656665727265645f6f726967696e616c5f6f776e65722e6873",
-    src = "src/actor_host_fixtures/generic_actor/deferred_original_owner.hs",
-    out = "deferred_original_owner.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f64656665727265645f756e666f6c645f6578616d706c652e6873",
-    src = "src/actor_host_fixtures/generic_actor/deferred_unfold_example.hs",
-    out = "deferred_unfold_example.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f646f63756d656e746174696f6e5f73657475702e6873",
-    src = "src/actor_host_fixtures/generic_actor/documentation_setup.hs",
-    out = "documentation_setup.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f726573706f6e73655f636f6d7075746174696f6e2e6873",
-    src = "src/actor_host_fixtures/generic_actor/response_computation.hs",
-    out = "response_computation.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f726963685f726573706f6e73655f7265706c792e6873",
-    src = "src/actor_host_fixtures/generic_actor/rich_response_reply.hs",
-    out = "rich_response_reply.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f726963685f726573706f6e73655f73657475702e6873",
-    src = "src/actor_host_fixtures/generic_actor/rich_response_setup.hs",
-    out = "rich_response_setup.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f6163746f725f686f73745f66697874757265732f67656e657269635f6163746f722f7365636f6e645f7175657565645f756e666f6c642e6873",
-    src = "src/actor_host_fixtures/generic_actor/second_queued_unfold.hs",
-    out = "second_queued_unfold.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -3806,51 +3866,51 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f636f64696e675f63616e5f756e666f6c642e6873",
-    src = "tests/exomonad_action_surface/coding_can_unfold.hs",
-    out = "coding_can_unfold.hs",
+    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f63616e6e6f745f636f6e74726f6c5f776974686f75745f6167656e745f636f6e74726f6c2e6873",
+    src = "tests/exomonad_action_surface/cannot_control_without_agent_control.hs",
+    out = "cannot_control_without_agent_control.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
-    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f636f64696e675f6368696c6472656e5f61646d69745f61735f7369626c696e67732e6873",
-    src = "tests/exomonad_action_surface/coding_children_admit_as_siblings.hs",
-    out = "coding_children_admit_as_siblings.hs",
+    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f63616e6e6f745f737061776e5f776974686f75745f6167656e745f6c61756e63682e6873",
+    src = "tests/exomonad_action_surface/cannot_spawn_without_agent_launch.hs",
+    out = "cannot_spawn_without_agent_launch.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
-    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f64656c696265726174696f6e5f616273656e742e6873",
-    src = "tests/exomonad_action_surface/deliberation_absent.hs",
-    out = "deliberation_absent.hs",
+    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f64656c65676174655f726571756573742e6873",
+    src = "tests/exomonad_action_surface/delegate_request.hs",
+    out = "delegate_request.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
-    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f657272616e642e6873",
-    src = "tests/exomonad_action_surface/errand.hs",
-    out = "errand.hs",
+    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f68656c7065725f6e656564735f737061776e5f6566666563742e6873",
+    src = "tests/exomonad_action_surface/helper_needs_spawn_effect.hs",
+    out = "helper_needs_spawn_effect.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
-    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f657272616e645f6e656564735f6c61756e63682e6873",
-    src = "tests/exomonad_action_surface/errand_needs_launch.hs",
-    out = "errand_needs_launch.hs",
+    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f696e646570656e64656e745f6368696c6472656e2e6873",
+    src = "tests/exomonad_action_surface/independent_children.hs",
+    out = "independent_children.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
-    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f6c6162656c5f706f6c796d6f72706869736d2e6873",
-    src = "tests/exomonad_action_surface/label_polymorphism.hs",
-    out = "label_polymorphism.hs",
+    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f6d696e696d616c5f737061776e2e6873",
+    src = "tests/exomonad_action_surface/minimal_spawn.hs",
+    out = "minimal_spawn.hs",
     visibility = ["PUBLIC"],
 )
 
 export_file(
-    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f6e6172726f775f72657365617263685f63616e6e6f745f636f6e74726f6c2e6873",
-    src = "tests/exomonad_action_surface/narrow_research_cannot_control.hs",
-    out = "narrow_research_cannot_control.hs",
+    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f6f7264696e6172795f6c6162656c732e6873",
+    src = "tests/exomonad_action_surface/ordinary_labels.hs",
+    out = "ordinary_labels.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -3869,20 +3929,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f72657365617263685f63616e5f756e666f6c642e6873",
-    src = "tests/exomonad_action_surface/research_can_unfold.hs",
-    out = "research_can_unfold.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f72657365617263685f6c6561665f63616e6e6f745f756e666f6c642e6873",
-    src = "tests/exomonad_action_surface/research_leaf_cannot_unfold.hs",
-    out = "research_leaf_cannot_unfold.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f7265757361626c655f68656c7065725f726f77732e6873",
     src = "tests/exomonad_action_surface/reusable_helper_rows.hs",
     out = "reusable_helper_rows.hs",
@@ -3893,5 +3939,12 @@ export_file(
     name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f736b696c6c5f70726f6d697365645f6e616d65732e6873",
     src = "tests/exomonad_action_surface/skill_promised_names.hs",
     out = "skill_promised_names.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f65786f6d6f6e61645f616374696f6e5f737572666163652f737061776e5f636f6e746578745f776f726b73706163655f63686f696365732e6873",
+    src = "tests/exomonad_action_surface/spawn_context_workspace_choices.hs",
+    out = "spawn_context_workspace_choices.hs",
     visibility = ["PUBLIC"],
 )

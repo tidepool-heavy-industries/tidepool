@@ -8,6 +8,7 @@ use tidepool_bridge_derive::FromHaskell;
 #[derive(FromHaskell)]
 pub enum WorktreeRegistryReq {
     WorktreeRegistryLookup(tidepool_bridge_effects::WtWorktreeId),
+    WorktreeRegistryWorkspace(tidepool_bridge_effects::WtWorktreeId),
     WorktreeRegistryList,
     WorktreeRegistryQuery(Option<bool>, Option<String>, Option<i64>),
 }
@@ -31,6 +32,9 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
         match req {
             WorktreeRegistryReq::WorktreeRegistryLookup(tree_id) => {
                 self.worktree_registry_lookup(cx, tree_id)
+            }
+            WorktreeRegistryReq::WorktreeRegistryWorkspace(tree_id) => {
+                self.worktree_registry_workspace(cx, tree_id)
             }
             WorktreeRegistryReq::WorktreeRegistryList => self.worktree_registry_list(cx),
             WorktreeRegistryReq::WorktreeRegistryQuery(present, branch_prefix, created_after) => {

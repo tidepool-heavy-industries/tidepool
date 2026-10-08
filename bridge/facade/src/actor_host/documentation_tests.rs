@@ -3,109 +3,123 @@
 use super::test_campaign::TestCampaign;
 use super::test_campaign::{
     dispatch_haskell_script, dispatch_haskell_script_result, dispatch_lookup, dispatch_status,
-    original_tool_call,
 };
 use super::*;
-use exomonad_tool::{
-    ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation, ToolInvocationContext,
-};
+use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
-fn example(document: &str) -> &str {
-    examples(document).next().unwrap()
+/// Authored notebook sources used by both the published fences and resident tests.
+#[derive(Clone, Copy)]
+enum PublishedExample {
+    HumanForms,
+    Request,
+    Command,
+    Lookup,
+    Reflect,
 }
 
-fn examples(document: &str) -> impl Iterator<Item = &str> {
-    document
-        .split("```haskell\n")
-        .skip(1)
-        .map(|block| block.split_once("```").unwrap().0)
+impl PublishedExample {
+    fn identity(self) -> &'static str {
+        match self {
+            Self::HumanForms => "human-forms",
+            Self::Request => "request",
+            Self::Command => "command",
+            Self::Lookup => "lookup",
+            Self::Reflect => "reflect",
+        }
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Self::HumanForms => include_str!("fixtures/api-guide/human-forms.hs"),
+            Self::Request => include_str!("fixtures/api-guide/request.hs"),
+            Self::Command => include_str!("fixtures/api-guide/command.hs"),
+            Self::Lookup => include_str!("fixtures/api-guide/lookup.hs"),
+            Self::Reflect => include_str!("fixtures/api-guide/reflect.hs"),
+        }
+    }
+}
+
+fn assert_published_sources(document: &str, expected: &[PublishedExample]) {
+    let mut published = std::collections::BTreeMap::new();
+    for fence in document.split("```").skip(1).step_by(2) {
+        let (info, source) = fence.split_once('\n').expect("fence has a body");
+        if info == "haskell signatures" {
+            continue;
+        }
+        if info.starts_with("haskell") {
+            let identity = info
+                .strip_prefix("haskell source=")
+                .expect("executable Haskell fence needs an authored source identity");
+            assert!(
+                published.insert(identity, source).is_none(),
+                "duplicate source {identity}"
+            );
+        }
+    }
+    for example in expected {
+        assert_eq!(
+            published.remove(example.identity()),
+            Some(example.source()),
+            "published source {} differs from its compiled fixture",
+            example.identity()
+        );
+    }
+    assert!(
+        published.is_empty(),
+        "unknown executable sources: {published:?}"
+    );
+}
+
+#[test]
+fn published_notebook_sources_match_authored_fixtures() {
+    assert_published_sources(
+        include_str!("../../../../exomonad/prompts/api-guide.md"),
+        &[
+            PublishedExample::HumanForms,
+            PublishedExample::Request,
+            PublishedExample::Command,
+            PublishedExample::Lookup,
+        ],
+    );
+    assert_published_sources(
+        include_str!("../../../../exomonad/prompts/docs/reflect.md"),
+        &[PublishedExample::Reflect],
+    );
 }
 
 #[tokio::test]
-async fn deferred_inherited_child_preserves_original_owner_after_parent_shadowing() {
-    assert_deferred_original_owner(
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_original_owner.hs",
-        ),
-        false,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn deferred_checkpoint_child_preserves_prior_nominal_owner_after_publication() {
-    assert_deferred_original_owner(
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host_fixtures/generic_actor/deferred_checkpoint_original_owner.hs"),
-        true,
-    )
-    .await;
-}
-
-async fn assert_deferred_original_owner(source: &str, checkpoint: bool) {
+async fn captured_child_keeps_original_nominal_types_after_parent_shadowing_and_failure() {
     let mut campaign = TestCampaign::start().await;
-    let root = Arc::clone(&campaign.root_installation.policy);
-    let call_id = format!("deferred-original-owner-{checkpoint}");
-    let (invocation, completion) = original_tool_call(OriginalOperation {
-        origin: ConversationOrigin::External {
-            thread_id: "original-owner-test".into(),
-        },
-        request_id: call_id.clone(),
-        call_id,
-    });
-    committed(root.as_ref(), "data DeferredInput = DeferredInput Int deriving Show\ndata DeferredReply = DeferredReply Int deriving Show").await;
-    let result = root
-        .dispatch_boxed(ToolInvocation {
-            context: Some(invocation),
-            name: exomonad_actor::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(source.into()),
-        })
-        .await
-        .unwrap()
-        .into_json()
-        .expect("structured observer receives the typed workbench response");
-    assert_eq!(result["status"], "committed", "{result}");
-    campaign.assert_no_deployment("deferred child booted before completion", |event| {
-        matches!(
-            event,
-            LocalResidentDeployment::PolicyInstalled(_)
-                | LocalResidentDeployment::SessionReady { .. }
-        )
-    });
-    committed(root.as_ref(), "data DeferredInput = LaterInput Bool deriving Show\ndata DeferredReply = LaterReply Bool deriving Show").await;
-    let staged_children: Vec<_> = campaign
-        .forest
-        .inspect_host_graph()
-        .into_iter()
-        .filter(|node| node.creator == Some(campaign.actor.identity()))
-        .collect();
-    let [staged_child] = staged_children.as_slice() else {
-        panic!("deferred call must retain exactly one staged child: {staged_children:?}");
-    };
-    // Installation is recorded before its deployment event, so this checks
-    // the lifecycle owner rather than only a buffered observer channel.
-    assert!(!staged_child.model_actor, "{staged_child:?}");
-    assert!(staged_child.terminal.is_none(), "{staged_child:?}");
-    let staged_identity = staged_child.actor;
-    root.complete_boxed(completion.clone()).await.unwrap();
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/captured_context_original_owner_setup.hs"),
+    )
+    .await;
+
     let child = campaign
         .next_deployment(
-            "original child tool installation",
+            "captured child installation",
             Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                LocalResidentDeployment::Retired { actor, terminal } => {
-                    panic!("captured child {actor:?} retired before installation: {terminal:?}")
-                }
                 other => Err(other),
             },
         )
         .await;
-    assert_eq!(child.checkpoint.is_some(), checkpoint);
     let child_id = child.actor.identity();
-    assert_eq!(child_id, staged_identity);
+    campaign.assert_no_deployment("captured child remains idle", |event| {
+        matches!(event, LocalResidentDeployment::SessionReady { activation } if activation.id.actor() == child_id)
+    });
+
+    committed(
+        root.as_ref(),
+        "Right originalOwnerRequest <- request @OriginalReply originalOwner (OriginalInput 41) defaultRequestOptions",
+    )
+    .await;
     campaign
         .next_deployment(
-            "original typed child input",
+            "captured child typed request activation",
             Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::SessionReady { activation }
@@ -113,134 +127,47 @@ async fn assert_deferred_original_owner(source: &str, checkpoint: bool) {
                 {
                     Ok(activation)
                 }
-                LocalResidentDeployment::Retired { actor, terminal } => {
-                    panic!("captured child {actor:?} retired before activation: {terminal:?}")
-                }
                 other => Err(other),
             },
         )
         .await;
-    if checkpoint {
-        committed(
-            root.as_ref(),
-            "Right () <- releaseCheckpoint originalOwnerSeed\npure ()",
-        )
-        .await;
-    }
+
+    committed(
+        root.as_ref(),
+        "data OriginalInput = LaterInput Bool deriving Show\ndata OriginalReply = LaterReply Bool deriving Show",
+    )
+    .await;
     let parent_failure = dispatch_haskell_script_result(
         root.as_ref(),
-        "error \"parent-failure-after-deferred-release\" >> pure ()",
+        "error \"parent-failure-after-captured-request\" >> pure ()",
     )
     .await
-    .expect_err("the parent cell deliberately fails after deferred publication");
-    assert_authored_workbench_failure(
-        parent_failure,
-        campaign.actor.identity(),
-        "parent-failure-after-deferred-release",
+    .expect_err("the parent cell deliberately fails after shadowing its types");
+    let parent_failure = format!("{parent_failure:?}");
+    assert!(
+        parent_failure.contains("parent-failure-after-captured-request"),
+        "{parent_failure}"
     );
     assert!(campaign.actor.terminal().get().is_none());
+
     let reply = dispatch_haskell_script(
         child.policy.as_ref(),
-        "case sessionInput of DeferredInput n -> respond (DeferredReply (n + 1))",
+        "case sessionInput of OriginalInput n -> respond (OriginalReply (n + 1))",
     )
     .await;
     assert_eq!(reply["status"], "replied", "{reply}");
     let observed = displayed(
         &mut campaign,
         root.as_ref(),
-        "originalOwnerReply <- pollResponse originalOwnerWorker\ndisplay (show originalOwnerReply)",
+        "originalOwnerReply <- pollResponse originalOwnerRequest\ndisplay (show originalOwnerReply)",
     )
     .await;
     let text = explicit_display_output(&observed)["text"].as_str().unwrap();
-    assert!(text.contains("DeferredReply 42"), "{observed}");
+    assert!(text.contains("OriginalReply 42"), "{observed}");
     assert!(!text.contains("LaterReply"), "{observed}");
+
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn failed_deferred_capture_does_not_release_child_tools() {
-    let mut campaign = TestCampaign::start().await;
-    let root = Arc::clone(&campaign.root_installation.policy);
-    let call_id = "deferred-original-owner-failure".to_owned();
-    let (invocation, completion) = original_tool_call(OriginalOperation {
-        origin: ConversationOrigin::External {
-            thread_id: "original-owner-test".into(),
-        },
-        request_id: call_id.clone(),
-        call_id,
-    });
-    committed(root.as_ref(), "data DeferredInput = DeferredInput Int deriving Show\ndata DeferredReply = DeferredReply Int deriving Show").await;
-    let source = format!(
-        "{}\nerror \"deferred-before-commit-failure\" >> pure ()",
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_original_owner.hs"
-        )
-    );
-    let result = root
-        .dispatch_boxed(ToolInvocation {
-            context: Some(invocation),
-            name: exomonad_actor::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(source),
-        })
-        .await
-        .expect_err("the deferred group creator deliberately fails before completion");
-    assert_authored_workbench_failure(
-        result,
-        campaign.actor.identity(),
-        "deferred-before-commit-failure",
-    );
-    assert!(campaign.actor.terminal().get().is_none());
-    root.complete_boxed(completion.clone()).await.unwrap();
-    root.complete_boxed(completion).await.unwrap();
-    let aborted_children: Vec<_> = campaign
-        .forest
-        .inspect_host_graph()
-        .into_iter()
-        .filter(|node| node.creator == Some(campaign.actor.identity()))
-        .collect();
-    let [aborted_child] = aborted_children.as_slice() else {
-        panic!("failed deferred call must retain its staged child: {aborted_children:?}");
-    };
-    // Failed completion awaits group abort and child shutdown. Retirement
-    // keeps the installation flag, making a premature launch observable.
-    assert!(!aborted_child.model_actor, "{aborted_child:?}");
-    assert_eq!(
-        aborted_child
-            .terminal
-            .as_ref()
-            .map(|terminal| terminal.kind),
-        Some(exomonad_actor::ActorExitKind::Cancelled),
-        "{aborted_child:?}"
-    );
-    campaign.assert_no_deployment("failed deferred group released a child", |event| {
-        matches!(
-            event,
-            LocalResidentDeployment::PolicyInstalled(_)
-                | LocalResidentDeployment::SessionReady { .. }
-        )
-    });
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-fn assert_authored_workbench_failure(
-    error: exomonad_actor::ResidentToolError,
-    actor: exomonad_actor::ActorRef,
-    marker: &str,
-) {
-    let exomonad_actor::ResidentToolError::Invocation(
-        exomonad_actor::KernelInvocationFailure::Workbench(failure),
-    ) = error
-    else {
-        panic!("expected an authored workbench failure: {error:?}");
-    };
-    assert_eq!(failure.actor, actor);
-    assert!(matches!(
-        failure.point,
-        tidepool_runtime::session::WorkbenchFailurePoint::InputUnit { .. }
-    ));
-    assert!(failure.detail.contains(marker), "{failure:?}");
 }
 
 async fn committed(
@@ -762,12 +689,16 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        "worker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"notebook-reply-worker\"))\n",
+        concat!(
+            "import qualified Tidepool.Agent.Contract as A\n",
+            "Right worker <- spawnSubagent (FreshCtx \"notebook reply worker\") SameDir ",
+            "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))\n",
+        ),
     )
     .await;
     committed(
         root.as_ref(),
-        "response <- do { issued <- request @Text worker (assignment [label|notebook-reply|] (\"ready\" :: Text)); Right () <- detachRequest issued; pure issued }\n",
+        "Right response <- request @Text worker (\"ready\" :: Text) defaultRequestOptions\n",
     )
     .await;
     let child = campaign
@@ -786,7 +717,7 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
             Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::SessionReady { activation }
-                    if activation.message.contains("notebook-reply") =>
+                    if activation.id.actor() == child.actor.identity() =>
                 {
                     Ok(())
                 }
@@ -817,53 +748,39 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
     campaign.hosted.await.unwrap();
 }
 
-fn open_test_fork(
+fn open_test_workspace(
     campaign: &TestCampaign,
     child: &exomonad_actor::LocalResidentInstallation,
-) -> Arc<dyn exomonad_actor::ForkWorkspaceCustody> {
-    campaign.authority.install_grant(
-        child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
-    );
+) -> Arc<dyn exomonad_actor::WorkspaceCustody> {
     let [worktree_id] = child.launch_worktrees.as_slice() else {
         panic!("child must have one worktree")
     };
-    let worktree = campaign
-        .worktrees
-        .lookup(&exomonad_worktree::WorktreeId::from_raw(worktree_id))
-        .unwrap()
-        .unwrap();
+    let worktree_id = exomonad_worktree::WorktreeId::from_raw(worktree_id);
+    let worktree = campaign.worktrees.lookup(&worktree_id).unwrap().unwrap();
+    assert!(worktree.cwd().is_dir(), "installation workspace must exist");
     let principal = WorktreePrincipal::exact_actor(
         &runtime_namespace(campaign.session_root.path()),
         child.actor.identity().id.0,
         child.actor.identity().incarnation.0,
     );
-    assert_eq!(
+    assert!(
         campaign
             .bindings
             .lock()
-            .current(worktree.id())
-            .unwrap()
-            .agent(),
-        &principal
+            .membership(&worktree_id, &principal)
+            .is_some(),
+        "installation must retain exact workspace membership"
     );
     let binding = child
         .worktree_custody
         .clone()
         .expect("bootstrap installed custody");
-    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     binding
 }
 
 #[tokio::test]
-async fn published_unfold_watch_and_request_examples_execute() {
-    execute_examples(false, None, 1).await;
-}
-
-#[tokio::test]
-async fn record_actor_unfold_publishes_and_routes_child_reply() {
+async fn record_actor_launch_publishes_and_routes_child_reply() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");
@@ -894,8 +811,10 @@ async fn record_actor_unfold_publishes_and_routes_child_reply() {
     committed(
         root.as_ref(),
         r#"import LaunchFixture
+import Tidepool.Worktree (workspaceFor)
 Right launcherTree <- createWorktree (fromRef (GitRef "HEAD") "resident-launcher")
-launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"#,
+Right launcherWorkspace <- workspaceFor launcherTree
+launcher <- R.start (R.withWorkspace launcherWorkspace launchDefinition)"#,
     )
     .await;
     committed(
@@ -916,18 +835,7 @@ launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"
             },
         )
         .await;
-    assert!(
-        child.fork_boundary.is_none(),
-        "resident handler has no notebook completion"
-    );
-    let _custody = open_test_fork(&campaign, &child);
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        child.fork_gate.as_ref().unwrap().wait_committed(),
-    )
-    .await
-    .expect("resident admission must publish without a notebook callback")
-    .unwrap();
+    let _custody = open_test_workspace(&campaign, &child);
     campaign
         .next_deployment(
             "review request activation",
@@ -964,301 +872,76 @@ launcher <- R.start (R.withWorktree (worktreeId launcherTree) launchDefinition)"
 }
 
 #[tokio::test]
-async fn invalid_label_literals_fail_before_actor_side_effects() {
+async fn published_request_example_retains_success_and_target_cancellation() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let me = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "display (inspectFull (agentIdentity me))",
-    )
-    .await;
-    let identity = campaign.root_installation.actor.identity();
-    assert_eq!(
-        explicit_display_output(&me)["text"]
-            .as_str()
-            .unwrap()
-            .split_whitespace()
-            .collect::<String>(),
-        format!("({},{})", identity.id.0, identity.incarnation.0)
-    );
-
-    let invalid_watch = dispatch_haskell_script(
-        root.as_ref(),
-        "badWatch <- watch (\"Bad Label\" :: WatchLabel) (pure ())",
-    )
-    .await;
-    assert_eq!(invalid_watch["status"], "rejected", "{invalid_watch}");
-    assert!(
-        invalid_watch
-            .to_string()
-            .contains("InvalidWatchLabel \\\"Bad Label\\\""),
-        "{invalid_watch}"
-    );
-    for (source, expected) in [
-        (
-            "emptyWatch <- watch (\"\" :: WatchLabel) (pure ())",
-            "EmptyWatchLabel",
-        ),
-        (
-            concat!(
-                "longWatch <- watch ",
-                "(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" :: WatchLabel) ",
-                "(pure ())",
-            ),
-            "WatchLabelTooLong",
-        ),
-    ] {
-        let rejected = dispatch_haskell_script(root.as_ref(), source).await;
-        assert_eq!(rejected["status"], "rejected", "{rejected}");
-        assert!(rejected.to_string().contains(expected), "{rejected}");
-    }
-
-    let invalid_unfold = dispatch_haskell_script(
-        root.as_ref(),
-        concat!(
-            "badWorkers <- unfoldDeferred (batch \"literal-errors\" \"branches\") $ ",
-            "(,) <$> child (withLifetime ActorOwned (researching @Text projectHead (assignment [label|valid|] ()))) ",
-            "<*> child (withLifetime ActorOwned (researching @Text projectHead (assignment [label|Bad Label|] ())))",
-        ),
-    )
-    .await;
-    assert_eq!(invalid_unfold["status"], "rejected", "{invalid_unfold}");
-    assert!(
-        invalid_unfold
-            .to_string()
-            .contains("InvalidKebabName \\\"Bad Label\\\""),
-        "{invalid_unfold}"
-    );
-    campaign.assert_no_deployment(
-        "an invalid later branch launched an earlier child",
-        |event| matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
-    );
-
     committed(
         root.as_ref(),
-        concat!(
-            "worker <- unfoldDeferred (batch \"literal-errors\" \"request\") ",
-            "(child (withLifetime ActorOwned (researching @Text projectHead (assignment [label|target|] ()))))",
-        ),
+        include_str!("fixtures/api-guide/request-setup.hs"),
     )
     .await;
-    let (_worker_installation, _worker_custody) = next_project_worker(&mut campaign).await;
-    committed(root.as_ref(), "before <- listAgents").await;
-    committed(
-        root.as_ref(),
-        concat!(
-            "let requestCount target rows = sum [length (rosterCurrentRequests row) | ",
-            "row <- rows, (rosterActorId row, rosterActorIncarnation row) == target]",
-        ),
-    )
-    .await;
-    committed(
-        root.as_ref(),
-        "let beforeRequests = requestCount (agentIdentity (responseActor worker)) before",
-    )
-    .await;
-    let rendered = displayed(&mut campaign, root.as_ref(), "display (inspectFull worker)").await;
-    let rendered = explicit_display_output(&rendered)["text"].as_str().unwrap();
-    assert!(rendered.starts_with("<response to request "), "{rendered}");
-    assert!(rendered.contains(" from agent "), "{rendered}");
-    assert!(rendered.contains(", path "), "{rendered}");
-    assert!(!rendered.contains("AgentRef"), "{rendered}");
-    let invalid_request = dispatch_haskell_script(
-        root.as_ref(),
-        "badResponse <- request @Text (responseActor worker) (assignment [label|Bad Label|] ())",
-    )
-    .await;
-    assert_eq!(invalid_request["status"], "rejected", "{invalid_request}");
-    assert!(
-        invalid_request
-            .to_string()
-            .contains("InvalidKebabName \\\"Bad Label\\\""),
-        "{invalid_request}"
-    );
-    committed(root.as_ref(), "after <- listAgents").await;
-    let unchanged = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "display (requestCount (agentIdentity (responseActor worker)) after == beforeRequests)",
-    )
-    .await;
-    assert_eq!(
-        explicit_display_output(&unchanged)["text"],
-        "True",
-        "{unchanged}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn shared_api_guide_example_handles_success_and_unavailable() {
-    // The guide's command/judgment example reads `J`, which a run gets from the
-    // Jev library its workspace pins, so this campaign selects that workspace.
-    let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
-        |admission| admission,
-        super::test_campaign::pinned_jev_workspace,
-    )
-    .await;
-    let root = campaign.root_installation.policy.clone();
-    let guide = include_str!("../../../../exomonad/prompts/api-guide.md");
-    let mut guide_examples = examples(guide);
-    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
-    let child = campaign
-        .next_deployment(
-            "guide example child policy installation",
+    let mut running = tokio::spawn({
+        let root = root.clone();
+        async move { committed(root.as_ref(), PublishedExample::Request.source()).await }
+    });
+    let child = tokio::select! {
+        child = campaign.next_deployment(
+            "published request child installation",
             Duration::from_secs(120),
             |event| match event {
-                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
                 other => Err(other),
             },
-        )
-        .await;
-    let _binding = open_test_fork(&campaign, &child);
+        ) => child,
+        result = &mut running => panic!("request example ended before child installation: {result:?}"),
+    };
+    let _binding = open_test_workspace(&campaign, &child);
     campaign
         .next_deployment(
-            "guide example session readiness",
+            "published typed request activates its child",
             Duration::from_secs(120),
             |event| match event {
-                LocalResidentDeployment::SessionReady { activation } => {
-                    assert!(activation.message.contains("Remove the stale path"));
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == child.actor.identity() =>
+                {
                     Ok(())
                 }
                 other => Err(other),
             },
         )
         .await;
-    let pending = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "state <- pollWatch ready\ndisplay (inspectFull state)",
-    )
-    .await;
-    let rendered = explicit_display_output(&pending)["text"].as_str().unwrap();
-    // A pending watch observation is itself the registered wake: its
-    // `PendingProgress` carries the dependency's lifecycle/provider evidence
-    // and `pendingWatched = True`, so `inspectFull` shows there is nothing a
-    // re-poll would add.
-    assert!(rendered.contains("WatchPending"), "{rendered}");
-    assert!(rendered.contains("PendingProgress"), "{rendered}");
-    assert!(rendered.contains("pendingActorState"), "{rendered}");
-    assert!(rendered.contains("pendingProviderHealth"), "{rendered}");
-    assert!(rendered.contains("pendingWatched = True"), "{rendered}");
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
-    campaign.await_watch_ready().await;
-    let success = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "state <- pollWatch ready\ndisplay (inspectFull (fmap settledValue state))",
-    )
-    .await;
-    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
-    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
-    let command_example = guide_examples.next().unwrap();
-    let lookup_example = guide_examples.next().unwrap();
-    assert!(guide_examples.next().is_none(), "untested guide example");
-    displayed(&mut campaign, root.as_ref(), lookup_example).await;
-    let topics_found = displayed(
-        &mut campaign,
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/lookup_topics_found.hs"),
-    )
-    .await;
-    assert_eq!(
-        explicit_display_output(&topics_found)["text"],
-        "True",
-        "{topics_found}"
-    );
-    displayed(
-        &mut campaign,
-        root.as_ref(),
-        example(include_str!(
-            "../../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md"
-        )),
-    )
-    .await;
-    // Exercise the canonical command/Jev composition and workbench examples.
-    // The host requests a backend for each command in a cell.
-    let command_examples = [
-        "inspectRecentChanges \"inspect changed documentation\" >>= display",
-        command_example,
-        examples(include_str!(
-            "../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"
-        ))
-        .nth(2)
-        .unwrap(),
-        examples(include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md"
-        ))
-        .nth(4)
-        .unwrap(),
-        example(include_str!(
-            "../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"
-        )),
-    ];
-    let output_store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let output_run = super::runtime_namespace(campaign.session_root.path());
-    for (index, source) in command_examples.into_iter().enumerate() {
-        let mut running = tokio::spawn({
-            let root = root.clone();
-            async move { dispatch_haskell_script(root.as_ref(), source).await }
-        });
-        let result = loop {
-            tokio::select! {
-                result = &mut running => break result.unwrap(),
-                // Compile and reload the Haskell cell before its command
-                // backend deployment arrives; this campaign can exceed the
-                // generic 30-second command-only helper timeout.
-                request = campaign.next_deployment(
-                    "guide example command backend",
-                    Duration::from_secs(180),
-                    |event| match event {
-                        LocalResidentDeployment::CommandBackend(_) | LocalResidentDeployment::DisplayPublished(_) => Ok(event),
-                        other => Err(other),
-                    },
-                ) => {
-                    let request = match request {
-                        LocalResidentDeployment::CommandBackend(request) => request,
-                        LocalResidentDeployment::DisplayPublished(request) => {
-                            super::display_output::publish(&campaign.forest, &output_store, &output_run, None, None, &request);
-                            continue;
-                        }
-                        _ => unreachable!(),
-                    };
-                    if request.purpose
-                        == exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe
-                    {
-                        request.supply(Ok(super::command_test_support::TestCommands::completed(
-                            "/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n",
-                        )));
-                        continue;
-                    }
-                    request.supply(Ok(super::command_test_support::TestCommands::completed("README.md")));
-                }
-            }
-        };
-        assert_eq!(result["status"], "committed", "{source}: {result}");
-        if index == 0 {
-            assert!(result.to_string().contains("Jev unavailable:"), "{result}");
-        }
-    }
-    let layout = displayed(
-        &mut campaign,
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/notebook_let_layout.hs"),
-    )
-    .await;
-    assert_eq!(explicit_display_output(&layout)["text"], "42", "{layout}");
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let completed = campaign.drive_actor_output(&store, running).await.unwrap();
+    assert_eq!(completed["status"], "committed", "{completed}");
+    let success = displayed(&mut campaign, root.as_ref(), "display (answer == input)").await;
     assert_eq!(
         explicit_display_output(&success)["text"],
-        "WatchReady (Right \"Remove the stale path and report the focused check.\")"
+        "True",
+        "{success}"
     );
 
-    displayed(
+    committed(
+        root.as_ref(),
+        "Right interrupted <- request @Text worker input defaultRequestOptions",
+    )
+    .await;
+    campaign
+        .next_deployment(
+            "second typed request activates its child",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == child.actor.identity() =>
+                {
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let failure = displayed(
         &mut campaign,
         root.as_ref(),
         &tidepool_testing::fixture_source(
@@ -1266,129 +949,246 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
         ),
     )
     .await;
-    campaign.await_watch_ready().await;
-    let unavailable = displayed(
-        &mut campaign, root.as_ref(),
-        "state <- pollWatch retainedFailureReady\ndisplay (inspectFull (fmap (either (const True) (const False) . settledValue) state))",
-    )
-    .await;
     assert_eq!(
-        explicit_display_output(&unavailable)["text"],
-        "WatchReady True"
+        explicit_display_output(&failure)["text"],
+        "(True, True, True)",
+        "{failure}"
     );
-    let outer_unavailable = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "state <- pollWatch outerFailureReady\ndisplay (inspectFull (guideIsUnavailable state))",
-    )
-    .await;
-    assert_eq!(explicit_display_output(&outer_unavailable)["text"], "True");
-
-    // The guide's companion `doc reflect` example, on this same campaign so it
-    // needs no compile of its own. This root has no conversation reader, which
-    // is the unbound case the example is written to survive: it continues with
-    // no history rather than being handed somebody else's.
-    let reflect = displayed(
-        &mut campaign,
-        root.as_ref(),
-        example(include_str!("../../../../exomonad/prompts/docs/reflect.md")),
-    )
-    .await;
-    assert_eq!(explicit_display_output(&reflect)["text"], "[]", "{reflect}");
-    assert_eq!(
-        reflect["items"][1]["operations"][0]["effect"], "reflect",
-        "{reflect}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn watch_documentation_request_options_reports_progress_then_settles() {
-    let mut campaign = TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    committed(
-        root.as_ref(),
-        "lead <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"documented-progress-lead\"))",
-    )
-    .await;
-    let snippets: Vec<_> = examples(include_str!("../../../../exomonad/prompts/docs/watch.md"))
-        .filter(|snippet| snippet.contains("let progressOptions = assignment"))
-        .collect();
-    assert_eq!(snippets.len(), 1, "one complete documented progress setup");
-    displayed(&mut campaign, root.as_ref(), snippets[0]).await;
-    let child = campaign
-        .next_deployment(
-            "documented progress child policy installation",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
-                other => Err(other),
-            },
-        )
-        .await;
     campaign
         .next_deployment(
-            "documented progress request activation",
+            "published request child retirement",
             Duration::from_secs(120),
             |event| match event {
-                LocalResidentDeployment::SessionReady { activation } => {
-                    assert!(activation
-                        .message
-                        .contains("Publish cumulative findings; then return your final report."));
+                LocalResidentDeployment::Retired { actor, .. }
+                    if actor == child.actor.identity() =>
+                {
                     Ok(())
                 }
                 other => Err(other),
             },
         )
         .await;
-    // Exercise the real resident actor path, without a model/provider execution claim.
-    committed(child.policy.as_ref(), "reportProgress [\"finding\"]").await;
-    campaign.await_watch_ready().await;
-    let progress = displayed(
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn published_human_form_example_handles_unbound_host() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        Arc::new(harness::store::Store::open(directory.path().join("store.sqlite")).unwrap());
+    let host = Arc::new(DisplayOnlyHost {
+        display: super::form_output::host(
+            store.clone(),
+            "published-human-form".into(),
+            Arc::new(std::sync::OnceLock::new()),
+        ),
+        openings: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut campaign = TestCampaign::start_with_form_host(host.clone()).await;
+    let root = campaign.root_installation.policy.clone();
+    displayed(
         &mut campaign,
         root.as_ref(),
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/watch_documentation_progress.hs",
-        ),
+        PublishedExample::HumanForms.source(),
     )
     .await;
-    let pages: Vec<_> = progress["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|item| item["operations"].as_array().unwrap())
-        .filter_map(|operation| operation.get("display").map(|display| &display["text"]))
-        .collect();
+    let unavailable = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "display (case scopeAnswer of { F.FormUnavailable F.FormNotInstalled -> True; _ -> False })",
+    )
+    .await;
     assert_eq!(
-        pages,
-        vec![&serde_json::json!("True"), &serde_json::json!("True")],
-        "{progress}"
+        explicit_display_output(&unavailable)["text"],
+        "True",
+        "{unavailable}"
     );
-    let reply =
-        dispatch_haskell_script(child.policy.as_ref(), "respond (\"final report\" :: Text)").await;
-    assert_eq!(reply["status"], "replied", "{reply}");
-    campaign.await_watch_ready().await;
-    let settled = displayed(
-        &mut campaign,
-        root.as_ref(),
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/watch_documentation_settled.hs",
-        ),
+    assert_eq!(host.openings.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let origin = harness::store::actor_output::ActorOutputOrigin {
+        run: "published-human-form".into(),
+        native_actor: campaign.actor.identity().id.0,
+        incarnation: campaign.actor.identity().incarnation.0,
+    };
+    let pages = store.actor_output_page(&origin, 0, 10).unwrap();
+    assert_eq!(
+        pages.outputs.len(),
+        3,
+        "narration, evidence, unavailable branch"
+    );
+    assert!(pages
+        .outputs
+        .iter()
+        .all(|output| output.emission().page.view.is_some()));
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+/// Rich views and form admission share FormHost. Delegate views to the real
+/// durable owner while declining form admission with its typed absent-service cause.
+struct DisplayOnlyHost {
+    display: Arc<dyn exomonad_actor::FormHost>,
+    openings: std::sync::atomic::AtomicUsize,
+}
+
+impl exomonad_actor::FormHost for DisplayOnlyHost {
+    fn changed(
+        &self,
+    ) -> futures_util::future::BoxFuture<'static, Result<(), tidepool_bridge_effects::FormCause>>
+    {
+        panic!("a refused form must not wait for submission")
+    }
+
+    fn open(
+        &self,
+        _: &exomonad_actor::FormPublication,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Result<(), tidepool_bridge_effects::FormCause> {
+        self.openings
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(tidepool_bridge_effects::FormCause::FormNotInstalled)
+    }
+
+    fn attempt(
+        &self,
+        _: exomonad_actor::ActorRef,
+        _: &str,
+    ) -> Result<Option<tidepool_bridge_effects::FormAttempt>, tidepool_bridge_effects::FormCause>
+    {
+        panic!("a refused form must not read a submission")
+    }
+
+    fn reject(
+        &self,
+        _: exomonad_actor::ActorRef,
+        _: &str,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Result<tidepool_bridge_effects::FormTransition, tidepool_bridge_effects::FormCause> {
+        panic!("a refused form must not reject a submission")
+    }
+
+    fn commit(
+        &self,
+        _: exomonad_actor::ActorRef,
+        _: &str,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Result<tidepool_bridge_effects::FormTransition, tidepool_bridge_effects::FormCause> {
+        panic!("a refused form must not commit a submission")
+    }
+
+    fn close(
+        &self,
+        _: exomonad_actor::ActorRef,
+        _: &str,
+    ) -> Result<(), tidepool_bridge_effects::FormCause> {
+        panic!("refused admission must not retain a form lease for cleanup")
+    }
+
+    fn display(
+        &self,
+        publication: &exomonad_actor::FormPublication,
+        display_slot: u64,
+        view: &serde_json::Value,
+    ) -> Result<(), tidepool_bridge_effects::FormCause> {
+        self.display.display(publication, display_slot, view)
+    }
+}
+
+#[tokio::test]
+async fn published_command_example_reuses_completed_stdout() {
+    use super::command_test_support::TestCommands;
+
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let mut running = tokio::spawn({
+        let root = root.clone();
+        async move { committed(root.as_ref(), PublishedExample::Command.source()).await }
+    });
+    let backend = TestCommands::completed("README.md");
+    tokio::select! {
+        request = campaign.next_deployment(
+            "published command backend",
+            Duration::from_secs(180),
+            |event| match event {
+                LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                other => Err(other),
+            },
+        ) => request.supply(Ok(backend.clone())),
+        result = &mut running => panic!("command example ended before backend admission: {result:?}"),
+    }
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let completed = campaign.drive_actor_output(&store, running).await.unwrap();
+    assert_eq!(completed["status"], "committed", "{completed}");
+    for _ in 0..2 {
+        let retained = displayed(
+            &mut campaign,
+            root.as_ref(),
+            "display (Cmd.stdout result == Right \"README.md\")",
+        )
+        .await;
+        assert_eq!(
+            explicit_display_output(&retained)["text"],
+            "True",
+            "{retained}"
+        );
+    }
+    assert_eq!(
+        backend.executions(),
+        1,
+        "reading stdout must not repeat the command"
+    );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
+    let mut campaign = TestCampaign::start_with_conversation(
+        |admission| admission,
+        |_| {},
+        Some(Arc::new(|_, _| {
+            Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+        })),
     )
     .await;
-    let pages: Vec<_> = settled["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|item| item["operations"].as_array().unwrap())
-        .filter_map(|operation| operation.get("display").map(|display| &display["text"]))
-        .collect();
+    let root = campaign.root_installation.policy.clone();
+    displayed(
+        &mut campaign,
+        root.as_ref(),
+        PublishedExample::Lookup.source(),
+    )
+    .await;
+    let found = displayed(
+        &mut campaign,
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/lookup_topics_found.hs"),
+    )
+    .await;
+    assert_eq!(explicit_display_output(&found)["text"], "True", "{found}");
+    let reflected = displayed(
+        &mut campaign,
+        root.as_ref(),
+        PublishedExample::Reflect.source(),
+    )
+    .await;
     assert_eq!(
-        pages,
-        vec![&serde_json::json!("True"), &serde_json::json!("True")],
-        "{settled}"
+        explicit_display_output(&reflected)["text"],
+        "[]",
+        "{reflected}"
+    );
+    let unbound = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "seen <- reflect 5\ndisplay (case seen of { Left ReflectUnbound -> True; _ -> False })",
+    )
+    .await;
+    assert_eq!(
+        explicit_display_output(&unbound)["text"],
+        "True",
+        "{unbound}"
     );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
@@ -1399,7 +1199,16 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let mut child = None;
-    committed(root.as_ref(), "data Report = Report Int deriving Show\nworker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"activation-preview-worker\"))").await;
+    committed(
+        root.as_ref(),
+        concat!(
+            "import qualified Tidepool.Agent.Contract as A\n",
+            "data Report = Report Int deriving Show\n",
+            "Right worker <- spawnSubagent (FreshCtx \"activation preview worker\") SameDir ",
+            "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
+        ),
+    )
+    .await;
     committed(
         root.as_ref(),
         &tidepool_testing::fixture_source(
@@ -1451,7 +1260,13 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
             "case sessionInput of BrokenPreview n -> respond (Report n)",
         ),
     ] {
-        committed(root.as_ref(), &format!("let previewLabel = [label|{label}|]\npreviewResponse <- do {{ issued <- request @Report worker (assignment previewLabel {input}); Right () <- detachRequest issued; pure issued }}")).await;
+        committed(
+            root.as_ref(),
+            &format!(
+                "Right previewResponse <- request @Report worker {input} defaultRequestOptions"
+            ),
+        )
+        .await;
         let activation = campaign
             .next_deployment(
                 "preview activation",
@@ -1462,7 +1277,9 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
                         Err(LocalResidentDeployment::PolicyInstalled(installation))
                     }
                     LocalResidentDeployment::SessionReady { activation }
-                        if activation.message.contains(label) =>
+                        if child.as_ref().is_some_and(|child| {
+                            activation.id.actor() == child.actor.identity()
+                        }) =>
                     {
                         Ok(activation)
                     }
@@ -1521,9 +1338,14 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
     campaign.hosted.await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn rich_response_survives_resident_computation() {
-    execute_examples(true, None, 1).await;
+    // The published review recipe computes typed decisions and verifies that
+    // their scope, task and candidate values survive the retained response.
+    let repository = recipe_workspace(Some(&["Project.SkillChecks.reviewProvenance"]));
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1636,7 +1458,11 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
         .len();
     let spawned = committed(
         root.as_ref(),
-        "startAgent (withAgentLifetime ActorOwned (readonlyAgent \"observe-once\"))",
+        concat!(
+            "import qualified Tidepool.Agent.Contract as A\n",
+            "Right spawned <- spawnSubagent (FreshCtx \"observe once\") SameDir ",
+            "(defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))",
+        ),
     )
     .await;
     let spawned_name = spawned["items"][0]["installedBindings"][0]
@@ -1664,417 +1490,6 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     committed(root.as_ref(), &format!("stopAgent ({spawned_name} ())")).await;
     committed(root.as_ref(), "stopAgent worker").await;
     campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn queued_unfold_survives_later_rejection() {
-    execute_examples(false, Some("missingBindingAfterSuccessfulUnfold"), 1).await;
-}
-
-#[tokio::test]
-async fn reattachment_preserves_completed_unacknowledged_forks() {
-    let mut campaign = TestCampaign::start().await;
-    let root = Arc::clone(&campaign.root_installation.policy);
-    committed(
-        root.as_ref(),
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host_fixtures/generic_actor/documentation_setup.hs",
-        ),
-    )
-    .await;
-    let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
-        "actor-host-recovery".into(),
-        "minimal-turn".into(),
-        "minimal-unfold".into(),
-    );
-    let result = root
-        .dispatch_json_boxed(ToolInvocation {
-            context: Some(ToolInvocationContext::external(
-                boundary.hosted().unwrap().external_thread().unwrap().into(),
-                "minimal-turn".into(),
-                "minimal-inner-call".into(),
-                Some(boundary.hosted().unwrap().call_id.clone()),
-                Some("haskell".into()),
-            )),
-            name: exomonad_actor::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_unfold_example.hs",
-            )),
-        })
-        .await
-        .unwrap();
-    assert_eq!(result["status"], "committed", "{result:?}");
-    campaign.assert_no_deployment("no child before reattachment", |event| {
-        matches!(event, LocalResidentDeployment::PolicyInstalled(_))
-    });
-    root.reattach_boxed().await.unwrap();
-    assert!(matches!(
-        root.reconcile_workbench_boxed(boundary.clone())
-            .await
-            .unwrap(),
-        exomonad_actor::WorkbenchBoundaryReconciliation::Recovered { .. }
-    ));
-    root.complete_boxed(boundary.clone()).await.unwrap();
-    root.complete_boxed(boundary.clone()).await.unwrap();
-
-    let mut children = Vec::new();
-    while children.len() < 2 {
-        let child = campaign
-            .next_deployment(
-                "recovered fork startup",
-                Duration::from_secs(120),
-                |event| match event {
-                    LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                    other => Err(other),
-                },
-            )
-            .await;
-        assert_eq!(child.fork_boundary.as_ref(), Some(&boundary));
-        children.push(child);
-    }
-    for child in &children {
-        let inherited = committed(child.policy.as_ref(), "sessionInput").await;
-        assert!(inherited["items"][0]["output"].as_str().is_some());
-    }
-    campaign.assert_no_deployment(
-        "exactly two children belong to the recovered unfold",
-        |event| matches!(event, LocalResidentDeployment::PolicyInstalled(_)),
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-}
-
-#[tokio::test]
-async fn multiple_unfolds_are_admitted_before_completion() {
-    execute_examples(false, None, 2).await;
-}
-
-async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usize) {
-    let mut campaign = TestCampaign::start().await;
-    let root = Arc::clone(&campaign.root_installation.policy);
-    for block in include_str!("../../../../exomonad/prompts/docs/workbench.md")
-        .split("```haskell\n")
-        .skip(1)
-    {
-        displayed(
-            &mut campaign,
-            root.as_ref(),
-            block.split_once("```").unwrap().0,
-        )
-        .await;
-    }
-    let setup = if rich_response {
-        tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host_fixtures/generic_actor/rich_response_setup.hs",
-        )
-    } else {
-        tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host_fixtures/generic_actor/documentation_setup.hs",
-        )
-    };
-    displayed(&mut campaign, root.as_ref(), &setup).await;
-    let review_type = dispatch_lookup(root.as_ref(), &["Review"]).await;
-    assert_eq!(review_type["status"], "committed", "{review_type:?}");
-    let extra_group = if groups == 2 {
-        tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host_fixtures/generic_actor/second_queued_unfold.hs",
-        )
-    } else {
-        String::new()
-    };
-    let call_id = "documentation-unfold".to_owned();
-    let (invocation, completion) = original_tool_call(OriginalOperation {
-        origin: ConversationOrigin::External {
-            thread_id: "actor-host-vertical".into(),
-        },
-        request_id: call_id.clone(),
-        call_id,
-    });
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        root.dispatch_json_boxed(ToolInvocation {
-            context: Some(invocation),
-            name: exomonad_actor::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(format!(
-                "{}\n{}\n{}\n{}",
-                tidepool_testing::fixture_source(
-                    "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_unfold_example.hs",
-                ),
-                example(include_str!("../../../../exomonad/prompts/docs/watch.md")),
-                extra_group,
-                suffix.unwrap_or("")
-            )),
-        }),
-    )
-    .await
-    .expect("deferred unfold must return without provider startup")
-    .unwrap();
-    assert_eq!(
-        result["status"],
-        if suffix.is_some() {
-            "rejected"
-        } else {
-            "committed"
-        },
-        "{result:?}"
-    );
-    campaign.assert_no_deployment("child started before tool completion", |event| {
-        matches!(event, LocalResidentDeployment::PolicyInstalled(_))
-    });
-
-    let expected_children = groups * 2;
-    root.complete_boxed(completion.clone()).await.unwrap();
-    root.complete_boxed(completion).await.unwrap();
-    let mut children = Vec::new();
-    let mut bindings = Vec::new();
-    let mut fork_boundary = None;
-    let mut activation_messages = Vec::new();
-    enum Collected {
-        Child(Box<exomonad_actor::LocalResidentInstallation>),
-        Activation(exomonad_actor::ResidentActivation),
-    }
-    while children.len() < expected_children {
-        let collected = campaign
-            .next_deployment(
-                "child deployment",
-                Duration::from_secs(120),
-                |event| match event {
-                    LocalResidentDeployment::PolicyInstalled(child) => Ok(Collected::Child(child)),
-                    LocalResidentDeployment::Retired { actor, terminal } => {
-                        panic!("{actor:?} retired: {terminal:?}")
-                    }
-                    LocalResidentDeployment::SessionReady { activation } => {
-                        Ok(Collected::Activation(activation))
-                    }
-                    other => Err(other),
-                },
-            )
-            .await;
-        match collected {
-            Collected::Child(child) => {
-                let expected_effort = if child.label.ends_with("/consumer-tests") {
-                    Some(exomonad_actor::ForkEffort::Medium)
-                } else if child.label.ends_with("/later-wave/domain") {
-                    Some(exomonad_actor::ForkEffort::Low)
-                } else {
-                    None
-                };
-                assert_eq!(
-                    child.fork_effort, expected_effort,
-                    "explicit effort is preserved; omitted effort stays a host default"
-                );
-                let boundary = child.fork_boundary.as_ref().expect("hosted fork boundary");
-                let operation = boundary.hosted().expect("hosted operation");
-                assert_eq!(operation.external_thread(), Some("actor-host-vertical"));
-                assert!(!operation.call_id.is_empty());
-                if let Some(expected) = &fork_boundary {
-                    assert_eq!(
-                        boundary, expected,
-                        "siblings inherit the same hosted invocation"
-                    );
-                } else {
-                    fork_boundary = Some(boundary.clone());
-                }
-                bindings.push(open_test_fork(&campaign, &child));
-                children.push(child);
-            }
-            Collected::Activation(activation) => activation_messages.push(activation),
-        }
-    }
-    let mut presented = std::collections::HashSet::new();
-    while presented.len() < children.len() {
-        let activation =
-            if let Some(activation) = activation_messages.pop() {
-                activation
-            } else {
-                campaign
-                    .next_deployment("request activation", Duration::from_secs(120), |event| {
-                        match event {
-                            LocalResidentDeployment::SessionReady { activation } => Ok(activation),
-                            other => Err(other),
-                        }
-                    })
-                    .await
-            };
-        let Some(child) = children
-            .iter()
-            .find(|child| child.actor.identity() == activation.id.actor())
-        else {
-            continue;
-        };
-        assert!(
-            !activation.message.contains("rendering unavailable"),
-            "{}",
-            activation.message
-        );
-        if !rich_response && child.label.ends_with("/domain") {
-            assert!(
-                activation.message.contains("sessionInput :: Int`):\n\n7"),
-                "{}",
-                activation.message
-            );
-            assert!(
-                activation.message.contains("data Report"),
-                "{}",
-                activation.message
-            );
-        }
-        presented.insert(activation.id.actor());
-    }
-    displayed(
-        &mut campaign,
-        root.as_ref(),
-        "let sharedAfterUnfold = (\"later parent value\" :: Text)",
-    )
-    .await;
-    for child in &children {
-        let inherited = displayed(
-            &mut campaign,
-            child.policy.as_ref(),
-            "display sharedAfterUnfold",
-        )
-        .await;
-        assert_eq!(
-            explicit_display_output(&inherited)["text"]
-                .as_str()
-                .unwrap()
-                .trim(),
-            "ready"
-        );
-    }
-    displayed(
-        &mut campaign,
-        root.as_ref(),
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host_fixtures/generic_actor/response_computation.hs",
-        ),
-    )
-    .await;
-    for child in &children {
-        let source = if rich_response {
-            tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host_fixtures/generic_actor/rich_response_reply.hs",
-            )
-        } else if child.label.ends_with("/domain") {
-            "respond (Report sessionInput)".to_owned()
-        } else {
-            "respond sessionInput".to_owned()
-        };
-        let result = dispatch_haskell_script(child.policy.as_ref(), &source).await;
-        assert_eq!(result["status"], "replied", "{result:?}");
-    }
-    campaign.await_watch_ready().await;
-    let first = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "firstState <- pollWatch joined\ndisplay firstState",
-    )
-    .await;
-    let second = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "secondState <- pollWatch joined\ndisplay secondState",
-    )
-    .await;
-    for observation in [&first, &second] {
-        assert!(explicit_display_output(observation)["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("WatchReady"));
-    }
-    let full = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "display (inspectFull firstState)",
-    )
-    .await;
-    assert!(explicit_display_output(&full)["text"]
-        .as_str()
-        .unwrap()
-        .contains("ReplyAvailable"));
-    displayed(
-        &mut campaign, root.as_ref(),
-        "import Tidepool.Actors.Observe (actorContext)\ncontext <- actorContext\ncontextFirstUsage context\ncontextLatestUsage context",
-    )
-    .await;
-    displayed(
-        &mut campaign,
-        root.as_ref(),
-        "let worker = responseActor (fst workers)\nlet task = 9 :: Int",
-    )
-    .await;
-    let domain = children
-        .iter()
-        .find(|child| child.label.ends_with("/domain"))
-        .unwrap();
-    for document in [
-        include_str!("../../../../exomonad/prompts/docs/request.md"),
-        include_str!("../../../../exomonad/prompts/docs/deadline.md"),
-    ] {
-        if rich_response {
-            break;
-        }
-        displayed(&mut campaign, root.as_ref(), example(document)).await;
-        displayed(
-            &mut campaign, root.as_ref(),
-            "let readyLabel = \"followup-result\" :: WatchLabel\nready <- watch readyLabel (awaitResponse response)",
-        )
-        .await;
-        let reply =
-            dispatch_haskell_script(domain.policy.as_ref(), "respond (Report sessionInput)").await;
-        assert_eq!(reply["status"], "replied", "{reply:?}");
-        campaign.await_watch_ready().await;
-        let result = displayed(
-            &mut campaign,
-            root.as_ref(),
-            "responseState <- pollResponse response\ndisplay responseState",
-        )
-        .await;
-        assert!(explicit_display_output(&result)["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("ResponseReady"));
-        let full = displayed(&mut campaign, root.as_ref(), "display (show responseState)").await;
-        assert!(
-            explicit_display_output(&full)["text"]
-                .as_str()
-                .unwrap()
-                .contains("Report 9"),
-            "{full}"
-        );
-    }
-    for child in children {
-        child
-            .actor
-            .shutdown(ActorTerminal {
-                kind: if child.label.ends_with("/consumer-tests") {
-                    ActorExitKind::Failed
-                } else {
-                    ActorExitKind::Cancelled
-                },
-                summary: "documentation scenario terminal evidence".into(),
-                diagnostic: None,
-            })
-            .await
-            .unwrap();
-    }
-    let status = dispatch_status(root.as_ref(), "summary").await;
-    let status = status["items"][0]["output"].as_str().unwrap();
-    assert!(
-        status.contains("terminal:Failed")
-            && status.contains("documentation scenario terminal evidence"),
-        "{status}"
-    );
-    campaign
-        .actor
-        .shutdown(ActorTerminal {
-            kind: ActorExitKind::Cancelled,
-            summary: "documentation scenario complete".into(),
-            diagnostic: None,
-        })
-        .await
-        .unwrap();
     campaign.hosted.await.unwrap();
 }
 
@@ -2111,7 +1526,7 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
                 .await;
             match arrival {
                 Arrival::Child(child) => {
-                    bindings.push(open_test_fork(&campaign, &child));
+                    bindings.push(open_test_workspace(&campaign, &child));
                     children.push(child);
                 }
                 Arrival::Ready => ready += 1,
@@ -2121,7 +1536,7 @@ async fn model_selection_is_independent_of_inherited_and_selected_context() {
     for child in &children {
         assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
-        if child.label.ends_with("/exact") {
+        if child.label == "exact" {
             assert_eq!(child.context_parent, Some(campaign.actor.identity()));
             let inherited = displayed(
                 &mut campaign,
@@ -2175,7 +1590,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                 .await;
             match arrival {
                 Arrival::Child(child) => {
-                    bindings.push(open_test_fork(&campaign, &child));
+                    bindings.push(open_test_workspace(&campaign, &child));
                     children.push(child);
                 }
                 Arrival::Ready => ready += 1,
@@ -2184,11 +1599,11 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     }
     let consumer = children
         .iter()
-        .find(|child| child.label.ends_with("/consumer"))
+        .find(|child| child.label == "consumer")
         .unwrap();
     let producer = children
         .iter()
-        .find(|child| child.label.ends_with("/producer"))
+        .find(|child| child.label == "producer")
         .unwrap();
     dispatch_haskell_script(consumer.policy.as_ref(), "respond sessionInput").await;
     dispatch_haskell_script(producer.policy.as_ref(), "respond sessionInput").await;
@@ -2235,7 +1650,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
                 ReviewArrival::Child(child) => {
                     assert_eq!(child.context_parent, None);
                     assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
-                    bindings.push(open_test_fork(&campaign, &child));
+                    bindings.push(open_test_workspace(&campaign, &child));
                     reviewer = Some(child);
                 }
                 ReviewArrival::Ready { message } => {
@@ -2292,7 +1707,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
         "stopAgent (responseActor producer)",
     )
     .await;
-    displayed(&mut campaign, root.as_ref(), "unavailable <- request @Text (responseActor producer) (assignment forwardedLabel (\"lost target\" :: Text))\nhandled <- route (awaitSettled unavailable) (\\settled -> case settled of { ReplyUnavailable _ -> pure (); ReplyAvailable _ -> error \"unexpected success\" })").await;
+    displayed(&mut campaign, root.as_ref(), "Right unavailable <- request @Text (responseActor producer) (\"lost target\" :: Text) defaultRequestOptions\nhandled <- route (settlement unavailable) (\\settled -> case settled of { Left _ -> pure (); Right _ -> error \"unexpected success\" })").await;
     let handled = displayed(
         &mut campaign, root.as_ref(),
         "_ <- pollRoute handled >>= display . show\n_ <- forgetRoute forwarding >>= display . show\n_ <- forgetRoute broken >>= display . show",
@@ -2338,7 +1753,6 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
 #[tokio::test]
 async fn configured_modules_are_available_to_resident_declarations_from_frozen_sources() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");
@@ -2445,10 +1859,10 @@ async fn workspace_campaign() -> TestCampaign {
 }
 
 async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign {
-    TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
+    TestCampaign::start_with_conversation(
         |admission| admission,
         |config| {
+            config.jev = Some(Arc::new(super::test_campaign::FixtureJev));
             let authored = config.workspace.join(".exomonad");
             crate::exomonad::workspace::copy_authored(
                 &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
@@ -2465,6 +1879,10 @@ async fn workspace_campaign_with(configure: impl FnOnce(&Path)) -> TestCampaign 
                 .unwrap(),
             );
         },
+        // The model-free fixture has no provider conversation to read.
+        Some(Arc::new(|_, _| {
+            Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+        })),
     )
     .await
 }
@@ -2529,8 +1947,7 @@ async fn workspace_recipe_modules_and_snapshot_helpers_compile() {
             "requestReview",
             "repair",
             "withDecision",
-            "unfoldWork",
-            "lunaLead",
+            "workspaceAgentSpec",
         ],
     )
     .await;
@@ -2543,7 +1960,7 @@ async fn next_project_worker(
     campaign: &mut TestCampaign,
 ) -> (
     exomonad_actor::LocalResidentInstallation,
-    Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
+    Arc<dyn exomonad_actor::WorkspaceCustody>,
 ) {
     let (installation, custody, _) = next_project_activation(campaign).await;
     (installation, custody)
@@ -2553,7 +1970,7 @@ async fn next_project_activation(
     campaign: &mut TestCampaign,
 ) -> (
     exomonad_actor::LocalResidentInstallation,
-    Arc<dyn exomonad_actor::ForkWorkspaceCustody>,
+    Arc<dyn exomonad_actor::WorkspaceCustody>,
     exomonad_actor::ResidentActivation,
 ) {
     enum WorkerArrival {
@@ -2598,7 +2015,7 @@ async fn next_project_activation(
             WorkerArrival::Child(child) => worker = Some(child),
             WorkerArrival::Ready(activation) => {
                 let child = worker.take().unwrap();
-                let binding = open_test_fork(campaign, &child);
+                let binding = open_test_workspace(campaign, &child);
                 return (*child, binding, activation);
             }
         }
@@ -2606,7 +2023,7 @@ async fn next_project_activation(
 }
 
 #[tokio::test]
-async fn independent_admission_rejects_inheritance_and_supervised_escape() {
+async fn independent_spawn_separates_context_and_ownership_and_refuses_missing_seed() {
     let mut campaign = workspace_campaign().await;
     campaign._repository.writer().stage(".exomonad").unwrap();
     campaign
@@ -2615,43 +2032,97 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    let fixture = tidepool_testing::fixture_source(
-        "bridge/facade/src/actor_host/fixtures/independent_worker_setup.hs",
-    );
-    let inherited = fixture
-        .replace("withContext (selected id)", "withContext inherited")
-        .replace("peer <- unfold", "peerAttempt <- attemptUnfold");
-    committed(root.as_ref(), &inherited).await;
-    let result = displayed(
+
+    let rejected = displayed(
         &mut campaign,
         root.as_ref(),
-        "display (either show (const \"unexpected acceptance\") peerAttempt)",
+        concat!(
+            "rejected <- spawnSubagent (FreshCtx \"bad seed control\") ",
+            "(ForkWorktree (atRef (GitRef \"refs/heads/tidepool-missing-seed\"))) ",
+            "(defaultSpawnOptions workspaceAgentSpec)\n",
+            "display (show rejected)",
+        ),
     )
     .await;
     assert!(
-        result.to_string().contains("UnfoldUncapturedContext"),
-        "{result}"
+        explicit_display_output(&rejected)["text"]
+            .as_str()
+            .unwrap()
+            .contains("Left"),
+        "a missing committed seed must fail typed spawn admission: {rejected}"
     );
-    committed(root.as_ref(), &fixture.replace("SwarmOwned", "ActorOwned")).await;
-    let (worker, _binding) = next_project_worker(&mut campaign).await;
+    campaign.assert_no_deployment("rejected seed did not install an actor", |event| {
+        matches!(event, LocalResidentDeployment::PolicyInstalled(_))
+    });
+
+    committed(
+        root.as_ref(),
+        concat!(
+            "let parentOnly = 41 :: Int\n",
+            "Right captured <- checkpoint \"independent fork context\"\n",
+            "Right peer <- spawnSubagent (ForkCtx captured) (ForkWorktree projectHead) ",
+            "((defaultSpawnOptions workspaceAgentSpec) { spawnLifetime = RunOwned, ",
+            "spawnLabel = Just \"run-owned-peer\" })",
+        ),
+    )
+    .await;
+    let peer = campaign
+        .next_deployment(
+            "independent run-owned child admission",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                other => Err(other),
+            },
+        )
+        .await;
+    assert_eq!(peer.supervisor_parent, None);
     assert_eq!(
-        worker.supervisor_parent,
+        peer.context_parent,
         Some(campaign.root_installation.actor.identity())
     );
-    let attempted = fixture
-        .replace("projectHead", "currentCheckout")
-        .replace("peer <- unfold", "standaloneAttempt <- attemptUnfold");
-    committed(worker.policy.as_ref(), &attempted).await;
-    let result = displayed(
-        &mut campaign, worker.policy.as_ref(),
-        "_ <- display (either show (const \"unexpected acceptance\") standaloneAttempt)\n_ <- pollReply sessionReply >>= display . show",
+    assert_eq!(
+        peer.creator,
+        Some(campaign.root_installation.actor.identity())
+    );
+    let peer_id = peer.actor.identity();
+    campaign.assert_no_deployment("idle spawn waits for a typed request", |event| {
+        matches!(event, LocalResidentDeployment::SessionReady { activation } if activation.id.actor() == peer_id)
+    });
+
+    committed(
+        root.as_ref(),
+        "Right peerRequest <- request @Text peer (\"ready\" :: Text) defaultRequestOptions",
     )
     .await;
-    assert!(
-        explicit_display_texts(&result)[0].contains("only a top-level actor"),
-        "{result}"
+    campaign
+        .next_deployment(
+            "first typed request activates the idle child",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == peer_id =>
+                {
+                    Ok(activation)
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let reply = dispatch_haskell_script(peer.policy.as_ref(), "respond sessionInput").await;
+    assert_eq!(reply["status"], "replied", "{reply}");
+    let answered = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "Right answer <- await (result peerRequest)\ndisplay answer",
+    )
+    .await;
+    assert_eq!(
+        explicit_display_output(&answered)["text"],
+        "ready",
+        "{answered}"
     );
-    assert_eq!(explicit_display_texts(&result)[1], "ReplyOpen", "{result}");
+
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -2764,7 +2235,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .unwrap();
     assert!(worker.actor.terminal().get().is_none());
     assert!(observer.actor.terminal().get().is_none());
-    committed(observer.policy.as_ref(), "let followupLabel = [label|peer-followup|]\nfollowup <- do { issued <- request @Text retainedPeer (assignment followupLabel (\"after planner retirement\" :: Text)); Right () <- detachRequest issued; pure issued }").await;
+    committed(observer.policy.as_ref(), "Right followup <- request @Text retainedPeer (\"after planner retirement\" :: Text) defaultRequestOptions").await;
     let worker_actor = worker.actor.identity();
     campaign
         .next_deployment(
@@ -2833,10 +2304,28 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
         .forest
         .new_workbench(
             "after-swarm-stop".into(),
-            exomonad_actor::EffectiveRole::root()
+            exomonad_actor::ActorCapabilities::default()
         )
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn candidate_reports_preserve_admissions_receipts_and_observation_failures() {
+    let campaign = workspace_campaign_with(|authored| {
+        crate::exomonad::edit_fixture_project_config(authored, |project| {
+            project.haskell.modules = vec!["Project.Work".into()];
+        });
+    })
+    .await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        "import Project.WorkflowExamplesChecks\nworkflowContracts",
+    )
+    .await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
@@ -2914,13 +2403,6 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let review_instructions =
         include_str!("../../../../exomonad/examples/workspace/.exomonad/prompts/review.md");
     assert_eq!(reviewer.instructions.as_deref(), Some(review_instructions));
-    let launched = super::developer_instructions_selected(
-        &reviewer.effective_role,
-        None,
-        reviewer.instructions.as_deref(),
-    );
-    assert!(launched.starts_with(review_instructions));
-    assert!(launched.contains("Runtime policy ("));
     let evidence = displayed(&mut campaign, reviewer.policy.as_ref(), "_ <- display . show $ (reviewInput sessionInput)\nlet RetainedImplementer repairTarget = repairOwner sessionInput\n_ <- display . show $ (agentIdentity repairTarget)").await;
     assert!(
         explicit_item_display_text(&evidence, 0).contains("focused candidate check"),
@@ -3015,7 +2497,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     )
     .await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let result = displayed(&mut campaign, reviewer.policy.as_ref(), "state <- pollWatch repaired\n_ <- display . show $ (fmap (either (const False) (const True) . settledValue) state)").await;
+    let result = displayed(&mut campaign, reviewer.policy.as_ref(), "state <- pollWatch repaired\n_ <- display . show $ fmap (either (const False) (const True)) state").await;
     assert_eq!(
         explicit_item_display_text(&result, 1),
         "WatchReady True",
@@ -3070,7 +2552,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
         &format!("respond (AmendPlan (PlanAmendment (GitOid \"{}\") (GitOid \"{}\") [\"plans/feature.md\"] \"retain the preparation gate\" [\"feature review\"] [\"boundary evidence\"]))", revised.as_str(), amendment.as_str()),
     ).await;
     assert_eq!(answered["status"], "replied", "{answered}");
-    let decision = displayed(&mut campaign, reviewer.policy.as_ref(), "design <- pollWatch designReady\n_ <- display . show $ (fmap settledValue design)\n_ <- pollReply sessionReply >>= display . show").await;
+    let decision = displayed(&mut campaign, reviewer.policy.as_ref(), "design <- pollWatch designReady\n_ <- display . show $ design\n_ <- pollReply sessionReply >>= display . show").await;
     assert!(
         explicit_item_display_text(&decision, 1).contains("retain the preparation gate"),
         "{decision}"
@@ -3124,7 +2606,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let incorporated = dispatch_haskell_script(implementer.policy.as_ref(),
         &format!("respond (Incorporated (incorporationAmendment sessionInput) (GitOid \"{}\") [\"read exact plan at resulting head\"])", incorporated_head.trimmed())).await;
     assert_eq!(incorporated["status"], "replied", "{incorporated}");
-    let checked = displayed(&mut campaign, reviewer.policy.as_ref(), "incorporation <- pollWatch planReady\n_ <- display . show $ (fmap settledValue incorporation)\n_ <- pollReply sessionReply >>= display . show").await;
+    let checked = displayed(&mut campaign, reviewer.policy.as_ref(), "incorporation <- pollWatch planReady\n_ <- display . show $ incorporation\n_ <- pollReply sessionReply >>= display . show").await;
     for expected in [
         "Incorporated",
         incorporated_head.trimmed(),
@@ -3358,7 +2840,7 @@ async fn route_reply_case(cancel: bool) {
     displayed(
         &mut campaign,
         root.as_ref(),
-        "let routeCampaign = \"route-reply\" :: CampaignLabel",
+        "let routeCampaign = \"route-reply\" :: Text",
     )
     .await;
     displayed(
@@ -3529,11 +3011,10 @@ fn recipe_workspace(checks: Option<&[&str]>) -> tempfile::TempDir {
     repository
 }
 
-/// `exomonad check --workspace` asks GHC whether every public child profile
-/// can install the selected spec and retains the profile, entry, and compiler
-/// evidence when one cannot.
+/// `exomonad check --workspace` accepts a spec requiring an effect in the
+/// default root capabilities.
 #[tokio::test(flavor = "multi_thread")]
-async fn workspace_check_refuses_a_spec_no_child_role_can_satisfy() {
+async fn workspace_check_accepts_a_spec_requiring_journal() {
     let repository = recipe_workspace(None);
     let spec = repository.path().join(".exomonad/AgentSpec.hs");
     let original = std::fs::read_to_string(&spec).unwrap();
@@ -3564,30 +3045,17 @@ async fn workspace_check_refuses_a_spec_no_child_role_can_satisfy() {
     );
     std::fs::write(&spec, widened).unwrap();
     super::test_campaign::commit_workspace(repository.path());
-    let error = crate::exomonad::check(Some(repository.path().to_path_buf()), false)
+    crate::exomonad::check(Some(repository.path().to_path_buf()), false)
         .await
-        .unwrap_err();
-    let message = error.to_string();
-    assert!(
-        message.contains("profile research cannot install spec AgentSpec.agentSpec"),
-        "{message}"
-    );
-    assert!(
-        message.contains("profile coding cannot install spec AgentSpec.agentSpec"),
-        "{message}"
-    );
-    assert!(
-        message.contains("Journal") && message.contains("<agent-spec-installation>"),
-        "{message}"
-    );
+        .expect("Journal is available to the root installer");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn workspace_check_refuses_sleep_required_by_a_spec_under_wider_role_ceilings() {
+async fn workspace_check_accepts_sleep_required_by_the_root_spec_installer() {
     let repository = recipe_workspace(None);
     crate::exomonad::check(Some(repository.path().to_path_buf()), false)
         .await
-        .expect("the original spec installs under every concrete public profile");
+        .expect("the original spec installs with root capabilities");
     std::fs::write(
         repository.path().join(".exomonad/AgentSpec.hs"),
         &tidepool_testing::fixture_source(
@@ -3596,23 +3064,9 @@ async fn workspace_check_refuses_sleep_required_by_a_spec_under_wider_role_ceili
     )
     .unwrap();
     super::test_campaign::commit_workspace(repository.path());
-    let error = crate::exomonad::check(Some(repository.path().to_path_buf()), false)
+    crate::exomonad::check(Some(repository.path().to_path_buf()), false)
         .await
-        .unwrap_err();
-    let message = error.to_string();
-    for profile in exomonad_tool::PublicActorProfile::ALL {
-        assert!(
-            message.contains(&format!(
-                "profile {} cannot install spec AgentSpec.agentSpec",
-                profile.label()
-            )),
-            "{message}"
-        );
-    }
-    assert!(
-        message.contains("Sleep") && message.contains("<agent-spec-installation>"),
-        "{message}"
-    );
+        .expect("Sleep is available to the root installer");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3638,6 +3092,36 @@ async fn candidate_workspace_runs_its_own_model_free_recipes() {
     crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_profile_executes_scopes_and_sleep_with_its_installed_effects() {
+    let campaign = workspace_campaign_with(|authored| {
+        crate::exomonad::edit_fixture_project_config(authored, |project| {
+            project.haskell.modules.clear();
+        });
+    })
+    .await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        include_str!(
+            "../../../../exomonad/examples/workspace/.exomonad/checks/workspace-quantities.hs"
+        ),
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        r#"if not (null workspaceProfileKeys) && all (\keys -> "ResourceScopes" `elem` keys && "Sleep" `elem` keys) workspaceProfileKeys then pure () else error "the installed workspace notebooks lost scope or sleep""#,
+    )
+    .await;
+    committed(
+        root.as_ref(),
+        r#"if scopeBody workspaceSleepOutcome == Right () && scopeCleanup workspaceSleepOutcome == Right () then pure () else error "WorkspaceEffects scoped sleep did not complete with confirmed cleanup""#,
+    )
+    .await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3735,7 +3219,6 @@ async fn attention_actor_recipe_retains_independent_sources_through_closure() {
 #[tokio::test]
 async fn work_router_queries_receipts_as_the_issuing_actor() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let package = Path::new(env!("CARGO_MANIFEST_DIR"))

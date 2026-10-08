@@ -264,8 +264,9 @@ impl ForestRetirementBatch {
 ///
 /// This is deliberately not a scheduler or lifecycle state machine. Ractor
 /// owns runnable actors and mailboxes; each actor owns its terminal cell. The
-/// directory only resolves the identity carried by a live Haskell `ActorRef`
-/// to that pair of owners. Entries intentionally live for the routing
+/// directory resolves the identity carried by a live Haskell `ActorRef`
+/// to that pair of owners and retains native resources whose cleanup belongs
+/// to the run. Entries intentionally live for the routing
 /// domain's lifetime: an exited exact reference must remain resolvable so any
 /// number of late `wait` operations can observe its retained result. Logical
 /// actor IDs are process-unique (see [`NEXT_ACTOR_ID`]); this directory's own
@@ -276,6 +277,11 @@ pub struct LocalActorDirectory {
     actors: std::sync::Arc<parking_lot::RwLock<DirectoryMembership>>,
     sessions: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, crate::ActorSessionContext>>>,
     identities: std::sync::Arc<parking_lot::Mutex<DirectoryIdentities>>,
+    // Native resources transfer their existing Ractor identity and finalizer
+    // here when their lifetime belongs to this run rather than an actor.
+    run_resources: Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
+    run_admission_closed: Arc<tokio::sync::RwLock<bool>>,
+    run_cleanup_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -294,6 +300,27 @@ struct DirectoryEntry {
 }
 
 impl LocalActorDirectory {
+    pub(crate) fn with_run_admission<T>(&self, operation: impl FnOnce() -> T) -> Result<T, String> {
+        let admission = self
+            .run_admission_closed
+            .try_read()
+            .map_err(|_| "run resource admission is closing".to_string())?;
+        if *admission {
+            return Err("run resource admission is closed".into());
+        }
+        Ok(operation())
+    }
+
+    pub(crate) async fn close_run_admission(&self) {
+        *self.run_admission_closed.write().await = true;
+    }
+
+    pub(crate) async fn shutdown_run_resources(&self) -> crate::CleanupComponentOutcome {
+        self.close_run_admission().await;
+        let _cleanup = self.run_cleanup_lock.lock().await;
+        shutdown_resources(&self.run_resources, SHUTDOWN_BUDGET).await
+    }
+
     fn reserve(&self, incarnation: crate::Incarnation) -> Result<ActorRef, String> {
         loop {
             let next = NEXT_ACTOR_ID.fetch_add(1, Ordering::Relaxed);
@@ -419,7 +446,62 @@ impl LocalActorDirectory {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifetimeTransferError {
+    Closed,
+    Unauthorized,
+    Unavailable,
+}
+
 impl KernelContext {
+    pub(crate) fn with_worker_lifetime_transfer<T, E>(
+        &self,
+        child: &LocalActorRef,
+        destination_run: bool,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, LifetimeTransferError> {
+        let admission = self
+            .child_admission_closed
+            .try_read()
+            .map_err(|_| LifetimeTransferError::Closed)?;
+        if *admission {
+            return Err(LifetimeTransferError::Closed);
+        }
+        self.directory
+            .with_run_admission(|| {
+                if self
+                    .directory
+                    .resolve(child.identity())
+                    .is_none_or(|known| known.address().get_id() != child.address().get_id())
+                {
+                    return Err(LifetimeTransferError::Unauthorized);
+                }
+                if child.terminal().get().is_some() {
+                    return Err(LifetimeTransferError::Unavailable);
+                }
+                let cell = child.address().get_cell();
+                if cell
+                    .try_get_supervisor()
+                    .is_some_and(|supervisor| supervisor.get_id() != self.myself.get_id())
+                {
+                    return Err(LifetimeTransferError::Unauthorized);
+                }
+                let mut children = self.children.lock();
+                let result = operation();
+                if result.is_ok() {
+                    if destination_run {
+                        children.remove(&child.address().get_id());
+                        cell.unlink(self.myself.get_cell());
+                    } else {
+                        cell.link(self.myself.get_cell());
+                        children.insert(child.address().get_id(), child.clone());
+                    }
+                }
+                Ok(result)
+            })
+            .map_err(|_| LifetimeTransferError::Closed)?
+    }
+
     /// Internal resources use Ractor supervision without a resident machine or model.
     pub(crate) async fn spawn_resource<A: ractor::Actor>(
         &self,
@@ -447,6 +529,58 @@ impl KernelContext {
         );
         drop(task);
         Ok(child)
+    }
+
+    /// Transfer existing native-resource finalizers while the actor and run
+    /// admission fences hold. Membership publication cannot await or reenter
+    /// these resource maps; a refused publication leaves supervision intact.
+    pub(crate) fn with_resource_lifetime_transfer<T, E>(
+        &self,
+        cells: &[ractor::ActorCell],
+        source_run: bool,
+        destination_run: bool,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, String> {
+        let actor_admission = self
+            .child_admission_closed
+            .try_read()
+            .map_err(|_| "actor resource admission is closing".to_string())?;
+        if *actor_admission {
+            return Err("actor resource admission is closed".into());
+        }
+        self.directory.with_run_admission(|| {
+            let mut actor = self.resources.lock();
+            let mut run = self.directory.run_resources.lock();
+            let (source, destination) = if source_run {
+                (&mut run, &mut actor)
+            } else {
+                (&mut actor, &mut run)
+            };
+            for cell in cells {
+                let id = cell.get_id();
+                if !source.contains_key(&id) {
+                    if destination.contains_key(&id)
+                        || cell.get_status() != ractor::ActorStatus::Stopped
+                    {
+                        return Err("native resource has another cleanup owner".to_string());
+                    }
+                }
+            }
+            let result = operation();
+            if result.is_ok() && source_run != destination_run {
+                for cell in cells {
+                    if let Some(resource) = source.remove(&cell.get_id()) {
+                        if destination_run {
+                            resource.cell.unlink(self.myself.get_cell());
+                        } else {
+                            resource.cell.link(self.myself.get_cell());
+                        }
+                        destination.insert(cell.get_id(), resource);
+                    }
+                }
+            }
+            Ok(result)
+        })?
     }
 
     pub(crate) fn supervisor_identity(&self) -> Option<ActorRef> {
@@ -657,10 +791,10 @@ impl KernelContext {
         let cleanup_only = startup_refusal.is_some();
         let arguments = LocalActorArguments {
             spawn_ownership: match lifetime {
-                crate::WorkerLifetime::SwarmOwned => SpawnOwnership::Independent,
-                crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::ActorOwned => {
-                    SpawnOwnership::Supervised(self.identity)
-                }
+                crate::WorkerLifetime::RunOwned => SpawnOwnership::Independent,
+                crate::WorkerLifetime::InvocationOwned
+                | crate::WorkerLifetime::ActorOwned
+                | crate::WorkerLifetime::InScope(_) => SpawnOwnership::Supervised(self.identity),
             },
             behavior,
             startup_refusal,
@@ -679,7 +813,9 @@ impl KernelContext {
             .await
         } else {
             match lifetime {
-                crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::ActorOwned => {
+                crate::WorkerLifetime::InvocationOwned
+                | crate::WorkerLifetime::ActorOwned
+                | crate::WorkerLifetime::InScope(_) => {
                     Box::pin(self.myself.spawn_linked(
                         name,
                         LocalActor::<C>(PhantomData),
@@ -687,7 +823,7 @@ impl KernelContext {
                     ))
                     .await
                 }
-                crate::WorkerLifetime::SwarmOwned => {
+                crate::WorkerLifetime::RunOwned => {
                     Box::pin(LocalActor::<C>::spawn(
                         name,
                         LocalActor::<C>(PhantomData),
@@ -717,7 +853,7 @@ impl KernelContext {
         drop(task);
         let child =
             LocalActorRef::with_identity_admission(address, terminal, identity, mailbox_admission);
-        if lifetime != crate::WorkerLifetime::SwarmOwned {
+        if lifetime != crate::WorkerLifetime::RunOwned {
             self.children
                 .lock()
                 .insert(child.address().get_id(), child.clone());
@@ -779,6 +915,14 @@ pub trait KernelBehavior: Send + 'static {
             })
         })
     }
+    fn replace_spec<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _definition: crate::SpecReplacementDefinition,
+    ) -> BoxFuture<'a, Result<(), crate::SpecReplacementError>> {
+        Box::pin(async { Err(crate::SpecReplacementError::Unavailable) })
+    }
+
     fn replace<'a>(
         &'a mut self,
         _context: &'a KernelContext,
@@ -978,7 +1122,7 @@ pub trait KernelBehavior: Send + 'static {
     fn reconcile_workbench_boundary<'a>(
         &'a mut self,
         _context: &'a KernelContext,
-        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> BoxFuture<'a, Result<crate::WorkbenchBoundaryReconciliation, KernelBehaviorError>> {
         Box::pin(async move { Ok(crate::WorkbenchBoundaryReconciliation::Pending) })
     }
@@ -989,7 +1133,7 @@ pub trait KernelBehavior: Send + 'static {
     fn tool_completed<'a>(
         &'a mut self,
         _context: &'a KernelContext,
-        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async { Ok(()) })
     }
@@ -997,7 +1141,7 @@ pub trait KernelBehavior: Send + 'static {
     fn tool_aborted<'a>(
         &'a mut self,
         _context: &'a KernelContext,
-        _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async { Ok(()) })
     }
@@ -1030,49 +1174,6 @@ pub trait KernelBehavior: Send + 'static {
                             diagnostic: error.diagnostic,
                         }
                     });
-                    (behavior, OwnedActorCompletion::new(move |_| result))
-                })
-            },
-        ))
-    }
-
-    /// Start an admitted child with its final inherited scope.
-    fn release_fork<'a>(
-        &'a mut self,
-        _context: &'a KernelContext,
-        _release: crate::ForkChildRelease,
-    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(async {
-            Err(KernelBehaviorError {
-                detail: "actor has no deferred fork".into(),
-                diagnostic: None,
-            })
-        })
-    }
-
-    /// Capture one admitted child release. The default transfers the original
-    /// behavior to its existing serial driver; resident initialization replaces
-    /// this with tasks that retain their own inputs.
-    fn dispatch_release_fork(
-        &mut self,
-        _context: &KernelContext,
-        release: crate::ForkChildRelease,
-    ) -> Result<OwnedActorTask<Self, ()>, KernelBehaviorError>
-    where
-        Self: Sized,
-    {
-        Ok(OwnedActorTask::serial(
-            move |mut behavior: Self, context| {
-                Box::pin(async move {
-                    let result = behavior
-                        .release_fork(&context, release)
-                        .await
-                        .map_err(|error| KernelInvocationFailure::Failed {
-                            receipts: Vec::new(),
-                            actor: context.identity(),
-                            detail: error.detail,
-                            diagnostic: error.diagnostic,
-                        });
                     (behavior, OwnedActorCompletion::new(move |_| result))
                 })
             },
@@ -1330,10 +1431,10 @@ impl PendingActorTask {
     fn matches_workbench_boundary(
         &self,
         actor: ActorRef,
-        boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> bool {
         match boundary {
-            tidepool_runtime::session::WorkbenchForkBoundary::Hosted(_) => {
+            tidepool_runtime::session::ContextCheckpointBoundary::Hosted(_) => {
                 let Some(key) = self
                     .control()
                     .and_then(|control| control.invocation.as_ref())
@@ -1344,7 +1445,7 @@ impl PendingActorTask {
                     && self.step().request_execution()
                         == Some(&crate::resident_tools::execution_id(actor, key))
             }
-            tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+            tidepool_runtime::session::ContextCheckpointBoundary::Execution {
                 actor_id,
                 incarnation,
                 execution_id,
@@ -1353,32 +1454,13 @@ impl PendingActorTask {
                     && *incarnation == actor.incarnation.0
                     && self.step().request_execution() == Some(execution_id)
             }
-            tidepool_runtime::session::WorkbenchForkBoundary::Route { .. } => false,
+            tidepool_runtime::session::ContextCheckpointBoundary::Route { .. } => false,
         }
     }
 }
 
 struct PendingKernel {
     step: crate::WorkbenchStepKey,
-    operation: KernelTaskOperation,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum KernelTaskOperation {
-    ReleaseFork,
-    Resume,
-}
-
-async fn fail_kernel_operation<B: KernelBehavior>(
-    myself: &RactorRef<KernelMessage>,
-    state: &mut LocalActorState<B>,
-    operation: KernelTaskOperation,
-    error: KernelBehaviorError,
-) {
-    match operation {
-        KernelTaskOperation::ReleaseFork => fail_actor_with_error(myself, state, error).await,
-        KernelTaskOperation::Resume => fail_handler_with_error(myself, state, error).await,
-    }
 }
 
 #[cfg(test)]
@@ -1844,6 +1926,17 @@ where
                 };
                 reply.send(result).ok();
             }
+            KernelMessage::ReplaceSpec { definition, reply } => {
+                let outcome = if state.replacement.is_some() {
+                    Err(crate::SpecReplacementError::Unavailable)
+                } else {
+                    state
+                        .behavior
+                        .replace_spec(&state.context, *definition)
+                        .await
+                };
+                reply.send(outcome).ok();
+            }
             KernelMessage::Replace { definition, reply } => {
                 if state.replacement.is_some() {
                     let failure = match state.behavior.discard_replacement(*definition).await {
@@ -2110,23 +2203,6 @@ where
             | KernelMessage::ToolAborted { .. }) => {
                 apply_hosted_settlement(state, settlement).await;
             }
-            KernelMessage::ReleaseFork { release } => {
-                if matches!(state.hosted_admission, HostedAdmission::Closing) {
-                    return Ok(());
-                }
-                if release.child() != state.context.identity() {
-                    tracing::warn!(actor = %state.context.identity(), release = ?release, "foreign child release refused");
-                    return Ok(());
-                }
-                start_kernel_task(
-                    &myself,
-                    state,
-                    KernelTaskOperation::ReleaseFork,
-                    |behavior, context| behavior.dispatch_release_fork(context, release),
-                )
-                .await;
-                return Ok(());
-            }
             KernelMessage::Workbench {
                 invocation,
                 control,
@@ -2165,12 +2241,9 @@ where
                 }
             }
             KernelMessage::Resume { kind } => {
-                start_kernel_task(
-                    &myself,
-                    state,
-                    KernelTaskOperation::Resume,
-                    |behavior, context| behavior.dispatch_resume(context, kind),
-                )
+                start_kernel_task(&myself, state, |behavior, context| {
+                    behavior.dispatch_resume(context, kind)
+                })
                 .await;
                 return Ok(());
             }
@@ -2432,12 +2505,17 @@ fn can_apply_independent_settlement<B: KernelBehavior>(
         return false;
     }
     match message {
+        KernelMessage::ReplaceSpec { .. } => state.replacement.is_none()
+            && matches!(state.hosted_admission, HostedAdmission::Open)
+            && !state.pending_tasks.values().any(|pending| {
+                matches!(pending, PendingActorTask::Workbench(workbench) if workbench.publication)
+            }),
         KernelMessage::ToolCompleted { boundary, .. }
         | KernelMessage::ToolAborted { boundary, .. }
         | KernelMessage::ReconcileWorkbenchBoundary { boundary, .. } => {
             !matches!(
                 boundary,
-                tidepool_runtime::session::WorkbenchForkBoundary::Route { .. }
+                tidepool_runtime::session::ContextCheckpointBoundary::Route { .. }
             ) && !state
                 .pending_tasks
                 .values()
@@ -2460,6 +2538,13 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
     message: KernelMessage,
 ) {
     match message {
+        KernelMessage::ReplaceSpec { definition, reply } => {
+            let result = state
+                .behavior
+                .replace_spec(&state.context, *definition)
+                .await;
+            reply.send(result).ok();
+        }
         KernelMessage::ReconcileWorkbenchBoundary { boundary, reply } => {
             let outcome = state
                 .behavior
@@ -2606,7 +2691,6 @@ fn start_tool<B: KernelBehavior>(
 async fn start_kernel_task<B: KernelBehavior>(
     myself: &RactorRef<KernelMessage>,
     state: &mut LocalActorState<B>,
-    operation: KernelTaskOperation,
     dispatch: impl FnOnce(&mut B, &KernelContext) -> Result<OwnedActorTask<B, ()>, KernelBehaviorError>,
 ) {
     let Some(generation) = state.next_task_generation.checked_add(1) else {
@@ -2620,7 +2704,6 @@ async fn start_kernel_task<B: KernelBehavior>(
     );
     let pending = PendingActorTask::Kernel(PendingKernel {
         step: crate::WorkbenchStepKey::new(state.context.identity, generation, None),
-        operation,
     });
     let key = pending.generation();
     state.pending_tasks.insert(key, pending);
@@ -2630,8 +2713,8 @@ async fn start_kernel_task<B: KernelBehavior>(
         Ok(Ok(task)) => spawn_actor_task(myself, state, generation, task),
         Ok(Err(error)) => {
             state.pending_tasks.remove(&generation);
-            fail_kernel_operation(myself, state, operation, {
-                let detail = format!("{operation:?} dispatch failed: {error}");
+            fail_handler_with_error(myself, state, {
+                let detail = format!("Resume dispatch failed: {error}");
                 error.context(detail)
             })
             .await;
@@ -2645,7 +2728,7 @@ async fn start_kernel_task<B: KernelBehavior>(
                 myself,
                 state,
                 pending,
-                format!("{operation:?} dispatch panicked; cleanup is unconfirmed"),
+                "Resume dispatch panicked; cleanup is unconfirmed".into(),
             );
         }
     }
@@ -2902,11 +2985,10 @@ async fn complete_actor_task<B: KernelBehavior>(
                 }
                 Ok(ActorAdvance::Complete(step)) => finish_after_step(myself, state, step).await,
                 Err(TaskApplyFailure::Invocation(error)) => {
-                    let detail = format!("{:?} failed: {error}", pending.operation);
-                    fail_kernel_operation(
+                    let detail = format!("Resume failed: {error}");
+                    fail_handler_with_error(
                         myself,
                         state,
-                        pending.operation,
                         error.into_behavior_error().context(detail),
                     )
                     .await;
@@ -3077,16 +3159,18 @@ enum DeferredControl {
 
 fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
     match message {
-        KernelMessage::Workbench { .. } => Some(DeferredControl::Workbench),
+        KernelMessage::Workbench { .. } | KernelMessage::ReplaceSpec { .. } => {
+            Some(DeferredControl::Workbench)
+        }
         KernelMessage::Tool { .. } | KernelMessage::ToolWithHostedCheckpoint { .. } => {
             Some(DeferredControl::HostedInvocation)
         }
         KernelMessage::ToolCompleted {
-            boundary: tidepool_runtime::session::WorkbenchForkBoundary::Route { .. },
+            boundary: tidepool_runtime::session::ContextCheckpointBoundary::Route { .. },
             ..
         }
         | KernelMessage::ReconcileWorkbenchBoundary {
-            boundary: tidepool_runtime::session::WorkbenchForkBoundary::Route { .. },
+            boundary: tidepool_runtime::session::ContextCheckpointBoundary::Route { .. },
             ..
         } => Some(DeferredControl::RouteSettlement),
         KernelMessage::ToolCompleted { .. }
@@ -3493,6 +3577,44 @@ impl Drop for StartupCustody {
     }
 }
 
+async fn shutdown_resources(
+    resources: &Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
+    timeout: Duration,
+) -> crate::CleanupComponentOutcome {
+    let snapshot: Vec<_> = resources.lock().values().cloned().collect();
+    for resource in &snapshot {
+        resource.cell.stop(None);
+    }
+    let mut shutdowns = FuturesUnordered::new();
+    for resource in snapshot {
+        shutdowns.push(async move {
+            let id = resource.cell.get_id();
+            let outcome = match tokio::time::timeout(timeout, async {
+                resource.cell.wait(Some(timeout)).await?;
+                Ok::<_, ractor::concurrency::Timeout>(
+                    (resource.cleanup)(ResourceCleanup::Retire).await,
+                )
+            })
+            .await
+            {
+                Ok(Ok(outcome)) => outcome,
+                _ => crate::CleanupComponentOutcome::Unconfirmed(
+                    "resource child cleanup is unconfirmed".into(),
+                ),
+            };
+            (id, outcome)
+        });
+    }
+    let mut outcome = crate::CleanupComponentOutcome::Confirmed;
+    while let Some((id, settled)) = shutdowns.next().await {
+        if settled == crate::CleanupComponentOutcome::Confirmed {
+            resources.lock().remove(&id);
+        }
+        outcome = combine_cleanup(outcome, settled);
+    }
+    outcome
+}
+
 /// The accepted replacement owns the same children and resource scopes. This
 /// changes live Ractor supervision, never the spawn fact used at startup.
 fn transfer_supervised_children(predecessor: &KernelContext, successor: &KernelContext) {
@@ -3547,33 +3669,11 @@ async fn shutdown_children(
             .map(|child| (child, requested.clone()))
             .collect(),
     );
-    let resources: Vec<_> = context.resources.lock().values().cloned().collect();
-    for resource in &resources {
-        resource.cell.stop(None);
-    }
-    let mut resource_shutdowns = FuturesUnordered::new();
-    for resource in resources {
-        resource_shutdowns.push(async move {
-            match tokio::time::timeout(timeout, async {
-                resource.cell.wait(Some(timeout)).await?;
-                Ok::<_, ractor::concurrency::Timeout>(
-                    (resource.cleanup)(ResourceCleanup::Retire).await,
-                )
-            })
-            .await
-            {
-                Ok(Ok(outcome)) => outcome,
-                _ => crate::CleanupComponentOutcome::Unconfirmed(
-                    "resource child cleanup is unconfirmed".into(),
-                ),
-            }
-        });
-    }
-    while let Some(outcome) = resource_shutdowns.next().await {
+    let resources = shutdown_resources(&context.resources, timeout).await;
+    {
         let mut retained = context.forgotten_children.lock();
-        *retained = combine_cleanup(retained.clone(), outcome);
+        *retained = combine_cleanup(retained.clone(), resources);
     }
-    // Include resource cleanup evidence retained after the child fence.
     outcome = combine_cleanup(outcome, context.forgotten_children.lock().clone());
     let mut shutdowns = FuturesUnordered::new();
     for (child, requested) in batch.into_actors() {
@@ -3819,13 +3919,29 @@ mod tests {
             })
         }
 
-        fn dispatch_release_fork(
+        fn dispatch_resume(
             &mut self,
-            context: &KernelContext,
-            release: crate::ForkChildRelease,
+            _context: &KernelContext,
+            kind: crate::kernel::KernelResume,
         ) -> Result<OwnedActorTask<Self, ()>, KernelBehaviorError> {
-            let probe = self.kernel_probe.clone().expect("configured kernel probe");
-            assert_eq!(release.child(), context.identity());
+            assert_eq!(kind, crate::kernel::KernelResume::ContinueProgram);
+            let Some(probe) = self.kernel_probe.clone() else {
+                return Ok(OwnedActorTask::serial(
+                    move |mut behavior: Self, context| {
+                        Box::pin(async move {
+                            let result = behavior.resume(&context).await.map_err(|error| {
+                                KernelInvocationFailure::Failed {
+                                    receipts: Vec::new(),
+                                    actor: context.identity(),
+                                    detail: error.detail,
+                                    diagnostic: error.diagnostic,
+                                }
+                            });
+                            (behavior, OwnedActorCompletion::new(move |_| result))
+                        })
+                    },
+                ));
+            };
             let abandoned = Arc::clone(&probe.abandoned);
             Ok(OwnedActorTask::new(Box::pin(async move {
                 probe.first.0.notify_one();
@@ -4100,7 +4216,7 @@ mod tests {
         fn tool_completed<'a>(
             &'a mut self,
             _context: &'a KernelContext,
-            _boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+            _boundary: tidepool_runtime::session::ContextCheckpointBoundary,
         ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
             Box::pin(async move {
                 self.calls.lock().push("tool-completed");
@@ -4347,24 +4463,23 @@ mod tests {
         }
     }
 
-    fn send_kernel_release(actor: &LocalActorRef) -> tidepool_runtime::session::PersistentSession {
-        let (release, _, machine) =
-            crate::resident_actor::child_initialization::scheduler_fixture(actor.identity());
+    fn send_kernel_resume(actor: &LocalActorRef) {
         actor
             .address()
-            .send_message(KernelMessage::ReleaseFork { release })
-            .expect("release child");
-        machine
+            .send_message(KernelMessage::Resume {
+                kind: crate::kernel::KernelResume::ContinueProgram,
+            })
+            .expect("resume kernel continuation");
     }
 
     #[tokio::test]
-    async fn hosted_tools_queued_during_child_initialization_settle_without_receiver() {
+    async fn hosted_tools_queued_during_kernel_continuation_settle_without_receiver() {
         struct UnavailableCapture;
         impl crate::HostedCheckpointCapture for UnavailableCapture {
             fn capture(
                 &self,
                 _: &str,
-                _: &tidepool_runtime::session::WorkbenchForkBoundary,
+                _: &tidepool_runtime::session::ContextCheckpointBoundary,
             ) -> Result<crate::HostedCheckpointAttachment, crate::HostedCheckpointCaptureError>
             {
                 Err(crate::HostedCheckpointCaptureError::Unavailable)
@@ -4376,7 +4491,7 @@ mod tests {
         let probe = kernel_probe(false);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        let _machine = send_kernel_release(&actor);
+        send_kernel_resume(&actor);
         probe.first.0.notified().await;
         let (plain_tx, mut plain_rx) = oneshot::channel();
         let (captured_tx, mut captured_rx) = oneshot::channel();
@@ -4409,7 +4524,7 @@ mod tests {
                 reply: following_tx.into(),
             })
             .unwrap();
-        // The seal acknowledges all preceding deliveries while initialization
+        // The seal acknowledges all preceding deliveries while the continuation
         // remains exclusive. Their admission is rechecked when it finishes.
         actor.seal_hosted_work().await.unwrap();
         assert!(matches!(
@@ -4457,7 +4572,7 @@ mod tests {
         actor
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
-                summary: "tool initialization queue checked".into(),
+                summary: "tool continuation queue checked".into(),
                 diagnostic: None,
             })
             .await
@@ -4471,7 +4586,7 @@ mod tests {
         let probe = kernel_probe(false);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        let _machine = send_kernel_release(&actor);
+        send_kernel_resume(&actor);
         probe.first.0.notified().await;
         let mut workbench = send_workbench(&actor);
         probe.first.1.notify_one();
@@ -4534,7 +4649,7 @@ mod tests {
         let probe = kernel_probe(true);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        let _machine = send_kernel_release(&actor);
+        send_kernel_resume(&actor);
         probe.first.0.notified().await;
         probe.first.1.notify_one();
         probe.next.0.notified().await;
@@ -4557,7 +4672,7 @@ mod tests {
         let probe = kernel_probe(false);
         fixture.behavior.kernel_probe = Some(probe.clone());
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        let _machine = send_kernel_release(&actor);
+        send_kernel_resume(&actor);
         probe.first.0.notified().await;
         probe.first.1.notify_one();
         probe.next.0.notified().await;
@@ -4567,7 +4682,7 @@ mod tests {
             stopping
                 .shutdown(ActorTerminal {
                     kind: ActorExitKind::Cancelled,
-                    summary: "stop during child initialization".into(),
+                    summary: "stop during kernel continuation".into(),
                     diagnostic: None,
                 })
                 .await
@@ -5081,7 +5196,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::WorkbenchForkBoundary::external(
+                boundary: tidepool_runtime::session::ContextCheckpointBoundary::external(
                     "ack-thread".into(),
                     "A".into(),
                     "A".into(),
@@ -5093,7 +5208,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::WorkbenchForkBoundary::Execution {
+                boundary: tidepool_runtime::session::ContextCheckpointBoundary::Execution {
                     actor_id: actor.identity().id.0,
                     incarnation: actor.identity().incarnation.0,
                     execution_id: execution,
@@ -5111,7 +5226,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::WorkbenchForkBoundary::external(
+                boundary: tidepool_runtime::session::ContextCheckpointBoundary::external(
                     "ack-thread".into(),
                     "B".into(),
                     "B".into(),
@@ -5153,7 +5268,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ReconcileWorkbenchBoundary {
-                boundary: tidepool_runtime::session::WorkbenchForkBoundary::Route {
+                boundary: tidepool_runtime::session::ContextCheckpointBoundary::Route {
                     actor_id: actor.identity().id.0,
                     incarnation: actor.identity().incarnation.0,
                     watch_id: 7,
@@ -5167,7 +5282,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::WorkbenchForkBoundary::external(
+                boundary: tidepool_runtime::session::ContextCheckpointBoundary::external(
                     "ack-thread".into(),
                     "B".into(),
                     "B".into(),
@@ -5431,7 +5546,7 @@ mod tests {
         actor
             .address()
             .send_message(KernelMessage::ToolCompleted {
-                boundary: tidepool_runtime::session::WorkbenchForkBoundary::external(
+                boundary: tidepool_runtime::session::ContextCheckpointBoundary::external(
                     "thread".into(),
                     "call".into(),
                     "call".into(),
@@ -5489,7 +5604,7 @@ mod tests {
                 reply: call_tx.into(),
             })
             .unwrap();
-        let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
             "parked-thread".into(),
             "completed-call".into(),
             "completed-call".into(),
@@ -5946,7 +6061,7 @@ mod tests {
         for lifetime in [
             crate::WorkerLifetime::ActorOwned,
             crate::WorkerLifetime::InvocationOwned,
-            crate::WorkerLifetime::SwarmOwned,
+            crate::WorkerLifetime::RunOwned,
         ] {
             let child = parent_context
                 .spawn_worker(None, observed_probe(&observations), lifetime)
@@ -5958,7 +6073,7 @@ mod tests {
                 "Ractor has not linked during pre_start"
             );
             match lifetime {
-                crate::WorkerLifetime::SwarmOwned => {
+                crate::WorkerLifetime::RunOwned => {
                     assert_eq!(context.spawn_ownership(), SpawnOwnership::Independent);
                     assert_eq!(context.supervisor_identity(), None);
                 }

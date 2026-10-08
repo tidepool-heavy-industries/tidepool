@@ -11,7 +11,7 @@ pub(super) fn original_tool_call(
     operation: OriginalOperation,
 ) -> (
     ToolInvocationContext,
-    tidepool_runtime::session::WorkbenchForkBoundary,
+    tidepool_runtime::session::ContextCheckpointBoundary,
 ) {
     let invocation = ToolInvocationContext {
         call_id: operation.call_id.clone(),
@@ -20,7 +20,7 @@ pub(super) fn original_tool_call(
     };
     (
         invocation,
-        tidepool_runtime::session::WorkbenchForkBoundary::Hosted(operation),
+        tidepool_runtime::session::ContextCheckpointBoundary::Hosted(operation),
     )
 }
 
@@ -165,7 +165,7 @@ pub(super) fn configure_notebook_jev_workspace(config: &mut ActorHostConfig) {
     );
 }
 
-struct FixtureJev;
+pub(super) struct FixtureJev;
 
 impl exomonad_actor::JevBackend for FixtureJev {
     fn ask(
@@ -207,6 +207,7 @@ enum CampaignRoot {
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
     },
     Dedicated,
+    FormHost(Arc<dyn exomonad_actor::FormHost>),
 }
 
 impl TestCampaign {
@@ -407,73 +408,95 @@ impl TestCampaign {
         .await
     }
 
+    /// This campaign has no provider process. Acknowledge the exact spawn
+    /// after its native policy and workspace attachment are installed.
+    pub fn acknowledge_native_spawn(
+        &self,
+        installation: &exomonad_actor::LocalResidentInstallation,
+    ) {
+        let actor = installation.actor.identity();
+        let admission = installation
+            .spawn_admission
+            .as_ref()
+            .expect("native child retains its spawn admission");
+        admission.validate_child(actor).unwrap();
+        assert!(installation.actor.terminal().get().is_none());
+        let installed_policy = installation
+            .policy
+            .snapshot_for_request()
+            .expect("native tools and source are installed before spawn acknowledgement");
+        assert_eq!(installation.policy.tools(), installed_policy.tools());
+        if !installation.launch_worktrees.is_empty() {
+            assert!(installation.worktree_custody.is_some());
+            let principal = WorktreePrincipal::exact_actor(
+                &runtime_namespace(self.session_root.path()),
+                actor.id.0,
+                actor.incarnation.0,
+            );
+            for worktree in &installation.launch_worktrees {
+                let tree = self
+                    .worktrees
+                    .lookup(&WorktreeId::from_raw(worktree))
+                    .unwrap()
+                    .expect("native child workspace is registered");
+                assert!(self
+                    .bindings
+                    .lock()
+                    .membership(tree.id(), &principal)
+                    .is_some());
+            }
+        }
+        admission.acknowledge(actor).unwrap();
+    }
+
     pub async fn start() -> Self {
-        Self::start_with_research_policy(exomonad_actor::ResearchPolicy::default()).await
+        Self::start_with_admission(|admission| admission).await
+    }
+
+    pub(super) async fn start_with_form_host(host: Arc<dyn exomonad_actor::FormHost>) -> Self {
+        Self::start_configured(|admission| admission, |_| {}, CampaignRoot::FormHost(host)).await
     }
 
     /// Opt into the existing dedicated-machine factory. Ordinary campaigns
     /// retain the production host's shared-machine policy.
     pub async fn start_with_child_sessions() -> Self {
-        Self::start_configured(
-            exomonad_actor::ResearchPolicy::default(),
-            |admission| admission,
-            |_| {},
-            CampaignRoot::Dedicated,
-        )
-        .await
+        Self::start_configured(|admission| admission, |_| {}, CampaignRoot::Dedicated).await
     }
 
     pub async fn start_with_shell() -> Self {
-        Self::start_with_config(
-            exomonad_actor::ResearchPolicy::default(),
-            |admission| admission,
-            configure_shell_workspace,
-        )
-        .await
-    }
-
-    pub async fn start_with_research_policy(
-        research_policy: exomonad_actor::ResearchPolicy,
-    ) -> Self {
-        Self::start_with_admission(research_policy, |admission| admission).await
+        Self::start_with_config(|admission| admission, configure_shell_workspace).await
     }
 
     pub async fn start_with_admission(
-        research_policy: exomonad_actor::ResearchPolicy,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
     ) -> Self {
-        Self::start_with_config(research_policy, transform, |_| {}).await
+        Self::start_with_config(transform, |_| {}).await
     }
 
     pub async fn start_with_config(
-        research_policy: exomonad_actor::ResearchPolicy,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Self {
-        Self::start_with_conversation(research_policy, transform, configure, None).await
+        Self::start_with_conversation(transform, configure, None).await
     }
 
-    /// A campaign whose root can read its own conversation, so `reflect`
-    /// returns the supplied turns instead of reporting the context unbound.
+    /// Install the conversation reader before admission so the root admits
+    /// Reflect. The reader may return turns or a typed unavailable result.
     pub async fn start_with_conversation(
-        research_policy: exomonad_actor::ResearchPolicy,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
         conversation: Option<exomonad_actor::ConversationReader>,
     ) -> Self {
-        Self::start_with_model_factory(research_policy, transform, configure, conversation, None)
-            .await
+        Self::start_with_model_factory(transform, configure, conversation, None).await
     }
 
     pub(super) async fn start_with_model_factory(
-        research_policy: exomonad_actor::ResearchPolicy,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
         conversation: Option<exomonad_actor::ConversationReader>,
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
     ) -> Self {
         Self::start_configured(
-            research_policy,
             transform,
             configure,
             CampaignRoot::Shared {
@@ -485,8 +508,7 @@ impl TestCampaign {
     }
 
     async fn start_configured(
-        research_policy: exomonad_actor::ResearchPolicy,
-        transform: impl FnOnce(Arc<dyn ForkWorkspaceAdmission>) -> Arc<dyn ForkWorkspaceAdmission>,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
         root: CampaignRoot,
     ) -> Self {
@@ -517,7 +539,6 @@ impl TestCampaign {
             tmux_session: "unused-in-resident-test".into(),
             model: "test-model".into(),
             effort: ForkEffort::Low,
-            research_policy,
 
             pane_environment: BTreeMap::new(),
             jev: Some(exomonad_actor::unconfigured_jev()),
@@ -554,6 +575,10 @@ impl TestCampaign {
                     &config, transform, None, None,
                 )
                 .await
+            }
+            CampaignRoot::FormHost(host) => {
+                super::model_free::ModelFreeSession::start_with_form_host(&config, transform, host)
+                    .await
             }
         }
         .unwrap();

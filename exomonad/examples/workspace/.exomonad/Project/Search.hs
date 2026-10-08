@@ -47,7 +47,7 @@ grep query (Right passages) = do
         <> p.body)) passages)
   pure $ case answer of
     Left err -> Left ("Jev unavailable: " <> T.pack (show err))
-    Right rows -> Right [p | (p, relevance) <- rows, J.holds J.lenient relevance]
+    Right response -> Right [p | (p, relevance) <- J.answers response, J.holds J.lenient relevance]
 
 address :: Passage -> Text
 address p = p.path <> ":" <> T.pack (show p.line)

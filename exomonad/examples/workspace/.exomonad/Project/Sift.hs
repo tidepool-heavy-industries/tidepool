@@ -179,7 +179,7 @@ scoreBatch focus recent rows = do
     Right response ->
       Right
         [ Ranked row judged.relevance.expectation
-          | (row, judged) <- response.sections
+          | (row, judged) <- (J.answers response).sections
         ]
 
 fallbackSelection :: Int -> Text -> [Section] -> [Section]

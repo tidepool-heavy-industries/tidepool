@@ -139,6 +139,7 @@ fn publish_inner(
                     })
                     .collect::<Result<_, _>>()?,
                 unavailable: page.unavailable,
+                view: None,
             },
         };
         store.append_actor_output(

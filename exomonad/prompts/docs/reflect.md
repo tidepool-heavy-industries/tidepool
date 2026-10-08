@@ -30,7 +30,7 @@ Fetch once, then reuse the value across a whole packet. It is free in your
 effort and in extra model turns; the history still counts as input tokens
 wherever you send it.
 
-```haskell
+```haskell source=reflect
 -- Your own recent turns, or none when this context has no conversation.
 recentContext :: Member Reflect effects => Int -> Eff effects [ConversationTurn]
 recentContext n = do

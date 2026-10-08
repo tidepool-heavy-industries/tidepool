@@ -14,7 +14,7 @@
 //!    [`WorktreeRegistry::put`](exomonad_worktree::WorktreeRegistry::put) via
 //!    `write_atomic` + `serde_json::to_vec_pretty`. Read:
 //!    `WorktreeRegistry::get`/`list` via `serde_json::from_slice`.
-//!    Closure: [`WorktreeId`], `PathBuf` (×2), [`BranchName`], [`GitOid`],
+//!    Closure: [`WorktreeId`], `PathBuf` (×2), `Option<BranchName>`, [`GitOid`],
 //!    `Option<`[`GitRef`]`>`, [`WorktreeOrigin`] (`CurrentRepository` |
 //!    `Ref(GitRef)` | `Worktree(WorktreeId)`), `i64`,
 //!    [`WorktreeRecordStatus`] (`Provisional` | `Finalized` | `Mounted` |
@@ -26,7 +26,8 @@
 //!    `BindingTable::persist` via `serde_json::to_vec_pretty`. Read:
 //!    `BindingTable::open` via `serde_json::from_slice::<Vec<Binding>>`.
 //!    Closure: `Binding { `[`WorktreeId`]`, `[`AgentRef`]`, `[`BindingState`]`
-//!    (`Active` | `Terminal` | `Released`), i64 }`.
+//!    (`Active` | `Terminal` | `Released`), `WorkspaceAccess`,
+//!    `Option<AgentRef>` predecessor, i64 }`.
 //!
 //! 3. **[`ObservationBatch`]** — `exomonad/worktree/src/journal.rs`. One
 //!    reconciliation per JSONL line. Write:
@@ -149,14 +150,14 @@ fn oid(hex_digit: char) -> GitOid {
     GitOid::from_raw(std::iter::repeat_n(hex_digit, 40).collect::<String>())
 }
 
-// --- WorktreeReceipt samples: WorktreeOrigin's variants, WorktreeRecordStatus's
-// --- variants, and Option<GitRef>'s Some/None. -------------------------------
+// --- WorktreeReceipt samples: origin/status variants and branch/snapshot
+// --- options' Some/None. -----------------------------------------------------
 
 fn receipt_source_checkout() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-source-0000"),
         cwd: PathBuf::from("/home/dev/repo"),
-        branch: BranchName::from_raw("main"),
+        branch: None,
         source_head: oid('0'),
         snapshot_ref: None,
         origin: WorktreeOrigin::SourceCheckout,
@@ -170,7 +171,9 @@ fn receipt_provisional() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-provisional-0001"),
         cwd: PathBuf::from("/var/exomonad/worktrees/wt-provisional-0001"),
-        branch: BranchName::from_raw("exomonad/worktree/sample-wt-provisional-0001"),
+        branch: Some(BranchName::from_raw(
+            "exomonad/worktree/sample-wt-provisional-0001",
+        )),
         source_head: oid('a'),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -184,7 +187,9 @@ fn receipt_finalized_ref_origin() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-finalized-0002"),
         cwd: PathBuf::from("/var/exomonad/worktrees/wt-finalized-0002"),
-        branch: BranchName::from_raw("exomonad/worktree/sample-wt-finalized-0002"),
+        branch: Some(BranchName::from_raw(
+            "exomonad/worktree/sample-wt-finalized-0002",
+        )),
         source_head: oid('b'),
         snapshot_ref: Some(GitRef::from_raw(
             "refs/exomonad/snapshots/wt-finalized-0002",
@@ -200,7 +205,9 @@ fn receipt_finalized_worktree_origin() -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-finalized-0003"),
         cwd: PathBuf::from("/var/exomonad/worktrees/wt-finalized-0003"),
-        branch: BranchName::from_raw("exomonad/worktree/sample-wt-finalized-0003"),
+        branch: Some(BranchName::from_raw(
+            "exomonad/worktree/sample-wt-finalized-0003",
+        )),
         source_head: oid('c'),
         snapshot_ref: None,
         origin: WorktreeOrigin::Worktree(WorktreeId::from_raw("wt-parent-0000")),
@@ -219,18 +226,21 @@ fn binding_rows() -> Vec<Binding> {
             WorktreeId::from_raw("wt-provisional-0001"),
             AgentRef::from_raw("agent-alpha"),
             BindingState::Terminal,
+            exomonad_worktree::WorkspaceAccess::ReadWrite,
             1_700_000_000_000,
         ),
         binding_row(
             WorktreeId::from_raw("wt-provisional-0001"),
             AgentRef::from_raw("agent-beta"),
             BindingState::Released,
+            exomonad_worktree::WorkspaceAccess::ReadWrite,
             1_700_000_001_000,
         ),
         binding_row(
             WorktreeId::from_raw("wt-provisional-0001"),
             AgentRef::from_raw("agent-gamma"),
             BindingState::Active,
+            exomonad_worktree::WorkspaceAccess::ReadWrite,
             1_700_000_002_000,
         ),
     ]
@@ -513,7 +523,7 @@ fn worktree_receipt_field_shape_is_pinned_inline() {
     let sample = WorktreeReceipt {
         worktree_id: WorktreeId::from_raw("wt-pin"),
         cwd: PathBuf::from("/tmp/wt-pin"),
-        branch: BranchName::from_raw("exomonad/worktree/pin"),
+        branch: Some(BranchName::from_raw("exomonad/worktree/pin")),
         source_head: oid('f'),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -542,12 +552,14 @@ fn binding_field_shape_is_pinned_inline() {
         WorktreeId::from_raw("wt-pin"),
         AgentRef::from_raw("agent-pin"),
         BindingState::Active,
+        exomonad_worktree::WorkspaceAccess::ReadWrite,
         1,
     );
     let json = serde_json::to_string(&sample)
         .unwrap_or_else(|e| panic!("failed to serialize the inline Binding pin: {e}"));
     assert_eq!(
-        json, r#"{"worktree":"wt-pin","agent":"agent-pin","state":"Active","bound_at_ms":1}"#,
+        json,
+        r#"{"worktree":"wt-pin","agent":"agent-pin","state":"Active","access":"ReadWrite","bound_at_ms":1}"#,
         "Binding's serde shape (field names, field order, or the BindingState \
          variant tags) drifted — this is an inline literal, independent of \
          tests/goldens/durable/, so no regen command can launder this away. \

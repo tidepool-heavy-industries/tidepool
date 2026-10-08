@@ -119,9 +119,9 @@ askReminder policy episode = do
         J..| J.alt #unclear "Evidence is insufficient to establish applicability" (ReminderUnresolved "insufficient evidence")))
   pure $ case answer of
     Left failure -> ReminderUnresolved (Text.pack (show failure))
-    Right choice -> case J.takenUnder J.careful choice of
+    Right response -> case J.takenUnder J.careful (J.answers response) of
       Left doubt -> ReminderUnresolved doubt.why
-      Right (J.Settled decision) -> decision
+      Right settled -> let decision = J.settledValue settled in decision
 
 startReminders :: Member Actor effects
   => AgentRef -> ReminderPolicy -> Eff effects (Either ReminderIssue (ActorHandle Reminders))

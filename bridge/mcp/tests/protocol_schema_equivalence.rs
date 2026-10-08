@@ -112,12 +112,7 @@ fn event_decl_matches_the_schema_exactly() {
     );
 }
 
-/// Written to run BEFORE the flip, against the still-hand-written
-/// `askuser_effect_def!` macro — see the module doc. #20 steps 2-3: the first
-/// migrated effect with two constructors riding one GADT (`AskUserWith`/
-/// `NoteWith`) and the first whose helpers are ALL representable as-is (both
-/// `askUserRaw`/`noteRaw` are thin single-verb `send` wrappers) — nothing
-/// relocates to `bridge/haskell/lib`.
+/// The mounted form declaration and its typed lifecycle are schema-owned.
 #[test]
 fn ask_user_decl_matches_the_schema_exactly() {
     assert_decl_matches_schema(
@@ -272,10 +267,10 @@ fn agent_launch_decl_matches_the_schema_exactly() {
 }
 
 #[test]
-fn forks_decl_matches_the_schema_exactly() {
+fn resource_scopes_decl_matches_the_schema_exactly() {
     assert_decl_matches_schema(
-        &tidepool_mcp::forks_decl(),
-        &tidepool_protocol::effects::forks::forks(),
+        &tidepool_mcp::resource_scopes_decl(),
+        &tidepool_protocol::effects::resource_scope::resource_scopes(),
     );
 }
 

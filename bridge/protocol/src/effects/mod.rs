@@ -32,7 +32,6 @@ pub mod console;
 pub mod context_read_write;
 pub mod event;
 pub mod exec;
-pub mod forks;
 pub mod green;
 pub mod introspection;
 pub mod jev;
@@ -43,6 +42,7 @@ pub mod notifications;
 pub mod read_state;
 pub mod recipe_check;
 pub mod reflect;
+pub mod resource_scope;
 pub mod sleep;
 pub mod source;
 pub mod worktree;
@@ -66,6 +66,7 @@ use crate::schema::Effect;
 #[must_use]
 pub fn all() -> Vec<Effect> {
     vec![
+        console::console(),
         exec::exec(),
         journal::journal(),
         worktree::worktree(),
@@ -74,6 +75,7 @@ pub fn all() -> Vec<Effect> {
         read_state::read_state(),
         recipe_check::recipe_check(),
         green::green(),
+        resource_scope::resource_scopes(),
         actor::actor(),
         actor_context::actor_context(),
         introspection::introspection(),
@@ -87,7 +89,6 @@ pub fn all() -> Vec<Effect> {
         jev::jev(),
         agent_inspection::agent_inspection(),
         agent_launch::agent_launch(),
-        forks::forks(),
         agent_tools::agent_tools(),
         agent_session::agent_session(),
         reflect::reflect(),
@@ -136,13 +137,7 @@ pub fn all_described() -> Vec<Effect> {
 /// `innerSchema`/`schemaToValue` themselves are no longer part of `Ask`'s
 /// decl at all — they migrated to `bridge/haskell/lib/Tidepool/Form/Schema.hs`,
 /// stdlib code auto-imported whenever `Ask` is, per `ask`'s own module doc.)
-/// `Console`
-/// stay hand-carried for an unrelated reason: their macro ALSO feeds a real
-/// `tidepool-handlers` `EffectHandler` projection, so flipping either would
-/// need `tidepool-handlers` edits, out of this migration's scope (see each
-/// module's `generated_handler` doc). `Ask`/`Console` do not flip through
-/// [`crate::gen::decl_rs`]/[`crate::gen::wire_rs`]/[`crate::gen::handler_rs`]/
-/// [`crate::gen::adapter_rs`], only through [`crate::gen::suspension_req_rs`].
+/// `Console` shares its schema with the generated handler and actor decoder.
 /// The four already-migrated outer effects (`Worktree`/`RepoEvent`/`Exec`/
 /// `Journal`) are NOT repeated here — their request enums already exist in
 /// `tidepool-handlers`.

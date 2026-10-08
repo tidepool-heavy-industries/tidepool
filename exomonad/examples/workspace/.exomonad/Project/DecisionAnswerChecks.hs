@@ -12,7 +12,7 @@ import Tidepool.Aeson (eitherDecode)
 import Tidepool.Aeson.Value (Value (..), encodeValue)
 import qualified Data.Map.Strict as Map
 import Exomonad.Workspace (workspaceRoot)
-import Tidepool.Actors.Exomonad (GitOid, batch)
+import Tidepool.Actors.Exomonad (GitOid)
 import Project.DecisionAnswers
 import Exomonad.Contrib.Types
 import Tidepool.Check
@@ -60,7 +60,7 @@ decisionCases =
     contradictory = AcceptedDecision ((question "Cancelling a waiter") { questionKey = "later-choice" }) source
       "Cancelling a waiter must terminate the underlying command."
       ["plans/waits.md#contradictory-choice"]
-    work = Task (batch "answer-probe" "waits") "plans/waits.md" source
+    work = Task "waits" "plans/waits.md" source
       "Implement command waiter cancellation" "Keep command identity and evidence intact"
       ["src/waits.rs"] "Detaching a waiter preserves the original command handle" [accepted]
 
@@ -69,7 +69,7 @@ exportRequests = mapM_ emit decisionCases
   where
     emit (name, work, question) = case prepareDecisionAnswer work question of
       Left reason -> check ("GUARDED " <> name <> " " <> reason) False
-      Right (state, packet) -> case J.request J.jevLatest (J.rawState state) packet of
+      Right (state, packet) -> case J.request <$> J.prepare J.jevLatest (J.rawState state) packet of
         Left issue -> check ("REQUEST-ERROR " <> name <> " " <> Text.pack (show issue)) False
         Right request -> check ("REQUEST " <> name <> " " <> encodeValue request) True
 
@@ -83,11 +83,13 @@ replay = do
   where
     replayOne responses (name, work, question) =
       case (prepareDecisionAnswer work question, Map.lookup name responses) of
-        (Right (_, packet), Just raw) -> case J.decode packet raw of
-          Left issue -> check ("decoder failed: " <> Text.pack (show issue)) False
-          Right response -> do
-            let result = interpretDecisionAnswer response
-                expected = if name == "paraphrase" then result == UseDecision 0
-                  else case result of { AskOwner _ -> True; _ -> False }
-            check ("live replay " <> name <> ": " <> Text.pack (show result)) expected
+        (Right (state, packet), Just raw) -> case J.prepare J.jevLatest (J.rawState state) packet of
+          Left issue -> check ("preparation failed: " <> Text.pack (show issue)) False
+          Right prepared -> case J.decode prepared raw of
+            Left issue -> check ("decoder failed: " <> Text.pack (show issue)) False
+            Right response -> do
+              let result = interpretDecisionAnswer response
+                  expected = if name == "paraphrase" then result == UseDecision 0
+                    else case result of { AskOwner _ -> True; _ -> False }
+              check ("live replay " <> name <> ": " <> Text.pack (show result)) expected
         _ -> check ("missing prepared packet or response: " <> name) False

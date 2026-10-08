@@ -122,22 +122,6 @@ sitedVerbs =
       "requestWithProgressIntoSited" "Tidepool.Actors.Internal.Agent" False [2, 0]
       DeliverExitCellFill ResponseResultEvidence)
       { vsAnswerSource = TypeArgument 1 }
-  , VerbSpec
-      { vsName = "child"
-      , vsModule = "Tidepool.Actors.Unfold"
-      , vsSitedName = "childSited"
-      , vsSitedModule = "Tidepool.Actors.Unfold"
-      , vsListAnswer = False
-      , vsInputTypeArgs = [2]
-      , vsDerivedInput = Nothing
-      , vsAnswerSource = TypeArgument 0
-      , vsDelivery = DeliverExitCellFill
-      , vsWireSource = ResponseResultEvidence
-      }
-  , (verb "childWithProgress" "Tidepool.Actors.Unfold"
-      "childWithProgressSited" "Tidepool.Actors.Unfold" False [3, 0]
-      DeliverExitCellFill ResponseResultEvidence)
-      { vsAnswerSource = TypeArgument 1 }
   , (verb "currentRequest" "Tidepool.Agent.Reply.Internal"
       "currentRequestSited" "Tidepool.Agent.Reply.Internal" False [0, 1]
       DeliverHostAnswer SelectedAnswer)
@@ -150,11 +134,8 @@ sitedVerbs =
   , (verb "pollProgress" "Tidepool.Agent.Reply.Internal"
       "pollProgressSited" "Tidepool.Agent.Reply.Internal" False [0]
       DeliverHostAnswer SelectedAnswer) { vsAnswerSource = EffectResult }
-  , verb "awaitProgressAfter" "Tidepool.Agent.Watch.Internal"
-      "awaitProgressAfterSited" "Tidepool.Agent.Watch.Internal" False [0]
-      DeliverHostAnswer ProgressStateEvidence
-  , verb "awaitAnyProgress" "Tidepool.Agent.Watch.Internal"
-      "awaitAnyProgressSited" "Tidepool.Agent.Watch.Internal" False [0]
+  , verb "after" "Tidepool.Agent.Watch.Internal"
+      "afterSited" "Tidepool.Agent.Watch.Internal" False [0]
       DeliverHostAnswer ProgressStateEvidence
   , verb "progressSource" "Tidepool.Actor.Source"
       "progressSourceSited" "Tidepool.Actor.Source" False [0]
@@ -163,6 +144,13 @@ sitedVerbs =
       "receiveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
   , verb "serve" "Tidepool.Actor"
       "serveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
+  , (verb "runScope" "Tidepool.Scope.Internal"
+      "runScopeSited" "Tidepool.Scope.Internal" False [] DeliverHostAnswer SelectedAnswer)
+      { vsAnswerSource = EffectResult }
+  , (verb "installRequestReceiver" "Tidepool.Actors.Internal.Agent"
+      "installRequestReceiverSited" "Tidepool.Actors.Internal.Agent" False []
+      DeliverHostAnswer SelectedAnswer)
+      { vsAnswerSource = EffectResult }
   ]
   where
     verb name source sibling siblingSource listAnswer inputs delivery wireSource =

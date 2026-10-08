@@ -1,54 +1,54 @@
--- | Immutable provenance for one launched request.
+{-# LANGUAGE FlexibleContexts #-}
+
+-- | Workspace selection for independent actor admission.
 module Tidepool.Agent.Launch
-  ( ActorPath (..)
-  , GitBranchPrefix (..)
-  , ForkRole (..)
-  , ForkWorkspaceAccess (..)
-  , AdmissionReceipt (..)
-  , admittedAgent
+  ( Workspace (..)
+  , WorkspaceHandle
+  , WorktreeSeed
+  , projectHead
+  , currentCheckout
+  , atRef
+  , existingWorktree
+  , currentWorkspace
+  , workspaceWire
   ) where
 
-import Data.Text (Text)
+import Control.Monad.Freer (Eff, Member, send)
 import Prelude
+import Tidepool.Effects.Core
+  ( BoundWorktree (..), GitRef, WorktreeId, WorktreeSource (..)
+  , WorktreeError, WorkspaceHandle, SpawnWorkspaceWire (..), WorkspaceSeedWire (..)
+  )
 
-import Tidepool.Effects.Core (WorktreeReceipt)
-import Tidepool.Agent.Ref (AgentRef, internalAgentRef)
-
-newtype ActorPath = ActorPath Text
-  deriving (Show, Eq, Ord)
-
-newtype GitBranchPrefix = GitBranchPrefix Text
-  deriving (Show, Eq, Ord)
-
-data ForkRole
-  = ResearchFork
-  | CodingFork
-  | ScaffoldingFork
-  | IntegrationFork
+-- | A directory choice does not change the child's installed tools or source.
+data Workspace
+  = SameDir
+  | ExistingWorkspace WorkspaceHandle
+  | ForkWorktree WorktreeSeed
   deriving (Show, Eq)
 
-data ForkWorkspaceAccess
-  = InspectForkWorktree
-  | WriteForkWorktree
+-- | A committed source selected once by the runtime at fork admission.
+data WorktreeSeed = CurrentCheckoutSeed | CommittedSeed WorktreeSource
   deriving (Show, Eq)
 
-data AdmissionReceipt = AdmissionReceipt
-  { requestedPath :: ActorPath
-  , allocatedPath :: ActorPath
-  , allocatedForkGroupPath :: ActorPath
-  , forkGroupIdentity :: Int
-  , launchedActorId :: Int
-  , launchedActorIncarnation :: Int
-  , launchedRole :: ForkRole
-  , launchedWorkspaceAccess :: ForkWorkspaceAccess
-  , launchedWorktree :: WorktreeReceipt
-  , launchedSupervisor :: Maybe (Int, Int)
-  , launchedContextParent :: Maybe (Int, Int)
-  , launchedProviderParent :: Maybe Text
-  , launchedHaskellScope :: Maybe Int
-  }
-  deriving (Show, Eq)
+projectHead :: WorktreeSeed
+projectHead = CommittedSeed SourceCurrentRepository
 
-admittedAgent :: AdmissionReceipt -> AgentRef
-admittedAgent receipt =
-  internalAgentRef (launchedActorId receipt) (launchedActorIncarnation receipt)
+currentCheckout :: WorktreeSeed
+currentCheckout = CurrentCheckoutSeed
+
+atRef :: GitRef -> WorktreeSeed
+atRef = CommittedSeed . SourceRef
+
+existingWorktree :: WorktreeId -> WorktreeSeed
+existingWorktree = CommittedSeed . SourceWorktree
+
+-- | Issue a run-local grant for the caller's actual registered directory.
+currentWorkspace :: Member BoundWorktree effects => Eff effects (Either WorktreeError WorkspaceHandle)
+currentWorkspace = send BoundWorkspaceGet
+
+workspaceWire :: Workspace -> SpawnWorkspaceWire
+workspaceWire SameDir = SameDirectory
+workspaceWire (ExistingWorkspace handle) = ExistingDirectory handle
+workspaceWire (ForkWorktree CurrentCheckoutSeed) = ForkDirectory CurrentCheckout
+workspaceWire (ForkWorktree (CommittedSeed source)) = ForkDirectory (CommittedSource source)

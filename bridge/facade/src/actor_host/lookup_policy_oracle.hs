@@ -13,7 +13,8 @@ import Control.Monad.Freer.Internal (handleRelay)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Tidepool.Agent.Contract (AsServerT, Tool (handler))
+import Tidepool.Agent.Contract (AsServerT, ToolDispatchSuccess (..), compileTools, dispatch)
+import Tidepool.Aeson.Value (object, toJSON, (.=))
 import Tidepool.Lookup
 import Tidepool.Effects.Core (Lookup (..))
 import qualified Tidepool.Lookup.Tools as Tools
@@ -53,14 +54,18 @@ main :: IO ()
 main = do
   let expectedDefaults = LookupRequest ["Cmd.quiet"] False Nothing 128 []
       (cellRequests, _) = observe (lookupRaw (lookupRequest ["Cmd.quiet"]))
-      hostedLookup = Tools.lookup
-        (Tools.tools :: Tools.LookupTools (AsServerT (Eff '[Lookup])))
-      (hostedRequests, _) = observe
-        (handler hostedLookup (Tools.LookupArguments ["Cmd.quiet"]))
+      hostedTools = Tools.tools :: Tools.LookupTools (AsServerT (Eff '[Lookup]))
+      hosted = either (error . show) id (compileTools hostedTools)
+      (hostedRequests, hostedResult) = observe
+        (dispatch hosted "lookup" (object ["queries" .= (["Cmd.quiet"] :: [T.Text])]))
+      expectedPresentation = Tools.renderResult
+        (LookupResult "Cmd.quiet" (LookupFound [entry "Cmd.quiet"] False))
   check "cell lookup constructor matches the shipped hosted tool request"
     (cellRequests == [expectedDefaults]
       && hostedRequests == [expectedDefaults]
       && lookupRequest ["Cmd.quiet"] == expectedDefaults)
+  check "hosted lookup retains semantic text and explicit presentation"
+    (hostedResult == Right (ToolDispatchSuccess (toJSON expectedPresentation) expectedPresentation))
   let select _ values = pure (Tools.rankCandidates (zip values [2,3,1,3,2,3]))
       (requests, output) = observe (Tools.executeWith select (Tools.LookupArguments ["root"]))
   check "one original batch and one nonrecursive follow-up" (length requests == 2)
@@ -150,4 +155,4 @@ main = do
   check "worst-case valid metadata fallback stays within 2 KiB UTF-8"
     (BS.length (TE.encodeUtf8 maximalBlock) <= 2048
       && "Code omitted" `T.isInfixOf` maximalBlock)
-  putStrLn "lookup policy oracle passed (13 checks)"
+  putStrLn "lookup policy oracle passed (14 checks)"

@@ -155,6 +155,11 @@ pub enum HandlerExecution {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthoredSurface {
     All,
+    /// Expose the ordinary effect vocabulary while keeping capability values
+    /// abstract. Trusted bridge code still imports their constructors from Core.
+    AllWithOpaqueTypes {
+        type_defs: &'static [&'static str],
+    },
     Only {
         verbs: &'static [&'static str],
         type_defs: &'static [&'static str],
@@ -171,20 +176,29 @@ impl AuthoredSurface {
 
     #[must_use]
     pub fn includes_verb(self, name: &str) -> bool {
-        matches!(self, Self::All)
+        matches!(self, Self::All | Self::AllWithOpaqueTypes { .. })
             || matches!(self, Self::Only { verbs, .. } if verbs.contains(&name))
     }
 
     #[must_use]
     pub fn includes_type_def(self, name: &str) -> bool {
         matches!(self, Self::All)
+            || matches!(self, Self::AllWithOpaqueTypes { type_defs } if !type_defs.contains(&name))
             || matches!(self, Self::Only { type_defs, .. } if type_defs.contains(&name))
     }
 
     #[must_use]
     pub fn includes_helper(self, name: &str) -> bool {
-        matches!(self, Self::All)
+        matches!(self, Self::All | Self::AllWithOpaqueTypes { .. })
             || matches!(self, Self::Only { helpers, .. } if helpers.contains(&name))
+    }
+
+    #[must_use]
+    pub fn abstract_types(self) -> &'static [&'static str] {
+        match self {
+            Self::AllWithOpaqueTypes { type_defs } => type_defs,
+            Self::All | Self::Only { .. } => &[],
+        }
     }
 }
 
@@ -571,6 +585,15 @@ impl Effect {
             }
             let mut seen: Vec<&str> = Vec::new();
             for a in &v.args {
+                if a.rust == RustBinding::Derived && derive_rust_type(&a.ty).is_none() {
+                    errs.push(format!(
+                        "{}::{}::{}: {} needs an explicit RustBinding",
+                        self.name,
+                        v.ctor,
+                        a.name,
+                        a.ty.render()
+                    ));
+                }
                 if seen.contains(&a.name) {
                     errs.push(format!(
                         "{}: verb {} has two arguments named `{}`",

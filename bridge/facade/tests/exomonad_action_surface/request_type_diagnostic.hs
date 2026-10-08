@@ -1,26 +1,23 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+
 module RequestTypeDiagnostic where
 
-import Prelude
 import Control.Monad.Freer (Eff)
 import Tidepool.Actors.Exomonad
 
 {-# NOINLINE unresolved #-}
-unresolved :: forall result. AgentRef -> Eff ActorEffects (Response result)
-unresolved actor =
-  let requestLabel = [label|review|]
-  in request @result actor (assignment requestLabel (7 :: Int))
+unresolved
+  :: forall answer. AgentRef
+  -> Eff ActorEffects (Either RequestError (Request answer))
+unresolved agent = request @answer agent (7 :: Int) defaultRequestOptions
 
-annotated :: AgentRef -> Eff ActorEffects (Response Bool)
-annotated actor =
-  let requestLabel = [label|review|]
-  in request @Bool actor (assignment requestLabel (7 :: Int))
+annotated
+  :: AgentRef
+  -> Eff ActorEffects (Either RequestError (Request Bool))
+annotated agent = request @Bool agent (7 :: Int) defaultRequestOptions
 
-functionResult :: AgentRef -> Eff ActorEffects (Response (Int -> Int))
-functionResult actor =
-  let requestLabel = [label|transform|]
-  in request @(Int -> Int) actor (assignment requestLabel (7 :: Int))
+functionAnswer
+  :: AgentRef
+  -> Eff ActorEffects (Either RequestError (Request (Int -> Int)))
+functionAnswer agent = request @(Int -> Int) agent (7 :: Int) defaultRequestOptions

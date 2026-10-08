@@ -23,12 +23,12 @@
     # names the directory inside it that holds modules, and Exomonad captures
     # them into a run as ordinary source roots.
     jev-dsl = {
-      url = "github:inanna-malick/jev-dsl/f16f1363b4d389d6e34f9d695fbd254ca0735f2e";
+      url = "github:inanna-malick/jev-dsl/2883fdc38cc7a64572e76ea43bd38e1df3a5e28b";
       flake = false;
     };
     # Browser assets must come from the exact harness source used by Cargo.
     harnessWeb = {
-      url = "github:tidepool-heavy-industries/exomonad-harness/ed8e4ccd1f94113766fbb2b4eba514e88118f9cf";
+      url = "github:tidepool-heavy-industries/exomonad-harness/59b342b96a921f4d9b0e044fe8ef61f6fc62bc71";
       flake = false;
     };
     # Match the harness web verification shell's pinned Node 24 package.
@@ -153,7 +153,7 @@
         harnessPkgs = import harnessNixpkgs { inherit system; };
         embeddedWebNpmCache = harnessPkgs.fetchNpmDeps {
           src = "${harnessWeb}/web";
-          hash = "sha256-R1WPUQzu8+knK7B5mSx7i6sneSBLgKmX7HDCSsWwekI=";
+          hash = "sha256-gXYGez5cJIcLl6KoAiG3bH1wrEmyf+kax+uoMtj+99g=";
         };
         browserTestNpmCache = harnessPkgs.fetchNpmDeps {
           src = ./nix/browser-test;
@@ -273,7 +273,7 @@
         };
         embeddedWebAssets = harnessPkgs.buildNpmPackage {
           pname = "exomonad-harness-web";
-          version = "ed8e4ccd1f94113766fbb2b4eba514e88118f9cf";
+          version = "59b342b96a921f4d9b0e044fe8ef61f6fc62bc71";
           src = "${harnessWeb}/web";
           nodejs = harnessPkgs.nodejs_24;
           npmDeps = embeddedWebNpmCache;
@@ -283,7 +283,7 @@
             cp -R dist/. "$out/share/exomonad/web/"
             runHook postInstall
           '';
-          passthru.sourceRevision = "ed8e4ccd1f94113766fbb2b4eba514e88118f9cf";
+          passthru.sourceRevision = "59b342b96a921f4d9b0e044fe8ef61f6fc62bc71";
         };
       in
       {

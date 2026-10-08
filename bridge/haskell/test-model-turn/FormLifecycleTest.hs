@@ -1,0 +1,200 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeOperators #-}
+-- The real generated AskUser constructors are interpreted by a scripted host.
+-- This checks the Haskell continuation; native lease histories have their own owner.
+module FormLifecycleTest (formLifecycleTests) where
+import Prelude
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.List.NonEmpty (NonEmpty(..))
+import Control.Monad.Freer (Eff, interpret, run)
+import Control.Monad.Freer.State (State, get, modify, runState)
+import Test.Tasty.HUnit (assertEqual)
+import Tidepool.Test.Runner (TestTree, testCase, testGroup)
+import Tidepool.Aeson.Value
+import Tidepool.Form
+import Tidepool.View (text)
+import Tidepool.Effects.Core
+  (AskUser(..), FormLease(..), FormAttemptId(..), FormAttempt(..), FormTransition(..))
+
+data Event = Opened | Awaited | Rejected | Committed | Closed deriving (Eq,Show)
+data Retry = InvalidRetry Int | StaleCommitRetry Int deriving (Eq,Show)
+data Ending = SubmitFinal Int | Dismiss | LoseTransport deriving (Eq,Show)
+data History = History [Retry] Ending deriving (Eq,Show)
+data Script = Script
+  { attempts :: [Either FormCause FormAttempt]
+  , commits :: [Either FormCause FormTransition]
+  , rejects :: [Either FormCause FormTransition]
+  , currentAttempt :: Maybe Text
+  , closeResult :: Either FormCause ()
+  , events :: [Event]
+  }
+script :: [Either FormCause FormAttempt] -> [Either FormCause FormTransition] -> Script
+script as cs = Script as cs [Right FormApplied] Nothing (Right ()) []
+
+handle :: AskUser a -> Eff '[State Script] a
+handle (FormOpenWith _) = mark Opened >> pure (Right (FormLeaseToken "same-mount"))
+handle (FormAwaitWith (FormLeaseToken lease)) = do
+  requireLease lease
+  mark Awaited
+  state <- get
+  case attempts state of
+    next:rest -> do
+      let current = case next of Right (FormSubmitted (FormAttemptToken token) _) -> Just token; _ -> Nothing
+      modify (\s -> s {attempts=rest,currentAttempt=current})
+      pure next
+    [] -> error "form awaited after scripted settlement"
+handle (FormRejectWith (FormLeaseToken lease) (FormAttemptToken attempt) errors) = do
+  requireLease lease
+  requireAttempt attempt
+  case errors of Array (_:_) -> pure (); _ -> error "rejected form without validation errors"
+  mark Rejected
+  state <- get
+  case rejects state of
+    next:rest -> modify (\s -> s {rejects=rest}) >> pure next
+    [] -> error "form rejected after scripted settlement"
+handle (FormCommitWith (FormLeaseToken lease) (FormAttemptToken attempt) _) = do
+  requireLease lease
+  requireAttempt attempt
+  mark Committed
+  state <- get
+  case commits state of
+    next:rest -> modify (\s -> s {commits=rest}) >> pure next
+    [] -> error "form committed after scripted settlement"
+handle (FormCloseWith (FormLeaseToken lease)) = do
+  requireLease lease
+  mark Closed
+  closeResult <$> get
+mark :: Event -> Eff '[State Script] ()
+mark event = modify (\s -> s {events=events s ++ [event]})
+requireLease :: Text -> Eff '[State Script] ()
+requireLease "same-mount" = pure ()
+requireLease _ = error "form retried on another mount"
+requireAttempt :: Text -> Eff '[State Script] ()
+requireAttempt attempt = do
+  current <- currentAttempt <$> get
+  if current == Just attempt then pure () else error "form settled another submission's attempt ID"
+runForm :: Script -> Form a -> (FormResult a,[Event])
+runForm initial form = let (answer,final) = run (runState initial (interpret handle (askUser form))) in (answer,events final)
+submitted :: Text -> Value -> Either FormCause FormAttempt
+submitted key value = Right (FormSubmitted (FormAttemptToken key) (object ["f0" .= value]))
+
+formLifecycleTests :: TestTree
+formLifecycleTests = testGroup "human-form-lifecycle"
+  [ testCase "invalid corrected submission reuses one mount" invalidCorrected
+  , testCase "stale rejection awaits a corrected attempt on the same mount" staleRejection
+  , testCase "stale commit awaits again and returns the new original closure" staleCommit
+  , testCase "dismissal survives a cleanup failure" dismissal
+  , testCase "transport cause survives a cleanup failure" unavailable
+  , testCase "durable commit returns original value without another host operation" committedValue
+  , testCase "bounded retry histories match lifecycle counts and final outcome" retryHistories
+  , testCase "the accepted action runs once for each explicit sequence" acceptedActionRunsWhenSequenced
+  ]
+invalidCorrected :: IO ()
+invalidCorrected = do
+  let form = validate (\n -> ["positive required" | n <= 0]) (intInput "Count" Nothing)
+      (answer,seen) = runForm (script [submitted "first" (String "0"),submitted "second" (String "2")] [Right FormApplied]) form
+  case answer of Submitted 2 -> pure (); _ -> error "corrected value did not survive"
+  assertEqual "one open, reject, then exact commit" [Opened,Awaited,Rejected,Awaited,Committed] seen
+staleCommit :: IO ()
+staleCommit = do
+  let form = choice "Action" (option (text "same") (+1) :| [option (text "same") (*2)])
+      (answer,seen) = runForm (script [submitted "old" (String "o0"),submitted "new" (String "o1")] [Right FormStale,Right FormApplied]) form
+  case answer of Submitted action -> assertEqual "latest retained function" (20::Int) (action 10); _ -> error "new selection unavailable"
+  assertEqual "stale attempt does not remount" [Opened,Awaited,Committed,Awaited,Committed] seen
+dismissal :: IO ()
+dismissal = do
+  let initial = (script [Right FormDismissed] []) {closeResult=Left (FormCleanupUnconfirmed "cleanup transport")}
+      (answer,seen) = runForm initial (pure ())
+  case answer of Dismissed -> pure (); _ -> error "cleanup replaced dismissal"
+  assertEqual "lease closed on dismissal" [Opened,Awaited,Closed] seen
+unavailable :: IO ()
+unavailable = do
+  let initial = (script [Left (FormTransportFailed "connection closed")] []) {closeResult=Left (FormCleanupUnconfirmed "cleanup transport")}
+      (answer,seen) = runForm initial (pure ())
+  case answer of FormUnavailable (FormTransportFailed "connection closed") -> pure (); _ -> error "cleanup erased original cause"
+  assertEqual "lease closed on unavailable" [Opened,Awaited,Closed] seen
+committedValue :: IO ()
+committedValue = do
+  let initial = (script [submitted "final" (String "o0")] [Right FormApplied]) {closeResult=Left (FormCleanupUnconfirmed "must never run")}
+      (answer,seen) = runForm initial (choice "Action" (option (text "Original") (+1) :| []))
+  case answer of Submitted action -> assertEqual "selected original survives native commit" (11::Int) (action 10); _ -> error "commit failed"
+  assertEqual "native applied commit authoritatively settles the lease" [Opened,Awaited,Committed] seen
+
+retryHistories :: IO ()
+retryHistories = mapM_ check histories
+  where
+    histories =
+      [ History retries ending
+      | depth <- [0..3]
+      , retries <- sequence (replicate depth [InvalidRetry 0,InvalidRetry (-1),StaleCommitRetry 2,StaleCommitRetry 3])
+      , ending <- [SubmitFinal 4, Dismiss, LoseTransport]
+      ]
+
+    check history@(History retries ending) = do
+      let form = validate (\n -> ["positive required" | n <= 0]) (intInput "Count" Nothing)
+          attempts = map retryAttempt retries ++ [endingAttempt ending]
+          rejects = [Right FormStale | InvalidRetry _ <- retries]
+          commits = [Right FormStale | StaleCommitRetry _ <- retries] ++
+            [Right FormApplied | SubmitFinal _ <- [ending]]
+          initial = (script attempts commits) { rejects = rejects }
+          (answer,seen) = runForm initial form
+          expected = expectedEvents retries ending
+          label = show history
+      assertEqual (label ++ " event sequence") expected seen
+      assertEqual (label ++ " opens") 1 (count Opened seen)
+      assertEqual (label ++ " reads") (length retries + 1) (count Awaited seen)
+      assertEqual (label ++ " rejects") (length [() | InvalidRetry _ <- retries]) (count Rejected seen)
+      assertEqual (label ++ " commits")
+        (length [() | StaleCommitRetry _ <- retries] + finalCommit ending)
+        (count Committed seen)
+      assertEqual (label ++ " closes") (finalClose ending) (count Closed seen)
+      case (ending,answer) of
+        (SubmitFinal expectedValue, Submitted actual) -> assertEqual (label ++ " final answer") expectedValue actual
+        (Dismiss, Dismissed) -> pure ()
+        (LoseTransport, FormUnavailable (FormTransportFailed "connection closed")) -> pure ()
+        _ -> error (label ++ " ended with the wrong form result")
+
+    retryAttempt (InvalidRetry n) = submitted (attemptKey "invalid" n) (String (T.pack (show n)))
+    retryAttempt (StaleCommitRetry n) = submitted (attemptKey "stale" n) (String (T.pack (show n)))
+    endingAttempt (SubmitFinal n) = submitted "final" (String (T.pack (show n)))
+    endingAttempt Dismiss = Right FormDismissed
+    endingAttempt LoseTransport = Left (FormTransportFailed "connection closed")
+    attemptKey prefix n = prefix <> "-" <> T.pack (show n)
+
+    expectedEvents retries ending =
+      [Opened] ++ concatMap retryEvents retries ++ terminalEvents ending
+    retryEvents (InvalidRetry _) = [Awaited,Rejected]
+    retryEvents (StaleCommitRetry _) = [Awaited,Committed]
+    terminalEvents (SubmitFinal _) = [Awaited,Committed]
+    terminalEvents Dismiss = [Awaited,Closed]
+    terminalEvents LoseTransport = [Awaited,Closed]
+    count event = length . filter (== event)
+    finalCommit (SubmitFinal _) = 1
+    finalCommit _ = 0
+    finalClose (SubmitFinal _) = 0
+    finalClose _ = 1
+
+acceptedActionRunsWhenSequenced :: IO ()
+acceptedActionRunsWhenSequenced = do
+  let action = modify (+ (1 :: Int))
+      form = choice "Action" (option (text "same") action :| [])
+      (answer,seen) = runForm (script [submitted "accepted" (String "o0")] [Right FormApplied]) form
+  case answer of
+    Submitted accepted -> do
+      let (_,once) = run (runState (0 :: Int) accepted)
+      let (_,runs) = run (runState (0 :: Int) (accepted >> accepted))
+      assertEqual "one explicit sequence runs once" 1 once
+      assertEqual "explicitly sequencing the same action runs it twice" 2 runs
+    _ -> error "accepted action unavailable"
+  assertEqual "the host sees one accepted submission" [Opened,Awaited,Committed] seen
+
+staleRejection :: IO ()
+staleRejection = do
+  let form = validate (\n -> ["positive required" | n <= 0]) (intInput "Count" Nothing)
+      initial = (script [submitted "invalid-old" (String "0"),submitted "valid-new" (String "2")] [Right FormApplied]) {rejects=[Right FormStale]}
+      (answer,seen) = runForm initial form
+  case answer of Submitted 2 -> pure (); _ -> error "stale rejection prevented corrected value"
+  assertEqual "stale rejection retains lease and current attempt identity" [Opened,Awaited,Rejected,Awaited,Committed] seen

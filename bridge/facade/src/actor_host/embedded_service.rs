@@ -160,6 +160,13 @@ impl EmbeddedService {
             EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
                 .map_err(|error| error.to_string())?,
         );
+        // Only this exclusive host startup can prove native continuations
+        // from the previous process no longer exist. Ordinary Store reads
+        // must preserve live mounted forms.
+        runtime
+            .store()
+            .interrupt_actor_forms_for_restart()
+            .map_err(|error| error.to_string())?;
         runtime
             .store()
             .recover_embedded_command_claims(&super::runtime_namespace(run_root))
@@ -327,23 +334,12 @@ pub(super) async fn attach_checkpoint_actor(
     initial_input: Option<String>,
 ) -> Result<EmbeddedActor, String> {
     let actor = installation.actor.identity();
-    let gate = installation
-        .fork_gate
+    installation
+        .spawn_admission
         .as_ref()
-        .ok_or("embedded checkpoint child requires its admitted fork gate")?;
-    gate.wait_committed()
-        .await
-        .map_err(|error| error.to_string())?;
-    if gate.publication().map_err(|error| error.to_string())?
-        == exomonad_actor::ForkGroupPublication::Deferred
-    {
-        if let Some(lease) = &installation.checkpoint {
-            lease
-                .wait_published()
-                .await
-                .map_err(|refusal| format!("checkpoint publication refused: {refusal:?}"))?;
-        }
-    }
+        .ok_or("embedded child requires independent spawn admission")?
+        .validate_child(actor)?;
+
     let captured = installation
         .checkpoint_attachment
         .as_ref()
@@ -392,14 +388,14 @@ pub(super) async fn attach_selected_actor(
     if installation.checkpoint.is_some() || installation.context_parent.is_some() {
         return Err("selected embedded child requires explicit fresh context".into());
     }
-    let gate = installation
-        .fork_gate
-        .as_ref()
-        .ok_or("selected embedded child requires its admitted fork gate")?;
-    gate.wait_committed()
-        .await
-        .map_err(|error| error.to_string())?;
+
     let actor = installation.actor.identity();
+    installation
+        .spawn_admission
+        .as_ref()
+        .ok_or("embedded child requires independent spawn admission")?
+        .validate_child(actor)?;
+
     let run = super::runtime_namespace(run_root);
     if parent.identity().run != run {
         return Err("selected provider ancestor belongs to another run".into());
@@ -418,6 +414,15 @@ pub(super) async fn attach_selected_actor(
             Some(&parent.identity().actor),
         )
         .map_err(|error| error.to_string())?;
+    if let Some(prompt) = installation.fresh_context_seed.as_deref() {
+        embedded
+            .conversation
+            .seed_context(
+                &format!("spawn-context:{}:{}", actor.id.0, actor.incarnation.0),
+                prompt,
+            )
+            .map_err(|error| error.to_string())?;
+    }
     if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
             .conversation

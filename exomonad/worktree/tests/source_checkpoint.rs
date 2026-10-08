@@ -415,10 +415,7 @@ fn failed_workspace_initialization_retains_a_provisional_checkout() {
         repo.path(),
     );
     let error = manager
-        .prepare_inherited_source(
-            &WorktreeSource::CurrentRepository,
-            &tidepool_repr::ActorPath::parse("root/child").expect("actor path"),
-        )
+        .prepare_inherited_source(&WorktreeSource::CurrentRepository)
         .expect_err("unreachable workspace URL must fail initialization");
     let WorktreeError::GitFailure(receipt) = error else {
         panic!("expected a Git failure from submodule initialization: {error:?}");
@@ -440,7 +437,15 @@ fn failed_workspace_initialization_retains_a_provisional_checkout() {
             repo.path(),
             &[
                 "rev-parse",
-                &format!("refs/heads/{}", summary.receipt.branch.as_str())
+                &format!(
+                    "refs/heads/{}",
+                    summary
+                        .receipt
+                        .branch
+                        .as_ref()
+                        .expect("managed branch")
+                        .as_str()
+                )
             ]
         )
         .expect("retained branch")

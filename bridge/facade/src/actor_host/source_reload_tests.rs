@@ -74,7 +74,6 @@ fn commit_workspace(workspace: &Path) {
 #[tokio::test]
 async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_revision() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, 1);
@@ -223,23 +222,28 @@ async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResiden
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
-    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&child);
     child
 }
 
-const CODING_CHILD: &str = "let campaign = \"source-reload\" :: CampaignLabel\n\
-     let group = \"checkout\" :: ForkGroupLabel\n\
-     let leaf = [label|editor|]\n\
-     worker <- unfoldDeferred (batch campaign group) (child (withLifetime ActorOwned (coding @Text projectHead (assignment leaf ()))))\n";
+const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
+     import Tidepool.Actors.Exomonad\n\
+     import Tidepool.Effects.Core (Commands, Lookup)\n\
+     import Tidepool.Effects.Core (Source)\n\
+     Right seed <- checkpoint \"source-reload child context\"\n\
+     Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
+       ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree, Source]))\n\
+         { spawnLabel = Just \"editor\", spawnLifetime = ActorOwned\n\
+         , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" })\n\
+     Right worker <- request @Text child () (defaultRequestOptions { requestLabel = Just \"editor\" })\n";
 
 /// A historical checkout can carry stale or missing tooling. A child uses the
 /// run's current graph and cannot publish checkout edits into that graph.
 #[tokio::test]
 async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, 1);
@@ -317,7 +321,6 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
 #[tokio::test]
 async fn a_child_without_its_own_source_cannot_republish_the_run() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             // Authored but never committed: the run reads it from the working
@@ -393,7 +396,6 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
 #[tokio::test]
 async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");
@@ -467,7 +469,6 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
 #[tokio::test]
 async fn reload_rejects_a_new_unconfigured_module_with_restart_guidance() {
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, 1);
@@ -514,7 +515,6 @@ async fn reload_rejects_a_new_unconfigured_module_with_restart_guidance() {
 #[tokio::test]
 async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");

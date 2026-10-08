@@ -19,10 +19,10 @@ import Data.List (nub, sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Tidepool.Agent.Reply
-  ( Replies, RequestId, Response, ResponseResult (..), ResponseState (..)
+  ( Replies, RequestId, Request, ResponseResult (..), ResponseState (..)
   , ResponseFailure, WorktreeEvidence (..), ExecutionReceipt (..), pollResponse, requestId )
 import Tidepool.Actors.Exomonad
-  ( AgentRef, Label, ForkGroupPath, ForkEffort, GitOid, Model, WatchLabel
+  ( AgentRef, ForkEffort, GitOid, Model
   )
 import Tidepool.Inspection (Display (..), application, displayRecord)
 import Tidepool.Worktree
@@ -31,7 +31,7 @@ import Tidepool.Worktree
 
 -- A task is the understanding handed to a fresh context, not a workflow stage.
 data Task = Task
-  { taskGroup :: ForkGroupPath
+  { taskName :: Text
   , planPath :: Text
   , taskSource :: GitOid
   , obligation :: Text
@@ -46,7 +46,7 @@ data Task = Task
 instance Display Task where
   displayTree = displayTreePrec 0
   displayTreePrec p t = displayRecord p "Task"
-    [ ("taskGroup", displayTree (taskGroup t))
+    [ ("taskName", displayTree (taskName t))
     , ("planPath", displayTree (planPath t))
     , ("taskSource", displayTree (taskSource t))
     , ("obligation", displayTree (obligation t))
@@ -126,7 +126,7 @@ data ReviewDecision
   deriving (Show, Eq)
 
 -- The retained response is the original review evidence. Construction is
--- restricted to 'admitReviewedCheckpoint', which observes its Response handle.
+-- restricted to 'admitReviewedCheckpoint', which observes its Request handle.
 data ReviewedCheckpoint = ReviewedCheckpoint
   { checkpointBasis :: ReviewBasis
   , checkpointCandidate :: Candidate
@@ -166,7 +166,7 @@ data ReviewEvidenceIssue
 -- the observed source and verdict, not reviewer independence or integration.
 admitReviewedCheckpoint
   :: Member Replies effects
-  => ReviewRequest -> Response (Outcome ReviewDecision)
+  => ReviewRequest -> Request (Outcome ReviewDecision)
   -> Eff effects (Either ReviewEvidenceIssue ReviewedCheckpoint)
 admitReviewedCheckpoint request response = do
   observed <- pollResponse response
@@ -288,9 +288,8 @@ data Incorporation
 
 data DesignSlot = DesignSlot
   { specialistPlan :: Text
-  , specialistGroup :: ForkGroupPath
-  , specialistLabel :: Label
-  , specialistWatch :: WatchLabel
+  , specialistLabel :: Text
+  , specialistWatch :: Text
   , specialistModel :: Model
   , specialistEffort :: ForkEffort
   }

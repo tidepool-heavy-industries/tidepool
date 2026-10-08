@@ -61,3 +61,20 @@ provides the schema output roster for `build/protocol/outputs.txt`; the build
 action refuses a roster that differs from the schema. The MCP production composer
 exports `Core`, `Authored`, and the effect shim through
 `//bridge/mcp:effects_generated` for declared Haskell compilation.
+
+Cargo's ordinary module paths read checked-in source projections; Cargo does not
+run the native producer. Refresh or check these snapshots together with
+the following command (use `--check` to inspect without writing):
+
+```sh
+python3 scripts/protocol-snapshots.py \
+  --generator /absolute/path/to/tidepool-protocol-gen --refresh
+```
+
+Supply an executable compiled from the exact schema revision. The command
+validates the producer's roster against
+`build/protocol/outputs.txt`, materializes all outputs before changing source,
+and removes only obsolete files bearing this producer's generated header.
+Authored files remain untouched. Buck takes its complete generated source
+closure from the declared roster, including outputs absent from the checkout;
+source snapshots do not authorize native build evidence.

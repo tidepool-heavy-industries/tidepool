@@ -3,7 +3,11 @@
 -- | Typed request observation and one-shot target settlement.
 module Tidepool.Agent.Reply
   ( RequestId
-  , Response
+  , Request
+  , RequestOptions (..)
+  , defaultRequestOptions
+  , RequestError (..)
+  , SettlementReporting (..)
   , Reply
   , RequestScope (..)
   , RequestScopeError (..)
@@ -32,12 +36,11 @@ module Tidepool.Agent.Reply
   , ReplyState (..)
   , requestId
   , responseActor
-  , responseAdmission
   , attemptReply
   , reply
   , pollResponse
   , cancelRequest
-  , detachRequest
+  , retainRequest
   , abandonResponse
   , forgetResponse
   , pollReply
@@ -63,7 +66,11 @@ import Tidepool.Agent.Reply.Internal
   , pollRequestUpdate
   , ReplyError (..)
   , RequestId
-  , Response
+  , Request
+  , RequestOptions (..)
+  , defaultRequestOptions
+  , RequestError (..)
+  , SettlementReporting (..)
   , ResponseFailure (..)
   , ResponseResult (..)
   , ExecutionReceipt (..)
@@ -77,7 +84,7 @@ import Tidepool.Agent.Reply.Internal
   , attemptReply
   , pollResponse
   , cancelRequest
-  , detachRequest
+  , retainRequest
   , abandonResponse
   , forgetResponse
   , pollReply
@@ -86,8 +93,7 @@ import Tidepool.Agent.Reply.Internal
   , reply
   , responseRequestId
   , responseActor
-  , responseAdmission
   )
 
-requestId :: Response result -> RequestId
+requestId :: Request result -> RequestId
 requestId = responseRequestId

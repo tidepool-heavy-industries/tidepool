@@ -102,7 +102,7 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
                 admitted_source: Default::default(),
                 reservation_owner,
                 invocation_work,
-                publication: ForkPublication::Resident,
+                publication: CheckpointPublication::Resident,
                 after_tool_active: false,
                 terminal_transfer: None,
             },
@@ -474,7 +474,8 @@ async fn context_authority_cannot_escape_to_after_tool_or_actor_callbacks() {
     let owners = [
         CurrentEffectOwner::Workbench(&execution.state.effects),
         CurrentEffectOwner::Actor {
-            publication: ForkPublication::Resident,
+            ephemeral_work: execution.state.effects.invocation_work.clone(),
+            publication: CheckpointPublication::Resident,
             reservation_owner: None,
             control: None,
         },

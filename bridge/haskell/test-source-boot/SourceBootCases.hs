@@ -2347,7 +2347,7 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
     when ranAfterRetry (fail "extension-only metadata retry executed its unused quoter")
   putStrLn "execution values: protected value quoter refuses missing execution capability before GHC load"
 
--- The effect sends a Text request but never observes its Text answer. Native
+-- The checkpoint effect sends Text and never observes its Text answer. Native
 -- originals, rather than incidental target use, own the constructor census.
 originalConstructorMetadataClosure :: FilePath -> IO ()
 originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work -> do
@@ -2403,7 +2403,7 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
     , ("original wire site census",
         Set.fromList (wireSites coldProducts) == Set.fromList (map ysSite expectedSites))
     -- currentRequest delivers a host RequestScope. Native request-reply and
-    -- progress signatures belong to exit-cell child/request sites instead.
+    -- progress signatures belong to exit-cell request sites instead.
     , ("host-answer signature role", all (isNothing . ysRequestTypeSignatures) expectedSites)
     , ("host-answer native input witnesses", all (\site -> not (null (ysInputs site))
         && length (ysInputTypeWitnesses site) == length (ysInputs site)
@@ -3404,24 +3404,24 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "shared original projection changed module bytes, ordinals or typed refusal"
   putStrLn "original projection products: actual source bytes/ordinals and retained typed refusal passed"
 
-candidateSitedSiblings :: IO ()
-candidateSitedSiblings = withScratch candidateSitedSiblingsAt
+candidateRequestSitedSiblings :: IO ()
+candidateRequestSitedSiblings = withScratch candidateRequestSitedSiblingsAt
 
-candidateSitedSiblingsAt :: FilePath -> IO ()
-candidateSitedSiblingsAt work = do
-  let unfoldDir = work </> "Tidepool" </> "Actors"
+candidateRequestSitedSiblingsAt :: FilePath -> IO ()
+candidateRequestSitedSiblingsAt work = do
+  let requestDir = work </> "Tidepool" </> "Actors" </> "Internal"
       replyDir = work </> "Tidepool" </> "Agent" </> "Reply"
-      owner = unfoldDir </> "Unfold.hs"
-      target = work </> "HydratedChildTarget.hs"
+      owner = requestDir </> "Agent.hs"
+      target = work </> "HydratedRequestTarget.hs"
       candidates = ["Tidepool.Internal.RequestSite", "Tidepool.Agent.Reply.Internal"]
-      owners = candidates ++ ["Tidepool.Actors.Unfold"]
-  createDirectoryIfMissing True unfoldDir
+      owners = candidates ++ ["Tidepool.Actors.Internal.Agent"]
+  createDirectoryIfMissing True requestDir
   createDirectoryIfMissing True replyDir
   createDirectoryIfMissing True (work </> "Tidepool/Internal")
   copyFile "lib/Tidepool/Internal/RequestSite.hs" (work </> "Tidepool/Internal/RequestSite.hs")
-  copyFile "test-source-boot/fixtures/HydratedChildOwnerWithAlternative.hs" owner
+  copyFile "test-source-boot/fixtures/HydratedRequestOwnerWithAlternative.hs" owner
   copyFile "test-source-boot/fixtures/HydratedReplyOwner.hs" (replyDir </> "Internal.hs")
-  copyFile "test-source-boot/fixtures/HydratedChildTarget.hs" target
+  copyFile "test-source-boot/fixtures/HydratedRequestTarget.hs" target
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing target [work] Nothing
   originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult original))
@@ -3430,18 +3430,18 @@ candidateSitedSiblingsAt work = do
   capturedPath <- writeGenuineCandidateLexicalScope candidates owners work originalFixture
   scopePath <- writeGenuineEmptyMetadataScope work
   let scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath }
-  -- Native candidates retain their original certified interfaces; Unfold is
+  -- Native candidates retain their original certified interfaces. The request owner is
   -- compiled from source here and retained only in the canonical lexical scope.
   reused <- runPipelineSessionSelected (PreparedProducts (Just (manifest work)))
     Set.empty GeneralCompile (Just scope) target [work] Nothing
   unless (Set.fromList (map candidateModule (pprAcceptedCandidates reused)) == Set.fromList candidates
-      && any ((== "Tidepool.Actors.Unfold") . dependencyModuleName)
+      && any ((== "Tidepool.Actors.Internal.Agent") . dependencyModuleName)
         (dependencyModules (preparedFreshDependencies reused))) $
     fail "typed sibling regression did not admit the requested originals"
-  unless (Set.fromList (preparedNames reused) == Set.fromList ["Tidepool.Actors.Unfold","HydratedChildTarget"]
+  unless (Set.fromList (preparedNames reused) == Set.fromList ["Tidepool.Actors.Internal.Agent","HydratedRequestTarget"]
       && Set.fromList (map moduleNameString (Map.keys (pprFinalizedModules reused)))
-        == Set.fromList ["Tidepool.Actors.Unfold","HydratedChildTarget"]) $
-    fail "typed sibling regression did not compile its deliberately fresh Unfold and target"
+        == Set.fromList ["Tidepool.Actors.Internal.Agent","HydratedRequestTarget"]) $
+    fail "typed sibling regression did not compile its deliberately fresh request owner and target"
   forM_ (pprAcceptedCandidates reused) $ \candidate -> do
     bytes <- BS.readFile (candidateInterface candidate)
     captured <- originalInterfaceBytes originals
@@ -3450,17 +3450,18 @@ candidateSitedSiblingsAt work = do
     unless (candidateUnit candidate == "main"
         && bytes == captured && candidateInterfaceSha256 candidate == digest captured) $
       fail "typed sibling candidate changed its exact original interface custody"
-  case filter ((== "HydratedChildTarget") . moduleNameString . moduleName . pmModule) (pprModules reused) of
-    [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
-    _ -> fail "hydrated child surface lost its exact typed sibling or site identity"
+  case filter ((== "HydratedRequestTarget") . moduleNameString . moduleName . pmModule) (pprModules reused) of
+    [prepared] | null (pmSiteRejections prepared), [site] <- pmYieldSites prepared
+      , isJust (ysRequestTypeSignatures site) -> pure ()
+    _ -> fail "hydrated request surface lost its exact typed sibling or site identity"
   -- Both deliveries select from the same cold, fully certified original.
   -- The mixed candidate/source result above has inherited custody and cannot
   -- be recertified as an ordinary fresh compiler result.
   fullScopePath <- writeGenuineCandidateLexicalScope []
-    (owners ++ ["HydratedChildTarget"]) work originalFixture
+    (owners ++ ["HydratedRequestTarget"]) work originalFixture
   fullScope <- readExactScope fullScopePath >>= either fail pure
   fullBodies <- newPreparedBodyCache
-  let fullOwner = mkModule (stringToUnit "main") (mkModuleName "HydratedChildTarget")
+  let fullOwner = mkModule (stringToUnit "main") (mkModuleName "HydratedRequestTarget")
       fullEnv = prHscEnv (pprPipelineResult original)
       siblingsA = Map.unions (map pmSitedSiblings (pprModules original))
       acquireFull cache siblings = do
@@ -3469,17 +3470,18 @@ candidateSitedSiblingsAt work = do
           Nothing -> fail "authenticated full original site owner became unavailable"
           Just (_,observation,task) -> do
             prepared <- runPreparedModuleTask task
-            unless (length (pmYieldSites prepared) == 1 && null (pmSiteRejections prepared)) $
-              fail "full original cache control lost its genuine typed suspension site"
+            unless (length (pmYieldSites prepared) == 1 && null (pmSiteRejections prepared)
+                && all (isJust . ysRequestTypeSignatures) (pmYieldSites prepared)) $
+              fail "full original cache control lost its genuine typed request suspension site"
             stable <- makeStableName prepared
             pure (observation == PreparedBodyReused,stable,prepared)
   alternative <- case [binder | prepared <- pprModules original
-      , moduleNameString (moduleName (pmModule prepared)) == "Tidepool.Actors.Unfold"
+      , moduleNameString (moduleName (pmModule prepared)) == "Tidepool.Actors.Internal.Agent"
       , (binding,_) <- pmBindings prepared, binder <- topBinders binding
-      , getOccString binder == "childAlternativeSited"] of
+      , getOccString binder == "requestAlternativeSited"] of
     [binder] -> pure binder
     _ -> fail "full original cache control lacks its compiled alternate typed helper"
-  let siblingsB = Map.insert "child" alternative siblingsA
+  let siblingsB = Map.insert "request" alternative siblingsA
   (coldHit,coldIdentity,cold) <- acquireFull fullBodies siblingsA
   (warmHit,warmIdentity,_) <- acquireFull fullBodies siblingsA
   (changedHit,changedIdentity,changed) <- acquireFull fullBodies siblingsB
@@ -3536,16 +3538,17 @@ candidateSitedSiblingsAt work = do
   captured <- runPipelineSessionSelected (PreparedProducts Nothing)
     Set.empty GeneralCompile (Just (scope {ssExactScope=Just capturedPath})) target [work] Nothing
   unless (null (pprAcceptedCandidates captured)
-      && preparedNames captured == ["HydratedChildTarget"]
+      && preparedNames captured == ["HydratedRequestTarget"]
       && all ((`notElem` owners) . dependencyModuleName) (dependencyModules (preparedFreshDependencies captured))) $
     fail "typed sibling regression did not exclude captured originals from downsweep"
   case pprModules captured of
-    [prepared] | null (pmSiteRejections prepared), length (pmYieldSites prepared) == 1 -> pure ()
-    _ -> fail "source-free exact child surface lost its typed sibling or site identity"
+    [prepared] | null (pmSiteRejections prepared), [site] <- pmYieldSites prepared
+      , isJust (ysRequestTypeSignatures site) -> pure ()
+    _ -> fail "source-free exact request surface lost its typed sibling or site identity"
   unless (map pmYieldSites (pprModules captured) == map pmYieldSites
-      (filter ((== "HydratedChildTarget") . moduleNameString . moduleName . pmModule) (pprModules reused))) $
+      (filter ((== "HydratedRequestTarget") . moduleNameString . moduleName . pmModule) (pprModules reused))) $
     fail "source-free sibling hydration changed the original typed suspension site"
-  putStrLn "candidate typed siblings: native candidates plus fresh Unfold and source-free canonical owners retain childSited and typed sites"
+  putStrLn "candidate typed siblings: native candidates plus fresh request owner and source-free canonical owners retain requestSited and typed sites"
 
 -- The production inventory preserves every identity field and global
 -- requirement; malformed controls mutate only the issued packet.
@@ -5173,11 +5176,11 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
 -- interfaces must still supply typed site siblings without widening imports.
 hydratedSiteSiblings :: IO ()
 hydratedSiteSiblings = withScratch $ \work -> do
-  let unfoldName = "Tidepool.Actors.Unfold"
+  let requestName = "Tidepool.Actors.Internal.Agent"
       replyName = "Tidepool.Agent.Reply.Internal"
-      names = ["Tidepool.Internal.RequestSite",replyName,unfoldName]
+      names = ["Tidepool.Internal.RequestSite",replyName,requestName]
       target = work </> "HydratedSiteExpr.hs"
-      unfoldPath = work </> "Tidepool/Actors/Unfold.hs"
+      requestPath = work </> "Tidepool/Actors/Internal/Agent.hs"
       replyPath = work </> "Tidepool/Agent/Reply/Internal.hs"
       compile selection session = runPipelineSessionSelected selection Set.empty GeneralCompile
         session target [work] Nothing
@@ -5188,9 +5191,9 @@ hydratedSiteSiblings = withScratch $ \work -> do
       evidence prepared = do
         target' <- targetModule prepared
         unless (null (pmSiteRejections target')) $
-          fail ("hydrated child site was rejected: " ++ show (map srMessage (pmSiteRejections target')))
+          fail ("hydrated request site was rejected: " ++ show (map srMessage (pmSiteRejections target')))
         let root = SymbolIdentity "main" "HydratedSiteExpr" "value" "__result" Nothing
-            sibling = SymbolIdentity "main" "Tidepool.Actors.Unfold" "value" "childSited" Nothing
+            sibling = SymbolIdentity "main" "Tidepool.Actors.Internal.Agent" "value" "requestSited" Nothing
             context = ProjectionContext "test" "matched"
               (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) Map.empty Map.empty
               root [] Nothing Nothing Nothing Nothing
@@ -5208,13 +5211,14 @@ hydratedSiteSiblings = withScratch $ \work -> do
         case pmYieldSites target' of
           [site] | ysOrigin site == "HydratedSiteExpr.__result"
             , stType (ysAnswer site) == "Bool"
-            , map stType (ysInputs site) == ["Char"] -> pure site
+            , map stType (ysInputs site) == ["Char"]
+            , isJust (ysRequestTypeSignatures site) -> pure site
           actual -> fail ("hydrated sibling changed the lexical site/root/input arity: " ++ show actual)
-  createDirectoryIfMissing True (work </> "Tidepool/Actors")
+  createDirectoryIfMissing True (work </> "Tidepool/Actors/Internal")
   createDirectoryIfMissing True (work </> "Tidepool/Agent/Reply")
   createDirectoryIfMissing True (work </> "Tidepool/Internal")
   copyFile "lib/Tidepool/Internal/RequestSite.hs" (work </> "Tidepool/Internal/RequestSite.hs")
-  copyFile "test-source-boot/fixtures/HydratedSiteUnfold.hs" unfoldPath
+  copyFile "test-source-boot/fixtures/HydratedSiteRequest.hs" requestPath
   copyFile "test-source-boot/fixtures/HydratedSiteReply.hs" replyPath
   copyFile "test-source-boot/fixtures/HydratedSiteExpr.hs" target
   cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
@@ -5227,7 +5231,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
       && all (`notElem` preparedNames warm) names) $
     fail "hydrated sibling regression did not take native-candidate reuse"
   warmSite <- evidence warm
-  unless (warmSite == originalSite) (fail "native-candidate hydration changed exact child-site identity")
+  unless (warmSite == originalSite) (fail "native-candidate hydration changed exact request-site identity")
   let env = prHscEnv (pprPipelineResult cold)
   scopePath <- writeGenuineCandidateLexicalScope names names work coldFixture
   let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
@@ -5235,7 +5239,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
   unless (all (`notElem` preparedNames exact) names) $
     fail "hydrated sibling regression recompiled an exact defining owner"
   exactSite <- evidence exact
-  unless (exactSite == originalSite) (fail "exact hydration changed child-site identity")
+  unless (exactSite == originalSite) (fail "exact hydration changed request-site identity")
   targetSource <- BSC.unpack <$> BS.readFile target
   writeFile target (T.unpack (T.replace "module HydratedSiteExpr where"
     "module HydratedSiteExpr (result) where" (T.pack targetSource)))
@@ -5251,60 +5255,60 @@ hydratedSiteSiblings = withScratch $ \work -> do
     unless (all ((/= "__result") . getOccString) (concatMap availNames (mi_exports privateInterface))) $
       fail "private capture root became a lexical module export"
     privateSite <- evidence prepared
-    unless (privateSite == originalSite) (fail "private capture root changed its child-site identity")
+    unless (privateSite == originalSite) (fail "private capture root changed its request-site identity")
   writeFile target targetSource
   home <- maybe (fail "hydrated sibling fixture lacks its original owner") pure
-    (lookupHpt (hsc_HPT env) (mkModuleName unfoldName))
-  let wrong = home {hm_iface=set_mi_module (mkModule (stringToUnit "other") (mkModuleName unfoldName)) (hm_iface home)}
-      invalid = hscUpdateHPT (\table -> addToHpt table (mkModuleName unfoldName) wrong) env
+    (lookupHpt (hsc_HPT env) (mkModuleName requestName))
+  let wrong = home {hm_iface=set_mi_module (mkModule (stringToUnit "other") (mkModuleName requestName)) (hm_iface home)}
+      invalid = hscUpdateHPT (\table -> addToHpt table (mkModuleName requestName) wrong) env
   -- A same-spelling interface with another defining unit cannot authorize IDs
   -- whose Names still belong to the original owner.
-  unless (Map.notMember "child" (resolvePreparedInterfaceSiblings invalid)) $
+  unless (Map.notMember "request" (resolvePreparedInterfaceSiblings invalid)) $
     fail "wrong defining interface owner authorized a sibling"
-  surface <- case [binder | binder <- typeEnvIds (md_types (hm_details home)), getOccString binder == "child"] of
+  surface <- case [binder | binder <- typeEnvIds (md_types (hm_details home)), getOccString binder == "request"] of
     [binder] -> pure binder
-    _ -> fail "cold HPT lacks its genuine child surface Id"
-  spec <- maybe (fail "cold HPT child did not match its declared surface module") pure (lookupPreparedVerb surface)
+    _ -> fail "cold HPT lacks its genuine request surface Id"
+  spec <- maybe (fail "cold HPT request did not match its declared surface module") pure (lookupPreparedVerb surface)
   let siblings = resolvePreparedInterfaceSiblings env
-      arguments = map Core.Type [boolTy,intTy,charTy,stringTy]
+      arguments = map Core.Type [boolTy,charTy]
   case classifySiteOccurrence siblings spec surface arguments of
     Right _ -> pure ()
-    Left _ -> fail "genuine cold HPT child/sibling pair was refused"
-  sibling <- maybe (fail "cold HPT lacks its genuine child sibling Id") pure (Map.lookup "child" siblings)
+    Left _ -> fail "genuine cold HPT request/sibling pair was refused"
+  sibling <- maybe (fail "cold HPT lacks its genuine request sibling Id") pure (Map.lookup "request" siblings)
   uniqueSupply <- mkSplitUniqSupply 's'
   let (foreignUnique,remaining) = takeUniqFromSupply uniqueSupply
       (surfaceUnique,remaining') = takeUniqFromSupply remaining
       (siblingUnique,_) = takeUniqFromSupply remaining'
       originalName = idName surface
       foreignSurface = setIdName surface (mkExternalName foreignUnique
-        (mkModule (stringToUnit "other") (mkModuleName unfoldName))
+        (mkModule (stringToUnit "other") (mkModuleName requestName))
         (nameOccName originalName) (nameSrcSpan originalName))
       unnamedSurface = setIdName surface (mkInternalName surfaceUnique
         (nameOccName originalName) (nameSrcSpan originalName))
       unnamedSibling = setIdName sibling (mkInternalName siblingUnique
         (nameOccName (idName sibling)) (nameSrcSpan (idName sibling)))
   -- Alter only the surface's defining unit; its occurrence, module and type
-  -- remain identical to GHC's genuine child Id, and the home sibling is valid.
+  -- remain identical to GHC's genuine request Id, and the home sibling is valid.
   case classifySiteOccurrence siblings spec foreignSurface arguments of
     Left MismatchedSiblingUnit -> pure ()
-    _ -> fail "a foreign-unit child surface acquired the valid home sibling"
-  forM_ [(siblings,unnamedSurface),(Map.insert "child" unnamedSibling siblings,surface)] $ \(available,verb) ->
+    _ -> fail "a foreign-unit request surface acquired the valid home sibling"
+  forM_ [(siblings,unnamedSurface),(Map.insert "request" unnamedSibling siblings,surface)] $ \(available,verb) ->
     case classifySiteOccurrence available spec verb arguments of
       Left MissingSiteOwner -> pure ()
       _ -> fail "a site pair without a defining module acquired sibling authority"
-  source <- BSC.unpack <$> BS.readFile unfoldPath
-  let withoutSibling = unlines (takeWhile (/= "{-# OPAQUE childSited #-}") (lines source))
-  writeFile unfoldPath withoutSibling
+  source <- BSC.unpack <$> BS.readFile requestPath
+  let withoutSibling = unlines (takeWhile (/= "{-# OPAQUE requestSited #-}") (lines source))
+  writeFile requestPath withoutSibling
   missing <- compile (PreparedProducts Nothing) Nothing >>= targetModule
   unless (any (isInfixOf "missing generated site-aware sibling" . srMessage) (pmSiteRejections missing)) $
     fail "missing typed sibling did not remain a source rejection"
-  writeFile unfoldPath (T.unpack (T.replace "RequestSite '[input] result" "Bool" (T.pack source)))
+  writeFile requestPath (T.unpack (T.replace "RequestSite '[input] result" "Bool" (T.pack source)))
   incompatible <- compile (PreparedProducts Nothing) Nothing >>= targetModule
   unless (any (isInfixOf "RequestSite input or reply index" . srMessage) (pmSiteRejections incompatible)) $
     fail "incompatible typed sibling did not remain a source rejection"
   -- A captured owner may retain the exact nominal name and indices while
   -- changing the private value field. Reject it before synthesizing Core.
-  writeFile unfoldPath source
+  writeFile requestPath source
   carrierSource <- readFile "lib/Tidepool/Internal/RequestSite.hs"
   writeFile (work </> "Tidepool/Internal/RequestSite.hs")
     (T.unpack (T.replace "RequestSite Int" "RequestSite Bool"

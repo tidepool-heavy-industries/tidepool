@@ -338,8 +338,9 @@ watchBy heuristicsFor call result = do
                 J.:& #trigger J.:= J.noul (heuristicQuestion h)) heuristics)
         case answer of
           Left err -> pure (Abstained (jevFailureSummary err))
-          Right r ->
-            let tripped = [ (h, ans.trigger.yes) | (h, ans) <- r.heuristics
+          Right response ->
+            let r = J.answers response
+                tripped = [ (h, ans.trigger.yes) | (h, ans) <- r.heuristics
                           , ans.supported.yes >= 0.8
                           , ans.trigger.yes >= heuristicFloor h ]
                 advised = [ advice | (h, _) <- tripped, Advise advice <- [heuristicOutcome h] ]
@@ -356,7 +357,7 @@ watchBy heuristicsFor call result = do
 
 -- | Report the failing boundary without copying provider or transport text,
 -- which may contain request details. The class still identifies the boundary.
-jevFailureSummary :: J.JevError -> Text
+jevFailureSummary :: J.JevError J.JevCallError -> Text
 jevFailureSummary err =
   case err of
     J.Prepare _ -> "Jev request preparation failed; watchdog left the result unchanged"

@@ -184,42 +184,6 @@ pub(super) enum LifecycleAnswer {
     Exited(crate::ActorTerminal),
 }
 
-pub(super) struct ForkCleanupAnswer(
-    pub(super) Result<crate::ForkGroupCleanupOutcome, crate::ForkGroupError>,
-);
-
-impl tidepool_bridge::sealed::ToHaskellSealed for ForkCleanupAnswer {}
-impl ToHaskell for ForkCleanupAnswer {
-    fn visit(
-        &self,
-        table: &DataConTable,
-        visitor: &mut dyn HaskellVisitor,
-    ) -> Result<(), BridgeError> {
-        match &self.0 {
-            Ok(crate::ForkGroupCleanupOutcome::Cleaned) => {
-                visit_core(table, visitor, "ForkGroupCleaned", |_| Ok(()))
-            }
-            Ok(crate::ForkGroupCleanupOutcome::Active(actors)) => {
-                visit_core(table, visitor, "ForkGroupStillActive", |visitor| {
-                    actors
-                        .iter()
-                        .map(|actor| {
-                            Ok((
-                                actor_haskell_int(actor.id.0, "actor id")?,
-                                actor_haskell_int(actor.incarnation.0, "actor incarnation")?,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, BridgeError>>()?
-                        .visit(table, visitor)
-                })
-            }
-            Err(error) => visit_core(table, visitor, "ForkGroupCleanupRejected", |visitor| {
-                error.to_string().visit(table, visitor)
-            }),
-        }
-    }
-}
-
 impl tidepool_bridge::sealed::ToHaskellSealed for LifecycleAnswer {}
 impl ToHaskell for LifecycleAnswer {
     fn visit(
@@ -343,163 +307,6 @@ impl ToHaskell for AgentStopProjection {
     }
 }
 
-impl tidepool_bridge::sealed::ToHaskellSealed for CleanupActorProjection {}
-impl ToHaskell for CleanupActorProjection {
-    fn visit(
-        &self,
-        table: &DataConTable,
-        visitor: &mut dyn HaskellVisitor,
-    ) -> Result<(), BridgeError> {
-        visit_core(table, visitor, "CleanupActorPlan", |visitor| {
-            actor_haskell_int(self.actor.id.0, "actor id")?.visit(table, visitor)?;
-            actor_haskell_int(self.actor.incarnation.0, "actor incarnation")?
-                .visit(table, visitor)?;
-            self.label.visit(table, visitor)?;
-            visit_core(
-                table,
-                visitor,
-                if self.terminal {
-                    "CleanupActorTerminal"
-                } else {
-                    "CleanupActorRunning"
-                },
-                |_| Ok(()),
-            )?;
-            actor_haskell_int(self.revision, "cleanup revision")?.visit(table, visitor)
-        })
-    }
-}
-
-impl tidepool_bridge::sealed::ToHaskellSealed for CleanupPlanProjection {}
-impl ToHaskell for CleanupPlanProjection {
-    fn visit(
-        &self,
-        table: &DataConTable,
-        visitor: &mut dyn HaskellVisitor,
-    ) -> Result<(), BridgeError> {
-        visit_core(table, visitor, "CleanupPlan", |visitor| {
-            actor_haskell_int(self.group.0, "fork group id")?.visit(table, visitor)?;
-            self.actors.visit(table, visitor)?;
-            self.pending_responses
-                .iter()
-                .map(|request| actor_haskell_int(request.0, "request id"))
-                .collect::<Result<Vec<_>, _>>()?
-                .visit(table, visitor)?;
-            self.pending_watches
-                .iter()
-                .map(|watch| actor_haskell_int(watch.0, "watch id"))
-                .collect::<Result<Vec<_>, _>>()?
-                .visit(table, visitor)?;
-            self.refusal.visit(table, visitor)
-        })
-    }
-}
-
-impl tidepool_bridge::sealed::ToHaskellSealed for CleanupStepProjection {}
-impl ToHaskell for CleanupStepProjection {
-    fn visit(
-        &self,
-        table: &DataConTable,
-        visitor: &mut dyn HaskellVisitor,
-    ) -> Result<(), BridgeError> {
-        let ids = |visitor: &mut dyn HaskellVisitor, values: &[u64], label| {
-            values
-                .iter()
-                .copied()
-                .map(|value| actor_haskell_int(value, label))
-                .collect::<Result<Vec<_>, _>>()?
-                .visit(table, visitor)
-        };
-        match self {
-            Self::ForgotResponses(requests) => {
-                visit_core(table, visitor, "CleanupForgotResponses", |visitor| {
-                    ids(
-                        visitor,
-                        &requests.iter().map(|request| request.0).collect::<Vec<_>>(),
-                        "request id",
-                    )
-                })
-            }
-            Self::ForgotWatches(watches) => {
-                visit_core(table, visitor, "CleanupForgotWatches", |visitor| {
-                    ids(
-                        visitor,
-                        &watches.iter().map(|watch| watch.0).collect::<Vec<_>>(),
-                        "watch id",
-                    )
-                })
-            }
-            Self::StoppedActor(actor, outcome) => {
-                visit_core(table, visitor, "CleanupStoppedActor", |visitor| {
-                    actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
-                    actor_haskell_int(actor.incarnation.0, "actor incarnation")?
-                        .visit(table, visitor)?;
-                    outcome.visit(table, visitor)
-                })
-            }
-            Self::ForgotActor(actor) => {
-                visit_core(table, visitor, "CleanupForgotActor", |visitor| {
-                    actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
-                    actor_haskell_int(actor.incarnation.0, "actor incarnation")?
-                        .visit(table, visitor)
-                })
-            }
-            Self::ActorRetained {
-                actor,
-                requests,
-                watches,
-            } => visit_core(table, visitor, "CleanupActorRetained", |visitor| {
-                actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
-                actor_haskell_int(actor.incarnation.0, "actor incarnation")?
-                    .visit(table, visitor)?;
-                requests
-                    .iter()
-                    .map(|request| actor_haskell_int(request.0, "request id"))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .visit(table, visitor)?;
-                watches
-                    .iter()
-                    .map(|watch| actor_haskell_int(watch.0, "watch id"))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .visit(table, visitor)
-            }),
-            Self::GroupRetired(group) => {
-                visit_core(table, visitor, "CleanupGroupRetired", |visitor| {
-                    actor_haskell_int(group.0, "fork group id")?.visit(table, visitor)
-                })
-            }
-            Self::ActorOutputPending { actor, displays } => {
-                visit_core(table, visitor, "CleanupActorOutputPending", |visitor| {
-                    actor_haskell_int(actor.id.0, "actor id")?.visit(table, visitor)?;
-                    actor_haskell_int(actor.incarnation.0, "actor incarnation")?
-                        .visit(table, visitor)?;
-                    actor_haskell_int(*displays as u64, "pending display count")?
-                        .visit(table, visitor)
-                })
-            }
-            Self::Blocked(detail) => visit_core(table, visitor, "CleanupBlocked", |visitor| {
-                detail.visit(table, visitor)
-            }),
-            Self::StalePlan => visit_core(table, visitor, "CleanupStalePlan", |_| Ok(())),
-        }
-    }
-}
-
-impl tidepool_bridge::sealed::ToHaskellSealed for CleanupReceiptProjection {}
-impl ToHaskell for CleanupReceiptProjection {
-    fn visit(
-        &self,
-        table: &DataConTable,
-        visitor: &mut dyn HaskellVisitor,
-    ) -> Result<(), BridgeError> {
-        visit_core(table, visitor, "CleanupReceipt", |visitor| {
-            self.plan.visit(table, visitor)?;
-            self.steps.visit(table, visitor)?;
-            self.complete.visit(table, visitor)
-        })
-    }
-}
-
 fn visit_usage_observation(
     table: &DataConTable,
     visitor: &mut dyn HaskellVisitor,
@@ -585,19 +392,14 @@ impl ToHaskell for AgentRosterProjection {
         table: &DataConTable,
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
-        let role = match self.descriptor.effective_role().role() {
-            crate::ActorRole::Root => "ContextRoot",
-            crate::ActorRole::Research => "ContextResearch",
-            crate::ActorRole::Coding => "ContextCoding",
-            crate::ActorRole::Scaffolding => "ContextScaffolding",
-            crate::ActorRole::Integration => "ContextIntegration",
-            crate::ActorRole::Inherited => "ContextInherited",
-        };
         visit_core(table, visitor, "AgentRosterEntry", |visitor| {
             actor_haskell_int(self.actor.id.0, "actor id")?.visit(table, visitor)?;
             actor_haskell_int(self.actor.incarnation.0, "actor incarnation")?
                 .visit(table, visitor)?;
-            self.descriptor.label().to_owned().visit(table, visitor)?;
+            self.descriptor
+                .display_label()
+                .into_owned()
+                .visit(table, visitor)?;
             self.runtime
                 .requested_model
                 .as_deref()
@@ -677,13 +479,7 @@ impl ToHaskell for AgentRosterProjection {
                 .map(|x| actor_haskell_int(x.0, "request id"))
                 .collect::<Result<Vec<_>, _>>()?
                 .visit(table, visitor)?;
-            visit_core(table, visitor, role, |_| Ok(()))?;
             self.bound_worktree.visit(table, visitor)?;
-            self.descriptor
-                .fork_group()
-                .map(|x| actor_haskell_int(x.0, "fork group id"))
-                .transpose()?
-                .visit(table, visitor)?;
             actor_haskell_int(self.descriptor.placement().lexical_scope.0, "lexical scope")?
                 .visit(table, visitor)?;
             self.runtime.provider_thread.visit(table, visitor)?;
@@ -804,25 +600,6 @@ impl ToHaskell for ActorContextProjection {
         table: &DataConTable,
         visitor: &mut dyn HaskellVisitor,
     ) -> Result<(), BridgeError> {
-        let role = match self.descriptor.effective_role().role() {
-            crate::ActorRole::Root => "ContextRoot",
-            crate::ActorRole::Research => "ContextResearch",
-            crate::ActorRole::Coding => "ContextCoding",
-            crate::ActorRole::Scaffolding => "ContextScaffolding",
-            crate::ActorRole::Integration => "ContextIntegration",
-            crate::ActorRole::Inherited => "ContextInherited",
-        };
-        let tools = match self.descriptor.effective_role().native_tools() {
-            crate::NativeToolClass::InspectionOnly => "NativeInspectionOnly",
-            crate::NativeToolClass::Coding => "NativeCoding",
-            crate::NativeToolClass::Integration => "NativeIntegration",
-            crate::NativeToolClass::Inherited => "NativeInherited",
-        };
-        let workspace = match self.descriptor.effective_role().workspace() {
-            crate::WorkspaceAccess::None => "WorkspaceNone",
-            crate::WorkspaceAccess::InspectOnly => "WorkspaceInspectOnly",
-            crate::WorkspaceAccess::WritableBound => "WorkspaceWritableBound",
-        };
         visit_core(table, visitor, "ActorContextInfo", |v| {
             actor_haskell_int(self.context.actor.id.0, "actor id")?.visit(table, v)?;
             actor_haskell_int(self.context.actor.incarnation.0, "actor incarnation")?
@@ -837,20 +614,15 @@ impl ToHaskell for ActorContextProjection {
                 .map(|x| actor_haskell_int(x.incarnation.0, "supervisor incarnation"))
                 .transpose()?
                 .visit(table, v)?;
-            self.descriptor.label().to_owned().visit(table, v)?;
-            visit_core(table, v, role, |_| Ok(()))?;
             self.descriptor
-                .effective_role()
+                .display_label()
+                .into_owned()
+                .visit(table, v)?;
+            self.descriptor
+                .capabilities()
                 .haskell_effects_type()
                 .visit(table, v)?;
-            visit_core(table, v, tools, |_| Ok(()))?;
-            visit_core(table, v, workspace, |_| Ok(()))?;
             self.bound_worktree.visit(table, v)?;
-            self.descriptor
-                .fork_group()
-                .map(|x| actor_haskell_int(x.0, "fork group id"))
-                .transpose()?
-                .visit(table, v)?;
             actor_haskell_int(self.context.placement.lexical_scope.0, "lexical scope")?
                 .visit(table, v)?;
             match &self.runtime.activation_kind {
@@ -882,19 +654,34 @@ impl ToHaskell for ActorContextProjection {
             visit_usage_observation(table, v, self.runtime.latest_provider_usage())?;
             visit_usage_summary(table, v, self.runtime.provider_usage_summary.as_ref())?;
             visit_usage_summary(table, v, self.runtime.latest_turn_usage_summary.as_ref())?;
-            i64::from(self.descriptor.effective_role().descendants().maximum_depth)
+            i64::from(self.descriptor.capabilities().descendants().maximum_depth)
                 .visit(table, v)?;
             self.descriptor
-                .effective_role()
+                .capabilities()
                 .descendants()
                 .maximum_active_children
                 .map(i64::from)
-                .visit(table, v)?;
-            self.descriptor
-                .effective_role()
-                .prompt_profile()
-                .to_owned()
                 .visit(table, v)
+        })
+    }
+}
+
+impl tidepool_bridge::sealed::ToHaskellSealed for SpecReplacementError {}
+impl ToHaskell for SpecReplacementError {
+    fn visit(
+        &self,
+        table: &DataConTable,
+        visitor: &mut dyn HaskellVisitor,
+    ) -> Result<(), BridgeError> {
+        let name = match self {
+            Self::Unavailable => "SpecReplacementUnavailable",
+            Self::Unauthorized => "SpecReplacementUnauthorized",
+            Self::SurfaceChanged => "SpecReplacementSurfaceChanged",
+            Self::Failed(_) => "SpecReplacementFailed",
+        };
+        visit_core(table, visitor, name, |visitor| match self {
+            Self::Failed(detail) => detail.visit(table, visitor),
+            _ => Ok(()),
         })
     }
 }

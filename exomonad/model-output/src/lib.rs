@@ -73,12 +73,12 @@ mod tests {
     #[test]
     fn extracts_all_haskell_blocks_in_order() {
         let response = "First:\n```haskell\ndata Mood = Rested | Wired\n```\n\
-                        Then: ```hs\nmood <- askUser @Mood \"how?\"\n```";
+                        Then: ```hs\nmood <- askUser (autoForm @Mood)\n```";
         assert_eq!(
             extract_haskell_blocks(response),
             [
                 "data Mood = Rested | Wired",
-                "mood <- askUser @Mood \"how?\""
+                "mood <- askUser (autoForm @Mood)"
             ]
         );
     }

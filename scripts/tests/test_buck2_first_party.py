@@ -503,12 +503,16 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
 
     def test_protocol_roster_owns_generated_module_inputs_even_without_source_copies(self):
         self.write("tidepool/runtime/src/generated/mod.rs", "// stale source copy\n")
+        self.write("tidepool/runtime/src/generated/forks.rs",
+                   'const STALE: &str = include_str!("missing-obsolete-input.txt");\n')
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
         _buck, groups = self.groups("tidepool/runtime")
         for name in ("tidepool_runtime_sources", "tidepool_runtime_unit_tests_sources"):
             mapping = groups[name]
             self.assertNotIn("src/generated/mod.rs", mapping)
+            self.assertNotIn("src/generated/forks.rs", mapping)
+            self.assertNotIn("tidepool/runtime/src/generated/forks.rs", mapping.values())
             self.assertEqual(mapping["//bridge/protocol:generated[tidepool_runtime_src_generated_mod_rs]"],
                              "tidepool/runtime/src/generated/mod.rs")
 

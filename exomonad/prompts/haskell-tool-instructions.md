@@ -6,8 +6,8 @@ Use hosted `lookup` if declared; otherwise use
 
 `haskell` is asynchronous; `haskell_sync` waits with the same effects. Only a
 synchronous profile can add `ContextReadWrite` (`setNextModel`, `setNextEffort`).
-Edits commit together on success; external effects are not undone. Use `unfoldDeferred`
-after curation; never await its children in their creating invocation.
+Edits commit together on success; external effects are not undone. Capture a
+completed context explicitly when another agent should start from it.
 `editableTexts` exposes full eligible message/result bodies and authored text;
 tool source/input and arguments stay pinned. With
 `import qualified Tidepool.Agent.Context as C`, `C.trimText reason retainedText`

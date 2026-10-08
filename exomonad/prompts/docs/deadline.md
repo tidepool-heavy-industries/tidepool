@@ -1,22 +1,15 @@
-No deadline is the default. A deadline bounds waiting for reply acceptance;
+Request options may include a deadline. It bounds when the request may be accepted;
 it does not promise that the target's processes have stopped. Use dimensional
-time, not bare integers. Given an existing `worker`, declared `Report`, and
-input `task`:
+time values rather than bare integers.
 
-```haskell
-response <- do
-  pending <- request @Report worker $
-    (assignment [label|bounded-review|] task) { deadline = Just (minutes 10) }
-  Right () <- detachRequest pending
-  pure pending
-```
+When the deadline expires, the request becomes unavailable and dependent waits
+can proceed with that typed outcome. If reply acceptance won the race, retain its
+terminal settlement. Cancellation is a separate operation, and the target actor
+remains active until its execution and cleanup actually close. Inspect the
+request and actor state before assuming the resource is safe to retire.
 
-`milliseconds`, `seconds`, and `minutes` construct `Duration`. Status preserves the authored unit and shows
-absolute and remaining time.
+Use the request handle as the identity for that activation. A follow-up request
+has its own identity and typed input. Its result does not terminate the actor;
+retirement remains a separate supervisor decision.
 
-Expiry makes the response unavailable with `ResponseDeadlineExceeded` and
-wakes dependent watches without waiting for cancellation acknowledgement.
-Later replies are rejected. If reply acceptance already won the race, its
-terminal settlement is preserved. Cancellation is requested separately, and
-the target remains active until its execution actually closes. Inspect the
-reply/actor state before assuming it is safe to clean up.
+skill: exomonad-agent-work

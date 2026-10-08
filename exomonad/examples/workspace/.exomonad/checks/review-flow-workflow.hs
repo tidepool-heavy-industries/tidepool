@@ -1,21 +1,24 @@
 {-# LANGUAGE QuasiQuotes #-}
 import Tidepool.Effects.Core (GitRef (..))
+import Tidepool.Worktree (workspaceFor)
 -- Supply routeCriteria for this task. Exact-source Repair uses Jev only when
 -- criteria are present; Accepted and missing-criteria escalation are local.
-let campaign = campaignName :: CampaignLabel
-let task = Task (batch campaign "component") "plans/component.md" sourceHead
-      "Implement one component" "Review its exact committed candidate"
-      ["review-flow.txt"] "Read exact committed source" []
-(worker, _updates) <- unfold (taskGroup task)
-  (childWithProgress @WorkProgress @(Outcome Candidate)
-    (withLifetime ActorOwned $ withContext (selected taskContext) $ coding (atRef (GitRef (renderGitOid sourceHead))) (assignment [label|implement|] task)))
+let work = (task "implement" "Implement one component" ["review-flow.txt"] "Read exact committed source" sourceHead)
+      { planPath = "plans/component.md", rationale = "Review its exact committed candidate" }
+Right workerAgent <- spawnSubagent (FreshCtx (taskContext work))
+  (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
+Right (worker, _updates) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work defaultRequestOptions
 Right coordinatorTree <- createWorktree
   (fromRef (GitRef (renderGitOid sourceHead)) coordinatorName)
+Right coordinatorWorkspace <- workspaceFor coordinatorTree
 let policy = defaultReviewFlowPolicy
       { flowRepairLimit = 1
       , flowEscalationCriteria = routeCriteria }
-flow <- R.start (R.withWorktree (worktreeId coordinatorTree)
-  (reviewFlowWith me task policy worker semanticReviewChoice))
+flow <- R.start (R.withWorkspace coordinatorWorkspace
+  (reviewFlowWith me work policy worker semanticReviewChoice))
 initialSnapshot <- R.call (reviewSnapshot (R.client flow)) ()
 pendingCleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce
 inspectFull (show (flowStage initialSnapshot, pendingCleanup))

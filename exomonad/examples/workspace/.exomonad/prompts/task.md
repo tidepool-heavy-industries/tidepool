@@ -1,51 +1,14 @@
-Load `exomonad-project-work` for this Git assignment's scaffold, delegation,
-review and integration policy. Compose its operations through the supplied
-helpers or an authored state machine with a task-specific control language.
-Keep the requested result type and combined acceptance as you delegate and
-automate. Child criteria can be narrower than your combined acceptance.
+Implement the assigned result in the supplied checkout from its accepted source
+and decisions. Read the production consumer and relevant acceptance criteria.
+Clarify shared contracts before changing dependent code. Delegate only a bounded
+obligation that can proceed independently; provide its source, owned paths,
+dependencies, acceptance evidence, and escalation condition. Use its actual
+AgentSpec, then activate the idle agent with a typed request. No model tier or
+agent hierarchy is required.
 
-Own the supplied Task in your bound checkout from its accepted source and
-decisions. For a planning-only assignment, return understanding through its typed
-channel and wait for the specified release condition.
-
-Build the owning production consumer. Before delegation, fix shared interfaces,
-acceptance, integration ownership, and the implementation you retain locally.
-Wire returned components together early. The Luna helpers select context from the Task and use the bound source. Focused
-Luna descendants should use `withContext (fromCheckpoint captured)` at a useful scaffold boundary;
-select focused Task context when crossing model tiers. Use fresh context for independent review.
-The initial brief names that consumer, the relevant state distinctions and an
-exact focused acceptance command with its expected matched count.
-
-A contract correction names the superseded decision, exact source commit,
-affected consumers and required check. The receiving owner reports incorporation
-at its actual candidate OID and the check result. Transport, acknowledgment,
-incorporation and verification are separate evidence. Send updates only to affected
-owners and continue independent work while a dependency is pending.
-
-Commit useful authored units, including partial implementations and failing tests.
-A pre-fork checkpoint proves source identity, not acceptance. Return the exact
-checked candidate: `head` is its commit, `reportedChecks` records authored check claims,
-and `gates` names remaining product limits. For `Outcome Candidate`:
-
-```haskell
-let candidate = Candidate head checks gates
-respond (Produced candidate)
-```
-
-Keep the obligation pending while awaiting an owning decision. Publish progress
-and unresolved questions through the supplied progress channel. `Blocked` ends
-an obligation that cannot proceed; it does not publish a pending question. If
-the assigned work needs no code change, report the finding through its actual
-result type, or ask the requester to correct a Candidate-only contract. A custom
-task may specify another result type; follow that contract. Remain available
-for named repairs.
-
-
-For recurring checks, begin with the project's compiled Haskell composition and
-specialize its inputs for this component. Retain one job and carry its terminal
-receipt, source and test counts into the candidate or review. Compose terminal waits and evidence reads in Haskell; use ongoing completion
-routing when independent observers need it. Pass the working helper name and its source to
-children; a menu seen by the parent does not establish discovery by a child.
-Before product review, name required sibling commits and check that the candidate
-contains them. A partial component review must say which integration gates remain.
-Preparation, executed checks, review and integration are distinct evidence.
+Build the owning production consumer and run the focused checks needed for the
+requested result. Keep authored check claims separate from executed evidence.
+Return the exact checked candidate, findings, or other requested typed result;
+do not fabricate a code candidate for a findings-only assignment. Keep the
+obligation pending while a required decision or repair can still proceed, and
+report changed source and checks at the actual resulting revision.

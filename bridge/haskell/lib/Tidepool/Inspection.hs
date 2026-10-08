@@ -15,7 +15,6 @@ module Tidepool.Inspection
     display,
     expand,
     DisplayHandle,
-    DisplayRoot (..),
     ExpansionKey,
     expansions,
     WorkbenchDisplay (..),
@@ -26,7 +25,7 @@ module Tidepool.Inspection
     displayRecord,
     opaqueHandle,
     FullInspection,
-    FullDisplay (inspectFull),
+    inspectFull,
     DisplayTree (..),
     treeParts,
     precedenceParens,
@@ -49,9 +48,11 @@ import qualified Data.Text as Text
 import Tidepool.Agent.Reply.Internal
 import Tidepool.Agent.Watch.Internal
 import Tidepool.Inspection.Display
+import Tidepool.View.Types (View(..), viewTree)
+import Tidepool.View.Wire (encodeView)
 import Tidepool.Inspection.Tree
 import Tidepool.Effects.Core
-  ( Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
+  ( Console (DisplayWith, DisplayExpandWith, DisplayAllowanceWith, DisplayExpansionInputWith), displayViewRaw, DirtySummary (..), WorkingState (..), SubmissionObservation (..) )
 import Tidepool.Worktree (HeadState (..), renderGitOid, renderWorktreeError)
 import Prelude
 
@@ -67,13 +68,18 @@ instance Display (DisplayHandle value) where
 
 -- | One explicit structured output. The host retains the callback in the
 -- actor's ordinary resource scope; the returned handle does not contain it.
-display :: (DisplayRoot value, Member Console effects) => value -> Eff effects (DisplayHandle value)
+display :: (Display value, Member Console effects) => value -> Eff effects (DisplayHandle value)
 display value = do
   allowance <- send DisplayAllowanceWith
   let budget = displayBudget allowance
-      state = newDisplayState budget (displayRoot value)
-  identity <- publishDisplay (0, 0, 0) state
-  pure (DisplayHandle identity (displayStateKeys state))
+  case displayView value of
+    Inspection tree -> do
+      let state = newDisplayState budget tree
+      identity <- publishDisplay (0, 0, 0) state
+      pure (DisplayHandle identity (displayStateKeys state))
+    view -> do
+      displayViewRaw (encodeView budget view)
+      pure (DisplayHandle (0, 0, 0) [])
 
 -- | The key must come from this handle's current expansion description.
 -- The host applies the retained callback directly, without compiling a cell.
@@ -81,18 +87,6 @@ expand :: Member Console effects => DisplayHandle value -> ExpansionKey -> Eff e
 expand (DisplayHandle identity _) key = do
   keys <- send (DisplayExpandWith (identity, expansionKeyNumber key))
   pure (DisplayHandle identity [(expansionKeyFromNumber number, label) | (number, label) <- keys])
-
-class DisplayRoot value where
-  displayRoot :: value -> DisplayTree
-
-instance {-# OVERLAPPABLE #-} Display value => DisplayRoot value where
-  displayRoot = displayTree
-
-instance DisplayRoot Text where
-  displayRoot = TextLeaf
-
-instance DisplayRoot [Char] where
-  displayRoot = StringLeaf
 
 -- The host grants this allowance before any tree is demanded. Its shared
 -- byte budget must never truncate a page after the renderer retains its suffix.
@@ -129,30 +123,18 @@ instance Display ResponseFailure where
     application precedence "ResponseRejected" [displayTreePrec 11 error]
   displayTreePrec precedence failure = StringLeaf (showsPrec precedence failure "")
 
-instance Display WatchFailure where
+instance Display AwaitError where
   displayTree = displayTreePrec 0
-  displayTreePrec precedence (WatchRejected error) =
-    application precedence "WatchRejected" [displayTreePrec 11 error]
+  displayTreePrec precedence (AwaitRejected error) =
+    application precedence "AwaitRejected" [displayTreePrec 11 error]
   displayTreePrec precedence failure = StringLeaf (showsPrec precedence failure "")
 
 data FullInspection = FullInspection ([Text] -> Int -> (Text, Bool)) DisplayTree
 
--- | Retain the value's structural renderer. Explicit display keeps its ordinary
--- allowance and expansion keys; inspection never serializes an unbounded value.
-class FullDisplay a where
-  inspectFull :: a -> FullInspection
-
-instance {-# OVERLAPPABLE #-} (Display a) => FullDisplay a where
-  inspectFull value = FullInspection (\keys budget -> displayWithout keys budget value) (displayTree value)
-
-instance FullDisplay Text where
-  -- Both fields must agree: the retained tree backs paged/resumable display
-  -- (PageDisplay), the closure backs the bounded single-shot text. A
-  -- top-level Text value is raw either way; only nested Text is quoted.
-  inspectFull value = FullInspection (\_ budget -> rawText budget value) (TextLeaf value)
-
-instance FullDisplay [Char] where
-  inspectFull value = FullInspection (\_ budget -> rawString budget value) (StringLeaf value)
+-- | Compiler-facing retained inspection uses the single Display contract.
+inspectFull :: Display a => a -> FullInspection
+inspectFull value = FullInspection (\keys budget -> displayWithout keys budget value)
+  (viewTree (displayView value))
 
 instance Display FullInspection where
   displayTree (FullInspection _ tree) = tree
@@ -288,7 +270,7 @@ class PageDisplay effects a where
   displayPageWithout _ = displayPage
 
 instance {-# OVERLAPPABLE #-} Display a => PageDisplay effects a where
-  displayPage budget value = pageWithContinuation budget (displayTree value) Nothing
+  displayPage budget value = pageWithContinuation budget (viewTree (displayView value)) Nothing
 
 instance PageDisplay effects FullInspection where
   displayPage budget (FullInspection _ tree) = pageWithContinuation budget tree Nothing
@@ -362,11 +344,6 @@ instance Display a => Display (WatchState a) where
   displayTreePrec precedence (WatchPending progress) = application precedence "WatchPending" [displayTreePrec 11 progress]
   displayTreePrec precedence (WatchReady value) = application precedence "WatchReady" [displayTreePrec 11 value]
   displayTreePrec precedence (WatchUnavailable reason) = application precedence "WatchUnavailable" [displayTreePrec 11 reason]
-
-instance Display a => Display (Settlement a) where
-  displayTree = displayTreePrec 0
-  displayTreePrec precedence (ReplyAvailable value) = application precedence "ReplyAvailable" [displayTreePrec 11 value]
-  displayTreePrec precedence (ReplyUnavailable reason) = application precedence "ReplyUnavailable" [displayTreePrec 11 reason]
 
 instance Display a => Display (ProgressState a) where
   displayTree = displayTreePrec 0

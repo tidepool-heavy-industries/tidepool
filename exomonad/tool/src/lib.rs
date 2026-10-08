@@ -6,7 +6,7 @@ mod effects;
 mod public_profiles;
 pub mod surface;
 pub use effects::{ActorEffectKey, ToolEffectKey};
-pub use public_profiles::{PublicActorEffectRow, PublicActorProfile};
+pub use public_profiles::DEFAULT_ACTOR_EFFECTS;
 
 /// When this invocation must settle relative to the caller's next inference.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

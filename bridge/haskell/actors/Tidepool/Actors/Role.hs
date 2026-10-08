@@ -3,7 +3,8 @@
 -- Constructors for witnesses are intentionally private. A row can only be
 -- reflected when every effect has a registered 'KnownEffect' instance.
 module Tidepool.Actors.Role
-  ( ActorContext
+  ( ActorEffects
+  , ActorContext
   , AgentLaunch
   , AgentInspection
   , AgentControl
@@ -15,7 +16,6 @@ module Tidepool.Actors.Role
   , WorktreeRegistry
   , WorktreeAllocation
   , WorktreeIntegration
-  , Forks
   , Jev
   , ModelCall
   , Lookup
@@ -29,12 +29,6 @@ module Tidepool.Actors.Role
   , KnownEffects (knownEffects)
   , effectKeys
   , Subset
-  , CoreEffects
-  , ResearchEffects
-  , ResearchLeafEffects
-  , CodingEffects
-  , IntegrationEffects
-  , ActorEffects
   ) where
 
 import Tidepool.Effects.Core
@@ -47,7 +41,6 @@ import Tidepool.Effects.Core
   , AgentInspection
   , AgentLaunch
   , BoundWorktree
-  , Forks
   , Jev
   , Journal
   , ModelCall
@@ -64,10 +57,5 @@ import Tidepool.Effects.Row
 -- Public requests share their generated rows with native preparation. Rust
 -- separately owns the wider authority ceilings and the root's actual grants.
 import Tidepool.Internal.ActorProfiles
-  ( CoreEffects
-  , ResearchEffects
-  , ResearchLeafEffects
-  , CodingEffects
-  , IntegrationEffects
-  , ActorEffects
+  ( ActorEffects
   )

@@ -1,14 +1,11 @@
-guideWatchTypes :: Watch result -> EventWatch -> (Watch result, EventWatch)
-guideWatchTypes readiness event = (readiness, event)
-guideIsUnavailable :: WatchState result -> Bool
-guideIsUnavailable (WatchPending _) = False
-guideIsUnavailable (WatchReady _) = False
-guideIsUnavailable (WatchUnavailable _) = True
-let failureLabel = [label|guide-unavailable|]
-failureResponse <- request @Text (responseActor worker) (assignment failureLabel ("This request will be interrupted." :: Text))
-let failureWatchLabel = "guide-unavailable-ready" :: WatchLabel
-failureReady <- watch failureWatchLabel (awaitSettled failureResponse)
-let outerFailureWatchLabel = "guide-outer-unavailable" :: WatchLabel
-outerFailureReady <- watch outerFailureWatchLabel (awaitResponse failureResponse)
-let retainedFailureReady = fst (guideWatchTypes failureReady (WatchDeadline 1))
-stopAgent (responseActor worker)
+_ <- stopAgent worker
+Right retainedFailure <- await (settlement interrupted)
+outerFailure <- await (result interrupted)
+Right retainedSuccess <- await (result pending)
+let failurePreserved = case retainedFailure of
+      Left (ResponseTargetCancelled _) -> True
+      _ -> False
+    observationFailed = case outerFailure of
+      Left (AwaitDependencyUnavailable _ (ResponseTargetCancelled _)) -> True
+      _ -> False
+display (failurePreserved, observationFailed, retainedSuccess == input)

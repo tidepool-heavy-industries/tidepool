@@ -10,21 +10,20 @@ import Control.Monad (void)
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
 import Tidepool.Check
+import Project.Work (workspaceAgentSpec)
 
--- The collector is allocated before the workers, then bound to one accepted
--- change only after those workers have active requests. The fixture exercises
--- the real owner-only update and a worker's typed, authenticated report while
--- its original request remains pending.
+-- A worker can be spawned idle before the collector exists; the ordinary typed
+-- request carries its handle after the owner has opened the episode. The fixture
+-- then exercises owner-only updates and authenticated reports while the request
+-- remains pending.
 episode :: Member RecipeCheck effects => Eff effects ()
 episode = do
   owner <- root
   before <- git owner ["rev-parse", "HEAD"]
   void $ turn owner (Text.unlines
     [ "let before = " <> gitOidLiteral before
-    , "let ownerTask = task [label|baseline-change|] \"Incorporate the accepted baseline\" [\"plans/baseline.md\"] \"report exact source and named checks\" before"
+    , "let ownerTask = task \"baseline-change\" \"Incorporate the accepted baseline\" [\"plans/baseline.md\"] \"report exact source and named checks\" before"
     , "let question = Question \"baseline\" (DesignQuestion \"plans/baseline.md\" before \"The accepted source changed\" [] [] [\"incorporation\"])"
-    , "opened <- openBaselineEpisode me"
-    , "lateOpened <- openBaselineEpisode me"
     ])
   after <- checkpoint owner "plans/baseline.md" "Accepted baseline\n" "accept a baseline"
   void $ turn owner (Text.unlines
@@ -32,19 +31,18 @@ episode = do
     , "let amendment = PlanAmendment before after [\"plans/baseline.md\"] \"accept baseline\" [\"incorporation\"] [\"plan check\"]"
     , "let decision = AcceptedDecision question after \"Adopt the accepted baseline\" [\"plan check\"]"
     , "let change = BaselineChange before after amendment decision"
-    , "let workerBranch label ownerLabel collector = lunaBaselineTaskFrom label Medium (atRef (GitRef (renderGitOid before))) (BaselineAssignment ownerTask ownerLabel collector)"
-    , "worker <- unfold (taskGroup ownerTask) (child @(Outcome Candidate) (withLifetime ActorOwned (workerBranch [label|incorporate|] \"worker\" opened)))"
+    , "Right workerAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"worker\" })"
     ])
   worker <- activation
+  void $ turn owner "opened <- openBaselineEpisode me\nlet workerInput = BaselineAssignment ownerTask \"worker\" opened\nRight (worker, workerProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent workerInput defaultRequestOptions"
   check "selected Luna receives the task without changing its role prompt"
-    (checkModel worker == Just "gpt-6-luna" && "Plan:" `Text.isInfixOf` checkContext worker
-      && "baselineCollector sessionInput" `Text.isInfixOf` checkContext worker)
-  void $ turn owner "lateWorker <- unfold (batch (labelCampaign [label|late-baseline|]) \"work\") (child @(Outcome Candidate) (withLifetime ActorOwned (workerBranch [label|late|] \"late\" lateOpened)))"
+    (checkModel worker == Just "gpt-6-luna" && "Plan:" `Text.isInfixOf` checkContext worker)
+  void $ turn owner "lateOpened <- openBaselineEpisode me\nlet lateInput = BaselineAssignment ownerTask \"late\" lateOpened\nRight lateAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"late\" })\nRight (lateWorker, lateProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) lateAgent lateInput defaultRequestOptions"
   lateWorker <- activation
   void $ turn (checkActor lateWorker) "respond (Blocked \"already settled\" [] :: Outcome Candidate)"
 
   void $ turn owner (Text.unlines
-    [ "let affected response label = Affected label response (responseActor response) ownerTask question [\"read exact baseline\"]"
+    [ "let affected request label = Affected label request (responseActor request) ownerTask question [\"read exact baseline\"]"
     , "exactRoute <- routeQuestion me question [affected worker \"worker\", affected lateWorker \"late\"]"
     , "Right active <- beginBaselineEpisode opened change [affected worker \"worker\"]"
     , "Right late <- beginBaselineEpisode lateOpened change [affected lateWorker \"late\"]"

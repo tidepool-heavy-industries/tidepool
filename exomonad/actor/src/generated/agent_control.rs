@@ -22,5 +22,5 @@ use tidepool_bridge_derive::FromHaskell;
 )]
 pub enum AgentControlReq {
     AgentControlStopWith((i64, i64)),
-    AgentControlExecuteCleanupWith(i64, Vec<(i64, i64, i64)>),
+    AgentControlRetainWith((i64, i64), crate::WorkerLifetime),
 }

@@ -48,7 +48,7 @@ inspectHistory task = do
             J..| J.many #commit fst (T.drop 1 . snd) commits))
       case choice of
         Left err -> pure ("Jev unavailable: " <> T.pack (show err))
-        Right answer -> case J.settle J.lenient answer
+        Right response -> case J.settle J.lenient (J.answers response)
           (#unresolved (\() -> pure "No useful candidate in these 30 commits.")
             J..| #commit (\_ (oid, _) -> do
               shown <- Cmd.quiet (Cmd.run (Cmd.argv ["git", "show", "--stat", "--format=short", oid]))
@@ -61,7 +61,7 @@ inspectHistory task = do
             in if null candidates
               then pure ("Needs a closer look: " <> doubt.why)
               else inspectPatches task candidates
-          Right (J.Settled next) -> next
+          Right settled -> let next = J.settledValue settled in next
 
 -- A near tie among summaries calls for stronger evidence, not a lower bar.
 inspectPatches :: (Member Jev effects, Member Commands effects)
@@ -81,13 +81,13 @@ inspectPatches task candidates = do
             J..| J.many #patch fst snd evidence))
       case choice of
         Left err -> pure ("Jev unavailable: " <> T.pack (show err))
-        Right chosen -> case J.settle J.lenient chosen
+        Right response -> case J.settle J.lenient (J.answers response)
           (#unresolved (\() -> pure "The candidate patches do not establish the requested change.")
             J..| #patch (\_ (oid, _) -> do
               result <- Cmd.quiet (Cmd.run (Cmd.argv ["git", "show", "--stat", "--format=short", oid]))
               pure (either (\issue -> "Cannot inspect commit: " <> T.pack (show issue)) id (Cmd.stdout result)))) of
           Left doubt -> pure ("Patch evidence remains ambiguous: " <> doubt.why)
-          Right (J.Settled action) -> do
+          Right settled -> let action = J.settledValue settled in do
             result <- action
             pure ("Compared " <> T.pack (show (length candidates)) <> " candidate patches.\n\n" <> result)
 

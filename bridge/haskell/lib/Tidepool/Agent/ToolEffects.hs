@@ -71,9 +71,9 @@ type family AsyncEffects (effects :: [Type -> Type]) :: Constraint where
 
 actorEffectName :: ActorEffectKey -> Text
 actorEffectName key = case key of
+  EffectResourceScopes -> "ResourceScopes"
   EffectReplies -> "Replies"
   EffectWatches -> "Watches"
-  EffectForks -> "Forks"
   EffectActorContext -> "ActorContext"
   EffectAgentLaunch -> "AgentLaunch"
   EffectAgentInspection -> "AgentInspection"
@@ -85,6 +85,8 @@ actorEffectName key = case key of
   EffectSleep -> "Sleep"
   EffectCommands -> "Commands"
   EffectConsole -> "Console"
+  EffectAskUser -> "AskUser"
+  EffectGreen -> "Green"
   EffectNotifications -> "Notifications"
   EffectJev -> "Jev"
   EffectModelCall -> "ModelCall"

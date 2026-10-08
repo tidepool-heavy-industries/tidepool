@@ -158,14 +158,16 @@ async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_
     assert!(forest
         .authorize_provider_attachment(actor.identity())
         .is_err());
-    let error = crate::ResidentInteractivePolicy::local(actor)
-        .dispatch_boxed(exomonad_tool::ToolInvocation {
-            context: None,
-            name: crate::HASKELL_TOOL.into(),
-            arguments: exomonad_tool::ToolArguments::Raw("undefined".into()),
-        })
-        .await
-        .expect_err("pending actor cannot begin compiler work");
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        crate::resident_tools::ResidentToolClient::local(actor).dispatch_workbench(
+            tidepool_runtime::session::WorkbenchRequest::from_cell_input("undefined"),
+            None,
+        ),
+    )
+    .await
+    .expect("pending durable admission refuses without compiler work")
+    .expect_err("pending actor cannot begin compiler work");
     assert!(matches!(error, crate::ResidentToolError::Invocation(
         KernelInvocationFailure::Rejected { detail, .. }
     ) if detail == "durable actor public surface is not initialized"));
@@ -177,11 +179,11 @@ async fn provider_admission_is_bound_to_the_original_forest_owner() {
     let (forest_a, _root_a) = forest();
     let (forest_b, _root_b) = forest();
     let actor_a = forest_a
-        .new_workbench("a".into(), crate::EffectiveRole::root())
+        .new_workbench("a".into(), crate::ActorCapabilities::default())
         .await
         .expect("first workbench");
     let actor_b = forest_b
-        .new_workbench("b".into(), crate::EffectiveRole::root())
+        .new_workbench("b".into(), crate::ActorCapabilities::default())
         .await
         .expect("second workbench");
     let admission = forest_a

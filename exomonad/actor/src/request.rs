@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod sequence_tests;
 
+pub(crate) mod readiness;
+
 mod activation;
 pub(crate) use activation::{ActivationPublicationRefusal, RequestActivationCompletion};
 
@@ -89,6 +91,18 @@ pub(crate) enum RequestReservationOwner {
         attempt: WorkbenchReservationAttempt,
     },
     Route(WatchId),
+    Scope(i64),
+}
+
+/// Cleanup lifetime is independent of actor authority and request construction.
+/// Scope and run admission are checked by the existing resource owner before
+/// entering the request registry; these identities do not grant authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResourceCleanupOwner {
+    Actor,
+    Invocation(RequestReservationOwner),
+    Scope(i64),
+    Run,
 }
 
 /// Distinguishes a concrete workbench attempt from a replay identity. An
@@ -195,13 +209,14 @@ pub enum ReplyObservation {
     Closed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplyError {
     UpdatePending,
     Stale,
     AlreadySettled,
     Unauthorized,
     WrongIncarnation,
+    InvalidReadiness,
     ProgressTypeMismatch,
     CancellationRequested,
 }
@@ -216,6 +231,7 @@ pub enum WatchTransition {
         request: RequestId,
         failure: ResponseFailure,
     },
+    Rejected(ReplyError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,16 +246,18 @@ pub enum WatchStateProjection {
         request: RequestId,
         failure: ResponseFailure,
     },
+    Rejected(ReplyError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchObservation {
     Pending(PendingProgress),
-    Ready(Vec<(RequestId, ResponseFailure)>),
+    Ready(readiness::Decision),
     Unavailable {
         request: RequestId,
         failure: ResponseFailure,
     },
+    Rejected(ReplyError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,8 +368,7 @@ struct RequestRecord {
     activation: Option<activation::ActivationRecord>,
     owner: ActorRef,
     reservation_owner: Option<RequestReservationOwner>,
-    /// Detachment changes lifetime, never the original reservation rollback fence.
-    invocation_detached: bool,
+    cleanup_owner: ResourceCleanupOwner,
     target: ActorRef,
     label: String,
     target_state: TargetState,
@@ -384,6 +401,7 @@ struct RequestRecord {
     /// it is excluded from target-side work and settles only through
     /// [`RequestRegistry::settle_command`].
     command_job: Option<String>,
+    command_report: Option<tidepool_bridge_effects::CommandReport>,
     /// A command record armed for a watch that has not registered yet. It is
     /// not released before that watch names it or is refused.
     held_for_watch: bool,
@@ -459,6 +477,22 @@ enum WatchState {
         request: RequestId,
         failure: ResponseFailure,
     },
+    Rejected(ReplyError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadinessDependency {
+    Request(RequestId, WatchRequirement),
+    Watch(WatchId),
+}
+
+/// Immutable projection custody. Nested watches retain the exact original
+/// decision and selected snapshots, independently of the public source handle.
+struct WatchSnapshot {
+    decision: readiness::Decision,
+    progress: HashMap<(RequestId, u64), ProgressCapture>,
+    commands: HashMap<usize, (String, tidepool_bridge_effects::CommandReport)>,
+    sources: HashMap<usize, std::sync::Arc<WatchSnapshot>>,
 }
 
 struct WatchRecord {
@@ -467,9 +501,13 @@ struct WatchRecord {
     owner: ActorRef,
     label: String,
     dependencies: Vec<WatchDependency>,
-    group_count: usize,
+    plan: readiness::Plan<ReadinessDependency>,
+    evaluation: readiness::Evaluation,
+    snapshot: Option<std::sync::Arc<WatchSnapshot>>,
+    sources: HashMap<usize, std::sync::Arc<WatchSnapshot>>,
     state: WatchState,
     progress: HashMap<(RequestId, u64), ProgressCapture>,
+    commands: HashMap<usize, (String, tidepool_bridge_effects::CommandReport)>,
     /// When the owner last observed this watch (via `observe_watch`) already
     /// settled Ready or Unavailable. Lets delivery acknowledge a queued
     /// `WatchChanged` notice without prompting when the owner polled the
@@ -499,7 +537,7 @@ pub(crate) enum WatchRequirement {
 struct WatchDependency {
     request: RequestId,
     requirement: WatchRequirement,
-    group: usize,
+    node: usize,
 }
 
 #[derive(Default)]
@@ -512,7 +550,7 @@ struct RequestStateTable {
     cleanup_revision: HashMap<ActorRef, u64>,
     cleaning: std::collections::HashSet<ActorRef>,
     requests: HashMap<RequestId, RequestRecord>,
-    watches: HashMap<WatchId, WatchRecord>,
+    watches: std::collections::BTreeMap<WatchId, WatchRecord>,
     settlement_notifications: VecDeque<SettlementNotification>,
 }
 
@@ -523,6 +561,7 @@ enum RequestAdmission {
         label: String,
         notify_owner: bool,
         reservation_owner: Option<RequestReservationOwner>,
+        cleanup_owner: ResourceCleanupOwner,
     },
     CommandSettlement {
         owner: ActorRef,
@@ -565,6 +604,7 @@ impl RequestStateTable {
             label,
             notify_owner,
             reservation_owner,
+            cleanup_owner,
             target_state,
             command_job,
             held_for_watch,
@@ -575,12 +615,14 @@ impl RequestStateTable {
                 label,
                 notify_owner,
                 reservation_owner,
+                cleanup_owner,
             } => (
                 owner,
                 target,
                 label,
                 notify_owner,
                 reservation_owner,
+                cleanup_owner,
                 TargetState::Reserved,
                 None,
                 false,
@@ -595,6 +637,7 @@ impl RequestStateTable {
                 format!("job {job}"),
                 notify_owner,
                 None,
+                ResourceCleanupOwner::Actor,
                 TargetState::Presented,
                 Some(job),
                 !notify_owner,
@@ -608,7 +651,7 @@ impl RequestStateTable {
                 activation: None,
                 owner,
                 reservation_owner,
-                invocation_detached: false,
+                cleanup_owner,
                 target,
                 label,
                 target_state,
@@ -623,6 +666,7 @@ impl RequestStateTable {
                 target_path: None,
                 target_revision: None,
                 command_job,
+                command_report: None,
                 held_for_watch,
             },
         );
@@ -742,6 +786,7 @@ pub(crate) struct ActorRequestStatus {
     pub pending_watches: Vec<(WatchId, String)>,
     pub ready_watches: Vec<(WatchId, String)>,
     pub unavailable_watches: Vec<(WatchId, String, ResponseFailure)>,
+    pub rejected_watches: Vec<(WatchId, String, ReplyError)>,
     pub deadlines: Vec<(RequestId, String)>,
     /// Command jobs whose completion this actor still awaits, by job id.
     pub running_jobs: Vec<String>,
@@ -1286,6 +1331,7 @@ impl RequestRegistry {
             pending_watches: Vec::new(),
             ready_watches: Vec::new(),
             unavailable_watches: Vec::new(),
+            rejected_watches: Vec::new(),
             deadlines: Vec::new(),
             running_jobs: Vec::new(),
         };
@@ -1332,6 +1378,11 @@ impl RequestRegistry {
             match record.state {
                 WatchState::Pending => status.pending_watches.push((*watch, record.label.clone())),
                 WatchState::Ready => status.ready_watches.push((*watch, record.label.clone())),
+                WatchState::Rejected(error) => {
+                    status
+                        .rejected_watches
+                        .push((*watch, record.label.clone(), error))
+                }
                 WatchState::Unavailable { ref failure, .. } => {
                     status
                         .unavailable_watches
@@ -1346,6 +1397,9 @@ impl RequestRegistry {
             .sort_unstable_by_key(|entry| entry.0);
         status.pending_watches.sort_unstable();
         status.ready_watches.sort_unstable();
+        status
+            .rejected_watches
+            .sort_unstable_by_key(|entry| entry.0);
         status
             .unavailable_watches
             .sort_unstable_by_key(|entry| entry.0);
@@ -1445,12 +1499,42 @@ impl RequestRegistry {
         notify_owner: bool,
         reservation_owner: Option<RequestReservationOwner>,
     ) -> RequestId {
+        let cleanup_owner = match &reservation_owner {
+            Some(reservation @ RequestReservationOwner::Workbench { .. }) => {
+                ResourceCleanupOwner::Invocation(reservation.clone())
+            }
+            Some(RequestReservationOwner::Scope(scope)) => ResourceCleanupOwner::Scope(*scope),
+            _ => ResourceCleanupOwner::Actor,
+        };
+        self.reserve_for_cleanup_owner(
+            owner,
+            target,
+            label,
+            notify_owner,
+            reservation_owner,
+            cleanup_owner,
+        )
+    }
+
+    /// The resource owner's admission gate must remain held until this
+    /// reservation is registered. Construction provenance remains unchanged
+    /// when cleanup lifetime later transfers to another owner.
+    pub(crate) fn reserve_for_cleanup_owner(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+        label: String,
+        notify_owner: bool,
+        reservation_owner: Option<RequestReservationOwner>,
+        cleanup_owner: ResourceCleanupOwner,
+    ) -> RequestId {
         self.state.lock().admit(RequestAdmission::Operation {
             owner,
             target,
             label,
             notify_owner,
             reservation_owner,
+            cleanup_owner,
         })
     }
 
@@ -1483,8 +1567,14 @@ impl RequestRegistry {
         request: RequestId,
         report: String,
         revision: Option<String>,
+        value: Option<tidepool_bridge_effects::CommandReport>,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
+        if let Some(record) = state.requests.get_mut(&request) {
+            if record.command_report.is_none() {
+                record.command_report = value;
+            }
+        }
         state
             .settle(
                 request,
@@ -1771,48 +1861,6 @@ impl RequestRegistry {
         let record = state.watches.get(&watch)?;
         let request = first_pending_dependency(&state, record)?;
         state.requests.get(&request).map(|record| record.target)
-    }
-
-    /// Pending alternatives for each unsatisfied readiness group. A group is
-    /// any-of; the watch needs every group. Settled groups cannot block a wait.
-    pub(crate) fn pending_watch_target_groups(
-        &self,
-        owner: ActorRef,
-        watch: WatchId,
-    ) -> Result<Vec<Vec<ActorRef>>, ReplyError> {
-        let state = self.state.lock();
-        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
-        if record.owner != owner {
-            return Err(identity_error(record.owner, owner));
-        }
-        if record.state != WatchState::Pending {
-            return Ok(Vec::new());
-        }
-        Ok((0..record.group_count)
-            .filter_map(|group| {
-                let dependencies = record
-                    .dependencies
-                    .iter()
-                    .filter(|dependency| dependency.group == group)
-                    .collect::<Vec<_>>();
-                if dependencies.iter().any(|dependency| {
-                    watch_dependency_ready(&state.requests, &record.progress, dependency)
-                }) {
-                    return None;
-                }
-                Some(
-                    dependencies
-                        .iter()
-                        .filter_map(|dependency| {
-                            state
-                                .requests
-                                .get(&dependency.request)
-                                .map(|request| request.target)
-                        })
-                        .collect(),
-                )
-            })
-            .collect())
     }
 
     pub(crate) fn observe_response(
@@ -2107,57 +2155,62 @@ impl RequestRegistry {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn register_watch_requirement_groups(
         &self,
         owner: ActorRef,
         label: String,
         groups: Vec<Vec<(RequestId, WatchRequirement)>>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
-        self.register_watch_groups_with_route(owner, label, groups, None)
+        self.register_watch_plan(owner, label, test_readiness_groups(groups))
     }
 
-    pub(crate) fn register_watch_groups_with_route(
+    pub(crate) fn register_watch_plan(
         &self,
         owner: ActorRef,
         label: String,
-        groups: Vec<Vec<(RequestId, WatchRequirement)>>,
-        route: Option<routes::WatchRoute>,
+        plan: readiness::Plan<ReadinessDependency>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
-        self.register_watch_groups(owner, label, groups, route, false)
+        self.register_watch_plan_with_route(owner, label, plan, None)
     }
 
-    /// A direct suspended wait uses the same readiness owner, without a
-    /// model notification or a retained named subscription.
+    pub(crate) fn register_watch_plan_with_route(
+        &self,
+        owner: ActorRef,
+        label: String,
+        plan: readiness::Plan<ReadinessDependency>,
+        route: Option<routes::WatchRoute>,
+    ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
+        self.register_watch_plan_owned(owner, label, plan, route, false)
+    }
+
     pub(crate) fn register_transient_watch(
         &self,
         owner: ActorRef,
-        groups: Vec<Vec<(RequestId, WatchRequirement)>>,
+        plan: readiness::Plan<ReadinessDependency>,
     ) -> Result<WatchId, ReplyError> {
-        self.register_watch_groups(owner, "wait-for".into(), groups, None, true)
+        self.register_watch_plan_owned(owner, "await".into(), plan, None, true)
             .map(|(watch, _)| watch)
     }
 
-    fn register_watch_groups(
+    fn register_watch_plan_owned(
         &self,
         owner: ActorRef,
         label: String,
-        groups: Vec<Vec<(RequestId, WatchRequirement)>>,
+        plan: readiness::Plan<ReadinessDependency>,
         route: Option<routes::WatchRoute>,
         transient: bool,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
-        let group_count = groups.len();
-        let dependencies = groups
-            .iter()
-            .enumerate()
-            .flat_map(|(group, dependencies)| {
-                dependencies
-                    .iter()
-                    .copied()
-                    .map(move |(request, requirement)| WatchDependency {
-                        request,
-                        requirement,
-                        group,
-                    })
+        let plan = readiness::Plan::checked(plan.nodes, plan.root)?;
+        let dependencies = plan
+            .leaves()
+            .filter_map(|(node, dependency)| match dependency {
+                ReadinessDependency::Request(request, requirement) => Some(WatchDependency {
+                    request: *request,
+                    requirement: *requirement,
+                    node,
+                }),
+                ReadinessDependency::Watch(_) => None,
             })
             .collect::<Vec<_>>();
         let mut state = self.state.lock();
@@ -2174,6 +2227,15 @@ impl RequestRegistry {
                 return Err(ReplyError::CancellationRequested);
             }
             touched.insert(record.target);
+        }
+        for (_, dependency) in plan.leaves() {
+            if let ReadinessDependency::Watch(source) = dependency {
+                let record = state.watches.get(source).ok_or(ReplyError::Stale)?;
+                if state.cleaning.contains(&record.owner) {
+                    return Err(ReplyError::CancellationRequested);
+                }
+                touched.insert(record.owner);
+            }
         }
         for actor in touched {
             *state.cleanup_revision.entry(actor).or_default() += 1;
@@ -2200,9 +2262,13 @@ impl RequestRegistry {
                 owner,
                 label,
                 dependencies,
-                group_count,
+                evaluation: readiness::Evaluation::new(&plan),
+                plan,
+                snapshot: None,
+                sources: HashMap::new(),
                 state: WatchState::Pending,
                 progress: HashMap::new(),
+                commands: HashMap::new(),
                 observed_ready_at: None,
                 registered_at_unix_ms: unix_time_ms(),
                 transitioned_at_unix_ms: None,
@@ -2218,30 +2284,65 @@ impl RequestRegistry {
         Ok((id, notifications))
     }
 
+    #[cfg(test)]
     pub(crate) fn observe_watch_progress(
         &self,
-        _owner: ActorRef,
+        owner: ActorRef,
         watch: WatchId,
         request: RequestId,
         after: u64,
     ) -> Result<(Option<ProgressSnapshot>, bool), ReplyError> {
+        self.observe_watch_snapshot_progress(owner, watch, &[], request, after)
+    }
+
+    pub(crate) fn observe_watch_snapshot_progress(
+        &self,
+        _owner: ActorRef,
+        watch: WatchId,
+        path: &[usize],
+        request: RequestId,
+        after: u64,
+    ) -> Result<(Option<ProgressSnapshot>, bool), ReplyError> {
         let state = self.state.lock();
-        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
-        if record.state != WatchState::Ready {
-            return Err(ReplyError::Stale);
-        }
-        let key = (request, after);
-        if !record.dependencies.iter().any(|dependency| {
-            dependency.request == request
-                && dependency.requirement == WatchRequirement::ProgressAfter(after)
-        }) {
-            return Err(ReplyError::Unauthorized);
-        }
-        match record.progress.get(&key) {
+        match snapshot_at(&state, watch, path)?
+            .progress
+            .get(&(request, after))
+        {
             Some(ProgressCapture::Update(snapshot)) => Ok((Some(snapshot.clone()), false)),
             Some(ProgressCapture::Closed) => Ok((None, true)),
-            None => Ok((None, false)),
+            None => Err(ReplyError::Unauthorized),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_watch_command(
+        &self,
+        watch: WatchId,
+        job: &str,
+    ) -> Result<Option<tidepool_bridge_effects::CommandReport>, ReplyError> {
+        self.observe_watch_snapshot_command(watch, &[], job)
+    }
+
+    pub(crate) fn observe_watch_snapshot_command(
+        &self,
+        watch: WatchId,
+        path: &[usize],
+        job: &str,
+    ) -> Result<Option<tidepool_bridge_effects::CommandReport>, ReplyError> {
+        let state = self.state.lock();
+        Ok(snapshot_at(&state, watch, path)?
+            .commands
+            .values()
+            .find_map(|(captured_job, report)| (captured_job == job).then(|| report.clone())))
+    }
+
+    pub(crate) fn observe_watch_snapshot_decision(
+        &self,
+        watch: WatchId,
+        path: &[usize],
+    ) -> Result<readiness::Decision, ReplyError> {
+        let state = self.state.lock();
+        Ok(snapshot_at(&state, watch, path)?.decision.clone())
     }
 
     pub(crate) fn observe_watch(
@@ -2348,7 +2449,7 @@ impl RequestRegistry {
         &self,
         owner: ActorRef,
         watch: WatchId,
-    ) -> Result<(), ReplyError> {
+    ) -> Result<Vec<WatchNotification>, ReplyError> {
         let mut state = self.state.lock();
         let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
         if record.owner != owner {
@@ -2359,9 +2460,9 @@ impl RequestRegistry {
         }
         wake_watch_waiters(state.watches.get_mut(&watch).expect("watch checked"));
         state.watches.remove(&watch);
-        queue_settlement_notifications(&mut state);
+        let notifications = state.reevaluate_watches();
         release_settled_commands(&mut state);
-        Ok(())
+        Ok(notifications)
     }
 
     /// Hold an existing command record for a watch about to register, so
@@ -2421,7 +2522,9 @@ impl RequestRegistry {
             .filter(|(_, record)| {
                 record.command_job.is_none()
                     && (record.target == actor
-                        || (record.owner == actor && record.target_state != TargetState::Closed))
+                        || (record.owner == actor
+                            && record.cleanup_owner != ResourceCleanupOwner::Run
+                            && record.target_state != TargetState::Closed))
             })
             .map(|(request, _)| *request)
             .collect::<Vec<_>>();
@@ -2454,7 +2557,10 @@ impl RequestRegistry {
         let released = state
             .requests
             .iter()
-            .filter_map(|(request, record)| (record.owner == actor).then_some(*request))
+            .filter_map(|(request, record)| {
+                (record.owner == actor && record.cleanup_owner != ResourceCleanupOwner::Run)
+                    .then_some(*request)
+            })
             .collect::<Vec<_>>();
         let mut notifications = Vec::new();
         for request in released {
@@ -2552,26 +2658,49 @@ fn first_pending_dependency(state: &RequestStateTable, watch: &WatchRecord) -> O
     })
 }
 
-fn watch_dependency_ready(
-    requests: &HashMap<RequestId, RequestRecord>,
-    progress: &HashMap<(RequestId, u64), ProgressCapture>,
-    dependency: &WatchDependency,
-) -> bool {
-    if let WatchRequirement::ProgressAfter(after) = dependency.requirement {
-        return progress.contains_key(&(dependency.request, after));
-    }
-    requests
-        .get(&dependency.request)
-        .is_some_and(|record| match record.owner_state {
-            OwnerState::Ready => true,
-            OwnerState::Unavailable(_) | OwnerState::Abandoned => {
-                dependency.requirement
-                    == (WatchRequirement::Response {
-                        allow_failure: true,
-                    })
+#[cfg(test)]
+pub(crate) fn test_readiness_groups(
+    groups: Vec<Vec<(RequestId, WatchRequirement)>>,
+) -> readiness::Plan<ReadinessDependency> {
+    use readiness::{Node, Plan};
+    let mut nodes = Vec::new();
+    let mut root = None;
+    for group in groups {
+        let mut group_root = None;
+        for dependency in group {
+            let leaf = nodes.len();
+            nodes.push(Node::Leaf(ReadinessDependency::Request(
+                dependency.0,
+                dependency.1,
+            )));
+            group_root = Some(match group_root {
+                None => leaf,
+                Some(left) => {
+                    let index = nodes.len();
+                    nodes.push(Node::Either(left, leaf));
+                    index
+                }
+            });
+        }
+        let group_root = group_root.unwrap_or_else(|| {
+            let index = nodes.len();
+            nodes.push(Node::Ready);
+            index
+        });
+        root = Some(match root {
+            None => group_root,
+            Some(left) => {
+                let index = nodes.len();
+                nodes.push(Node::All(left, group_root));
+                index
             }
-            _ => false,
-        })
+        });
+    }
+    let root = root.unwrap_or_else(|| {
+        nodes.push(Node::Ready);
+        0
+    });
+    Plan::checked(nodes, root).expect("test readiness expression is valid")
 }
 
 fn request_has_pending_watcher(state: &RequestStateTable, request: RequestId) -> bool {
@@ -2649,9 +2778,6 @@ fn identity_error(expected: ActorRef, actual: ActorRef) -> ReplyError {
     }
 }
 
-/// Release removes the request under the same lock used to accept reads. A
-/// watch that has not been polled must therefore stop advertising its former
-/// readiness, even if its Ready notification is already queued.
 /// Remove closed command records that no watch names. Their settlement
 /// notice, if any, is already queued with its full text; the job's report
 /// stays with the job.
@@ -2685,6 +2811,8 @@ fn release_request_record(
     if let Some(mut record) = state.requests.remove(&request) {
         record.publish_source_release();
     }
+    let mut notifications = notifications;
+    notifications.extend(state.reevaluate_watches());
     notifications
 }
 
@@ -2692,57 +2820,44 @@ fn invalidate_response_watches(
     state: &mut RequestStateTable,
     request: RequestId,
 ) -> Vec<WatchNotification> {
-    let mut notifications = Vec::new();
-    for (watch_id, watch) in &mut state.watches {
-        if !watch
-            .dependencies
-            .iter()
-            .any(|dependency| dependency.request == request)
-        {
+    // Successful leaf facts and terminal decisions are already retained by
+    // their watch. Release only changes leaves not yet captured; evaluation
+    // handles that failure within its own expression branch.
+    for watch in state.watches.values_mut() {
+        if watch.state != WatchState::Pending {
             continue;
         }
-        let previous = match &watch.state {
-            WatchState::Pending => WatchStateProjection::Pending,
-            WatchState::Ready => WatchStateProjection::Ready,
-            WatchState::Unavailable { .. } => continue,
-        };
-        watch.state = WatchState::Unavailable {
-            request,
-            failure: ResponseFailure::Released,
-        };
-        watch.progress.clear();
-        wake_watch_waiters(watch);
-        if watch.transient {
-            continue;
+        for dependency in &watch.dependencies {
+            if dependency.request == request {
+                // Progress captures remain immutable; an uncaptured closed
+                // stream has a terminal observation even after source release.
+                if let WatchRequirement::ProgressAfter(after) = dependency.requirement {
+                    watch
+                        .progress
+                        .entry((request, after))
+                        .or_insert(ProgressCapture::Closed);
+                }
+            }
         }
-        if let Some(route) = &mut watch.route {
-            route.schedule(*watch_id);
-            continue;
-        }
-        notifications.push(WatchNotification {
-            owner: watch.owner,
-            watch: *watch_id,
-            label: watch.label.clone(),
-            previous,
-            current: WatchStateProjection::Unavailable {
-                request,
-                failure: ResponseFailure::Released,
-            },
-            transition: WatchTransition::Unavailable {
-                request,
-                failure: ResponseFailure::Released,
-            },
-            occurred_at_unix_ms: unix_time_ms(),
-            sequence: ActorEventSequence(0),
-            watermark: ActorEventSequence(0),
-        });
     }
-    for notification in &mut notifications {
-        let sequence = next_event_sequence(state, notification.owner);
-        notification.sequence = sequence;
-        notification.watermark = sequence;
+    Vec::new()
+}
+
+fn snapshot_at<'a>(
+    state: &'a RequestStateTable,
+    watch: WatchId,
+    path: &[usize],
+) -> Result<&'a WatchSnapshot, ReplyError> {
+    let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+    let mut snapshot = record.snapshot.as_deref().ok_or(ReplyError::Stale)?;
+    for node in path {
+        snapshot = snapshot
+            .sources
+            .get(node)
+            .ok_or(ReplyError::Unauthorized)?
+            .as_ref();
     }
-    notifications
+    Ok(snapshot)
 }
 
 fn observe_watch_locked(
@@ -2762,23 +2877,14 @@ fn observe_watch_locked(
                 .map(|snapshot| snapshot.revision),
             watched: true,
         }),
+        WatchState::Rejected(error) => WatchObservation::Rejected(*error),
         WatchState::Ready => WatchObservation::Ready(
             record
-                .dependencies
-                .iter()
-                .filter_map(|dependency| {
-                    let request = state.requests.get(&dependency.request)?;
-                    match &request.owner_state {
-                        OwnerState::Unavailable(failure) => {
-                            Some((dependency.request, failure.clone()))
-                        }
-                        OwnerState::Abandoned => {
-                            Some((dependency.request, ResponseFailure::Abandoned))
-                        }
-                        _ => None,
-                    }
-                })
-                .collect(),
+                .snapshot
+                .as_ref()
+                .expect("ready watch retains its snapshot")
+                .decision
+                .clone(),
         ),
         WatchState::Unavailable { request, failure } => WatchObservation::Unavailable {
             request: *request,
@@ -2787,7 +2893,9 @@ fn observe_watch_locked(
     };
     if matches!(
         observation,
-        WatchObservation::Ready(_) | WatchObservation::Unavailable { .. }
+        WatchObservation::Ready(_)
+            | WatchObservation::Unavailable { .. }
+            | WatchObservation::Rejected(_)
     ) {
         if let Some(record) = state
             .watches
@@ -2899,130 +3007,217 @@ fn queue_settlement_notifications(state: &mut RequestStateTable) {
 
 impl RequestStateTable {
     fn reevaluate_watches(&mut self) -> Vec<WatchNotification> {
-        let state = self;
-        queue_settlement_notifications(state);
+        queue_settlement_notifications(self);
         let mut notifications = Vec::new();
-        for (watch_id, watch) in &mut state.watches {
-            if watch.state != WatchState::Pending {
-                continue;
-            }
-            for dependency in &watch.dependencies {
-                let WatchRequirement::ProgressAfter(after) = dependency.requirement else {
-                    continue;
-                };
-                let key = (dependency.request, after);
-                if watch.progress.contains_key(&key) {
-                    continue;
-                }
-                let Some(record) = state.requests.get(&dependency.request) else {
-                    continue;
-                };
-                if let Some(snapshot) = record
-                    .progress
-                    .as_ref()
-                    .filter(|snapshot| snapshot.revision > after)
-                {
-                    watch
-                        .progress
-                        .insert(key, ProgressCapture::Update(snapshot.clone()));
-                } else if record.owner_state != OwnerState::Observing
-                    || record.target_state == TargetState::Closed
-                {
-                    watch.progress.insert(key, ProgressCapture::Closed);
+        // A source must already exist at admission, so its monotonic ID is
+        // earlier than its dependent. Evaluate that DAG in publication order
+        // under the same lock, then retain one coherent immutable snapshot.
+        let watch_ids = self.watches.keys().copied().collect::<Vec<_>>();
+        for watch_id in watch_ids {
+            let mut watch = self.watches.remove(&watch_id).expect("listed watch exists");
+            if watch.state == WatchState::Pending {
+                if let Some(notification) = self.evaluate_watch(watch_id, &mut watch) {
+                    notifications.push(notification);
                 }
             }
-            let next_state = watch.dependencies.iter().find_map(|dependency| {
-                let record = state.requests.get(&dependency.request)?;
-                match &record.owner_state {
-                    OwnerState::Unavailable(failure)
-                        if dependency.requirement
-                            == (WatchRequirement::Response {
-                                allow_failure: false,
-                            }) =>
-                    {
-                        Some(WatchState::Unavailable {
-                            request: dependency.request,
-                            failure: failure.clone(),
-                        })
-                    }
-                    OwnerState::Abandoned
-                        if dependency.requirement
-                            == (WatchRequirement::Response {
-                                allow_failure: false,
-                            }) =>
-                    {
-                        Some(WatchState::Unavailable {
-                            request: dependency.request,
-                            failure: ResponseFailure::Abandoned,
-                        })
-                    }
-                    _ => None,
-                }
-            });
-            let next_state = next_state.or_else(|| {
-                (0..watch.group_count)
-                    .all(|group| {
-                        watch.dependencies.iter().any(|dependency| {
-                            if dependency.group != group {
-                                return false;
-                            }
-                            watch_dependency_ready(&state.requests, &watch.progress, dependency)
-                        })
-                    })
-                    .then_some(WatchState::Ready)
-            });
-            let Some(next_state) = next_state else {
-                continue;
-            };
-            let (transition, current) = match &next_state {
-                WatchState::Pending => continue,
-                WatchState::Ready => (WatchTransition::Ready, WatchStateProjection::Ready),
-                WatchState::Unavailable { request, failure } => {
-                    watch.progress.clear();
-                    (
-                        WatchTransition::Unavailable {
-                            request: *request,
-                            failure: failure.clone(),
-                        },
-                        WatchStateProjection::Unavailable {
-                            request: *request,
-                            failure: failure.clone(),
-                        },
-                    )
-                }
-            };
-            watch.state = next_state;
-            wake_watch_waiters(watch);
-            let occurred_at_unix_ms = unix_time_ms();
-            watch.transitioned_at_unix_ms = Some(occurred_at_unix_ms);
-            if watch.transient {
-                continue;
-            }
-            if let Some(route) = &mut watch.route {
-                route.schedule(*watch_id);
-                continue;
-            }
-            let label = watch.label.clone();
-            let owner = watch.owner;
-            let watch = *watch_id;
-            notifications.push(WatchNotification {
-                owner,
-                watch,
-                label,
-                previous: WatchStateProjection::Pending,
-                current,
-                transition,
-                occurred_at_unix_ms,
-                sequence: ActorEventSequence(0),
-                watermark: ActorEventSequence(0),
-            });
+            self.watches.insert(watch_id, watch);
         }
         for notification in &mut notifications {
-            let sequence = next_event_sequence(state, notification.owner);
+            let sequence = next_event_sequence(self, notification.owner);
             notification.sequence = sequence;
             notification.watermark = sequence;
         }
         notifications
+    }
+
+    fn evaluate_watch(
+        &self,
+        watch_id: WatchId,
+        watch: &mut WatchRecord,
+    ) -> Option<WatchNotification> {
+        let state = self;
+        for dependency in &watch.dependencies {
+            let WatchRequirement::ProgressAfter(after) = dependency.requirement else {
+                continue;
+            };
+            let key = (dependency.request, after);
+            if watch.progress.contains_key(&key) {
+                continue;
+            }
+            let Some(record) = state.requests.get(&dependency.request) else {
+                continue;
+            };
+            if let Some(snapshot) = record
+                .progress
+                .as_ref()
+                .filter(|snapshot| snapshot.revision > after)
+            {
+                watch
+                    .progress
+                    .insert(key, ProgressCapture::Update(snapshot.clone()));
+            } else if record.owner_state != OwnerState::Observing
+                || record.target_state == TargetState::Closed
+            {
+                watch.progress.insert(key, ProgressCapture::Closed);
+            }
+        }
+        for dependency in &watch.dependencies {
+            if let Some(record) = state.requests.get(&dependency.request) {
+                if record.owner_state == OwnerState::Ready {
+                    if let (Some(job), Some(report)) = (&record.command_job, &record.command_report)
+                    {
+                        watch
+                            .commands
+                            .entry(dependency.node)
+                            .or_insert_with(|| (job.clone(), report.clone()));
+                    }
+                }
+            }
+        }
+        let outcome = watch.evaluation.advance(&watch.plan, |node, dependency| {
+            use readiness::LeafState;
+            let (request, requirement) = match *dependency {
+                ReadinessDependency::Request(request, requirement) => (request, requirement),
+                ReadinessDependency::Watch(source) => {
+                    if watch.sources.contains_key(&node) {
+                        return LeafState::Ready;
+                    }
+                    return match state.watches.get(&source) {
+                        Some(source) => match &source.state {
+                            WatchState::Pending => LeafState::Pending,
+                            WatchState::Ready => {
+                                watch.sources.insert(
+                                    node,
+                                    source
+                                        .snapshot
+                                        .clone()
+                                        .expect("ready source retains snapshot"),
+                                );
+                                LeafState::Ready
+                            }
+                            WatchState::Unavailable { request, failure } => {
+                                LeafState::Failed(*request, failure.clone())
+                            }
+                            WatchState::Rejected(error) => LeafState::Rejected(*error),
+                        },
+                        None => LeafState::Rejected(ReplyError::Stale),
+                    };
+                }
+            };
+            if let WatchRequirement::ProgressAfter(after) = requirement {
+                return if watch.progress.contains_key(&(request, after)) {
+                    LeafState::Ready
+                } else {
+                    LeafState::Pending
+                };
+            }
+            let failure = match state
+                .requests
+                .get(&request)
+                .map(|record| &record.owner_state)
+            {
+                Some(OwnerState::Ready) => return LeafState::Ready,
+                Some(OwnerState::Observing) => return LeafState::Pending,
+                Some(OwnerState::Unavailable(failure)) => failure.clone(),
+                Some(OwnerState::Abandoned) => ResponseFailure::Abandoned,
+                None => ResponseFailure::Released,
+            };
+            if requirement
+                == (WatchRequirement::Response {
+                    allow_failure: true,
+                })
+            {
+                LeafState::SettledFailure(failure)
+            } else {
+                LeafState::Failed(request, failure)
+            }
+        });
+        let next_state = outcome.map(|outcome| match outcome {
+            readiness::Outcome::Ready(decision) => {
+                let selected = decision
+                    .leaves
+                    .iter()
+                    .map(|(node, _)| *node)
+                    .collect::<std::collections::HashSet<_>>();
+                watch.progress.retain(|&(request, after), _| {
+                    watch.dependencies.iter().any(|dependency| {
+                        selected.contains(&dependency.node)
+                            && dependency.request == request
+                            && dependency.requirement == WatchRequirement::ProgressAfter(after)
+                    })
+                });
+                watch.commands.retain(|node, _| selected.contains(node));
+                watch.sources.retain(|node, _| selected.contains(node));
+                watch.snapshot = Some(std::sync::Arc::new(WatchSnapshot {
+                    decision,
+                    progress: std::mem::take(&mut watch.progress),
+                    commands: std::mem::take(&mut watch.commands),
+                    sources: std::mem::take(&mut watch.sources),
+                }));
+                WatchState::Ready
+            }
+            readiness::Outcome::Rejected(error) => {
+                watch.progress.clear();
+                watch.commands.clear();
+                watch.sources.clear();
+                WatchState::Rejected(error)
+            }
+            readiness::Outcome::Failed(request, failure) => {
+                watch.progress.clear();
+                watch.commands.clear();
+                watch.sources.clear();
+                WatchState::Unavailable { request, failure }
+            }
+        });
+        let Some(next_state) = next_state else {
+            return None;
+        };
+        let (transition, current) = match &next_state {
+            WatchState::Pending => return None,
+            WatchState::Ready => (WatchTransition::Ready, WatchStateProjection::Ready),
+            WatchState::Rejected(error) => (
+                WatchTransition::Rejected(*error),
+                WatchStateProjection::Rejected(*error),
+            ),
+            WatchState::Unavailable { request, failure } => {
+                watch.progress.clear();
+                (
+                    WatchTransition::Unavailable {
+                        request: *request,
+                        failure: failure.clone(),
+                    },
+                    WatchStateProjection::Unavailable {
+                        request: *request,
+                        failure: failure.clone(),
+                    },
+                )
+            }
+        };
+        watch.state = next_state;
+        wake_watch_waiters(watch);
+        let occurred_at_unix_ms = unix_time_ms();
+        watch.transitioned_at_unix_ms = Some(occurred_at_unix_ms);
+        if watch.transient {
+            return None;
+        }
+        if let Some(route) = &mut watch.route {
+            route.schedule(watch_id);
+            return None;
+        }
+        let label = watch.label.clone();
+        let owner = watch.owner;
+        let watch = watch_id;
+        Some(WatchNotification {
+            owner,
+            watch,
+            label,
+            previous: WatchStateProjection::Pending,
+            current,
+            transition,
+            occurred_at_unix_ms,
+            sequence: ActorEventSequence(0),
+            watermark: ActorEventSequence(0),
+        })
     }
 }
 
@@ -3144,15 +3339,15 @@ mod tests {
                 )]],
             )
             .unwrap();
-        let ready = registry.settle_command(watched, "job-b report".into(), None);
+        let ready = registry.settle_command(watched, "job-b report".into(), None, None);
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].watch, watch);
         assert_eq!(ready[0].transition, WatchTransition::Ready);
 
-        registry.settle_command(notified, "job-a report".into(), Some("abc123".into()));
+        registry.settle_command(notified, "job-a report".into(), Some("abc123".into()), None);
         // Settling twice keeps the first report.
         assert!(registry
-            .settle_command(notified, "later".into(), None)
+            .settle_command(notified, "later".into(), None, None)
             .is_empty());
         let notices = registry.take_settlement_notifications();
         assert_eq!(
@@ -3202,7 +3397,7 @@ mod tests {
             ))
         );
         assert!(registry
-            .settle_command(stopped, "after stop".into(), None)
+            .settle_command(stopped, "after stop".into(), None, None)
             .is_empty());
         let notices = registry.take_settlement_notifications();
         assert!(notices.iter().all(|notice| notice.transition
@@ -3220,14 +3415,14 @@ mod tests {
         let request = registry.reserve_command_settlement(owner, "job".into(), false);
         registry.release_command_holds(&[request]);
         assert!(registry.notify_command_owner(request).is_some());
-        registry.settle_command(request, "finished".into(), None);
+        registry.settle_command(request, "finished".into(), None, None);
         assert_eq!(registry.take_settlement_notifications().len(), 1);
         // A later handoff can rearm from the retained job report; it cannot
         // emit a second notice from this released request.
         assert!(registry.notify_command_owner(request).is_none());
 
         let raced = registry.reserve_command_settlement(owner, "raced".into(), false);
-        registry.settle_command(raced, "already finished".into(), None);
+        registry.settle_command(raced, "already finished".into(), None, None);
         assert!(registry.notify_command_owner(raced).is_some());
         assert!(registry.notify_command_owner(raced).is_some());
         let notices = registry.take_settlement_notifications();
@@ -3298,7 +3493,7 @@ mod tests {
         let owner = actor(1);
         let armed = registry.reserve_command_settlement(owner, "job".into(), false);
         // Held for its watch: settling does not release it.
-        registry.settle_command(armed, "report".into(), None);
+        registry.settle_command(armed, "report".into(), None, None);
         assert!(registry.hold_command(armed));
         registry.release_command_holds(&[armed]);
         assert_eq!(
@@ -3331,6 +3526,327 @@ mod tests {
         let notices = registry.take_settlement_notifications();
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].request, progress_only);
+    }
+
+    #[test]
+    fn observed_nested_choice_keeps_the_source_decision_after_source_forget() {
+        use readiness::{Node, Plan};
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let left = registry.reserve(owner, actor(2));
+        let right = registry.reserve(owner, actor(3));
+        let tail = registry.reserve(owner, actor(4));
+        for (request, target) in [(left, actor(2)), (right, actor(3)), (tail, actor(4))] {
+            registry.mark_queued(owner, target, request).unwrap();
+            registry.present(target, request).unwrap();
+        }
+        let response = |request| {
+            ReadinessDependency::Request(
+                request,
+                WatchRequirement::Response {
+                    allow_failure: false,
+                },
+            )
+        };
+        let source = registry
+            .register_watch_plan(
+                owner,
+                "source".into(),
+                Plan::checked(
+                    vec![
+                        Node::Leaf(response(left)),
+                        Node::Leaf(response(right)),
+                        Node::Either(0, 1),
+                    ],
+                    2,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .0;
+        let first = registry
+            .register_watch_plan(
+                owner,
+                "first".into(),
+                Plan::checked(vec![Node::Leaf(ReadinessDependency::Watch(source))], 0).unwrap(),
+            )
+            .unwrap()
+            .0;
+        let nested = registry
+            .register_watch_plan(
+                owner,
+                "nested".into(),
+                Plan::checked(
+                    vec![
+                        Node::Leaf(ReadinessDependency::Watch(first)),
+                        Node::Leaf(response(tail)),
+                        Node::All(0, 1),
+                    ],
+                    2,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .0;
+        registry.begin_reply(actor(3), right).unwrap();
+        registry.finish_reply(right, None);
+        let original = registry
+            .observe_watch_snapshot_decision(source, &[])
+            .unwrap();
+        assert_eq!(original.choices, vec![(2, false)]);
+        registry.forget_watch(owner, source).unwrap();
+        registry.forget_watch(owner, first).unwrap();
+        registry.mark_target_unavailable(owner, left);
+        registry.begin_reply(actor(4), tail).unwrap();
+        registry.finish_reply(tail, None);
+        assert!(matches!(
+            registry.observe_watch(owner, nested),
+            Ok(WatchObservation::Ready(_))
+        ));
+        assert_eq!(
+            registry.observe_watch_snapshot_decision(nested, &[0, 0]),
+            Ok(original)
+        );
+        assert_eq!(
+            registry.observe_watch_snapshot_decision(source, &[]),
+            Err(ReplyError::Stale)
+        );
+        assert_eq!(
+            registry.observe_watch_snapshot_decision(nested, &[1]),
+            Err(ReplyError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn cancelling_a_pending_source_watch_rejects_dependents_without_cancelling_requests() {
+        use readiness::{Node, Plan};
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let source = registry
+            .register_transient_watch(
+                owner,
+                test_readiness_groups(vec![vec![(
+                    request,
+                    WatchRequirement::Response {
+                        allow_failure: false,
+                    },
+                )]]),
+            )
+            .unwrap();
+        let dependent = registry
+            .register_watch_plan(
+                owner,
+                "dependent".into(),
+                Plan::checked(vec![Node::Leaf(ReadinessDependency::Watch(source))], 0).unwrap(),
+            )
+            .unwrap()
+            .0;
+        let notices = registry.release_transient_watch(owner, source).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].watch, dependent);
+        assert_eq!(
+            notices[0].transition,
+            WatchTransition::Rejected(ReplyError::Stale)
+        );
+        assert_eq!(
+            registry.observe_watch(owner, dependent),
+            Ok(WatchObservation::Rejected(ReplyError::Stale))
+        );
+        assert!(matches!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Pending(_))
+        ));
+    }
+
+    #[test]
+    fn observed_admission_racing_source_forget_either_refuses_or_retains_the_original_snapshot() {
+        use readiness::{Node, Plan};
+        for _ in 0..32 {
+            let registry = std::sync::Arc::new(RequestRegistry::default());
+            let owner = actor(1);
+            let source = registry
+                .register_watch_plan(
+                    owner,
+                    "source".into(),
+                    Plan::checked(vec![Node::Ready, Node::Ready, Node::Either(0, 1)], 2).unwrap(),
+                )
+                .unwrap()
+                .0;
+            let original = registry
+                .observe_watch_snapshot_decision(source, &[])
+                .unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let registrar = {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    registry.register_watch_plan(
+                        owner,
+                        "dependent".into(),
+                        Plan::checked(vec![Node::Leaf(ReadinessDependency::Watch(source))], 0)
+                            .unwrap(),
+                    )
+                })
+            };
+            barrier.wait();
+            registry.forget_watch(owner, source).unwrap();
+            match registrar.join().unwrap() {
+                Ok((dependent, _)) => assert_eq!(
+                    registry.observe_watch_snapshot_decision(dependent, &[0]),
+                    Ok(original)
+                ),
+                Err(error) => assert_eq!(error, ReplyError::Stale),
+            }
+        }
+    }
+
+    #[test]
+    fn private_read_subscription_retains_projection_after_public_root_forget() {
+        use readiness::{Node, Plan};
+        use tidepool_bridge_effects::{
+            CommandCleanup, CommandOutcome, CommandReport, CommandResult,
+        };
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let request = registry.reserve_command_settlement(owner, "read-job".into(), false);
+        let source = registry.register_watch(owner, vec![request]).unwrap().0;
+        let report = CommandReport {
+            command: vec!["true".into()],
+            source: None,
+            result: CommandResult {
+                outcome: CommandOutcome::CommandExited(0),
+                cleanup: CommandCleanup::CommandClean,
+            },
+            output_complete: true,
+            tail: "stable projection".into(),
+        };
+        registry.settle_command(request, "exit 0".into(), None, Some(report.clone()));
+        let read = registry
+            .register_transient_watch(
+                owner,
+                Plan::checked(vec![Node::Leaf(ReadinessDependency::Watch(source))], 0).unwrap(),
+            )
+            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let reader = {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let readiness = registry.observe_watch(owner, read).unwrap();
+                barrier.wait();
+                barrier.wait();
+                (
+                    readiness,
+                    registry
+                        .observe_watch_snapshot_command(read, &[0], "read-job")
+                        .unwrap(),
+                )
+            })
+        };
+        barrier.wait();
+        registry.forget_watch(owner, source).unwrap();
+        registry.forget_response(owner, request).unwrap();
+        assert_eq!(
+            registry.observe_watch(owner, source),
+            Err(ReplyError::Stale)
+        );
+        barrier.wait();
+        let (readiness, projected) = reader.join().unwrap();
+        assert!(matches!(readiness, WatchObservation::Ready(_)));
+        assert_eq!(projected, Some(report));
+        registry.release_transient_watch(owner, read).unwrap();
+        assert_eq!(
+            registry.observe_watch_snapshot_command(read, &[0], "read-job"),
+            Err(ReplyError::Stale)
+        );
+    }
+
+    #[test]
+    fn releasing_a_pending_private_read_does_not_cancel_its_public_source() {
+        use readiness::{Node, Plan};
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let source = registry.register_watch(owner, vec![request]).unwrap().0;
+        let read = registry
+            .register_transient_watch(
+                owner,
+                Plan::checked(vec![Node::Leaf(ReadinessDependency::Watch(source))], 0).unwrap(),
+            )
+            .unwrap();
+        assert!(registry
+            .release_transient_watch(owner, read)
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            registry.observe_watch(owner, source),
+            Ok(WatchObservation::Pending(_))
+        ));
+        assert!(matches!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Pending(_))
+        ));
+    }
+
+    #[test]
+    fn command_projection_racing_source_release_keeps_the_selected_report() {
+        use tidepool_bridge_effects::{
+            CommandCleanup, CommandOutcome, CommandReport, CommandResult,
+        };
+        for _ in 0..32 {
+            let registry = std::sync::Arc::new(RequestRegistry::default());
+            let owner = actor(1);
+            let request = registry.reserve_command_settlement(owner, "retained-job".into(), false);
+            let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+            let report = CommandReport {
+                command: vec!["true".into()],
+                source: None,
+                result: CommandResult {
+                    outcome: CommandOutcome::CommandExited(0),
+                    cleanup: CommandCleanup::CommandClean,
+                },
+                output_complete: true,
+                tail: "captured before release".into(),
+            };
+            registry.settle_command(request, "exit 0".into(), None, Some(report.clone()));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let observer = {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let decision = registry.observe_watch(owner, watch).unwrap();
+                    let projected = registry
+                        .observe_watch_command(watch, "retained-job")
+                        .unwrap();
+                    (decision, projected)
+                })
+            };
+            barrier.wait();
+            registry.forget_response(owner, request).unwrap();
+            let (decision, projected) = observer.join().unwrap();
+            assert_eq!(
+                decision,
+                WatchObservation::Ready(readiness::Decision {
+                    leaves: vec![(0, None)],
+                    choices: vec![]
+                })
+            );
+            assert_eq!(projected, Some(report));
+            registry.forget_watch(owner, watch).unwrap();
+            assert_eq!(
+                registry.observe_watch_command(watch, "retained-job"),
+                Err(ReplyError::Stale)
+            );
+        }
     }
 
     #[test]
@@ -3510,7 +4026,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_any_group_wakes_on_one_closure_and_freezes_other_as_pending() {
+    fn progress_choice_retains_only_the_selected_snapshot() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let first_target = actor(2);
@@ -3550,7 +4066,7 @@ mod tests {
         ));
         assert!(matches!(
             registry.observe_watch_progress(owner, watch, second, 0),
-            Ok((None, false))
+            Err(ReplyError::Unauthorized)
         ));
         assert!(matches!(
             registry.observe_watch_progress(owner, watch, unrelated, 0),
@@ -3561,7 +4077,7 @@ mod tests {
         assert!(registry.finish_reply(second, None).is_empty());
         assert!(matches!(
             registry.observe_watch_progress(owner, watch, second, 0),
-            Ok((None, false))
+            Err(ReplyError::Unauthorized)
         ));
     }
 
@@ -3686,10 +4202,10 @@ mod tests {
             registry.begin_reply(right_target, right),
             Err(ReplyError::AlreadySettled)
         );
-        assert_eq!(
+        assert!(matches!(
             registry.observe_watch(owner, watch),
-            Ok(WatchObservation::Ready(Vec::new()))
-        );
+            Ok(WatchObservation::Ready(_))
+        ));
     }
 
     #[test]
@@ -3869,17 +4385,17 @@ mod tests {
         let before_settlement = registry.subscribe_watch(owner, watch).unwrap();
         registry.begin_reply(target, request).unwrap();
         registry.finish_reply(request, None);
-        assert_eq!(
+        assert!(matches!(
             before_settlement.wait().await,
-            Ok(WatchObservation::Ready(Vec::new()))
-        );
+            Ok(WatchObservation::Ready(_))
+        ));
 
         // The state check and subscription share the registry lock, so a
         // subscription made after the transition is immediately signalled.
-        assert_eq!(
+        assert!(matches!(
             registry.subscribe_watch(owner, watch).unwrap().wait().await,
-            Ok(WatchObservation::Ready(Vec::new()))
-        );
+            Ok(WatchObservation::Ready(_))
+        ));
     }
 
     #[tokio::test]
@@ -3938,10 +4454,10 @@ mod tests {
 
         registry.begin_reply(target, request).unwrap();
         registry.finish_reply(request, None);
-        assert_eq!(
+        assert!(matches!(
             registry.observe_watch(owner, watch),
-            Ok(WatchObservation::Ready(Vec::new()))
-        );
+            Ok(WatchObservation::Ready(_))
+        ));
     }
 
     #[tokio::test]
@@ -4099,10 +4615,13 @@ mod tests {
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(
             registry.observe_watch(owner, watch),
-            Ok(WatchObservation::Ready(vec![(
-                failed,
-                ResponseFailure::TargetFailed("boom".into())
-            )]))
+            Ok(WatchObservation::Ready(readiness::Decision {
+                leaves: vec![
+                    (0, Some(ResponseFailure::TargetFailed("boom".into()))),
+                    (1, None)
+                ],
+                choices: vec![],
+            }))
         );
     }
 
@@ -4492,14 +5011,14 @@ mod tests {
             .expect("owner watch transition")
             .occurred_at_unix_ms;
 
-        assert_eq!(
+        assert!(matches!(
             registry.observe_watch(foreign, watch),
-            Ok(WatchObservation::Ready(vec![]))
-        );
-        assert_eq!(
+            Ok(WatchObservation::Ready(_))
+        ));
+        assert!(matches!(
             registry.observe_watch(other_incarnation, watch),
-            Ok(WatchObservation::Ready(vec![]))
-        );
+            Ok(WatchObservation::Ready(_))
+        ));
         assert!(!registry.watch_observed_since(owner, watch, transition_time));
 
         let _ = registry.status_for(owner);
@@ -4523,17 +5042,12 @@ mod tests {
         let (unavailable_watch, _) = unavailable_registry
             .register_watch(owner, vec![unavailable_request])
             .unwrap();
-        unavailable_registry
-            .begin_reply(target, unavailable_request)
-            .unwrap();
-        unavailable_registry.finish_reply(unavailable_request, None);
-        let (_, notifications) = unavailable_registry
-            .forget_response(owner, unavailable_request)
-            .unwrap();
+        let notifications =
+            unavailable_registry.mark_target_unavailable(owner, unavailable_request);
         let unavailable_transition_time = notifications
             .iter()
             .find(|notification| notification.watch == unavailable_watch)
-            .expect("owner watch release transition")
+            .expect("owner watch failure transition")
             .occurred_at_unix_ms;
         assert!(matches!(
             unavailable_registry.observe_watch(foreign, unavailable_watch),
@@ -4555,7 +5069,7 @@ mod tests {
     }
 
     #[test]
-    fn foreign_listener_preserves_owner_notice_and_release_invalidates_queued_ready() {
+    fn foreign_listener_preserves_owner_notice_and_release_preserves_queued_decision() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -4585,24 +5099,24 @@ mod tests {
         );
         let (outcome, release_notices) = registry.forget_response(owner, request).unwrap();
         assert_eq!(outcome, ForgetResponseOutcome::Forgotten);
-        assert_eq!(release_notices.len(), 2);
+        assert!(release_notices.is_empty());
         assert_eq!(
             registry.observe_response(child, request),
             Err(ReplyError::Stale)
         );
         assert_eq!(
             registry.observe_watch(child, child_watch),
-            Ok(WatchObservation::Unavailable {
-                request,
-                failure: ResponseFailure::Released
-            })
+            Ok(WatchObservation::Ready(readiness::Decision {
+                leaves: vec![(0, None)],
+                choices: vec![]
+            }))
         );
         assert_eq!(
             registry.observe_watch(owner, owner_watch),
-            Ok(WatchObservation::Unavailable {
-                request,
-                failure: ResponseFailure::Released
-            })
+            Ok(WatchObservation::Ready(readiness::Decision {
+                leaves: vec![(0, None)],
+                choices: vec![]
+            }))
         );
     }
 
@@ -4627,7 +5141,7 @@ mod tests {
     }
 
     #[test]
-    fn release_wakes_a_pending_foreign_watch_without_releasing_active_work() {
+    fn captured_leaf_survives_release_while_another_leaf_remains_pending() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -4649,30 +5163,25 @@ mod tests {
         ));
 
         let (_, notices) = registry.forget_response(owner, completed).unwrap();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].owner, child);
-        assert_eq!(
-            notices[0].transition,
-            WatchTransition::Unavailable {
-                request: completed,
-                failure: ResponseFailure::Released
-            }
-        );
-        assert_eq!(
+        assert!(notices.is_empty());
+        assert!(matches!(
             registry.observe_watch(child, watch),
-            Ok(WatchObservation::Unavailable {
-                request: completed,
-                failure: ResponseFailure::Released
-            })
-        );
+            Ok(WatchObservation::Pending(_))
+        ));
         assert_eq!(
             registry.forget_response(owner, active),
             Ok((ForgetResponseOutcome::StillPending, Vec::new()))
         );
+        registry.begin_reply(target, active).unwrap();
+        assert_eq!(registry.finish_reply(active, None).len(), 1);
+        assert!(matches!(
+            registry.observe_watch(child, watch),
+            Ok(WatchObservation::Ready(_))
+        ));
     }
 
     #[test]
-    fn mixed_watch_progress_read_after_release_reports_unavailable() {
+    fn mixed_watch_keeps_closed_progress_snapshot_after_response_release() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -4698,30 +5207,30 @@ mod tests {
             .unwrap();
         registry.begin_reply(target, request).unwrap();
         registry.finish_reply(request, None);
-        assert_eq!(
+        assert!(matches!(
             registry.observe_watch(child, watch),
-            Ok(WatchObservation::Ready(Vec::new()))
-        );
+            Ok(WatchObservation::Ready(_))
+        ));
         registry.forget_response(owner, request).unwrap();
         assert!(matches!(
             registry.observe_watch_progress(child, watch, request, 0),
-            Err(ReplyError::Stale)
+            Ok((None, true))
         ));
         assert!(matches!(
             registry.observe_watch_progress(other, watch, request, 0),
-            Err(ReplyError::Stale)
+            Ok((None, true))
         ));
         assert_eq!(
             registry.observe_watch(other, watch),
-            Ok(WatchObservation::Unavailable {
-                request,
-                failure: ResponseFailure::Released
-            })
+            Ok(WatchObservation::Ready(readiness::Decision {
+                leaves: vec![(0, None), (1, None)],
+                choices: vec![]
+            }))
         );
     }
 
     #[test]
-    fn forgetting_terminal_owner_invalidates_foreign_watch() {
+    fn forgetting_terminal_owner_preserves_foreign_watch_decision() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -4734,26 +5243,18 @@ mod tests {
         registry.finish_reply(request, None);
 
         let notifications = registry.forget_terminal_actor_metadata(owner).unwrap();
-        assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].owner, observer);
-        assert_eq!(
-            notifications[0].transition,
-            WatchTransition::Unavailable {
-                request,
-                failure: ResponseFailure::Released
-            }
-        );
+        assert!(notifications.is_empty());
         assert_eq!(
             registry.observe_watch(observer, watch),
-            Ok(WatchObservation::Unavailable {
-                request,
-                failure: ResponseFailure::Released
-            })
+            Ok(WatchObservation::Ready(readiness::Decision {
+                leaves: vec![(0, None)],
+                choices: vec![]
+            }))
         );
     }
 
     #[test]
-    fn explicit_cleanup_releases_terminal_response_and_invalidates_dependent_watch() {
+    fn explicit_cleanup_releases_terminal_response_and_preserves_dependent_watch() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -4774,20 +5275,13 @@ mod tests {
         registry.finish_reply(request, None);
         let (outcome, notifications) = registry.forget_response(owner, request).unwrap();
         assert_eq!(outcome, ForgetResponseOutcome::Forgotten);
-        assert_eq!(notifications.len(), 1);
-        assert_eq!(
-            notifications[0].transition,
-            WatchTransition::Unavailable {
-                request,
-                failure: ResponseFailure::Released
-            }
-        );
+        assert!(notifications.is_empty());
         assert_eq!(
             registry.observe_watch(owner, watch),
-            Ok(WatchObservation::Unavailable {
-                request,
-                failure: ResponseFailure::Released
-            })
+            Ok(WatchObservation::Ready(readiness::Decision {
+                leaves: vec![(0, None)],
+                choices: vec![]
+            }))
         );
         assert_eq!(
             registry.forget_watch(owner, watch),

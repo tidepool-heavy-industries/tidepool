@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MonoLocalBinds #-}
@@ -14,14 +15,25 @@ module Project.ReviewPolicy (defaultReviewFlowPolicy, semanticReviewChoice) wher
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
 import qualified Jev.Operators as J
-import Jev.Operators (Packet ((:=)), Settled (Settled))
+import Jev.Operators (Packet ((:=)))
 import Tidepool.Actors.Exomonad
+import Tidepool.Agent.Contract (AgentSpec)
+import qualified AgentSpec as Installed
+import qualified Project.Tools as Tools
 import Tidepool.Aeson.Value (object, (.=))
-import Tidepool.Effects.Core (GitRef (..), Jev)
+import Tidepool.Effects.Core (GitRef (..), Jev, Commands, Lookup)
 import Tidepool.Worktree (renderGitOid)
 import Exomonad.Contrib.Types
-import Project.Work (projectPrompt, reviewContext)
+import Project.Work
+  ( WorkAdmissionError (..), projectPrompt, reviewContext )
 import Exomonad.Contrib.ReviewFlow
+
+-- The flow grants this reviewer the effects needed by its actual tool record.
+-- Broader project operations remain with the owner that coordinates delivery.
+type ReviewerEffects = '[Replies, BoundWorktree, Commands, Lookup, Jev, Reflect, ActorContext]
+
+reviewerSpec :: AgentSpec (Tools.WorkspaceTools ReviewerEffects) ReviewerEffects
+reviewerSpec = Installed.agentSpec
 
 defaultReviewFlowPolicy :: ReviewFlowPolicy
 defaultReviewFlowPolicy = ReviewFlowPolicy
@@ -31,14 +43,29 @@ defaultReviewFlowPolicy = ReviewFlowPolicy
   , flowEscalationCriteria = []
   , flowCompleted = Nothing
   , flowIntegration = Nothing
-  , flowReviewer = \sourcePlan request evidence ->
-      withInstructions (projectPrompt "review" <>
-        "\nThis review has inspection-only ResearchLeafEffects. Do not execute checks or modify source. The flow owns executed checks; distinguish retained evidence from inspection. Reply with respond; keep questions pending through progress.\n") $
-      withContext (selected (\input -> reviewContext input <> reviewScope sourcePlan <> "\nFlow check evidence:\n" <> evidence)) $
-      withModel "luna" $ withEffort Medium $ withLifetime ActorOwned $
-      narrowed @ResearchLeafEffects knownEffects
-        (inspectionPolicy (atRef (GitRef (renderGitOid (candidateCommit (reviewInput request))))))
-        ((assignment [label|review|] request) { report = Silent })
+  , flowReviewer = \sourcePlan request evidence -> do
+      let instructions = projectPrompt "review" <>
+            "\nReview the exact candidate and return Accepted or concrete Repair findings. Do not execute additional checks or modify source; the flow owns executed checks. Distinguish retained execution evidence from inspection. Keep questions pending through progress.\n"
+          context = reviewContext request <> reviewScope sourcePlan
+            <> "\nFlow check evidence:\n" <> evidence
+          source = atRef (GitRef (renderGitOid (candidateCommit (reviewInput request))))
+          spawnOptions = (defaultSpawnOptions reviewerSpec)
+            { spawnModel = Just (Alias "luna")
+            , spawnEffort = Just Medium
+            , spawnInstructions = Just instructions
+            , spawnLabel = Just "review"
+            }
+      spawned <- spawnSubagent (FreshCtx context) (ForkWorktree source) spawnOptions
+      case spawned of
+        Left issue -> pure (Left (WorkSpawnRefused issue))
+        Right reviewer -> do
+          let requestOptions = defaultRequestOptions
+                { requestLabel = Just "review"
+                , requestReporting = Silent
+                }
+          admitted <- requestWithProgress @WorkProgress @(Outcome ReviewDecision)
+            reviewer request requestOptions
+          pure (either (Left . WorkRequestRefused reviewer) Right admitted)
   , flowCorrectionInstructions = projectPrompt "review" <>
       "\nYour prior Repair response had no findings. Return Accepted only after verifying this exact source, or Repair with concrete findings. This correction is final."
   , flowRepairInstructions = projectPrompt "repair"
@@ -96,7 +123,7 @@ semanticReviewChoice context = case routeDecision context of
               (EscalateReview ("semantic review unavailable: " <> reason))
               (JevRouteUnavailable reason)
           Right observed ->
-            let selected = observed.route
+            let selected = (J.answers observed).route
                 model = J.resolvedModel observed
                 explanation = J.explain J.strict selected
             in case J.takenUnder J.strict selected of
@@ -104,7 +131,7 @@ semanticReviewChoice context = case routeDecision context of
                 (EscalateReview ("semantic review uncertain: " <> doubt.why))
                 (JevRouteDoubted model selected.key selected.mass
                   selected.confidence explanation)
-              Right (Settled choice) -> ReviewRouteResult choice
+              Right settled -> let choice = J.settledValue settled in ReviewRouteResult choice
                 (JevRouteSelected model selected.key selected.mass
                   selected.confidence explanation)
 

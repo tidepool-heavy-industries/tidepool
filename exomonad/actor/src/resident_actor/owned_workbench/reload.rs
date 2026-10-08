@@ -70,8 +70,17 @@ where
                 );
             };
             let active = expected.tools().expect("selected installed spec");
-            receipt.push(format!("spec: {}", active.resolved.describe()));
-            if let Some(module) = active.resolved.checked_module() {
+            receipt.push(format!("spec: {}", active.origin.describe()));
+            if active.origin.is_explicit() {
+                receipt.push(
+                    "filesystem spec reload refused: the actor uses an explicitly supplied live spec; use replaceSpec to replace its implementation.".into(),
+                );
+                return Self::finish_owned_task(
+                    owned,
+                    reload_result(reload_receipt("source unavailable", started, receipt)),
+                );
+            }
+            if let Some(module) = active.origin.checked_module() {
                 if !checked.contains(&module) {
                     checked.push(module);
                 }
@@ -279,7 +288,7 @@ where
             .application_workbench()
             .with_intrinsic_effect_support(self.environment.intrinsic_effect_support())
             .with_compilation_authority(authority);
-        let granted_effects = self.descriptor.effective_role().effect_keys().to_vec();
+        let granted_effects = self.descriptor.capabilities().effect_keys().to_vec();
         Self::owned_step_task(
             owned,
             move |owned| {

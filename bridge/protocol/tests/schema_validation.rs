@@ -1,5 +1,102 @@
 //! Schema validation and narrow rendering pins; generated consumers are build outputs.
 
+#[test]
+fn record_actor_workspace_binding_uses_its_declared_external_wire_type() {
+    use tidepool_protocol::schema::RustBinding;
+
+    let mut actor = tidepool_protocol::effects::actor::actor();
+    let start = actor
+        .verbs
+        .iter()
+        .find(|verb| verb.ctor == "ActorStartWith")
+        .unwrap();
+    let workspace = start
+        .args
+        .iter()
+        .find(|arg| arg.name == "workspace")
+        .unwrap();
+    assert_eq!(
+        workspace
+            .rust
+            .rust_type(&workspace.ty, "ActorStartWith::workspace", &actor),
+        "Option<tidepool_bridge_effects::WtWorkspaceHandle>"
+    );
+
+    actor
+        .verbs
+        .iter_mut()
+        .find(|verb| verb.ctor == "ActorStartWith")
+        .unwrap()
+        .args
+        .iter_mut()
+        .find(|arg| arg.name == "workspace")
+        .unwrap()
+        .rust = RustBinding::Derived;
+    let errors = actor.validate().unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error == "Actor::ActorStartWith::workspace: Maybe WorkspaceHandle needs an explicit RustBinding"
+    }));
+}
+
+#[test]
+fn authored_projection_hides_capability_constructors_and_record_selectors() {
+    use tidepool_protocol::gen::decl_rs;
+    use tidepool_protocol::schema::{SumVariant, TypeShape, VariantFields};
+    use tidepool_protocol::types::RecordField;
+    use tidepool_protocol::HsType;
+
+    let workspace = tidepool_protocol::effects::worktree::worktree();
+    let mut scopes = tidepool_protocol::effects::resource_scope::resource_scopes();
+    // Exercise a private record-shaped constructor too: its selector must not
+    // remain an independent authored accessor after hiding the data type.
+    scopes.type_defs[0].shape = TypeShape::Sum {
+        variants: vec![SumVariant {
+            ctor: "PrivateScopeToken",
+            fields: VariantFields::Named(vec![RecordField {
+                hs_name: "privateScopeIdentity",
+                rust_name: "identity",
+                ty: HsType::Int,
+                doc: &[],
+            }]),
+            doc: &[],
+        }],
+    };
+    let generated = decl_rs::module_index(&[workspace, scopes]).contents;
+    assert!(generated.contains("\"WorkspaceHandle(..)\""));
+    assert!(generated.contains("\"Scope(..)\""));
+    assert!(generated.contains("\"PrivateScopeToken\""));
+    assert!(generated.contains("\"privateScopeIdentity\""));
+    assert!(generated.contains("AUTHORED_ABSTRACT_TYPES: &[&str] = &[\"WorkspaceHandle\"]"));
+}
+
+#[test]
+fn lexical_scope_delimiter_keeps_body_and_cleanup_outcomes_separate() {
+    use tidepool_protocol::schema::{HandlingClass, RustBinding};
+
+    let scopes = tidepool_protocol::effects::resource_scope::resource_scopes();
+    assert_eq!(
+        scopes.constructor_signatures(),
+        [
+            "ScopeRunWith :: RequestSite '[] (Either ScopeFailure (), Either CleanupError ()) -> (Int -> Eff bodyEffs ()) -> ResourceScopes (Either ScopeFailure (), Either CleanupError ())",
+            "ScopeDoneWith :: Int -> ResourceScopes ()",
+        ]
+    );
+    assert_eq!(scopes.verbs[0].args[0].rust, RustBinding::External);
+    assert_eq!(scopes.verbs[0].args[1].rust, RustBinding::HaskellValue);
+    assert!(scopes
+        .verbs
+        .iter()
+        .all(|verb| verb.handling == HandlingClass::Actor));
+    assert!(!scopes.authored_surface.includes_type_def("Scope"));
+    assert!(!scopes.authored_surface.includes_verb("ScopeRunWith"));
+    assert!(!scopes.authored_surface.includes_verb("ScopeDoneWith"));
+
+    let generated = tidepool_protocol::actor_generated_files();
+    assert!(generated
+        .iter()
+        .any(|file| file.path == "exomonad/actor/src/generated/resource_scopes.rs"));
+}
+
 /// The suspension-decode roster must be internally consistent too — same
 /// discipline as [`every_migrated_effect_validates`], over the disjoint
 /// roster.

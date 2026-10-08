@@ -3,6 +3,8 @@ name:          tidepool-extract
 version:       0.1.0.0
 build-type:    Simple
 extra-source-files:
+  test-display-tree/EmitFormWireFixtures.hs
+  test-model-turn/form-choice-response.json
   test/Suite.hs
   lib/Tidepool/Aeson/Scientific.hs
   lib/Tidepool/Aeson/Value.hs
@@ -45,6 +47,7 @@ extra-source-files:
   test-planned-declaration/fixtures/*.hs
   test-check/fixtures/Ext/Tiny.hs
   test-check/tool-profiles/*.hs
+  test-check/quantities/*.hs
 
 -- Internal (unexposed) sub-library: the genuinely shared extractor
 -- implementation, compiled ONCE per configuration instead of once per
@@ -156,22 +159,6 @@ library tidepool-extract-internal
   default-extensions: OverloadedStrings
   ghc-options:      -Wall -Werror=missing-fields
 
--- Exposes only the model-facing name-error vocabulary ('renderNameError' and
--- friends) to host-side tests, without adding the rest of 'lib/Tidepool' (the
--- eval stdlib, a runtime GHC include path — see the note above
--- 'tidepool-extract-bin') as a host hs-source-dir, which would collide on
--- module names ('Tidepool.Introspection' exists both here and under 'src/')
--- with 'tidepool-extract-internal' proper.
-library assignment-internal
-  hs-source-dirs:   lib
-  exposed-modules:  Tidepool.Agent.Assignment.Internal
-  build-depends:
-    base >= 4.20 && < 5,
-    text
-  default-language: GHC2024
-  default-extensions: OverloadedStrings
-  ghc-options:      -Wall -Werror=missing-fields
-
 flag test-tools
   description: Build child-process helpers and the corpus compiler action for local test compatibility
   default: False
@@ -213,7 +200,6 @@ test-suite cell-splitter-test
     containers,
     filepath,
     text,
-    assignment-internal,
     tidepool-extract-internal,
     unix,
     syb
@@ -260,11 +246,28 @@ test-suite display-tree-test
   type:             exitcode-stdio-1.0
   main-is:          DisplayTreeTest.hs
   hs-source-dirs:   lib test-display-tree
-  other-modules:    Tidepool.Inspection.Tree
-                   Tidepool.Inspection.Display
+  other-modules:
+    FormViewTest
+    Tidepool.Inspection.Tree
+    Tidepool.Inspection.Display
+    Tidepool.View
+    Tidepool.View.Types
+    Tidepool.View.Wire
+    Tidepool.Form.Algebra
+    Tidepool.Form.Check
+    Tidepool.Form.GForm
+    Tidepool.Form.Wire
+    Tidepool.Aeson.Scientific
+    Tidepool.Aeson.Value
+    Tidepool.Aeson.FromJSON
+    Tidepool.Data.Text
+    Tidepool.Double
   build-depends:
     base >= 4.20 && < 5,
-    text
+    text,
+    containers,
+    tasty-quickcheck,
+    QuickCheck >= 2.14 && < 2.16
   default-language: GHC2024
   ghc-options:      -Wall
 
@@ -750,8 +753,26 @@ test-suite model-turn-test
   -- Buck compiles against the generated artifact providers. Local Cabal
   -- compatibility requires these explicit directories from the same outputs;
   -- missing generated modules are errors, never a skipped suite.
-  hs-source-dirs:   test-model-turn generated/effects generated/protocol lib
+  hs-source-dirs:   test-model-turn examples/model-turns ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib
   other-modules:
+    JevPreparedTest
+    Examples.JevPreparedWorkflow
+    Examples.JevFormWorkflow
+    FormJevDialogueTest
+    Jev.Core
+    Jev.Core.Contract
+    Jev.Core.Json
+    Jev.Core.Schema
+    Jev.Host
+    Jev.Operators
+    Jev.Tidepool
+    FormLifecycleTest
+    Tidepool.Form
+    Tidepool.Form.Algebra
+    Tidepool.Form.Check
+    Tidepool.Form.GForm
+    Tidepool.Form.Wire
+    Tidepool.View
     Tidepool.Actor.Internal
     Tidepool.Actor.Source
     Tidepool.Aeson
@@ -761,11 +782,12 @@ test-suite model-turn-test
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
     Tidepool.Agent.Contract
     Tidepool.Agent.Launch
+    Tidepool.Scope
+    Tidepool.Scope.Internal
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.ToolEffects
@@ -782,8 +804,10 @@ test-suite model-turn-test
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
     Tidepool.Internal.ModelControl
@@ -892,7 +916,7 @@ test-suite automation-helper-contract
     Tidepool.Actors.Internal.ExomonadDriver
     Tidepool.Actors.Observe
     Tidepool.Actors.Role
-    Tidepool.Actors.Unfold
+    Tidepool.Actors.Spawn
     Tidepool.Actors.Worktree
     Tidepool.Aeson
     Tidepool.Aeson.FromJSON
@@ -901,13 +925,16 @@ test-suite automation-helper-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
+    Tidepool.Agent.Contract
     Tidepool.Agent.Launch
+    Tidepool.Scope
+    Tidepool.Scope.Internal
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.Session
+    Tidepool.Agent.ToolEffects
     Tidepool.Agent.Watch
     Tidepool.Agent.Watch.Internal
     Tidepool.Command
@@ -922,8 +949,10 @@ test-suite automation-helper-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
     Tidepool.Internal.ActorProfiles
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
@@ -933,7 +962,6 @@ test-suite automation-helper-contract
     Tidepool.Prelude
     Tidepool.QQ.Bash
     Tidepool.QQ.Fmt.Runtime
-    Tidepool.QQ.Label
     Tidepool.QQ.Validate
     Tidepool.Records
     Tidepool.Records.Bridged
@@ -964,10 +992,11 @@ test-suite browser-scenario-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
     Tidepool.Agent.Launch
+    Tidepool.Scope
+    Tidepool.Scope.Internal
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.Watch
@@ -984,8 +1013,10 @@ test-suite browser-scenario-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite
@@ -1019,11 +1050,12 @@ test-suite command-tools-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
     Tidepool.Agent.Contract
     Tidepool.Agent.Launch
+    Tidepool.Scope
+    Tidepool.Scope.Internal
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.ToolEffects
@@ -1042,8 +1074,10 @@ test-suite command-tools-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite
@@ -1066,6 +1100,7 @@ test-suite tool-profiles-contract
   main-is:          ToolProfiles.hs
   hs-source-dirs:   test-check generated/effects generated/protocol lib actors
   other-modules:
+    QuantitiesContract
     Tidepool.Actor.Internal
     Tidepool.Actor.Source
     Tidepool.Aeson
@@ -1075,11 +1110,12 @@ test-suite tool-profiles-contract
     Tidepool.Aeson.Schema
     Tidepool.Aeson.Scientific
     Tidepool.Aeson.Value
-    Tidepool.Agent.Assignment
-    Tidepool.Agent.Assignment.Internal
     Tidepool.Agent.Contract
     Tidepool.Agent.Launch
+    Tidepool.Scope
+    Tidepool.Scope.Internal
     Tidepool.Agent.Ref
+    Tidepool.Agent.Ref.Internal
     Tidepool.Agent.Reply
     Tidepool.Agent.Reply.Internal
     Tidepool.Agent.ToolEffects
@@ -1096,8 +1132,11 @@ test-suite tool-profiles-contract
     Tidepool.Effects.Row
     Tidepool.FilePath
     Tidepool.Inspection
+    Tidepool.View.Wire
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
+    Tidepool.View.Types
+    Tidepool.Internal.ActorProfiles
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite

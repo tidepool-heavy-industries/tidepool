@@ -8,7 +8,10 @@
 {-# LANGUAGE TypeOperators #-}
 module Main where
 
+import FormJevDialogueTest (formJevDialogueTests)
+import FormLifecycleTest (formLifecycleTests)
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
+import JevPreparedTest (jevPreparedTests)
 
 import Prelude
 import Control.Monad (unless)
@@ -53,7 +56,7 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-model-turn"
-  [testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
+  [jevPreparedTests, formJevDialogueTests, formLifecycleTests, testCase "typed model callbacks hooks receipts and nullable schemas" scenario]
 
 scenario :: IO ()
 scenario = do

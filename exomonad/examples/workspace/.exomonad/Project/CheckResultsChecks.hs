@@ -23,7 +23,7 @@ import qualified Tidepool.Command as Cmd
 import Tidepool.Check
 import Tidepool.Effects.Core (Actor, Commands)
 import Tidepool.Effects.Row (knownEffects)
-import Tidepool.Worktree (createWorktree, fromCurrentRepository, worktreeId)
+import Tidepool.Worktree (createWorktree, fromCurrentRepository, workspaceFor, worktreeId)
 import Exomonad.Contrib.CheckResults
 
 -- Preparation and test execution share the original command. These checks
@@ -271,13 +271,13 @@ evidenceProbe spec =
 managedEvidence :: Member RecipeCheck effects => Eff effects ()
 managedEvidence = do
   owner <- root
-  void $ turn owner "import Project.CheckResultsChecks\nimport Tidepool.Worktree (renderWorktreeId)"
-  void $ turn owner "Right focusedTree <- createWorktree (fromCurrentRepository \"focused-evidence-check\")\nworktreeId focusedTree"
+  void $ turn owner "import Project.CheckResultsChecks\nimport Tidepool.Worktree (renderWorktreeId, workspaceFor)"
+  void $ turn owner "Right focusedTree <- createWorktree (fromCurrentRepository \"focused-evidence-check\")\nRight focusedWorkspace <- workspaceFor focusedTree\nworktreeId focusedTree"
   assertCell owner "managed focused evidence checkout has typed allocated identity"
     "not (T.null (renderWorktreeId (worktreeId focusedTree)))"
   void $ turn owner $ Text.unlines
     [ "let managedSpec = FocusedSpec \"managed fixture\" \"fixture-source\" \"fixture-package\" \"lib\" \"fixture::one\" 1"
-    , "boundProbe <- R.start (R.withWorktree (worktreeId focusedTree) (evidenceProbe managedSpec))"
+    , "boundProbe <- R.start (R.withWorkspace focusedWorkspace (evidenceProbe managedSpec))"
     , "managedRun <- R.call (probeStart (R.client boundProbe)) ()"
     , "Right managedWatcher <- watchChecks me NotifyAllTerminal [(\"managed\", managedRun)]"
     ]

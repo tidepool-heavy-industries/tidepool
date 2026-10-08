@@ -148,7 +148,7 @@ watchAssumption owner initial source project decide =
 -- same watcher. The exact incorporation response remains the source of truth.
 watchIncorporatedBaseline
   :: Member Actor effects
-  => AgentRef -> GitOid -> Text -> Response Incorporation
+  => AgentRef -> GitOid -> Text -> Request Incorporation
   -> Eff effects (ActorHandle (AssumptionWatch BaselineStatus (Either ResponseFailure (ResponseResult Incorporation))))
 watchIncorporatedBaseline owner baseline pendingChild incorporation =
   watchAssumption owner (BaselineAt baseline)

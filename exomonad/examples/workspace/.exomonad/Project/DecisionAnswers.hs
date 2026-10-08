@@ -10,15 +10,16 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 
--- An owner installs a bounded, immutable set of decisions for one local batch.
--- The actor can relay those decisions; it cannot amend an assignment or source.
+-- An owner installs a bounded, immutable set of decisions for caller-supplied
+-- request sources. The actor can relay those decisions; it cannot amend an
+-- assignment or source.
 module Project.DecisionAnswers
   ( DecisionAnswers (answerQuestion, answerRead, disableAnswers)
   , AnswerTarget (..), AnswerState (..), AnswerEntry (..), AnswerChoice (..)
   , AnswerFailure (..), DecisionChoice, startDecisionAnswers, startDecisionAnswersWith
   , semanticDecisionAnswer, withDecisionAnswers
   , prepareDecisionAnswer, interpretDecisionAnswer, DecisionAnswerPacket
-  , unfoldAnsweredWork
+  , followAnsweredWork
   ) where
 
 import Control.Monad.Freer (Eff, Member, raise)
@@ -133,12 +134,12 @@ semanticDecisionAnswer task question = case prepareDecisionAnswer task question 
       Left failure -> AskOwner (Text.pack (show failure))
       Right response -> interpretDecisionAnswer response
 
-interpretDecisionAnswer :: J.Response DecisionAnswerPacket -> AnswerChoice
-interpretDecisionAnswer response = case J.takenUnder J.strict response.answer of
+interpretDecisionAnswer :: J.Response (DecisionAnswerPacket J.Answers) -> AnswerChoice
+interpretDecisionAnswer response = case J.takenUnder J.strict (J.answers response).answer of
   Left doubt -> AskOwner doubt.why
-  Right (J.Settled chosen) -> chosen
+  Right settled -> let chosen = J.settledValue settled in chosen
 
-data AnswerFailure = InvalidAnswerCount | InvalidAnswerNames | AnswerAdmissionFailed BatchFailure
+data AnswerFailure = InvalidAnswerCount | InvalidAnswerNames | AnswerRoutingFailed RoutingError
   deriving (Show, Eq)
 
 startDecisionAnswers :: Member Actor effects
@@ -216,27 +217,29 @@ withDecisionAnswers actor (WorkSink sink) = WorkSink $ \policy event -> case eve
     sink policy (WorkChanged name delta { openedQuestions = [q | (q, False) <- results] })
   _ -> sink policy event
 
--- Task/branch pairs describe one ready frontier, not a future workflow. The
--- response recipients are bound from the actual admission, never guessed IDs.
--- Keep the typed admission site at the caller's concrete result type.
-{-# INLINE unfoldAnsweredWork #-}
-unfoldAnsweredWork
-  :: (Member Forks effects, Member Replies effects, Member AgentInspection effects,
-      Member Actor effects, Subset CodingEffects effects)
-  => AgentRef -> ForkGroupPath
-  -> [(Text, Task, Task -> Branch CodingEffects Task value)] -> WorkSink value
-  -> Eff effects (Either AnswerFailure (WorkBatch value, ActorHandle DecisionAnswers))
-unfoldAnsweredWork owner group branches sink
-  | null branches || length branches > 16 = pure (Left InvalidAnswerCount)
+-- Configure routing and decision relays around requests the caller has already
+-- launched. This function owns no spawn or request admission.
+followAnsweredWork
+  :: Member Actor effects
+  => AgentRef
+  -> [(Text, Task, Request value, Progress WorkProgress)]
+  -> WorkSink value
+  -> Eff effects (Either AnswerFailure
+       (ActorHandle (WorkActor value), ActorHandle DecisionAnswers))
+followAnsweredWork owner sources sink
+  | null sources || length sources > 16 = pure (Left InvalidAnswerCount)
   | length names /= length (nub names) || any (Text.null . Text.strip) names =
       pure (Left InvalidAnswerNames)
-  | otherwise = do
-      admitted <- unfoldWorkWith group
-        [workChild name (branch task) | (name, task, branch) <- branches]
-        (\members -> do
-          let targets = [AnswerTarget name (responseActor response) task
-                | ((name, task, _), (_, response, _)) <- zip branches members]
-          actor <- startValidDecisionAnswersWith semanticDecisionAnswer owner targets
-          pure (withDecisionAnswers actor sink, actor))
-      pure (either (Left . AnswerAdmissionFailed) Right admitted)
-  where names = [name | (name, _, _) <- branches]
+  | otherwise = case workDefinition routedSources sink of
+      Left issue -> pure (Left (AnswerRoutingFailed issue))
+      Right _ -> do
+        answers <- startValidDecisionAnswersWith semanticDecisionAnswer owner targets
+        router <- followWork routedSources (withDecisionAnswers answers sink)
+        pure $ case router of
+          Left issue -> Left (AnswerRoutingFailed issue)
+          Right handle -> Right (handle, answers)
+  where
+    names = [name | (name, _, _, _) <- sources]
+    routedSources = [(name, request, progress) | (name, _, request, progress) <- sources]
+    targets = [AnswerTarget name (responseActor request) task
+      | (name, task, request, _) <- sources]

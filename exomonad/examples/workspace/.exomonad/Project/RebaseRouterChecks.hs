@@ -33,5 +33,5 @@ agentRef = do
   owner <- root
   source <- readFile owner (checkSource "rebase-router-agentref")
   void $ turn owner ("admissionResult <- do\n" <> Text.unlines (map ("  " <>) (Text.lines source)))
-  assertCell owner "an admission receipt resolves to a usable child AgentRef"
+  assertCell owner "the original spawn-issued child AgentRef accepts a notification"
     "case admissionResult of { Right _ -> True; Left _ -> False }"

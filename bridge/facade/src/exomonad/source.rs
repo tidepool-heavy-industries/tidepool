@@ -273,46 +273,6 @@ impl SourceLayer {
         self.publish(pending)
     }
 
-    /// Seed a private layer from another layer's current immutable revision.
-    /// The source bytes may be shared by identity, but the new layer gets its
-    /// own active link so later publication by either owner cannot upgrade the
-    /// other. `roots` are the draft roots this branch will reload from.
-    pub(crate) fn inherit_active_from(
-        &self,
-        parent: &SourceLayer,
-        roots: &[PathBuf],
-    ) -> Result<SourceRevision> {
-        if let Some(active) = self.read_active()? {
-            return Ok(active);
-        }
-        let active = parent
-            .read_active()?
-            .ok_or("parent source layer has no active revision to inherit")?;
-        let parent_revision = parent.revisions().join(&active.identity);
-        let child_revision = self.revisions().join(&active.identity);
-        std::fs::create_dir_all(self.revisions())?;
-        if !child_revision.exists() {
-            let staged = self
-                .revisions()
-                .join(format!(".inherit-{}", uuid::Uuid::new_v4()));
-            copy_revision_tree(&parent_revision, &staged)?;
-            if let Err(error) = std::fs::rename(&staged, &child_revision) {
-                let _ = std::fs::remove_dir_all(&staged);
-                return Err(error.into());
-            }
-            tidepool_atomic_write::sync_parent_directory(&child_revision)?;
-        }
-        let pending = PendingRevision {
-            directory: child_revision,
-            source_roots: roots.to_vec(),
-            revision: SourceRevision {
-                generation: 0,
-                ..active
-            },
-        };
-        self.publish(pending)
-    }
-
     fn read_record(&self) -> Result<Option<ActiveRecord>> {
         let target = match std::fs::read_link(self.active_link()) {
             Ok(target) => target,
@@ -639,6 +599,7 @@ enum SourcePublishFailure {
     },
 }
 
+#[cfg(test)]
 fn copy_revision_tree(source: &Path, destination: &Path) -> Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(source)? {
@@ -995,14 +956,6 @@ impl ExomonadSourceReload {
             .unwrap_or(ActorSourceScope::RunReadOnly)
     }
 
-    fn helper_branch(worktrees: &[String]) -> String {
-        match worktrees {
-            [id] => id.clone(),
-            [] => "run".to_owned(),
-            _ => "run".to_owned(),
-        }
-    }
-
     fn helper_layer(&self, branch: &str) -> SourceLayer {
         let mut layers = self.helpers.lock();
         layers
@@ -1141,20 +1094,6 @@ impl ExomonadSourceReload {
 
     pub(crate) fn helper_branch_for(&self, actor: PrincipalId) -> Option<String> {
         self.helper_scopes.read().get(&actor).cloned()
-    }
-
-    fn fork_helper_branch(&self, creator: PrincipalId, branch: &str) -> Result<()> {
-        let parent_branch = self
-            .helper_branch_for(creator)
-            .ok_or("creator has no session helper branch")?;
-        let parent = self.helper_layer(&parent_branch);
-        let _parent_lock = parent.lock_helpers()?;
-        self.ensure_helper_active(&parent_branch)?;
-        let child_draft = self.helper_draft(branch);
-        crate::actor_host::copy_helper_draft(&self.helper_draft(&parent_branch), &child_draft)?;
-        self.helper_layer(branch)
-            .inherit_active_from(&parent, std::slice::from_ref(&child_draft))?;
-        Ok(())
     }
 
     fn ensure_helper_active(&self, branch: &str) -> Result<SourceRevision> {
@@ -1385,9 +1324,9 @@ impl ExomonadSourceReload {
                 .collect();
             if !removed.is_empty() {
                 return Ok(Some(format!(
-                        "removed module(s) {} would resolve from the frozen run capture; restart with a new source graph",
-                        removed.join(", ")
-                    )));
+                    "removed module(s) {} would resolve from the frozen run capture; restart with a new source graph",
+                    removed.join(", ")
+                )));
             }
         }
         let configured_modules: std::collections::BTreeSet<&str> =
@@ -1403,9 +1342,9 @@ impl ExomonadSourceReload {
             .collect();
         if !new_modules.is_empty() {
             return Ok(Some(format!(
-                    "new module(s) {} cannot be imported in this running session; add them to [haskell].modules and restart",
-                    new_modules.join(", ")
-                )));
+                "new module(s) {} cannot be imported in this running session; add them to [haskell].modules and restart",
+                new_modules.join(", ")
+            )));
         }
         if let Err(error) = crate::actor_host::typecheck_candidate_revision(
             &self.frozen,
@@ -2127,7 +2066,6 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         checkpoint: &exomonad_actor::CheckpointSourceLayer,
         creator: PrincipalId,
         helper_branch: &str,
-        _worktrees: &[String],
     ) -> std::result::Result<Vec<PathBuf>, String> {
         let _one_at_a_time = self.gate.lock();
         self.validate_source_authority(checkpoint)?;
@@ -2166,45 +2104,12 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         Ok(())
     }
 
-    fn prepare_helpers(
-        &self,
-        creator: PrincipalId,
-        worktrees: &[String],
-        prepared_fork: bool,
-    ) -> std::result::Result<String, String> {
-        if prepared_fork {
-            let [branch] = worktrees else {
-                return Err("prepared fork must have exactly one helper branch".into());
-            };
-            let draft = self.helper_draft(branch);
-            let active = self
-                .helper_layer(branch)
-                .read_active()
-                .map_err(|error| format!("prepared helper revision is unavailable: {error}"))?;
-            match (draft.exists(), active.is_some()) {
-                (true, true) => {}
-                (false, false) => self.fork_helper_branch(creator, branch).map_err(|error| {
-                    format!("could not snapshot creator's session helpers: {error}")
-                })?,
-                _ => return Err("prepared helper draft and active revision disagree".into()),
-            }
-            return Ok(branch.clone());
-        }
-        let branch = format!("actor-{}", uuid::Uuid::new_v4());
-        self.fork_helper_branch(creator, &branch)
-            .map_err(|error| format!("could not snapshot creator's session helpers: {error}"))?;
-        Ok(branch)
+    fn retain_helpers(&self, creator: PrincipalId) -> std::result::Result<String, String> {
+        self.helper_branch_for(creator)
+            .ok_or_else(|| "creator has no selected session helper source".into())
     }
 
-    fn layer_include(&self, worktrees: &[String]) -> std::result::Result<Vec<PathBuf>, String> {
-        self.layer_include_for(&Self::helper_branch(worktrees), worktrees)
-    }
-
-    fn layer_include_for(
-        &self,
-        branch: &str,
-        _worktrees: &[String],
-    ) -> std::result::Result<Vec<PathBuf>, String> {
+    fn layer_include_for(&self, branch: &str) -> std::result::Result<Vec<PathBuf>, String> {
         self.ensure_helper_active(branch)
             .map_err(|error| format!("session helper layer could not be initialized: {error}"))?;
         self.helper_layer(branch)
@@ -2212,11 +2117,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
             .map_err(|error| format!("session helper layer has no include roots: {error}"))
     }
 
-    fn bind(&self, actor: PrincipalId, worktrees: &[String]) {
-        self.bind_for(actor, &Self::helper_branch(worktrees), worktrees);
-    }
-
-    fn bind_for(&self, actor: PrincipalId, helper_branch: &str, _worktrees: &[String]) {
+    fn bind_for(&self, actor: PrincipalId, helper_branch: &str) {
         self.helper_scopes
             .write()
             .insert(actor, helper_branch.to_owned());
@@ -2622,10 +2523,12 @@ mod tests {
         let workspace_identity = format!("workspace:{}", reload.frozen.identity());
         assert_eq!(captured.identities()[2], workspace_identity);
         assert!(!captured.include_paths().is_empty());
-        assert!(captured
-            .include_paths()
-            .iter()
-            .all(|path| !path.to_string_lossy().contains("/active/")));
+        assert!(
+            captured
+                .include_paths()
+                .iter()
+                .all(|path| !path.to_string_lossy().contains("/active/"))
+        );
         let workspace_resource =
             std::fs::canonicalize(reload.frozen.workspace_resources()).unwrap();
         assert_eq!(captured.include_paths().last(), Some(&workspace_resource));
@@ -2650,7 +2553,7 @@ mod tests {
         ));
         assert_eq!(
             reload
-                .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run", &[])
+                .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run")
                 .unwrap(),
             captured.include_paths()
         );
@@ -2667,7 +2570,7 @@ mod tests {
             .unwrap();
         reload.layer.publish(pending).unwrap();
         let refusal = reload
-            .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run", &[])
+            .admit_checkpoint_layer(&captured, PrincipalId::SYSTEM, "run")
             .unwrap_err();
         assert!(refusal.contains("source revisions differ"));
         assert!(captured.include_paths()[0].exists());
@@ -2773,7 +2676,7 @@ mod tests {
         assert!(reload.validate_source_authority(&foreign).is_err());
         assert!(reload.admit_retained_layer(&foreign).is_err());
         assert!(reload
-            .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run", &[])
+            .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run")
             .is_err());
         assert!(reload
             .bind_checkpoint_for(PrincipalId::new(1, 1), "run", &foreign)
@@ -2804,10 +2707,12 @@ mod tests {
         drop(reload);
         drop(run);
         drop(captured);
-        assert!(surviving_child
-            .include_paths()
-            .iter()
-            .all(|path| path.exists()));
+        assert!(
+            surviving_child
+                .include_paths()
+                .iter()
+                .all(|path| path.exists())
+        );
         assert!(run_path.exists());
         drop(surviving_child);
         assert!(
@@ -2829,10 +2734,12 @@ mod tests {
         );
         let captured = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
         drop(reload);
-        assert!(crate::actor_host::HostIncarnationLease::claim(
-            &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap()
-        )
-        .is_err());
+        assert!(
+            crate::actor_host::HostIncarnationLease::claim(
+                &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap()
+            )
+            .is_err()
+        );
         assert!(captured.include_paths().iter().all(|path| path.exists()));
         drop(captured);
         crate::actor_host::HostIncarnationLease::claim(
@@ -2885,10 +2792,12 @@ mod tests {
             .path()
             .join("workspace/revisions")
             .join(&original.identity);
-        assert!(std::fs::symlink_metadata(&run_revision)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&run_revision)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(
             std::fs::canonicalize(&run_revision).unwrap(),
             prepared_revision
@@ -2920,10 +2829,12 @@ mod tests {
             .path()
             .join("workspace/revisions")
             .join(&updated.identity);
-        assert!(!std::fs::symlink_metadata(&live_revision)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            !std::fs::symlink_metadata(&live_revision)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(
             std::fs::read_to_string(prepared_revision.join("0/Project/Work.hs")).unwrap(),
             "module Project.Work where\nwork = 1\n"
@@ -2935,26 +2846,19 @@ mod tests {
 
         // These selections exercise source/recipe observation only; no
         // compiled entry or compiler authority is manufactured by this case.
-        let config = frozen.config().unwrap();
-        let profiles = config
-            .preparation
-            .selected_profiles(config.research)
-            .unwrap();
         let original_selection = uuid::Uuid::new_v4();
         let mut deployed = frozen.clone();
         deployed.preparation = Some(super::super::workspace::WorkspacePreparation::Completed {
             original: original_selection,
             revision: original.identity.clone(),
-            coverage: profiles
-                .into_iter()
-                .map(|profile| super::super::workspace::PreparedToolsetCoverage {
-                    profile: profile.profile,
-                    requested_effects: profile.requested_effects,
-                    effective_effects: Vec::new(),
-                    recipe: "a".repeat(64),
-                    original: original_selection,
-                })
-                .collect(),
+            coverage: vec![super::super::workspace::PreparedToolsetCoverage {
+                requested_effects: exomonad_actor::ActorCapabilities::default()
+                    .effect_keys()
+                    .to_vec(),
+                effective_effects: Vec::new(),
+                recipe: "a".repeat(64),
+                original: original_selection,
+            }],
         });
         deployed.prepared_deployment = Some(Arc::new(
             tidepool_atomic_write::DirectoryAnchor::open_existing(deployment.path()).unwrap(),
@@ -2988,12 +2892,16 @@ mod tests {
         };
         let preflight = reload.prepared_toolset_layer().unwrap();
         let current = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
-        assert!(preflight
-            .identities()
-            .contains(&format!("run:{}", original.identity)));
-        assert!(current
-            .identities()
-            .contains(&format!("run:{}", updated.identity)));
+        assert!(
+            preflight
+                .identities()
+                .contains(&format!("run:{}", original.identity))
+        );
+        assert!(
+            current
+                .identities()
+                .contains(&format!("run:{}", updated.identity))
+        );
         assert_eq!(
             preflight.include_paths()[..retained.paths.len()],
             retained.paths
@@ -3010,24 +2918,30 @@ mod tests {
             .frozen
             .validate_prepared_toolset_recipes(&workbench, &preflight, &[])
             .unwrap();
-        assert!(reload
-            .frozen
-            .validate_prepared_toolset_recipes(&workbench, &current, &[])
-            .is_err());
+        assert!(
+            reload
+                .frozen
+                .validate_prepared_toolset_recipes(&workbench, &current, &[])
+                .is_err()
+        );
         let current_recipe = workbench
             .source_toolset_recipe(&current, &requested, &[])
             .unwrap();
         assert_ne!(current_recipe.recipe, original_recipe.recipe);
-        assert!(reload
-            .frozen
-            .completed_entry_selections()
-            .unwrap()
-            .contains_key(&original_recipe.recipe));
-        assert!(!reload
-            .frozen
-            .completed_entry_selections()
-            .unwrap()
-            .contains_key(&current_recipe.recipe));
+        assert!(
+            reload
+                .frozen
+                .completed_entry_selections()
+                .unwrap()
+                .contains_key(&original_recipe.recipe)
+        );
+        assert!(
+            !reload
+                .frozen
+                .completed_entry_selections()
+                .unwrap()
+                .contains_key(&current_recipe.recipe)
+        );
         let before = tidepool_extract_cmd::extract_spawn_count();
         assert!(matches!(
             workbench
@@ -3106,14 +3020,18 @@ mod tests {
         );
         let projected = reload.toolset_layer_from(&checkpoint).unwrap();
         assert_eq!(projected.include_paths(), selected.include_paths());
-        assert!(checkpoint
-            .include_paths()
-            .iter()
-            .any(|path| path.starts_with(run.path().join("helpers"))));
-        assert!(projected
-            .include_paths()
-            .iter()
-            .all(|path| !path.starts_with(run.path().join("helpers"))));
+        assert!(
+            checkpoint
+                .include_paths()
+                .iter()
+                .any(|path| path.starts_with(run.path().join("helpers")))
+        );
+        assert!(
+            projected
+                .include_paths()
+                .iter()
+                .all(|path| !path.starts_with(run.path().join("helpers")))
+        );
         assert!(projected.include_paths().iter().all(|path| {
             path.starts_with(run.path().join("workspace/revisions")) || path == &workspace_resource
         }));
@@ -3135,14 +3053,16 @@ mod tests {
             .checkpoint_revision(reload.frozen.identity())
             .unwrap();
         assert!(owned.paths[0].starts_with(run.path().join("workspace/revisions")));
-        assert!(!std::fs::symlink_metadata(
-            run.path()
-                .join("workspace/revisions")
-                .join(&updated.identity)
-        )
-        .unwrap()
-        .file_type()
-        .is_symlink());
+        assert!(
+            !std::fs::symlink_metadata(
+                run.path()
+                    .join("workspace/revisions")
+                    .join(&updated.identity)
+            )
+            .unwrap()
+            .file_type()
+            .is_symlink()
+        );
         let after_reload = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
         let mut expected = owned.paths.clone();
         expected.push(workspace_resource.clone());
@@ -3167,10 +3087,12 @@ mod tests {
             after_reload.source_manifests().unwrap().last().unwrap(),
             &source_root_manifest(&workspace_resource).unwrap()
         ));
-        assert!(!after_reload
-            .include_paths()
-            .iter()
-            .any(|path| path != &workspace_resource && selected.include_paths().contains(path)));
+        assert!(
+            !after_reload
+                .include_paths()
+                .iter()
+                .any(|path| path != &workspace_resource && selected.include_paths().contains(path))
+        );
     }
 
     fn workspace_with(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
@@ -3208,13 +3130,15 @@ mod tests {
             std::fs::read_to_string(reload.helper_draft("run").join("SessionHelpers.hs")).unwrap(),
             source
         );
-        assert!(reload
-            .helper_layer("run")
-            .read_active()
-            .unwrap()
-            .unwrap()
-            .modules
-            .is_empty());
+        assert!(
+            reload
+                .helper_layer("run")
+                .read_active()
+                .unwrap()
+                .unwrap()
+                .modules
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3283,13 +3207,15 @@ mod tests {
             std::fs::read_to_string(reload.helper_draft("run").join("SessionHelpers.hs")).unwrap(),
             invalid
         );
-        assert!(reload
-            .helper_layer("run")
-            .read_active()
-            .unwrap()
-            .unwrap()
-            .modules
-            .is_empty());
+        assert!(
+            reload
+                .helper_layer("run")
+                .read_active()
+                .unwrap()
+                .unwrap()
+                .modules
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3328,45 +3254,19 @@ mod tests {
     }
 
     #[test]
-    fn prepared_helper_branch_refuses_a_partial_snapshot() {
-        use exomonad_actor::ActorSourceLayers;
-
-        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
-        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        let reload = ExomonadSourceReload::new(
-            frozen,
-            project.path().to_path_buf(),
-            run.path().to_path_buf(),
-            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
-        );
-        let draft = reload.helper_draft("prepared");
-        std::fs::create_dir_all(&draft).unwrap();
-        let result = ActorSourceLayers::prepare_helpers(
-            &reload,
-            PrincipalId::SYSTEM,
-            &["prepared".to_owned()],
-            true,
-        );
-        assert!(result.unwrap_err().contains("disagree"));
-        assert!(reload
-            .helper_layer("prepared")
-            .read_active()
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
     fn failed_source_capture_removes_its_temporary_tree() {
         let run = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("A.hs"), "module A where").unwrap();
         let layer = SourceLayer::new(run.path());
-        assert!(layer
-            .capture_from_roots(
-                "test",
-                &[root.path().to_path_buf(), root.path().join("missing"),]
-            )
-            .is_err());
+        assert!(
+            layer
+                .capture_from_roots(
+                    "test",
+                    &[root.path().to_path_buf(), root.path().join("missing"),]
+                )
+                .is_err()
+        );
         assert_eq!(std::fs::read_dir(layer.revisions()).unwrap().count(), 0);
         assert_eq!(
             std::fs::read_to_string(root.path().join("A.hs")).unwrap(),
@@ -3661,9 +3561,11 @@ mod tests {
             .iter()
             .find(|path| path.join("Project/Work.hs").is_file())
             .unwrap();
-        assert!(std::fs::read_to_string(selected.join("Project/Work.hs"))
-            .unwrap()
-            .contains("work = 2"));
+        assert!(
+            std::fs::read_to_string(selected.join("Project/Work.hs"))
+                .unwrap()
+                .contains("work = 2")
+        );
         let mut pair = previous;
         let first_outcome = first.commit(
             &PublicationDecision::new(),
@@ -3769,12 +3671,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("A.hs"), "module A where").unwrap();
         let layer = SourceLayer::new(run.path());
-        assert!(layer
-            .observe_from_roots(
-                "test",
-                &[root.path().to_path_buf(), root.path().join("missing")]
-            )
-            .is_err());
+        assert!(
+            layer
+                .observe_from_roots(
+                    "test",
+                    &[root.path().to_path_buf(), root.path().join("missing")]
+                )
+                .is_err()
+        );
         assert!(!layer.revisions().exists());
         std::os::unix::fs::symlink(root.path().join("A.hs"), root.path().join("Alias.hs")).unwrap();
         let error = layer
@@ -3839,9 +3743,11 @@ mod tests {
 
         // The include vector is unchanged; only what it resolves to moved.
         assert_eq!(include, layer.include_paths(1));
-        assert!(std::fs::read_to_string(include[0].join("Project/Work.hs"))
-            .unwrap()
-            .contains("work = 2"));
+        assert!(
+            std::fs::read_to_string(include[0].join("Project/Work.hs"))
+                .unwrap()
+                .contains("work = 2")
+        );
 
         // Compile-time provenance travels with the revision: the generated
         // module on the search path names the snapshot that built whatever
@@ -3861,57 +3767,6 @@ mod tests {
 
         // …and the run still loads, which is the tamper check passing.
         FrozenWorkspace::load(project.path(), run.path()).unwrap();
-    }
-
-    #[test]
-    fn inherited_active_revision_is_a_private_branch_snapshot() {
-        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
-        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        let roots = frozen.captured_source_roots().to_vec();
-        let parent = SourceLayer::new(run.path());
-        let first = parent.ensure_active(&frozen).unwrap();
-        std::fs::write(
-            project.path().join(".exomonad/Project/Work.hs"),
-            "module Project.Work where\nwork :: Int\nwork = 2\n",
-        )
-        .unwrap();
-        let parent_at_fork = parent
-            .publish(
-                parent
-                    .capture_from_workspace(&frozen, project.path())
-                    .unwrap(),
-            )
-            .unwrap();
-        assert_ne!(first.identity, parent_at_fork.identity);
-
-        let child = SourceLayer {
-            directory: run.path().join("workspace/checkouts/child"),
-            retained_revision: Default::default(),
-        };
-        let inherited = child.inherit_active_from(&parent, &roots).unwrap();
-        assert_eq!(inherited.identity, parent_at_fork.identity);
-        assert_eq!(child.read_active().unwrap(), Some(inherited.clone()));
-        assert_ne!(child.active_link(), parent.active_link());
-
-        std::fs::write(
-            project.path().join(".exomonad/Project/Work.hs"),
-            "module Project.Work where\nwork :: Int\nwork = 3\n",
-        )
-        .unwrap();
-        let later_parent = parent
-            .publish(
-                parent
-                    .capture_from_workspace(&frozen, project.path())
-                    .unwrap(),
-            )
-            .unwrap();
-        assert_ne!(later_parent.identity, inherited.identity);
-        assert_eq!(child.read_active().unwrap(), Some(inherited));
-        assert!(
-            std::fs::read_to_string(child.include_paths(1)[0].join("Project/Work.hs"))
-                .unwrap()
-                .contains("work = 2")
-        );
     }
 
     #[test]
@@ -3940,10 +3795,12 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        assert!(added
-            .modules
-            .iter()
-            .any(|(module, _)| module == "SessionHelpers.Extra"));
+        assert!(
+            added
+                .modules
+                .iter()
+                .any(|(module, _)| module == "SessionHelpers.Extra")
+        );
         assert_eq!(
             changed_modules(&first, &added),
             vec!["SessionHelpers.Extra".to_owned()]
@@ -3953,13 +3810,17 @@ mod tests {
         let deleted = layer
             .capture_from_roots("helpers-test", std::slice::from_ref(&draft))
             .unwrap();
-        assert!(changed_modules(&added, deleted.revision())
-            .contains(&"SessionHelpers.Extra".to_owned()));
+        assert!(
+            changed_modules(&added, deleted.revision())
+                .contains(&"SessionHelpers.Extra".to_owned())
+        );
         let published = layer.publish(deleted).unwrap();
-        assert!(!published
-            .modules
-            .iter()
-            .any(|(module, _)| module == "SessionHelpers.Extra"));
+        assert!(
+            !published
+                .modules
+                .iter()
+                .any(|(module, _)| module == "SessionHelpers.Extra")
+        );
     }
 
     #[test]
@@ -3985,8 +3846,8 @@ mod tests {
         )
         .unwrap();
         let helper_actor = PrincipalId::new(1, 1);
-        exomonad_actor::ActorSourceLayers::bind(&reload, helper_actor, &[]);
-        exomonad_actor::ActorSourceLayers::layer_include(&reload, &[]).unwrap();
+        exomonad_actor::ActorSourceLayers::bind_for(&reload, helper_actor, "run");
+        exomonad_actor::ActorSourceLayers::layer_include_for(&reload, "run").unwrap();
         assert!(reload
             .helper_layer("run")
             .read_active()
@@ -4099,12 +3960,12 @@ mod tests {
     }
 
     #[test]
-    fn actors_on_one_worktree_publish_helpers_independently() {
+    fn retained_helper_selection_creates_no_draft_or_source_generation() {
         use exomonad_actor::ActorSourceLayers;
 
         let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
         let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        let helper_root = run.path().join("helpers");
+        let helper_root = run.path().join("retained-helpers");
         let reload = ExomonadSourceReload::new(
             frozen,
             project.path().to_path_buf(),
@@ -4112,89 +3973,23 @@ mod tests {
             crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
         )
         .with_helper_root(helper_root.clone());
-        let worktrees = vec!["shared-worktree".to_owned()];
-        let parent = PrincipalId::new(1, 1);
-        let child = PrincipalId::new(2, 1);
-        let parent_branch = "parent";
-        ActorSourceLayers::bind_for(&reload, parent, parent_branch, &worktrees);
-        let parent_draft = reload.helper_draft(parent_branch);
-        std::fs::write(
-            parent_draft.join("SessionHelpers.hs"),
-            "module SessionHelpers where\nvalue :: Int\nvalue = 1\n",
-        )
-        .unwrap();
-        let parent_revision = match ActorSourceLayers::reload_helpers(&reload, parent, &[]) {
-            exomonad_actor::SourceLayerReload::Published { revision, .. } => revision,
-            result => panic!("parent helper publish failed: {result:?}"),
-        };
-
-        let child_branch =
-            ActorSourceLayers::prepare_helpers(&reload, parent, &worktrees, false).unwrap();
-        assert_ne!(child_branch, parent_branch);
-        ActorSourceLayers::bind_for(&reload, child, &child_branch, &worktrees);
-        assert_eq!(
-            reload
-                .helper_layer(&child_branch)
-                .read_active()
-                .unwrap()
-                .unwrap()
-                .identity,
-            parent_revision
-        );
-        let child_draft = reload.helper_draft(&child_branch);
+        let creator = PrincipalId::new(1, 1);
+        reload
+            .helper_scopes
+            .write()
+            .insert(creator, "selected-source".into());
+        assert!(!helper_root.exists());
+        for _ in 0..3 {
+            assert_eq!(
+                ActorSourceLayers::retain_helpers(&reload, creator).unwrap(),
+                "selected-source"
+            );
+        }
         assert!(
-            std::fs::read_to_string(child_draft.join("SessionHelpers.hs"))
-                .unwrap()
-                .contains("value = 1")
+            !helper_root.exists(),
+            "retaining a selection must not copy drafts or publish source"
         );
-        std::fs::write(
-            child_draft.join("SessionHelpers.hs"),
-            "module SessionHelpers where\nvalue :: Int\nvalue = 2\n",
-        )
-        .unwrap();
-        let child_revision = match ActorSourceLayers::reload_helpers(&reload, child, &[]) {
-            exomonad_actor::SourceLayerReload::Published { revision, .. } => revision,
-            result => panic!("child helper publish failed: {result:?}"),
-        };
-        assert_ne!(child_revision, parent_revision);
-        assert_eq!(
-            reload
-                .helper_layer(parent_branch)
-                .read_active()
-                .unwrap()
-                .unwrap()
-                .identity,
-            parent_revision
-        );
-        assert!(
-            std::fs::read_to_string(parent_draft.join("SessionHelpers.hs"))
-                .unwrap()
-                .contains("value = 1")
-        );
-        assert_ne!(
-            ActorSourceLayers::layer_include_for(&reload, parent_branch, &worktrees).unwrap()[0],
-            ActorSourceLayers::layer_include_for(&reload, &child_branch, &worktrees).unwrap()[0]
-        );
-        std::fs::write(
-            parent_draft.join("SessionHelpers.hs"),
-            "module SessionHelpers where\nvalue :: Int\nvalue = 3\n",
-        )
-        .unwrap();
-        let later_parent = match ActorSourceLayers::reload_helpers(&reload, parent, &[]) {
-            exomonad_actor::SourceLayerReload::Published { revision, .. } => revision,
-            result => panic!("later parent helper publish failed: {result:?}"),
-        };
-        assert_ne!(later_parent, parent_revision);
-        assert_eq!(
-            reload
-                .helper_layer(&child_branch)
-                .read_active()
-                .unwrap()
-                .unwrap()
-                .identity,
-            child_revision,
-            "a later parent publication cannot change an existing child"
-        );
+        assert!(ActorSourceLayers::retain_helpers(&reload, PrincipalId::new(1, 2)).is_err());
     }
 
     #[test]
@@ -4218,11 +4013,13 @@ mod tests {
         let revision = layer.revisions().join(published.identity);
         std::fs::rename(revision.join("0"), revision.join("1")).unwrap();
 
-        assert!(layer
-            .read_active()
-            .unwrap_err()
-            .to_string()
-            .contains("contiguous"));
+        assert!(
+            layer
+                .read_active()
+                .unwrap_err()
+                .to_string()
+                .contains("contiguous")
+        );
     }
 
     #[test]
@@ -4437,12 +4234,14 @@ mod tests {
             panic!("expected captured workspace commit, got {outcome:?}");
         };
         assert!(drift.is_empty());
-        assert!(GitCli::new()
-            .try_run(
-                &workspace,
-                &["cat-file", "-e", &format!("{oid}:L.lhs-boot")]
-            )
-            .is_err());
+        assert!(
+            GitCli::new()
+                .try_run(
+                    &workspace,
+                    &["cat-file", "-e", &format!("{oid}:L.lhs-boot")]
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -4781,11 +4580,11 @@ mod tests {
 
         // The edited source is untouched, and the previous graph still
         // compiles, which is what "still active" means.
-        assert!(std::fs::read_to_string(
-            project.path().join(".exomonad/workspace/Project/Types.hs")
-        )
-        .unwrap()
-        .contains("evidenceAmount"));
+        assert!(
+            std::fs::read_to_string(project.path().join(".exomonad/workspace/Project/Types.hs"))
+                .unwrap()
+                .contains("evidenceAmount")
+        );
         assert_eq!(
             git.try_run(&workspace, &["rev-parse", "HEAD"])
                 .unwrap()

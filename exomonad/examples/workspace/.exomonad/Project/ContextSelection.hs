@@ -189,8 +189,9 @@ selectRelevantChunks config intent call result =
           (#chunks := J.each key question chunks)
       pure $ case answer of
         Left err -> Abstained (jevFailureSummary err)
-        Right judged ->
-          let rows = judged.chunks
+        Right response ->
+          let judged = J.answers response
+              rows = judged.chunks
               decisive answerRow =
                 answerRow.supported.yes >= evidenceFloor config
                   && (answerRow.relevant.yes >= relevanceFloor config
@@ -225,7 +226,7 @@ selectRelevantChunks config intent call result =
 
 -- Keep provider/transport bodies out of status: they may contain request
 -- details. The class still identifies the failing boundary.
-jevFailureSummary :: J.JevError -> Text
+jevFailureSummary :: J.JevError J.JevCallError -> Text
 jevFailureSummary err =
   case err of
     J.Prepare _ -> "Jev request preparation failed; keeping the displayed tool result unchanged"

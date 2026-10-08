@@ -9,16 +9,12 @@
 //! round. Ordinary provider output termination makes it idle; reply settlement
 //! completes one typed request; only supervision terminates the actor.
 //!
-//! Cache-preserving context unfold is admitted here as one atomic sibling
-//! group. The caller's active provider thread and immutable Haskell snapshot
-//! are shared as information, while [`EffectiveRole`], exact
-//! [`ActorEffectKey`] membership, opaque grants, workspace placement, and
-//! descendant limits independently define each child's authority. Children
-//! are admitted dormant and released after the enclosing hosted tool block's
-//! real result is durable. They inherit its final committed Haskell scope.
-//! Admission failure aborts its own group; subsequent statement failure preserves
-//! earlier admissions. Unacknowledged groups are cancelled on host reattachment
-//! or owner shutdown. Published children remain independently addressable.
+//! Each child is admitted independently with an explicit context, workspace,
+//! installer, and lifetime. [`ActorCapabilities`], exact [`ActorEffectKey`]
+//! membership, opaque resource grants, and retained sponsor budgets authorize
+//! its work. A captured checkpoint keeps information available without
+//! changing the child's caller-selected tool surface. Readiness acknowledges
+//! the installed actor before the caller receives its live typed handle.
 
 pub(crate) mod after_tool;
 pub mod agent_spec;
@@ -31,12 +27,16 @@ mod conversation;
 mod descriptor;
 mod external_application;
 mod fork_workspace;
+mod forms;
+pub use forms::{FormHost, FormPublication};
 mod generated;
 mod hosted_lifecycle;
 mod identity;
 mod interactive_session;
 mod jev;
-pub use jev::{unconfigured_jev, JevBackend, JevBackendHandle, JevCallFailure};
+pub use jev::{
+    failed_jev_client_setup, unconfigured_jev, JevBackend, JevBackendHandle, JevCallFailure,
+};
 mod kernel;
 mod lineage;
 mod local_actor;
@@ -78,18 +78,20 @@ pub use workbench_display::bounded_output as bound_workbench_display;
 
 pub use conversation::{ConversationFuture, ConversationReader, ConversationUnavailable};
 // A `ConversationReader` resolves to `Vec<ConversationTurn>`, so anyone who
-// installs one has to be able to name what it yields. `ActorRole` and
-// `EffectiveRole` are this crate's own; a conversation's speaker is the
+// installs one has to be able to name what it yields. Actor capabilities belong
+// to this crate; a conversation's speaker is the
 // provider's, hence the alias.
 pub use agent_spec::preparation::ToolsetAcquisition;
 pub use descriptor::{ActorDescriptor, ActorPersistencePolicy};
 pub use exomonad_model::{ConversationTurn, Role as ConversationRole, TurnItem};
+pub use exomonad_worktree::WorkspaceAccess;
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
+
 pub use fork_workspace::{
-    ForkWorkspaceAdmission, ForkWorkspaceAdmissionError, ForkWorkspaceAdmissionFuture,
-    ForkWorkspaceCustody, ForkWorkspacePolicy, ForkWorkspaceSeed, PreparedForkWorkspace,
+    PreparedWorkspaceAttachment, SpawnWorkspaceWire, WorkspaceAdmission, WorkspaceAdmissionError,
+    WorkspaceAdmissionFuture, WorkspaceCustody, WorkspaceSeedWire, WorkspaceSelection,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
@@ -103,9 +105,8 @@ pub use kernel::{
     NativeProviderStartError, NativeProviderTurnLease, WorkbenchStepKey,
 };
 pub use lineage::{
-    ActorLineageRegistry, ActorPathReservation, CheckpointLease, CheckpointRefusal,
-    ForkGroupCleanupOutcome, ForkGroupError, ForkGroupGate, ForkGroupId, ForkGroupPhase,
-    ForkGroupPublication, ForkGroupRegistry,
+    ActorAdmissionRegistry, CheckpointLease, CheckpointRefusal, SpawnAdmission,
+    SpawnAdmissionOutcome, SpawnCleanupOutcome,
 };
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ActorAbandonGuard, ActorAdvance,
@@ -142,11 +143,11 @@ pub use request::{
 };
 pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_in_incarnation,
-    spawn_resident_root_with_fork_admission, ActorDisplayAdmission, ActorGraphNode,
+    spawn_resident_root_with_workspace_admission, ActorDisplayAdmission, ActorGraphNode,
     ActorProviderAdmission, DisplayConversationIdentity, DisplayPublication,
-    DisplayPublicationHostContext, DisplayPublicationOutcome, ForkChildRelease,
-    LocalResidentDeployment, LocalResidentInstallation, ReleaseAwait, ResidentActorRoot,
-    ResidentForest, ResidentKernelBehavior, ResidentRootEntry, ResourceRelease, RootStartupRelease,
+    DisplayPublicationHostContext, DisplayPublicationOutcome, LocalResidentDeployment,
+    LocalResidentInstallation, ReleaseAwait, ResidentActorRoot, ResidentForest,
+    ResidentKernelBehavior, ResidentRootEntry, ResourceRelease, RootStartupRelease,
 };
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{
@@ -161,12 +162,10 @@ pub use resident_workbench::{
     ActivationCompileStage, ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory,
     InstalledToolLease, PreparedSourceToolset, RequestWorkbenchScope, ResidentActorRunner,
     ResidentActorWorkbench, ResidentActorWorkbenchError, ResidentMachineMeasurement,
-    SourceToolsetRecipe, ToolDispatchError, ToolDispatchReply,
+    SourceToolsetRecipe, SpecReplacementDefinition, SpecReplacementError, ToolDispatchError,
+    ToolDispatchReply,
 };
-pub use role::{
-    render_child_budget, ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole,
-    NativeToolClass, ResearchPolicy, WorkspaceAccess,
-};
+pub use role::{render_child_budget, ActorCapabilities, ActorEffectKey, DescendantBudget};
 pub use runtime_observation::{
     ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,
     ActorSourceDriftObservation, ActorWorkbenchPosture, ActorWorkbenchTransfer,
@@ -176,9 +175,9 @@ pub use runtime_observation::{
     TrackedMessageState,
 };
 pub use start::{
-    ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorReplacementDefinition,
-    ActorStartCaptureError, ForkContext, ForkEffort, Model, ResidentActorStart,
-    WorkerLaunchPreview, WorkerLaunchRequest, WorkerLaunchResolver, WorkerLifetime,
+    ActorEffectKeyWire, ActorEffectProfileWire, ActorReplacementDefinition, ActorStartCaptureError,
+    ForkEffort, Model, ResidentActorStart, SpawnContextWire, SpawnError, SpawnRetainedResources,
+    WorkerLifetime,
 };
 pub use termination::{
     ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,

@@ -1,9 +1,9 @@
 {-# LANGUAGE QuasiQuotes #-}
-let campaign = "interview-collect" :: CampaignLabel
 let question = Question "source-choice" (DesignQuestion
       "plans/component.md" sourceHead "Choose a source" [] [] ["implementation"])
-(expert, _updates) <- unfoldDeferred (batch campaign "expert")
-  (childWithProgress @WorkProgress @DesignAnswer $
-    withLifetime ActorOwned $ coding projectHead
-      (assignment [label|source-expert|] (questionDetails question)))
+Right expertAgent <- spawnSubagent (FreshCtx (questionFinding (questionDetails question))) (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnInstructions = Just (projectPrompt "specialist"), spawnLabel = Just "source-expert" })
+Right (expert, _updates) <- requestWithProgress @WorkProgress @DesignAnswer expertAgent
+  (questionDetails question) defaultRequestOptions
 let interviewItems = [AwaitAnswer question expert]

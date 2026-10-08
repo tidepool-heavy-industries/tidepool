@@ -1,3 +1,7 @@
+import qualified Tidepool.Agent.Contract as A
+let curatedHelper value = retainedHelper value + 2 :: Int
+retainedValue <- pure (40 :: Int)
+
 do
   current <- C.getContext
   let trimResult body = if ContextText.isInfixOf "native-trim-result-tail" body
@@ -9,11 +13,14 @@ do
   C.putContext (over C.editableTexts trimResult current)
   C.setNextModel "test-model"
   C.setNextEffort C.High
-  let Right firstLabel = labelFromText "first"
-  let Right secondLabel = labelFromText "second"
-  let first = withLifetime ActorOwned (withModel (Literal "test-model") (narrowed @'[Replies] @Text knownEffects (codingPolicy projectHead) (assignment firstLabel ("reuse the curated build result" :: Text))))
-  let second = withLifetime ActorOwned (withModel (Literal "test-model") (narrowed @'[Replies] @Text knownEffects (codingPolicy projectHead) (assignment secondLabel ("reuse the curated build result" :: Text))))
-  workers <- unfoldDeferred (batch ("native-trim-acceptance" :: CampaignLabel) ("committed" :: ForkGroupLabel)) ((,) <$> child first <*> child second)
+  Right captured <- checkpoint "curated parent snapshot"
+  idle <- mapM (\name -> spawnSubagent (ForkCtx captured) SameDir
+    ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
+      { spawnModel = Just (Literal "test-model"), spawnLabel = Just name }))
+    ["first", "second"]
+  workers <- mapM (\admitted -> case admitted of
+    Left issue -> error (show issue)
+    Right actor -> do
+      Right reply <- request @Text actor ("reuse the curated build result" :: Text) defaultRequestOptions
+      pure reply) idle
   pure True
-let curatedHelper value = retainedHelper value + 2 :: Int
-retainedValue <- pure (40 :: Int)

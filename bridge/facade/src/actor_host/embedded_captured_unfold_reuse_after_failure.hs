@@ -1,19 +1,24 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+
+import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Actors.Exomonad
+
 do
   Just seed <- R.call (readSeed (R.client seedStore)) ()
-  again <- unfold (batch ("embedded-captured" :: CampaignLabel)
-    ("after-cell-failure" :: ForkGroupLabel))
-    (child (withContext (fromCheckpoint seed)
-      (researching @Int projectHead
-        (assignment [label|capture-still-usable|] ("reply with the retained getter" :: Text)))))
-  replies <- watch "reused-captured-reply" (awaitValue again)
-  result <- awaitWatch replies
-  firstRelease <- releaseCheckpoint seed
-  secondRelease <- releaseCheckpoint seed
-  refused <- attemptUnfold (batch "embedded-captured" "reuse-after-release")
-    (child (withContext (fromCheckpoint seed)
-      (researching @Int projectHead
-        (assignment [label|reuse-released-must-not-launch|] ("released capture" :: Text)))))
-  cleaned <- planCleanupFor again >>= executeCleanup
-  case (result, firstRelease, secondRelease, refused, cleanupReceiptComplete cleaned) of
-    (Right 42, Right (), Right (), Left (UnfoldCheckpointRefused ReleasedCheckpoint), True) -> display True
-    _ -> error "retained failed-cell capture contract failed" >> display True
+  Right again <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
+    ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+      { spawnLabel = Just "capture-still-usable", spawnLifetime = ActorOwned })
+  Right againRequest <- request @Int again ("reply with the retained getter" :: Text)
+    (defaultRequestOptions { requestLabel = Just "capture-still-usable" })
+  replies <- watch (Just "reused-captured-reply") (settlement againRequest)
+  result <- await (observed replies)
+  released <- releaseCheckpoint seed
+  refused <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
+    (defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  cleanup <- stopAgent again
+  case (result, released, refused, cleanup) of
+    (Right (Right 42), Right (), Left (SpawnRefused _), StoppedNow) -> display True
+    (Right (Right 42), Right (), Left (SpawnRefused _), AlreadyStopped) -> display True
+    _ -> display False

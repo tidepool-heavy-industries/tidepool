@@ -1,8 +1,13 @@
 {-# LANGUAGE QuasiQuotes #-}
-let campaign = "reviewed-checkpoint" :: CampaignLabel
-let task = Task (batch campaign "review") "plans/component.md" sourceHead
-      "Review this slice" "Exercise exact source admission"
-      ["slice.txt"] "read exact source" []
+import Tidepool.Effects.Core (GitRef (..))
+let work = (task "reviewed-checkpoint" "Review this slice" ["slice.txt"] "read exact source" sourceHead)
+      { planPath = "plans/component.md", rationale = "Exercise exact source admission" }
 let candidate = Candidate sourceHead [] ["browser gate remains"]
-let reviewRequest = ReviewRequest (AssignedTask task) candidate OwnerRepairs
-(reviewer, _) <- reviewCandidate task OwnerRepairs candidate
+let reviewRequest = ReviewRequest (AssignedTask work) candidate OwnerRepairs
+Right reviewerAgent <- spawnSubagent (FreshCtx (reviewContext reviewRequest))
+  (ForkWorktree (atRef (GitRef (renderGitOid sourceHead))))
+  ((defaultSpawnOptions workspaceAgentSpec)
+    { spawnModel = Just (Alias "luna"), spawnEffort = Just Medium
+    , spawnInstructions = Just (projectPrompt "review"), spawnLabel = Just "reviewed-checkpoint" })
+Right (reviewer, _) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision)
+  reviewerAgent reviewRequest defaultRequestOptions

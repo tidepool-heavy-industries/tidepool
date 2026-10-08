@@ -21,8 +21,9 @@ use tidepool_atomic_write::DirectoryAnchor;
 use exomonad_worktree::testing::TestRepo;
 use exomonad_worktree::{
     AgentRef, BindingTable, BranchName, EventId, EventJournal, GitCli, GitOid, HeadChangeKind,
-    HeadChangeReceipt, RepositoryEvent, WorktreeError, WorktreeId, WorktreeManager, WorktreeOrigin,
-    WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry, WorktreeSpec,
+    HeadChangeReceipt, RepositoryEvent, WorkspaceAccess, WorktreeError, WorktreeId,
+    WorktreeManager, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry,
+    WorktreeSpec,
 };
 
 /// Make `dir` unwritable (`r-xr-xr-x`) so a create/write inside it fails.
@@ -43,7 +44,7 @@ fn minimal_receipt(id: &WorktreeId) -> WorktreeReceipt {
     WorktreeReceipt {
         worktree_id: id.clone(),
         cwd: PathBuf::from("/nonexistent/cwd"),
-        branch: BranchName::from_raw("exomonad/worktree/fixture"),
+        branch: Some(BranchName::from_raw("exomonad/worktree/fixture")),
         source_head: GitOid::from_raw("0".repeat(40)),
         snapshot_ref: None,
         origin: WorktreeOrigin::CurrentRepository,
@@ -210,7 +211,7 @@ fn binding_bind_reports_typed_failure_when_the_root_is_read_only() {
     make_read_only(&root);
     let worktree = WorktreeId::from_raw("wt-bind-perm-test");
     let agent = AgentRef::from_raw("agent-a");
-    let result = table.bind(&worktree, &agent, 1000);
+    let result = table.bind(&worktree, &agent, WorkspaceAccess::ReadWrite, 1000);
     make_writable(&root);
 
     match result {
@@ -243,6 +244,7 @@ fn binding_open_reports_typed_failure_for_a_corrupt_record() {
             .bind(
                 &WorktreeId::from_raw("wt-bind-corrupt"),
                 &AgentRef::from_raw("agent-a"),
+                WorkspaceAccess::ReadWrite,
                 1000,
             )
             .expect("bind fixture");
@@ -516,22 +518,27 @@ fn binding_failed_bind_persist_requires_reopen() {
     make_read_only(&root);
     let worktree = WorktreeId::from_raw("wt-uncertain");
     let agent = AgentRef::from_raw("agent-a");
-    let result = table.bind(&worktree, &agent, 1000);
+    let result = table.bind(&worktree, &agent, WorkspaceAccess::ReadWrite, 1000);
     make_writable(&root);
 
     match result {
         Err(WorktreeError::StorageFailure { .. }) => {
-            assert!(table.current(&worktree).is_none());
+            assert!(table.membership(&worktree, &agent).is_none());
             assert!(table.active_for_agent(&agent).is_none());
-            assert!(table.bind(&worktree, &agent, 2000).is_err());
+            assert!(table
+                .bind(&worktree, &agent, WorkspaceAccess::ReadWrite, 2000)
+                .is_err());
             drop(table);
             // Chmod stopped publication before rename; authoritative disk has no row.
             let mut table =
                 BindingTable::open(&base_anchor, "bindings").expect("reopen after fault clears");
             table
-                .bind(&worktree, &agent, 2000)
+                .bind(&worktree, &agent, WorkspaceAccess::ReadWrite, 2000)
                 .expect("fresh bind after reconciliation");
-            assert_eq!(table.current(&worktree).expect("bound").agent(), &agent);
+            assert_eq!(
+                table.membership(&worktree, &agent).expect("bound").agent(),
+                &agent
+            );
         }
         Ok(_) => eprintln!(
             "SKIPPED: binding_failed_bind_persist_requires_reopen — the write \
@@ -552,7 +559,9 @@ fn binding_failed_settle_persist_requires_reopen() {
 
     let worktree = WorktreeId::from_raw("wt-settle-uncertain");
     let agent = AgentRef::from_raw("agent-a");
-    let lease = table.bind(&worktree, &agent, 1000).expect("initial bind");
+    let lease = table
+        .bind(&worktree, &agent, WorkspaceAccess::ReadWrite, 1000)
+        .expect("initial bind");
 
     make_read_only(&root);
     let result = lease.release(&mut table);
@@ -560,20 +569,30 @@ fn binding_failed_settle_persist_requires_reopen() {
 
     match result {
         Err(WorktreeError::StorageFailure { .. }) => {
-            assert!(table.current(&worktree).is_none());
+            assert!(table.membership(&worktree, &agent).is_none());
             assert!(table.active_for_agent(&agent).is_none());
-            assert!(table.bind(&worktree, &agent, 2000).is_err());
+            assert!(table
+                .bind(&worktree, &agent, WorkspaceAccess::ReadWrite, 2000)
+                .is_err());
             drop(table);
             let mut table =
                 BindingTable::open(&base_anchor, "bindings").expect("reopen retained disk state");
+            assert!(table.membership(&worktree, &agent).is_none());
+            assert_eq!(table.participants(&worktree).unwrap().count(), 1);
+            assert!(matches!(
+                table.bind(&worktree, &agent, WorkspaceAccess::ReadWrite, 2000),
+                Err(WorktreeError::WorktreeAuthorityDenied(_))
+            ));
+            table
+                .recover_active(&worktree, &agent, &agent, 2000)
+                .expect("recover retained row");
             assert_eq!(
-                table.current(&worktree).expect("retained Active").agent(),
+                table
+                    .membership(&worktree, &agent)
+                    .expect("recovered membership")
+                    .agent(),
                 &agent
             );
-            assert!(matches!(
-                table.bind(&worktree, &agent, 2000),
-                Err(WorktreeError::WorktreeBusy { .. })
-            ));
         }
         Ok(()) => eprintln!(
             "SKIPPED: binding_failed_settle_persist_requires_reopen — the write \

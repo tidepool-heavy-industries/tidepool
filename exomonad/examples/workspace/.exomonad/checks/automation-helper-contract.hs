@@ -24,7 +24,7 @@ import Project.AssumptionWatch (watchIncorporatedBaseline)
 import Project.ParallelInvestigate
 import Project.SlowCommandWatch (SlowHandler, SlowObservation (..))
 import Exomonad.Contrib.Types (Incorporation)
-import Tidepool.Actors.Exomonad (Actor, AgentRef, GitOid, Response)
+import Tidepool.Actors.Exomonad (Actor, AgentRef, GitOid, Request)
 import qualified Tidepool.Actors.Internal.ExomonadDriver as Root
 import qualified Tidepool.Command as Cmd
 import Tidepool.Effects.Core (AgentSession (..), ActorLocal (..), Commands (..), Jev, CommandObservation (..))
@@ -35,7 +35,7 @@ import Tidepool.Command.Types (Job (..))
 -- terminal observations and the probes not admitted to this batch.
 pendingChildExample
   :: (Member Actor effects, Member Commands effects)
-  => AgentRef -> GitOid -> Response Incorporation -> Text
+  => AgentRef -> GitOid -> Request Incorporation -> Text
   -> Eff effects (Either ProbeRefusal ProbeBatch)
 pendingChildExample owner baseline incorporation checkout = do
   void (watchIncorporatedBaseline owner baseline "pending child" incorporation)
@@ -74,9 +74,9 @@ semanticSlowDiagnostic context observation = do
         J..| J.alt #unclear "The bounded output does not establish a cause" "Cause unresolved"))
   pure $ case answer of
     Left issue -> "Semantic diagnosis unavailable: " <> Text.pack (show issue)
-    Right choice -> case J.takenUnder J.careful choice of
+    Right response -> case J.takenUnder J.careful (J.answers response) of
       Left doubt -> "Semantic diagnosis uncertain: " <> doubt.why
-      Right (J.Settled recommendation) -> recommendation
+      Right settled -> let recommendation = J.settledValue settled in recommendation
 
 assert :: String -> Bool -> IO ()
 assert label passed = do

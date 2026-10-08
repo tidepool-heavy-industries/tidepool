@@ -9,6 +9,11 @@ use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb}
 
 const FOREIGN: &[crate::schema::ExternalType] = &[
     crate::schema::ExternalType {
+        haskell_name: "WorkspaceHandle",
+        rust_wire: "tidepool_bridge_effects::WtWorkspaceHandle",
+        core_module: None,
+    },
+    crate::schema::ExternalType {
         haskell_name: "WorktreeError",
         rust_wire: "crate::generated::worktree::WorktreeError",
         core_module: None,
@@ -74,6 +79,12 @@ pub fn bound_worktree() -> Effect {
         "bound_worktree_decl",
         vec![
             plain(
+                "BoundWorkspaceGet",
+                "bound_workspace_get",
+                vec![],
+                result("WorkspaceHandle"),
+            ),
+            plain(
                 "BoundWorktreeGet",
                 "bound_worktree_get",
                 vec![],
@@ -122,6 +133,12 @@ pub fn worktree_registry() -> Effect {
                 result("WorktreeHandle"),
             ),
             plain(
+                "WorktreeRegistryWorkspace",
+                "worktree_registry_workspace",
+                vec![arg("treeId", "WorktreeId")],
+                result("WorkspaceHandle"),
+            ),
+            plain(
                 "WorktreeRegistryList",
                 "worktree_registry_list",
                 vec![],
@@ -166,26 +183,12 @@ pub fn worktree_allocation() -> Effect {
         "ActorWorktreeAllocationHandler",
         "WorktreeAllocationReq",
         "worktree_allocation_decl",
-        vec![
-            plain(
-                "WorktreeAllocationCreate",
-                "worktree_allocation_create",
-                vec![arg("spec", "WorktreeSpec")],
-                result("WorktreeHandle"),
-            ),
-            plain(
-                "WorktreeAllocationCreateForActorPath",
-                "worktree_allocation_create_for_actor_path",
-                vec![arg("spec", "WorktreeSpec"), text_arg("actorPath")],
-                result("WorktreeHandle"),
-            ),
-            plain(
-                "WorktreeAllocationCreateFromBoundForActorPath",
-                "worktree_allocation_create_from_bound_for_actor_path",
-                vec![arg("dirtyPolicy", "DirtyPolicy"), text_arg("actorPath")],
-                result("WorktreeHandle"),
-            ),
-        ],
+        vec![plain(
+            "WorktreeAllocationCreate",
+            "worktree_allocation_create",
+            vec![arg("spec", "WorktreeSpec")],
+            result("WorktreeHandle"),
+        )],
     )
 }
 
@@ -256,13 +259,5 @@ fn arg(name: &'static str, ty: &'static str) -> Arg {
         name,
         ty: HsType::Named(ty),
         rust: RustBinding::External,
-    }
-}
-
-fn text_arg(name: &'static str) -> Arg {
-    Arg {
-        name,
-        ty: HsType::Text,
-        rust: RustBinding::Derived,
     }
 }

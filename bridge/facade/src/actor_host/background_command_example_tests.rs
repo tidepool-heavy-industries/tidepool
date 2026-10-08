@@ -19,7 +19,6 @@ fn example_stage(name: &str) -> String {
 
 async fn workspace_campaign() -> TestCampaign {
     TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         super::jev_tests::pinned_jev_workspace,
     )

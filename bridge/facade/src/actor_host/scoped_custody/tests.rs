@@ -1,6 +1,6 @@
 use super::*;
 use crate::actor_host::*;
-use exomonad_actor::ForkWorkspaceCustody;
+use exomonad_actor::WorkspaceCustody;
 use exomonad_node::{
     run_process_supervisor, LaunchReservation, ProcessInvocation, ProcessMountBoundary,
     ProcessSupervisorClient, ProcessSupervisorManifest,
@@ -38,7 +38,10 @@ fn replacement_transfers_unlaunched_workspace_without_old_guard_release() {
         diagnostic: None,
     });
     drop(transferred);
-    assert!(bindings.lock().current(fixture.tree.id()).is_none());
+    assert_eq!(
+        bindings.lock().participants(fixture.tree.id()).unwrap().count(),
+        0
+    );
 }
 
 #[test]
@@ -52,7 +55,14 @@ fn replacement_can_restore_original_workspace_owner_before_cutover() {
     drop(transferred);
     drop(fixture.custody);
     assert_eq!(
-        bindings.lock().current(fixture.tree.id()).unwrap().agent(),
+        bindings
+            .lock()
+            .membership(
+                fixture.tree.id(),
+                &WorktreePrincipal::exact_actor("scope-test", 905, 1),
+            )
+            .unwrap()
+            .agent(),
         &WorktreePrincipal::exact_actor("scope-test", 905, 1)
     );
     assert!(bindings
@@ -65,7 +75,10 @@ fn replacement_can_restore_original_workspace_owner_before_cutover() {
         diagnostic: None,
     });
     drop(restored);
-    assert!(bindings.lock().current(fixture.tree.id()).is_none());
+    assert_eq!(
+        bindings.lock().participants(fixture.tree.id()).unwrap().count(),
+        0
+    );
 }
 
 #[test]
@@ -80,7 +93,10 @@ fn replacement_cannot_transfer_workspace_with_uncertain_process_custody() {
             .custody
             .bindings
             .lock()
-            .current(fixture.tree.id())
+            .membership(
+                fixture.tree.id(),
+                &WorktreePrincipal::exact_actor("scope-test", 903, 1),
+            )
             .unwrap()
             .agent(),
         &WorktreePrincipal::exact_actor("scope-test", 903, 1)
@@ -109,6 +125,7 @@ impl Fixture {
             .bind(
                 tree.id(),
                 &WorktreePrincipal::exact_actor("scope-test", id, 1),
+                exomonad_worktree::WorkspaceAccess::ReadWrite,
                 0,
             )
             .unwrap();
@@ -184,7 +201,14 @@ impl Fixture {
             .custody
             .bindings
             .lock()
-            .current(self.tree.id())
+            .membership(
+                self.tree.id(),
+                &WorktreePrincipal::exact_actor(
+                    "scope-test",
+                    self.custody.actor.id.0,
+                    self.custody.actor.incarnation.0,
+                ),
+            )
             .is_some());
         assert!(
             !self.tree.cwd().join("started").exists(),
@@ -413,6 +437,7 @@ fn scoped_custody_exact_claim_and_pre_spawn_failure() {
         .bind(
             fixture.tree.id(),
             &WorktreePrincipal::exact_actor("scope-test", 1, 1),
+            exomonad_worktree::WorkspaceAccess::ReadWrite,
             1,
         )
         .unwrap();
@@ -704,7 +729,10 @@ fn scoped_custody_concurrent_claim_sibling_timeout_and_legacy_fence() {
     let id = legacy.tree.id().clone();
     drop(map);
     drop(legacy.custody);
-    assert!(table.lock().current(&id).is_some());
+    assert!(table
+        .lock()
+        .membership(&id, &WorktreePrincipal::exact_actor("scope-test", 3, 1))
+        .is_some());
 }
 
 #[test]

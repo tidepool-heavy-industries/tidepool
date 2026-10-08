@@ -62,12 +62,8 @@ impl<'de> Deserialize<'de> for HaskellConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct PromptConfig {
-    pub core: Option<PathBuf>,
-    pub root: Option<PathBuf>,
-    pub research: Option<PathBuf>,
-    pub coding: Option<PathBuf>,
-    pub scaffolding: Option<PathBuf>,
-    pub integration: Option<PathBuf>,
+    pub base: Option<PathBuf>,
+    pub agent: Option<PathBuf>,
     pub files: BTreeMap<String, PathBuf>,
 }
 
@@ -154,12 +150,11 @@ pub(crate) enum WorkspacePreparation {
     },
 }
 
-/// The required profile and the exact specialization its producer completed.
-/// These records are the primary inventory; recipe selections are derived.
+/// The root's requested effects and the exact specialization its producer
+/// completed. Recipe selections are derived from this single primary record.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedToolsetCoverage {
-    pub(crate) profile: super::PreparationProfile,
     pub(crate) requested_effects: Vec<exomonad_actor::ActorEffectKey>,
     pub(crate) effective_effects: Vec<exomonad_actor::ActorEffectKey>,
     pub(crate) recipe: String,
@@ -167,39 +162,21 @@ pub(crate) struct PreparedToolsetCoverage {
 }
 
 fn coverage_entries(coverage: &[PreparedToolsetCoverage]) -> Result<BTreeMap<String, uuid::Uuid>> {
-    if coverage.is_empty() {
-        return Err("completed workspace has no prepared toolset coverage".into());
+    if coverage.len() != 1 {
+        return Err(
+            "completed workspace must contain exactly one root toolset coverage record".into(),
+        );
     }
-    let mut selected = BTreeMap::new();
-    for (index, entry) in coverage.iter().enumerate() {
-        if entry.recipe.len() != 64
-            || !entry.recipe.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || entry.original.is_nil()
-        {
-            return Err("prepared toolset coverage has an invalid original selection".into());
-        }
-        if coverage[..index]
-            .iter()
-            .any(|previous| previous.profile == entry.profile)
-        {
-            return Err("prepared toolset coverage repeats a profile".into());
-        }
-        if let Some(previous) = coverage[..index]
-            .iter()
-            .find(|previous| previous.recipe == entry.recipe)
-        {
-            if previous.original != entry.original
-                || previous.effective_effects != entry.effective_effects
-            {
-                return Err(
-                    "prepared profiles sharing a recipe select different originals or effect rows"
-                        .into(),
-                );
-            }
-        }
-        selected.insert(entry.recipe.clone(), entry.original);
+    let entry = &coverage[0];
+    if entry.recipe.len() != 64
+        || !entry.recipe.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || entry.original.is_nil()
+    {
+        return Err("prepared toolset coverage has an invalid original selection".into());
     }
-    Ok(selected)
+    Ok([(entry.recipe.clone(), entry.original)]
+        .into_iter()
+        .collect())
 }
 
 /// A run-local reference to an independently retained immutable deployment.
@@ -334,7 +311,7 @@ impl FrozenWorkspace {
             if selection.get("tools").is_some_and(|tools| !tools.is_null()) {
                 return Err("frozen workspace uses obsolete [haskell] tools; migrate to spec = 'Module.agentSpec' with agentSpec = defaultSpec { specTools = yourTools }, then start a new run".into());
             }
-            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(6) {
+            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(7) {
                 return Err("unsupported frozen workspace format; prepare a new deployment and start a new run".into());
             }
             let mut frozen: Self = serde_json::from_value(selection)?;
@@ -517,12 +494,8 @@ impl FrozenWorkspace {
         }
         let mut prompts = BTreeMap::new();
         for (name, path) in [
-            ("core", config.prompts.core),
-            ("root", config.prompts.root),
-            ("research", config.prompts.research),
-            ("coding", config.prompts.coding),
-            ("scaffolding", config.prompts.scaffolding),
-            ("integration", config.prompts.integration),
+            ("base", config.prompts.base),
+            ("agent", config.prompts.agent),
         ] {
             if let Some(path) = path {
                 let text = std::fs::read_to_string(base.join(path))?;
@@ -533,12 +506,7 @@ impl FrozenWorkspace {
             }
         }
         for (name, path) in config.prompts.files {
-            if name.trim().is_empty()
-                || matches!(
-                    name.as_str(),
-                    "core" | "root" | "research" | "coding" | "scaffolding" | "integration"
-                )
-            {
+            if name.trim().is_empty() || matches!(name.as_str(), "base" | "agent") {
                 return Err(format!("project prompt name is empty or reserved: {name:?}").into());
             }
             let text = std::fs::read_to_string(base.join(path))?;
@@ -593,7 +561,7 @@ impl FrozenWorkspace {
         );
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 6,
+            version: 7,
             identity,
             include,
             modules: config.haskell.modules,
@@ -748,22 +716,12 @@ impl FrozenWorkspace {
 
     fn validate_toolset_coverage(&self, coverage: &[PreparedToolsetCoverage]) -> Result<()> {
         coverage_entries(coverage)?;
-        let config = self.config()?;
-        let expected = config.preparation.selected_profiles(config.research)?;
-        if expected.len() != coverage.len() {
-            return Err("prepared workspace does not cover all configured toolset profiles".into());
-        }
-        for profile in expected {
-            let entry = coverage
-                .iter()
-                .find(|entry| entry.profile == profile.profile)
-                .ok_or("prepared workspace is missing a configured toolset profile")?;
-            if entry.requested_effects != profile.requested_effects {
-                return Err(
-                    "prepared toolset profile differs from this build's requested effect row"
-                        .into(),
-                );
-            }
+        let capabilities = exomonad_actor::ActorCapabilities::default();
+        let expected = capabilities.effect_keys();
+        if coverage[0].requested_effects != expected {
+            return Err(
+                "prepared root toolset differs from this build's requested effect row".into(),
+            );
         }
         Ok(())
     }
@@ -857,12 +815,8 @@ impl FrozenWorkspace {
         }
         let base = workspace.join(".exomonad");
         for (name, path) in [
-            ("core", config.prompts.core),
-            ("root", config.prompts.root),
-            ("research", config.prompts.research),
-            ("coding", config.prompts.coding),
-            ("scaffolding", config.prompts.scaffolding),
-            ("integration", config.prompts.integration),
+            ("base", config.prompts.base),
+            ("agent", config.prompts.agent),
         ]
         .into_iter()
         .filter_map(|(name, path)| path.map(|path| (name.to_owned(), path)))
@@ -1598,9 +1552,7 @@ mod tests {
     #[test]
     fn prepared_toolset_coverage_history_refuses_mutated_promises() {
         let (_libraries, selection) = deployment_fixture();
-        let project = deployment_project(
-            "[defaults]\nmodel = 'gpt-6-sol'\n[preparation]\nroles = ['research']\n",
-        );
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
         let directory = tempfile::tempdir().unwrap();
         let frozen = FrozenWorkspace::load_with_deployment(
             project.path(),
@@ -1608,23 +1560,16 @@ mod tests {
             Some(selection),
         )
         .unwrap();
-        let config = frozen.config().unwrap();
         let original = uuid::Uuid::new_v4();
         let recipe = "a".repeat(64);
-        let coverage = config
-            .preparation
-            .selected_profiles(config.research)
-            .unwrap()
-            .into_iter()
-            .map(|profile| PreparedToolsetCoverage {
-                profile: profile.profile,
-                requested_effects: profile.requested_effects,
-                effective_effects: vec![exomonad_actor::ActorEffectKey::Replies],
-                recipe: recipe.clone(),
-                original,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(coverage.len(), 2);
+        let coverage = vec![PreparedToolsetCoverage {
+            requested_effects: exomonad_actor::ActorCapabilities::default()
+                .effect_keys()
+                .to_vec(),
+            effective_effects: vec![exomonad_actor::ActorEffectKey::Replies],
+            recipe: recipe.clone(),
+            original,
+        }];
         let admitted = serde_json::to_vec(&coverage).unwrap();
         let expected = [(recipe.clone(), original)]
             .into_iter()
@@ -1632,31 +1577,17 @@ mod tests {
         frozen.validate_toolset_coverage(&coverage).unwrap();
         assert_eq!(coverage_entries(&coverage).unwrap(), expected);
 
-        // Logical record order does not change the derived exact selection.
-        let mut reordered = coverage.clone();
-        reordered.reverse();
-        frozen.validate_toolset_coverage(&reordered).unwrap();
-        assert_eq!(coverage_entries(&reordered).unwrap(), expected);
-
-        for mutation in 0..8 {
+        for mutation in 0..6 {
             let mut changed = coverage.clone();
             match mutation {
-                0 => {
-                    changed.pop();
-                }
-                1 => changed[1].profile = super::super::PreparationProfile::Root,
-                2 => {
-                    changed[1].profile = super::super::PreparationProfile::Public(
-                        exomonad_tool::PublicActorProfile::Integration,
-                    )
-                }
-                3 => changed[1].requested_effects.reverse(),
-                4 => changed[1].original = uuid::Uuid::new_v4(),
-                5 => changed[1]
+                0 => changed[0].requested_effects.reverse(),
+                1 => changed[0].original = uuid::Uuid::new_v4(),
+                2 => changed[0]
                     .effective_effects
                     .push(exomonad_actor::ActorEffectKey::Watches),
-                6 => changed[1].recipe = "invalid".into(),
-                7 => changed[1].original = uuid::Uuid::nil(),
+                3 => changed[0].recipe = "invalid".into(),
+                4 => changed[0].original = uuid::Uuid::nil(),
+                5 => changed.push(changed[0].clone()),
                 _ => unreachable!(),
             }
             assert!(
@@ -1676,9 +1607,7 @@ mod tests {
         use exomonad_actor::ActorEffectKey;
         use exomonad_tool::ToolEffectKey;
         let (_libraries, selection) = deployment_fixture();
-        let project = deployment_project(
-            "[defaults]\nmodel = 'gpt-6-sol'\n[preparation]\nroles = ['research']\n",
-        );
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
         let directory = tempfile::tempdir().unwrap();
         let mut frozen = FrozenWorkspace::load_with_deployment(
             project.path(),
@@ -1686,7 +1615,6 @@ mod tests {
             Some(selection),
         )
         .unwrap();
-        let config = frozen.config().unwrap();
         let workbench = exomonad_actor::ActorWorkbenchSource::new(String::new(), Vec::new());
         let source = exomonad_actor::CheckpointSourceLayer::default();
         let support = vec![
@@ -1695,28 +1623,22 @@ mod tests {
         ];
         let before = tidepool_extract_cmd::extract_spawn_count();
         let original = uuid::Uuid::new_v4();
-        let coverage = config
-            .preparation
-            .selected_profiles(config.research)
-            .unwrap()
-            .into_iter()
-            .map(|profile| {
-                let actual = workbench
-                    .source_toolset_recipe(&source, &profile.requested_effects, &support)
-                    .unwrap();
-                assert_eq!(
-                    actual.effective_effects,
-                    vec![ActorEffectKey::Replies, ActorEffectKey::Watches]
-                );
-                PreparedToolsetCoverage {
-                    profile: profile.profile,
-                    requested_effects: profile.requested_effects,
-                    effective_effects: actual.effective_effects,
-                    recipe: actual.recipe,
-                    original,
-                }
-            })
-            .collect::<Vec<_>>();
+        let requested_effects = exomonad_actor::ActorCapabilities::default()
+            .effect_keys()
+            .to_vec();
+        let actual = workbench
+            .source_toolset_recipe(&source, &requested_effects, &support)
+            .unwrap();
+        assert_eq!(
+            actual.effective_effects,
+            vec![ActorEffectKey::Replies, ActorEffectKey::Watches]
+        );
+        let coverage = vec![PreparedToolsetCoverage {
+            requested_effects,
+            effective_effects: actual.effective_effects,
+            recipe: actual.recipe,
+            original,
+        }];
         frozen.preparation = Some(WorkspacePreparation::Completed {
             original,
             revision: "b".repeat(64),
@@ -1728,16 +1650,20 @@ mod tests {
             .unwrap();
         let mut changed_support = support.clone();
         changed_support.pop();
-        assert!(frozen
-            .validate_prepared_toolset_recipes(&workbench, &source, &changed_support)
-            .is_err());
+        assert!(
+            frozen
+                .validate_prepared_toolset_recipes(&workbench, &source, &changed_support)
+                .is_err()
+        );
         // Context support selects a different builtin installer even when its
         // support-filtered actor row remains unchanged.
         let mut changed_installer = support.clone();
         changed_installer.push(ToolEffectKey::ContextReadWrite);
-        assert!(frozen
-            .validate_prepared_toolset_recipes(&workbench, &source, &changed_installer)
-            .is_err());
+        assert!(
+            frozen
+                .validate_prepared_toolset_recipes(&workbench, &source, &changed_installer)
+                .is_err()
+        );
         assert_eq!(serde_json::to_vec(&frozen.preparation).unwrap(), admitted);
         frozen
             .validate_prepared_toolset_recipes(&workbench, &source, &support)
@@ -1749,7 +1675,7 @@ mod tests {
     fn preparing_retry_preserves_original_nonce_and_refuses_mutable_source_drift() {
         let (_libraries, selection) = deployment_fixture();
         let project = deployment_project(
-            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['src']\n[prompts]\nroot = 'root.md'\n",
+            "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['src']\n[prompts]\nagent = 'agent.md'\n",
         );
         let authored = project.path().join(".exomonad/src");
         std::fs::create_dir_all(&authored).unwrap();
@@ -1758,8 +1684,8 @@ mod tests {
             "module Original where\noriginal = (37 :: Int)\n",
         )
         .unwrap();
-        let prompt = project.path().join(".exomonad/root.md");
-        std::fs::write(&prompt, "original root prompt").unwrap();
+        let prompt = project.path().join(".exomonad/agent.md");
+        std::fs::write(&prompt, "original agent prompt").unwrap();
         let directory = tempfile::tempdir().unwrap();
         let mut frozen = FrozenWorkspace::load_with_deployment(
             project.path(),
@@ -1788,18 +1714,22 @@ mod tests {
             before
         );
         std::fs::write(&prompt, "changed root prompt").unwrap();
-        assert!(retry
-            .verify_current_inputs(project.path())
-            .unwrap_err()
-            .to_string()
-            .contains("prompt changed"));
+        assert!(
+            retry
+                .verify_current_inputs(project.path())
+                .unwrap_err()
+                .to_string()
+                .contains("prompt changed")
+        );
         std::fs::write(&prompt, "original root prompt").unwrap();
         std::fs::write(authored.join("Added.hs"), "module Added where\n").unwrap();
-        assert!(retry
-            .verify_current_inputs(project.path())
-            .unwrap_err()
-            .to_string()
-            .contains("source bytes changed"));
+        assert!(
+            retry
+                .verify_current_inputs(project.path())
+                .unwrap_err()
+                .to_string()
+                .contains("source bytes changed")
+        );
         assert_eq!(
             std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),
             before
@@ -1816,9 +1746,11 @@ mod tests {
         let before = tidepool_extract_cmd::extract_spawn_count();
         let refuse = || {
             assert!(FrozenWorkspace::load_prepared_run(project.path(), run.path()).is_err());
-            assert!(std::fs::read_dir(run.path())
-                .unwrap()
-                .all(|entry| { entry.unwrap().file_name() == "workspace-prepared.json" }));
+            assert!(
+                std::fs::read_dir(run.path())
+                    .unwrap()
+                    .all(|entry| { entry.unwrap().file_name() == "workspace-prepared.json" })
+            );
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
         };
         // A consumed selection that disappears cannot become a fresh capture.
@@ -1868,19 +1800,23 @@ mod tests {
         ] {
             selected["preparation"] = replacement;
             std::fs::write(&manifest, serde_json::to_vec(&selected).unwrap()).unwrap();
-            assert!(pointer
-                .read_selection()
-                .unwrap_err()
-                .to_string()
-                .contains("selection changed"));
+            assert!(
+                pointer
+                    .read_selection()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("selection changed")
+            );
         }
         // Hash refusal precedes deserialization, including malformed metadata.
         std::fs::write(&manifest, b"invalid selection").unwrap();
-        assert!(pointer
-            .read_selection()
-            .unwrap_err()
-            .to_string()
-            .contains("selection changed"));
+        assert!(
+            pointer
+                .read_selection()
+                .unwrap_err()
+                .to_string()
+                .contains("selection changed")
+        );
         std::fs::remove_file(&manifest).unwrap();
         assert!(pointer.read_selection().is_err());
         std::fs::write(&manifest, &original).unwrap();
@@ -1888,11 +1824,13 @@ mod tests {
             version: 1,
             ..pointer
         };
-        assert!(legacy
-            .read_selection()
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported"));
+        assert!(
+            legacy
+                .read_selection()
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
     }
 
     #[test]
@@ -1911,7 +1849,7 @@ mod tests {
         let manifest = directory.path().join("workspace/selection.json");
         let mut selected: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        for version in [4, 5] {
+        for version in [4, 5, 6] {
             selected["version"] = serde_json::json!(version);
             // An old completed inventory must be refused by its version,
             // before decoding its missing current coverage fields.
@@ -1920,9 +1858,11 @@ mod tests {
             });
             std::fs::write(&manifest, serde_json::to_vec(&selected).unwrap()).unwrap();
             let error = FrozenWorkspace::load(project.path(), directory.path()).unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("unsupported frozen workspace format"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported frozen workspace format")
+            );
             assert!(!run.path().join("workspace-prepared.json").exists());
         }
     }
@@ -1976,24 +1916,28 @@ mod tests {
             .join("Tidepool/Prelude.hs");
         let original = std::fs::read(&prelude).unwrap();
         std::fs::write(&prelude, "module Tidepool.Prelude where\n").unwrap();
-        assert!(FrozenWorkspace::load_with_deployment(
-            project.path(),
-            run.path(),
-            Some(selection.clone())
-        )
-        .is_err());
+        assert!(
+            FrozenWorkspace::load_with_deployment(
+                project.path(),
+                run.path(),
+                Some(selection.clone())
+            )
+            .is_err()
+        );
         std::fs::write(&prelude, original).unwrap();
         let extra = selection
             .sources
             .root(NativeSourceRole::Stdlib)
             .join("Tidepool/DeploymentExtra.hs");
         std::fs::write(&extra, "module Tidepool.DeploymentExtra where\n").unwrap();
-        assert!(FrozenWorkspace::load_with_deployment(
-            project.path(),
-            run.path(),
-            Some(selection.clone())
-        )
-        .is_err());
+        assert!(
+            FrozenWorkspace::load_with_deployment(
+                project.path(),
+                run.path(),
+                Some(selection.clone())
+            )
+            .is_err()
+        );
         std::fs::remove_file(extra).unwrap();
         std::fs::remove_file(prelude).unwrap();
         assert!(
@@ -2016,12 +1960,14 @@ mod tests {
         let sentinel = actors.join("Tidepool/Check.hs");
         let original = std::fs::read(&sentinel).unwrap();
         std::fs::write(&sentinel, "changed actor source").unwrap();
-        assert!(FrozenWorkspace::load_with_deployment(
-            project.path(),
-            run.path(),
-            Some(selection.clone())
-        )
-        .is_err());
+        assert!(
+            FrozenWorkspace::load_with_deployment(
+                project.path(),
+                run.path(),
+                Some(selection.clone())
+            )
+            .is_err()
+        );
         std::fs::write(&sentinel, original).unwrap();
         std::fs::rename(&actors, fixture.path().join("original-actors")).unwrap();
         std::os::unix::fs::symlink(fixture.path().join("original-actors"), &actors).unwrap();
@@ -2058,12 +2004,10 @@ mod tests {
             .sha256
             .push_str("-changed");
         for selection in changed {
-            assert!(FrozenWorkspace::load_with_deployment(
-                project.path(),
-                run.path(),
-                Some(selection)
-            )
-            .is_err());
+            assert!(
+                FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
+                    .is_err()
+            );
             assert_eq!(std::fs::read(&manifest).unwrap(), admitted);
         }
         assert!(FrozenWorkspace::load_with_deployment(project.path(), run.path(), None).is_err());
@@ -2074,9 +2018,11 @@ mod tests {
         let error =
             FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
                 .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unsupported frozen workspace format"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported frozen workspace format")
+        );
         assert_eq!(std::fs::read(manifest).unwrap(), old);
     }
 
@@ -2106,9 +2052,11 @@ mod tests {
             .find_map(|root| std::fs::read_to_string(root.join("Project/Shared.hs")).ok())
             .unwrap();
         assert!(winner.contains("value = 1"));
-        assert!(std::fs::read_to_string(roots[1].join("Project/Shared.hs"))
-            .unwrap()
-            .contains("value = 2"));
+        assert!(
+            std::fs::read_to_string(roots[1].join("Project/Shared.hs"))
+                .unwrap()
+                .contains("value = 2")
+        );
         assert!(frozen.include.last().unwrap().ends_with("resources"));
     }
 
@@ -2189,7 +2137,7 @@ mod tests {
         let manifest = run.path().join("workspace/selection.json");
         let mut selection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        assert_eq!(selection["version"], 6);
+        assert_eq!(selection["version"], 7);
         selection["tools"] = serde_json::Value::Null;
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();
@@ -2234,9 +2182,11 @@ mod tests {
         selection.as_object_mut().unwrap().remove("core_identity");
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let error = FrozenWorkspace::load(project.path(), run.path()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unsupported frozen workspace format"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported frozen workspace format")
+        );
     }
 
     #[test]
@@ -2266,7 +2216,7 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         let authored = project.path().join(".exomonad");
         std::fs::create_dir_all(authored.join("Project")).unwrap();
-        std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n[prompts]\ncore = 'core.md'\n").unwrap();
+        std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n[prompts]\nbase = 'base.md'\n").unwrap();
         std::fs::write(
             authored.join("Project/Work.hs"),
             "module Project.Work where\nimport Project.Types\n",
@@ -2277,7 +2227,7 @@ mod tests {
             "module Project.Types where\ndata Result = Old\n",
         )
         .unwrap();
-        std::fs::write(authored.join("core.md"), "Original guidance").unwrap();
+        std::fs::write(authored.join("base.md"), "Original guidance").unwrap();
         let frozen = FrozenWorkspace::load(project.path(), first.path()).unwrap();
         let identical_run = tempfile::tempdir().unwrap();
         let identical = FrozenWorkspace::load(project.path(), identical_run.path()).unwrap();
@@ -2287,7 +2237,7 @@ mod tests {
             "module Project.Types where\ndata Result = New\n",
         )
         .unwrap();
-        std::fs::write(authored.join("core.md"), "Revised guidance").unwrap();
+        std::fs::write(authored.join("base.md"), "Revised guidance").unwrap();
         let reused = FrozenWorkspace::load(project.path(), first.path()).unwrap();
         assert_eq!(reused.prompts, frozen.prompts);
         assert!(
@@ -2297,17 +2247,19 @@ mod tests {
         );
         let next = FrozenWorkspace::load(project.path(), second.path()).unwrap();
         assert_ne!(next.identity, frozen.identity);
-        assert_eq!(next.prompts["core"], "Revised guidance");
+        assert_eq!(next.prompts["base"], "Revised guidance");
         assert!(
             std::fs::read_to_string(next.include[0].join("Project/Types.hs"))
                 .unwrap()
                 .contains("New")
         );
         std::fs::write(frozen.include[0].join("Project/Types.hs"), "tampered").unwrap();
-        assert!(FrozenWorkspace::load(project.path(), first.path())
-            .unwrap_err()
-            .to_string()
-            .contains("frozen workspace input changed"));
+        assert!(
+            FrozenWorkspace::load(project.path(), first.path())
+                .unwrap_err()
+                .to_string()
+                .contains("frozen workspace input changed")
+        );
     }
 
     #[test]
@@ -2564,12 +2516,14 @@ mod tests {
         )
         .unwrap();
         for argv in [&["init", "-q"][..], &["add", "-A"][..]] {
-            assert!(std::process::Command::new("git")
-                .args(argv)
-                .current_dir(project)
-                .status()
-                .unwrap()
-                .success());
+            assert!(
+                std::process::Command::new("git")
+                    .args(argv)
+                    .current_dir(project)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         }
     }
 

@@ -128,25 +128,14 @@ worker may reach 10 GiB, and the enclosing systemd slice remains the aggregate
 memory limit. The compiler trace records daemon epoch, daemon/worker PIDs,
 queue wait, service time and worker RSS so rotation is visible in measurements.
 
-The root prepares its selected source toolset before becoming ready. Optional
-public child profiles can then warm in the background:
-
-```toml
-[preparation]
-roles = ["research", "coding"]
-```
-
-Each listed role selects its standard public constructor: `researching`, `coding`,
-`scaffolding`, or `integrating`. Preparation uses that constructor's exact ordered
-available effects and actual installed handler support. `research` selects
-`ResearchEffects`; it does not cover the distinct `researchingLeaf` profile.
-The required root uses its actual host grants independently of `ActorEffects`.
-Later actors execute fresh installations from the shared immutable code.
-With one compiler worker, optional warming may be refused so foreground work can
-proceed; a later required installation still prepares its row in the foreground.
-
-Child agents are launched from committed checkouts. Commit the package before
-you ask an agent to delegate.
+An `AgentSpec` declares an agent's hosted tool record and child effect row. Each
+typed request supplies raw input and selects its reply type at the compiled
+request site. Spawning supplies that actual spec and creates an idle `AgentRef`;
+a typed request starts work. Choose `SameDir` when the agent should share the
+actual writable files, index, and HEAD. Choose a forked worktree when the task
+depends on a selected committed source. Project delivery may use the optional Git
+workflow in the workspace skills; general exploration does not require a
+project role or delegation hierarchy.
 
 ## Agent specification
 
@@ -455,5 +444,5 @@ evidence export is available.
   [Jev](../examples/workspace/.exomonad/skills/exomonad-jev/SKILL.md),
   [the agent spec](../examples/workspace/.exomonad/skills/exomonad-agent-spec/SKILL.md),
   [the workbench](../examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md),
-  [delegating](../examples/workspace/.exomonad/skills/exomonad-unfold/SKILL.md).
+  [delegating](../examples/workspace/.exomonad/skills/exomonad-agent-work/SKILL.md).
 - [The glossary](../../docs/GLOSSARY.md), for what the words mean here.

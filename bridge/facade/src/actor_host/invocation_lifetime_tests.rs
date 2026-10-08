@@ -97,7 +97,6 @@ impl Drop for AfterToolDeadline {
 #[tokio::test]
 async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_uncertainty() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");

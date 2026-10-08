@@ -57,6 +57,7 @@ import Tidepool.Effects.Core
 import Tidepool.Effects.Row (knownEffects)
 import Tidepool.Effects (RepoEvent, sleep)
 import Tidepool.Journal (record)
+import Tidepool.Worktree (WorkspaceHandle)
 
 data Child = Child
   { childAgent :: AgentRef
@@ -76,7 +77,7 @@ data RouterState = RouterState
 
 data RebaseRouter mode = RebaseRouter
   { routerState :: mode :- State RouterState
-  , register :: mode :- Call (Text, AdmissionReceipt) NoReply
+  , register :: mode :- Call (Text, AgentRef) NoReply
   , start :: mode :- Call () NoReply
   , tick :: mode :- Call () NoReply
   , stop :: mode :- Call () NoReply
@@ -119,8 +120,8 @@ adviceFor facts likelihood
   | likelihood >= 0.35 = DeferJudgment
   | otherwise = RecordOnly
 
-rebaseRouter :: WorktreeId -> ActorSpec RebaseRouter RebaseRouterEffects
-rebaseRouter integration = R.withWorktree integration $
+rebaseRouter :: WorkspaceHandle -> ActorSpec RebaseRouter RebaseRouterEffects
+rebaseRouter integration = R.withWorkspace integration $
   R.definition "rebase-router" (Actor.Selected knownEffects) RebaseRouter
     { routerState = RouterState Map.empty Nothing Nothing False
     , register = registerChild
@@ -129,28 +130,33 @@ rebaseRouter integration = R.withWorktree integration $
     , stop = stopRouter
     }
 
-registerChild :: (Text, AdmissionReceipt) -> Handler RouterState RebaseRouterEffects ()
-registerChild (label, receipt) = do
-  let launched = launchedWorktree receipt
-  found <- lookupWorktree (treeId launched)
-  case found of
-    Left failure -> record "rebase-router" label
-      (object ["outcome" .= ("register_failed" :: Text), "error" .= Text.pack (show failure)])
-    Right handle -> do
-      initialPaths <- gitText (cwd (handleReceipt handle))
-        ["diff", "--name-only", unGitOid (sourceHead launched), "HEAD"]
-      case initialPaths of
-        Left problem -> record "rebase-router" label
-          (outcomeJson "register_failed" ["error" .= problem])
-        Right paths -> R.modify' $ \state -> state
-          { routerChildren = Map.insert label Child
-              { childAgent = admittedAgent receipt
-              , childWorktree = treeId launched
-              , childBase = sourceHead launched
-              , childPaths = Set.fromList (Text.lines paths)
-              }
-              (routerChildren state)
-          }
+-- The spawn-issued reference retains the managed checkout chosen at admission.
+-- A reference without one cannot supply this router's worktree observations.
+registerChild :: (Text, AgentRef) -> Handler RouterState RebaseRouterEffects ()
+registerChild (label, agent) = case agentBoundWorktree agent of
+  Nothing -> record "rebase-router" label
+    (outcomeJson "register_failed" ["error" .= ("actor has no managed worktree" :: Text)])
+  Just launchedHandle -> do
+    let launched = handleReceipt launchedHandle
+    found <- lookupWorktree (treeId launched)
+    case found of
+      Left failure -> record "rebase-router" label
+        (object ["outcome" .= ("register_failed" :: Text), "error" .= Text.pack (show failure)])
+      Right handle -> do
+        initialPaths <- gitText (cwd (handleReceipt handle))
+          ["diff", "--name-only", unGitOid (sourceHead launched), "HEAD"]
+        case initialPaths of
+          Left problem -> record "rebase-router" label
+            (outcomeJson "register_failed" ["error" .= problem])
+          Right paths -> R.modify' $ \state -> state
+            { routerChildren = Map.insert label Child
+                { childAgent = agent
+                , childWorktree = treeId launched
+                , childBase = sourceHead launched
+                , childPaths = Set.fromList (Text.lines paths)
+                }
+                (routerChildren state)
+            }
 
 startRouter :: () -> Handler RouterState RebaseRouterEffects ()
 startRouter () = do
@@ -314,7 +320,7 @@ judgeAndRoute newHead rows = do
         (#children := J.each (\(label, _, _) -> label) judgeOne ambiguous)
       pure $ case result of
         Left failure -> Left failure
-        Right response -> Right (Map.fromList (map toJudgment response.children))
+        Right response -> Right (Map.fromList (map toJudgment (J.answers response).children))
   forM_ rows $ \(label, child, facts) -> do
     let (likelihood, costAnswer) = case judgments of
           Left _ | factsBehind facts && Set.null (factsOverlap facts) -> (0.5, Nothing)

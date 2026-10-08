@@ -6,6 +6,7 @@
 #[serde(rename_all = "PascalCase")]
 pub enum ActorEffectKey {
     Replies,
+    ResourceScopes,
     Watches,
     Forks,
     ActorContext,
@@ -22,6 +23,8 @@ pub enum ActorEffectKey {
     ModelCall,
     Commands,
     Console,
+    AskUser,
+    Green,
     Actor,
     Reflect,
     Lookup,
@@ -39,6 +42,7 @@ impl ActorEffectKey {
     pub const fn haskell_name(self) -> &'static str {
         match self {
             Self::Replies => "Replies",
+            Self::ResourceScopes => "ResourceScopes",
             Self::Watches => "Watches",
             Self::Forks => "Forks",
             Self::ActorContext => "ActorContext",
@@ -55,6 +59,8 @@ impl ActorEffectKey {
             Self::ModelCall => "ModelCall",
             Self::Commands => "Commands",
             Self::Console => "Console",
+            Self::AskUser => "AskUser",
+            Self::Green => "Green",
             Self::Actor => "Actor",
             Self::Reflect => "Reflect",
             Self::Lookup => "Lookup",

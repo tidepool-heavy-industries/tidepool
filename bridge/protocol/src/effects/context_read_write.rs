@@ -33,7 +33,7 @@ pub fn context_read_write() -> Effect {
             "Context edits stage together and commit on whole-cell success; external effects already issued are not rolled back on failure. ",
             "Context references and native blocks retain host-owned evidence provenance, while system and developer instructions remain host-controlled. ",
             "Saving a context value preserves data, not future edit authority; restoration must pass the current protected-structure checks. ",
-            "For curation followed by delegation, finish with `unfoldDeferred` and let children start after commit. Do not await those children inside their creating invocation. ",
+            "For curation followed by delegation, complete the synchronous context edit before capturing that context for `spawnSubagent`. Context and workspace are independent choices; see `exomonad-agent-work`. ",
             "Only an explicitly admitted synchronous profile can carry this effect; see `doc workbench` for edit and restore rules.",
         ],
         prompt_card: None,

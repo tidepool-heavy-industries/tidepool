@@ -27,6 +27,9 @@ module Tidepool.Command
     withTerminal,
     start,
     tryStart,
+    tryStartWith,
+    retain,
+    Lifetime,
     detach,
     tryDetach,
     background,
@@ -90,7 +93,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Tidepool.Actor.Record as R
 import Tidepool.Aeson.FromJSON (FromJSON, eitherDecode)
-import Tidepool.Agent.Watch.Internal (Await (..), AwaitDependency (..), Watches (..))
+import Tidepool.Agent.Watch.Internal (Await (..), AwaitPlan (..), AwaitNode (..), AwaitDependency (..), Watches (..), requireObserved)
+import qualified Tidepool.Agent.Watch.Internal as Watch (Observation (..))
 import Tidepool.Command.Types
 import Tidepool.Effects.Core
   ( CommandCleanup (..),
@@ -109,6 +113,7 @@ import Tidepool.Effects.Core
     CommandStatus (..),
     CommandStream (..),
     Commands (..),
+    WorkerLifetime,
   )
 import Tidepool.Inspection
   ( Display (..),
@@ -222,6 +227,19 @@ start command = tryStart command >>= checked
 tryStart :: (Member Commands effects) => Command -> Eff effects (Either CommandError Job)
 tryStart (Command spec) = fmap Job <$> send (CommandStartWith spec)
 
+-- | Cleanup lifetime, shared with subagents and requests.
+type Lifetime = WorkerLifetime
+
+-- | Start with explicit cleanup membership; defaults of 'tryStart' remain
+-- invocation ownership. Selecting a scope checks its runtime admission gate.
+tryStartWith :: Member Commands effects => Lifetime -> Command -> Eff effects (Either CommandError Job)
+tryStartWith lifetime (Command spec) = fmap Job <$> send (CommandStartOwnedWith spec lifetime)
+
+-- | Move cleanup membership while preserving the job's controlling actor and
+-- construction provenance. Returning a Job does not transfer its lifetime.
+retain :: Member Commands effects => Job -> Lifetime -> Eff effects (Either CommandError ())
+retain (Job key) lifetime = send (CommandRetainWith key lifetime)
+
 -- | Transfer an owned job to this actor's lifetime. Borrowed handles cannot
 -- detach or cancel another owner's work.
 detach :: (Member Commands effects) => Job -> Eff effects ()
@@ -245,11 +263,11 @@ tryBackground (Command spec) = fmap Job <$> send (CommandBackgroundWith spec)
 
 -- | Ready when the job has finished, with its outcome, cleanup, output
 -- completeness, a diagnostic tail, and the source it started at. Compose it
--- with 'awaitSettled' and use it with 'waitFor', 'watch' or 'route'. A report is evidence about the commit the command
+-- with request readiness and use it with 'await', 'watch' or 'route'. A report is evidence about the commit the command
 -- started at; it says nothing about a later revision.
 awaitFinished :: Job -> Await CommandReport
 awaitFinished (Job key) =
-  Await [[AwaitCommand key]] (\_ _ -> send (ObserveCommandWith key))
+  Await (AwaitPlan [LeafNode (AwaitCommand key)] 0) (\(Watch.Observation watchId path) _ _ -> requireObserved <$> send (ObserveWatchCommandWith watchId path key))
 
 -- | Run once and suspend until terminal completion, preserving the continuation.
 run :: (Member Commands effects) => Command -> Eff effects RunResult
@@ -525,6 +543,7 @@ instance WorkbenchDisplay StreamCapture where
 -- | A capture renders its outcome first, then each stream separately, and an
 -- incomplete stream says so before any of its text is shown.
 instance Display Capture where
+  displayTree value = LegacyLeaf (\budget -> displayWith budget value)
   displayWith budget capture =
     let heading = resultHeading (capturedResult capture) <> "\n"
         remaining = max 0 (budget - T.length heading)
@@ -534,6 +553,7 @@ instance Display Capture where
      in (text, omittedOut || omittedErr || clipped)
 
 instance Display StreamCapture where
+  displayTree value = LegacyLeaf (\budget -> displayWith budget value)
   displayWith = captureDisplay "output"
 
 captureDisplay :: Text -> Int -> StreamCapture -> (Text, Bool)
@@ -644,6 +664,7 @@ outputMetadata stream page =
     number = T.pack . show
 
 instance Display OutputIssue where
+  displayTree value = LegacyLeaf (\budget -> displayWith budget value)
   displayWith budget issue = rawText budget $ case issue of
     IncompleteStdout retained ->
       "Command finished; this capture is incomplete. Awaiting again does not enlarge it. Use Cmd.readStdout with your existing job binding, or Cmd.job applied to your result; Cmd.output navigates retained output. Retention gaps are explicit. Job: " <> T.pack (show retained)

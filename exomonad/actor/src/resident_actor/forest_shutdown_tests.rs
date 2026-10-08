@@ -16,7 +16,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let session_root = tempfile::tempdir().unwrap();
-        let session_id = tidepool_repr::SessionId(79);
+        let session_id = tidepool_runtime::session::fresh_session_id();
         let lib = SessionLib::open(
             session_id,
             session_root.path(),
@@ -34,7 +34,7 @@ impl Fixture {
             session_id,
             session,
             None,
-            crate::Incarnation(1),
+            crate::Incarnation::FIRST,
         );
         Self {
             forest: Arc::new(forest),
@@ -96,14 +96,30 @@ impl Fixture {
     }
 }
 
-/// Observe the real resident initializer and cleanup without supplying either
-/// membership records or cleanup evidence from the test.
+struct CleanupGate {
+    entered: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+impl CleanupGate {
+    fn new() -> Self {
+        Self {
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+/// Observe the ownership issued at spawn and require the retirement intent to
+/// reach every admitted member before any member begins cleanup.
 struct ObservedBehavior {
     inner: Behavior,
     context: Option<tokio::sync::oneshot::Sender<KernelContext>>,
-    independent: bool,
+    owner: crate::local_actor::SpawnOwnership,
     peers: Arc<Mutex<Vec<LocalActorRef>>>,
     cleanups: Arc<AtomicUsize>,
+    gate: Option<Arc<CleanupGate>>,
+    start_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl KernelBehavior for ObservedBehavior {
@@ -111,14 +127,27 @@ impl KernelBehavior for ObservedBehavior {
         &'a mut self,
         context: &'a KernelContext,
     ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        assert_eq!(context.spawn_ownership().is_independent(), self.independent);
-        assert_eq!(
-            context.supervisor_identity(),
-            None,
-            "Ractor links after pre_start"
-        );
+        assert!(match self.owner {
+            crate::local_actor::SpawnOwnership::Independent => {
+                matches!(
+                    context.spawn_ownership(),
+                    crate::local_actor::SpawnOwnership::Independent
+                )
+            }
+            crate::local_actor::SpawnOwnership::Supervised(expected) => matches!(
+                context.spawn_ownership(),
+                crate::local_actor::SpawnOwnership::Supervised(actual) if actual == expected
+            ),
+        });
         assert!(self.context.take().unwrap().send(context.clone()).is_ok());
-        self.inner.start(context)
+        let start_gate = self.start_gate.clone();
+        let inner = &mut self.inner;
+        Box::pin(async move {
+            if let Some(start_gate) = start_gate {
+                start_gate.acquire().await.unwrap().forget();
+            }
+            inner.start(context).await
+        })
     }
 
     fn cast<'a>(
@@ -189,11 +218,19 @@ impl KernelBehavior for ObservedBehavior {
         for peer in self.peers.lock().iter() {
             assert!(
                 peer.terminal().requested_shutdown().is_some(),
-                "cleanup preceded peer cancellation"
+                "cleanup preceded retirement intent for an admitted member"
             );
         }
         self.cleanups.fetch_add(1, Ordering::Relaxed);
-        self.inner.shutdown_components(context, terminal, deadline)
+        let gate = self.gate.clone();
+        let inner = &mut self.inner;
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.entered.add_permits(1);
+                gate.release.acquire().await.unwrap().forget();
+            }
+            inner.shutdown_components(context, terminal, deadline).await
+        })
     }
 
     fn stopped<'a>(
@@ -210,13 +247,9 @@ impl KernelBehavior for ObservedBehavior {
 }
 
 #[tokio::test]
-async fn forest_cancels_linked_members_before_staging_and_drains_only_roots() {
+async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
     let fixture = Fixture::new();
     let forest = &fixture.forest;
-    let workbench = forest
-        .new_workbench("host-workbench".into(), crate::EffectiveRole::root())
-        .await
-        .unwrap();
     let placement = forest
         .environment
         .runner
@@ -225,55 +258,92 @@ async fn forest_cancels_linked_members_before_staging_and_drains_only_roots() {
         .unwrap();
     let peers = Arc::new(Mutex::new(Vec::new()));
     let cleanups = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(CleanupGate::new());
     let (send, receive) = tokio::sync::oneshot::channel();
-    let (parent, task) = crate::local_actor::spawn_local_actor_in_directory(
+    let (parent, parent_task) = crate::local_actor::spawn_local_actor_in_directory(
         None,
         ObservedBehavior {
             inner: fixture.behavior(ActorDescriptor::new("observed-root", placement)),
             context: Some(send),
-            independent: true,
+            owner: crate::local_actor::SpawnOwnership::Independent,
             peers: peers.clone(),
             cleanups: cleanups.clone(),
+            gate: Some(gate.clone()),
+            start_gate: None,
         },
         forest.incarnation,
         forest.directory.clone(),
     )
     .await
     .unwrap();
-    let kernel = receive.await.unwrap();
+    let parent_kernel = receive.await.unwrap();
+
+    let child_placement = fixture.child_placement(&parent);
     let (send, receive) = tokio::sync::oneshot::channel();
-    let child = kernel
+    let child = parent_kernel
         .spawn_child(
             None,
             ObservedBehavior {
                 inner: fixture.behavior(
-                    ActorDescriptor::new("linked-child", fixture.child_placement(&parent))
+                    ActorDescriptor::new("supervised-child", child_placement)
                         .with_supervisor_parent(Some(parent.identity())),
                 ),
                 context: Some(send),
-                independent: false,
+                owner: crate::local_actor::SpawnOwnership::Supervised(parent.identity()),
                 peers: peers.clone(),
                 cleanups: cleanups.clone(),
+                gate: Some(gate.clone()),
+                start_gate: None,
             },
         )
         .await
         .unwrap();
     let child_kernel = receive.await.unwrap();
-    assert_eq!(child_kernel.supervisor_identity(), Some(parent.identity()));
-    {
-        let records = forest.environment.actors.lock();
-        assert!(records[&workbench.identity()].scheduler_root);
-        assert!(records[&parent.identity()].scheduler_root);
-        assert!(!records[&child.identity()].scheduler_root);
-    }
-    *peers.lock() = vec![workbench.clone(), parent.clone(), child.clone()];
-    let staging = forest.environment.root_admission_closed.read().await;
+    assert!(matches!(
+        child_kernel.spawn_ownership(),
+        crate::local_actor::SpawnOwnership::Supervised(owner) if owner == parent.identity()
+    ));
+
+    let run_owned_placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let start_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let spawning_kernel = parent_kernel.clone();
+    let run_owned_behavior = ObservedBehavior {
+        inner: fixture.behavior(ActorDescriptor::new("run-owned", run_owned_placement)),
+        context: Some(send),
+        owner: crate::local_actor::SpawnOwnership::Independent,
+        peers: peers.clone(),
+        cleanups: cleanups.clone(),
+        gate: Some(gate.clone()),
+        start_gate: Some(start_gate.clone()),
+    };
+    let spawning_run_owned = tokio::spawn(async move {
+        spawning_kernel
+            .spawn_worker(None, run_owned_behavior, crate::WorkerLifetime::RunOwned)
+            .await
+    });
+    let run_owned_kernel = receive.await.unwrap();
+    let run_owned = run_owned_kernel
+        .resolve(run_owned_kernel.identity())
+        .expect("pre_start has admitted the actor to the directory");
+    assert!(matches!(
+        run_owned_kernel.spawn_ownership(),
+        crate::local_actor::SpawnOwnership::Independent
+    ));
+
+    *peers.lock() = vec![parent.clone(), child.clone(), run_owned.clone()];
+
     let shutting_down = {
         let forest = forest.clone();
         tokio::spawn(async move { forest.shutdown().await })
     };
     let admitted = peers.lock().clone();
-    for actor in admitted {
+    for actor in &admitted {
         tokio::time::timeout(
             Duration::from_secs(2),
             actor.terminal().wait_requested_shutdown(),
@@ -281,37 +351,55 @@ async fn forest_cancels_linked_members_before_staging_and_drains_only_roots() {
         .await
         .unwrap();
     }
-    assert!(!shutting_down.is_finished(), "staging is still owned");
-    assert_eq!(cleanups.load(Ordering::Relaxed), 0);
-    drop(staging);
+    assert!(
+        run_owned.terminal().get().is_none(),
+        "the admitted pre_start member has not published an exit"
+    );
+    start_gate.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    assert!(
+        peers
+            .lock()
+            .iter()
+            .all(|actor| actor.terminal().requested_shutdown().is_some()),
+        "the first cleanup must follow intent for the complete captured membership"
+    );
+    assert!(cleanups.load(Ordering::Relaxed) >= 1);
+    gate.release.add_permits(3);
     let outcomes = tokio::time::timeout(Duration::from_secs(5), shutting_down)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(outcomes.len(), 2);
     assert!(outcomes.iter().all(crate::ForestRootShutdown::is_confirmed));
-    let mut roots = outcomes
+    let roots = outcomes
         .into_iter()
-        .map(|outcome| match outcome {
-            crate::ForestRootShutdown::Settled(shutdown) => shutdown.cleanup.actor(),
+        .filter_map(|outcome| match outcome {
+            crate::ForestRootShutdown::Settled(shutdown) => Some(shutdown.cleanup.actor()),
+            crate::ForestRootShutdown::RunResources(_) => None,
             other => panic!("unconfirmed root shutdown: {other:?}"),
         })
-        .collect::<Vec<_>>();
-    roots.sort_by_key(|actor| actor.id);
-    let mut expected = vec![workbench.identity(), parent.identity()];
-    expected.sort_by_key(|actor| actor.id);
-    assert_eq!(roots, expected);
-    assert_eq!(cleanups.load(Ordering::Relaxed), 2);
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(roots, [parent.identity(), run_owned.identity()].into());
     assert!(child.terminal().cleanup().unwrap().is_confirmed());
-    assert!(!fixture.scope_is_live(placement));
-    tokio::time::timeout(Duration::from_secs(2), task)
+    assert_eq!(cleanups.load(Ordering::Relaxed), 3);
+    let spawned_run_owned = tokio::time::timeout(Duration::from_secs(2), spawning_run_owned)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(spawned_run_owned.identity(), run_owned.identity());
+    tokio::time::timeout(Duration::from_secs(2), parent_task)
         .await
         .unwrap()
         .unwrap();
 }
 
 #[tokio::test]
-async fn sealed_forest_refuses_provisioned_workbench_with_actual_startup_cleanup() {
+async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
     let fixture = Fixture::new();
     let forest = &fixture.forest;
     let placement = forest
@@ -321,6 +409,7 @@ async fn sealed_forest_refuses_provisioned_workbench_with_actual_startup_cleanup
         .await
         .unwrap();
     assert!(fixture.scope_is_live(placement));
+
     let retirement = forest.directory.seal().cancel_all(ActorTerminal::new(
         ActorExitKind::Cancelled,
         "forest host shutdown",
@@ -334,142 +423,125 @@ async fn sealed_forest_refuses_provisioned_workbench_with_actual_startup_cleanup
     )
     .await
     {
-        Ok(_) => panic!("closed directory admitted staged root"),
+        Ok(_) => panic!("sealed directory admitted staged root"),
         Err(error) => error,
     };
     let cleanup = crate::local_actor::startup_cleanup(&error)
-        .expect("pre_start refusal retains actual cleanup");
+        .expect("startup refusal retains cleanup from the placement owner");
     assert!(cleanup.is_confirmed());
     assert!(forest.directory.resolve(cleanup.actor()).is_none());
     assert!(forest.environment.actors.lock().is_empty());
     assert!(!fixture.scope_is_live(placement));
 
     let error = match forest
-        .new_workbench("late-workbench".into(), crate::EffectiveRole::root())
+        .new_workbench("late-workbench".into(), crate::ActorCapabilities::default())
         .await
     {
-        Ok(_) => panic!("closed directory admitted new_workbench"),
+        Ok(_) => panic!("sealed forest admitted a late workbench"),
         Err(error) => error,
     };
     let error = error
         .downcast_ref::<ractor::SpawnErr>()
-        .expect("original typed startup refusal");
+        .expect("preserve the typed startup refusal");
     assert!(crate::local_actor::startup_cleanup(error)
-        .unwrap()
+        .expect("the actual startup owner cleaned its placement")
         .is_confirmed());
-    assert!(forest.shutdown().await.is_empty());
+    let outcomes = forest.shutdown().await;
+    assert_eq!(outcomes.len(), 1);
+    assert!(matches!(
+        outcomes.as_slice(),
+        [crate::ForestRootShutdown::RunResources(
+            crate::CleanupComponentOutcome::Confirmed
+        )]
+    ));
 }
 
 #[tokio::test]
-async fn provider_abort_refuses_nested_only_before_releasing_source_or_settlement() {
+async fn tool_abort_validates_original_owner_before_empty_settlement() {
     use tidepool_runtime::session::{
-        WorkbenchExecutionId, WorkbenchForkBoundary, WorkbenchRequest,
+        ContextCheckpointBoundary, WorkbenchExecutionId, WorkbenchRequest,
     };
-    for nested in [true, false] {
-        let fixture = Fixture::new();
-        let kernel_fixture = crate::resident_actor::invocation_work::tests::Fixture::start().await;
-        let forest = &fixture.forest;
-        let placement = forest
-            .environment
-            .runner
-            .provision_root_scope(forest.session)
-            .await
-            .unwrap();
-        let mut behavior = fixture.behavior(ActorDescriptor::new("provider-abort", placement));
-        let boundary =
-            WorkbenchForkBoundary::external("thread".into(), "turn".into(), "call".into());
-        let invocation = crate::resident_tools::WorkbenchCallKey::from(
-            exomonad_tool::ToolInvocationContext::external(
-                "thread".into(),
-                "turn".into(),
-                if nested {
-                    "inner".into()
-                } else {
-                    "call".into()
-                },
-                Some("call".into()),
-                None,
-            ),
-        );
-        let execution = WorkbenchExecutionId::from_digest([41; 16]);
-        let request = WorkbenchRequest::from_cell_input("pure ()")
-            .with_execution_id(execution.clone())
-            .with_fork_boundary(boundary.clone());
-        let source = {
-            let machines = forest.environment.runner.machines_for_test();
-            let mut checkout = machines.checkout_run(placement.session).unwrap();
-            let source = checkout
-                .machine()
-                .retain_lexical_scope(placement.lexical_scope)
-                .unwrap();
-            let holes = checkout
-                .machine()
-                .parked_holes()
-                .into_iter()
-                .map(str::to_owned)
-                .collect();
-            checkout.restore_suspended(holes);
-            source
-        };
-        let retained = Arc::downgrade(&source);
-        behavior
-            .workbench_executions
-            .lock()
-            .begin(&execution, request, Some(&invocation));
-        behavior.workbench_executions.lock().retain_fork_source(
-            &execution,
-            Some(&invocation),
-            crate::resident_workbench::PublishedForkSource {
-                lexical: source,
-                session: placement.session,
-                public_scope: placement.lexical_scope,
-                public_epoch: 0,
-                machine_incarnation: None,
-            },
-        );
-        assert!(!forest
-            .environment
-            .fork_groups
-            .has_abort_work_at_boundary(kernel_fixture.actor.identity(), &boundary));
-        let result = behavior
-            .abort_provider_boundary(&kernel_fixture.kernel, boundary.clone())
-            .await;
-        if nested {
-            let error = result.expect_err("nested cell is not the enclosing operation owner");
-            assert_eq!(
-                error.detail,
-                "provider child cleanup lacks one exact original journal owner"
-            );
-            assert!(!behavior.settled_fork_boundaries.contains(&boundary));
-            assert!(
-                retained.upgrade().is_some(),
-                "refusal must retain source custody"
-            );
-            assert!(behavior
-                .abort_provider_boundary(&kernel_fixture.kernel, boundary.clone())
-                .await
-                .is_err());
-            assert!(!behavior.settled_fork_boundaries.contains(&boundary));
-            assert!(retained.upgrade().is_some());
-        } else {
-            result.unwrap();
-            assert!(behavior.settled_fork_boundaries.contains(&boundary));
-            assert!(
-                retained.upgrade().is_none(),
-                "exact empty original can release its source after real checkout"
-            );
-            behavior
-                .abort_provider_boundary(&kernel_fixture.kernel, boundary)
-                .await
-                .unwrap();
-        }
-        drop(behavior);
-        forest
-            .environment
-            .runner
-            .retire_root_placement(placement)
-            .await
-            .unwrap();
-        kernel_fixture.finish().await;
-    }
+
+    let fixture = Fixture::new();
+    let forest = &fixture.forest;
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    let peers = Arc::new(Mutex::new(Vec::new()));
+    let cleanups = Arc::new(AtomicUsize::new(0));
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let (actor, task) = crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        ObservedBehavior {
+            inner: fixture.behavior(ActorDescriptor::new("abort-owner", placement)),
+            context: Some(send),
+            owner: crate::local_actor::SpawnOwnership::Independent,
+            peers: peers.clone(),
+            cleanups: cleanups.clone(),
+            gate: None,
+            start_gate: None,
+        },
+        forest.incarnation,
+        forest.directory.clone(),
+    )
+    .await
+    .unwrap();
+    let kernel = receive.await.unwrap();
+    let boundary =
+        ContextCheckpointBoundary::external("thread".into(), "turn".into(), "call".into());
+    let execution = WorkbenchExecutionId::from_digest([41; 16]);
+    let request = WorkbenchRequest::from_cell_input("pure ()")
+        .with_execution_id(execution.clone())
+        .with_checkpoint_boundary(boundary.clone());
+    let mut behavior = fixture.behavior(ActorDescriptor::new("abort-owner", placement));
+
+    let nested_only = crate::resident_tools::WorkbenchCallKey::from(
+        exomonad_tool::ToolInvocationContext::external(
+            "thread".into(),
+            "turn".into(),
+            "inner".into(),
+            Some("call".into()),
+            None,
+        ),
+    );
+    behavior
+        .workbench_executions
+        .lock()
+        .begin(&execution, request.clone(), Some(&nested_only));
+    let error = behavior
+        .tool_aborted(&kernel, boundary.clone())
+        .await
+        .expect_err("a nested cell cannot settle its original provider operation");
+    assert!(!behavior.settled_checkpoint_boundaries.contains(&boundary));
+    assert!(error.detail.contains("original") || error.detail.contains("exact"));
+
+    let original = crate::resident_tools::WorkbenchCallKey::from(
+        exomonad_tool::ToolInvocationContext::external(
+            "thread".into(),
+            "turn".into(),
+            "call".into(),
+            Some("call".into()),
+            None,
+        ),
+    );
+    behavior
+        .workbench_executions
+        .lock()
+        .begin(&execution, request, Some(&original));
+    behavior
+        .tool_aborted(&kernel, boundary.clone())
+        .await
+        .expect("the original owner can settle an empty abort after validation");
+    assert!(behavior.settled_checkpoint_boundaries.contains(&boundary));
+
+    let shutdown = forest.shutdown().await;
+    assert!(shutdown.iter().all(crate::ForestRootShutdown::is_confirmed));
+    assert!(actor.terminal().cleanup().unwrap().is_confirmed());
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
 }

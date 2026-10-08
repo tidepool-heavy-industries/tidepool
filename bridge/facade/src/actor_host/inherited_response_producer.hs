@@ -1,4 +1,13 @@
-let campaign = "inherited-producer" :: CampaignLabel
-let wave = "worker" :: ForkGroupLabel
-let workerLabel = [label|worker|]
-worker <- unfoldDeferred (batch campaign wave) (child (withLifetime ActorOwned (narrowed @'[Replies] @(Text, Int -> Int) knownEffects (codingPolicy currentCheckout) (assignment workerLabel ("custody" :: Text)))))
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+
+import qualified Tidepool.Agent.Contract as A
+import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Actors.Exomonad
+
+Right workerAgent <- spawnSubagent (FreshCtx "Return the requested value and increment function.")
+  (ForkWorktree currentCheckout)
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+    { spawnLabel = Just "worker", spawnLifetime = ActorOwned })
+Right worker <- request @((Text, [Int]), Int -> Int) workerAgent ("custody" :: Text)
+  (defaultRequestOptions { requestLabel = Just "worker" })

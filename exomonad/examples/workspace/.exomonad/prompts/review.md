@@ -28,24 +28,16 @@ or repairs; old sessionInput is not automatically rewritten. For within-contract
 findings, the existing repair relationship determines the action:
 
 ```haskell
-let repairLabel = [label|repair-candidate|]
+let repairLabel = "repair-candidate" :: Text
 next <- repair repairLabel current latest findings
 ```
 
-Left verdict means your requester repairs: respond (Produced verdict), then it
-uses `requestReview` for a changed candidate so the reviewer starts on its exact source. Right handoff retains the original response and its lifetime-transfer receipt.
-Inspect `handoffRetention` before promising work across turns; refusal leaves
-invocation ownership and normal cleanup. Given that returned `handoff`:
-
-```haskell
-let response = handedRequest handoff
-Right () <- pure (handoffRetention handoff)
-let repairedLabel = "repair-ready" :: WatchLabel
-repaired <- watch repairedLabel (awaitSettled response)
-```
-
-End the turn and keep this review pending. On wake, incorporate/check its revised
-candidate. An unavailable repair is evidence for an explicit next action, never
+If your requester repairs, return the verdict with its evidence. A changed
+candidate needs a new exact-source review request; an existing reviewer does not
+move to another workspace. Keep each typed request and its terminal result
+separate from any progress observation. If an assigned repair obligation remains
+active, keep the review pending and inspect the resulting candidate when it
+arrives. An unavailable repair is evidence for an explicit next action, never
 acceptance. Preserve original gates unless real evidence closes them.
 
 For a contradicted contract or product decision, publish WorkProgress with candidate evidence and cumulative questions.
@@ -60,16 +52,10 @@ let reviewed = ReviewedCandidate (reviewBasis current) latest checks conclusion
 respond (Produced (Accepted reviewed))
 ```
 
-A coding reviewer can also submit acceptance with `submit_review`. An
-inspection-only reviewer uses the typed reply above and retained check evidence;
-do not execute checks or pin its effects to CodingEffects. For the coding tool, read the current request id
-with `requestIdNumber` from `currentRequest :: Eff CodingEffects
-(RequestScope ReviewRequest (Outcome ReviewDecision))`, and pass it as
-`expectedRequestId`. Pass `candidateCommit (reviewInput current)` as
-`expectedCandidateOid`, plus the checks performed now as `submittedChecks` and
-your conclusion as `submittedRationale`. The tool reads the live typed request
-again, verifies the bound checkout's HEAD and clean state, then settles the
-same reply. A refusal leaves the request open; inspect it before trying again.
+Use only tools and effects declared by the actual AgentSpec. Inspection and
+executed-check evidence are separate: do not claim execution for a reviewer
+whose installed tools cannot run those checks. A refusal leaves the request
+open; inspect it before trying again.
 
 The reviewed candidate is the single source of its reviewed revision. Keep source
 check limits accurate; do not launder earlier checks into a later head. Return

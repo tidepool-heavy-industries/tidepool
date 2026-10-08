@@ -154,9 +154,7 @@ pub fn agent_inspection() -> Effect {
                         field("rosterDisposition", HsType::maybe(HsType::Named("AgentDisposition"))),
                         field("rosterCurrentRequests", HsType::list(HsType::Int)),
                         field("rosterQueuedRequests", HsType::list(HsType::Int)),
-                        field("rosterRole", HsType::Named("ActorContextRole")),
                         field("rosterBoundWorktree", HsType::maybe(HsType::Text)),
-                        field("rosterForkGroup", HsType::maybe(HsType::Int)),
                         field("rosterHaskellScope", HsType::Int),
                         field("rosterProviderThread", HsType::maybe(HsType::Text)),
                         field("rosterProviderParentThread", HsType::maybe(HsType::Text)),
@@ -219,24 +217,11 @@ pub fn agent_inspection() -> Effect {
             },
         ],
         external_types: &[
-            crate::schema::ExternalType { haskell_name: "ActorContextRole", rust_wire: "crate::ActorContextRoleWire", core_module: None },
             crate::schema::ExternalType { haskell_name: "ProviderUsageObservation", rust_wire: "crate::ProviderUsageObservationWire", core_module: None },
             crate::schema::ExternalType { haskell_name: "ProviderUsageSummary", rust_wire: "crate::ProviderUsageSummaryWire", core_module: None },
         ],
         errors: None,
         verbs: vec![
-            Verb {
-                ctor: "AgentInspectCleanupWith",
-                method: "agent_inspect_cleanup_with",
-                args: vec![Arg {
-                    name: "group",
-                    ty: HsType::Int,
-                    rust: RustBinding::Path("i64"),
-                }],
-                ret: HsType::Named("CleanupPlan"),
-                errors: None,
-                handling: HandlingClass::Actor,
-            },
             Verb {
                 ctor: "AgentInspectWith",
                 method: "agent_inspect_with",
@@ -265,18 +250,6 @@ pub fn agent_inspection() -> Effect {
                     rust: RustBinding::Path("(i64, i64)"),
                 }).collect(),
                 ret: HsType::Named("ObservationShareResult"),
-                errors: None,
-                handling: HandlingClass::Actor,
-            },
-            Verb {
-                ctor: "AgentGroupListWith",
-                method: "agent_group_list_with",
-                args: vec![Arg {
-                    name: "group",
-                    ty: HsType::Int,
-                    rust: RustBinding::Path("i64"),
-                }],
-                ret: HsType::maybe(HsType::list(HsType::Named("AgentRosterEntry"))),
                 errors: None,
                 handling: HandlingClass::Actor,
             },

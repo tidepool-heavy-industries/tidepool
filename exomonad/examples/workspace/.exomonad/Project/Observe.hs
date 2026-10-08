@@ -6,7 +6,7 @@ module Project.Observe
   ( WorkObservation (..), observeWork, workSummary, deliverySummary
   , candidateOutcomeSummary, reviewSummary, attentionSummary, progressSummary, workSnapshotSummary
   , workingAndAbnormal, actorSummary
-  , RsiInput (..), rsiContext, rsiBranch
+  , RsiInput (..), rsiContext
   ) where
 
 import Control.Monad.Freer (Eff, Member)
@@ -17,7 +17,6 @@ import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (AgentInspection)
 import Exomonad.Workspace (workspaceIdentity)
 import Exomonad.Contrib.Types
-import Project.Work (projectPrompt)
 import Exomonad.Contrib.Routing (WorkState (..), WorkSource (..), WorkEvent (..), WorkDelta (..), outstandingEvidence)
 
 -- Existing owned handles and observations are the evidence. This value is a
@@ -34,7 +33,7 @@ data WorkObservation = WorkObservation
 
 observeWork
   :: (Member AgentInspection effects, Member Replies effects)
-  => Task -> (Response Delivery, Progress WorkProgress) -> Eff effects WorkObservation
+  => Task -> (Request Delivery, Progress WorkProgress) -> Eff effects WorkObservation
 observeWork task (worker, progress) = do
   current <- snapshot
   result <- pollResponse worker
@@ -81,6 +80,7 @@ workSummary observed = Text.unlines
   , "Definitions: " <> observedDefinition observed
   , "Owner: " <> shown (observedOwner observed) <> "; visible: " <> shown (observedOwnerVisible observed)
   , "Outcome: " <> case observedResult observed of
+      ResponseStarting reason -> "starting: " <> reason
       ResponsePending _ -> "pending"
       ResponseCancellationPending reason -> "cancellation pending: " <> shown reason
       ResponseUnavailable failure -> "unavailable: " <> shown failure
@@ -165,8 +165,3 @@ rsiContext input = Text.unlines $
   , "Current definitions: " <> workspaceIdentity
   , "Usage interval (newly visible history is separate): " <> shown (usageDelta (rsiBefore input) (rsiAfter input))
   ] ++ map workSummary (rsiWork input) ++ rsiEvidence input
-
-rsiBranch :: Label -> WorktreeSeed -> RsiInput -> Branch CodingEffects RsiInput (Outcome Candidate)
-rsiBranch label seed input = withInstructions (projectPrompt "rsi") $
-  withContext (selected rsiContext) $ withModel "planner" $ withEffort Medium $
-  coding seed (assignment label input)

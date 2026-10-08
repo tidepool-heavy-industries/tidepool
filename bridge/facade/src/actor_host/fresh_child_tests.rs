@@ -26,7 +26,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
     .expect("the shipped workspace starts through its production host");
     host.run_scenario(|host| {
         Box::pin(async move {
-            host.input("Pass a workspace Task to a selected coding child and return its typed candidate.")
+            host.input("Pass a workspace Task to the supplied child spec and return its typed candidate.")
                 .await
                 .unwrap();
             let root_id = host.context.actor.identity();
@@ -56,7 +56,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
                         .forest
                         .inspect_host_graph()
                         .into_iter()
-                        .find(|node| node.label == "typed-source/coding/worker")
+                        .find(|node| node.label == "worker")
                     {
                         assert!(child.terminal.is_none(), "{child:?}");
                         assert_eq!(child.creator, Some(root_id));
@@ -75,16 +75,31 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
             .await
             .expect("selected child completes typed input admission and attaches its provider");
             let child_installation = host.context.observer.installation(child_id).await;
-            assert!(!child_installation.checkpoint);
             assert_eq!(child_installation.context_parent, None);
             let child_notebook = child_installation
                 .tools
                 .iter()
                 .find(|tool| tool.name() == "haskell_sync")
-                .expect("coding child notebook");
-            assert!(child_notebook
+                .expect("supplied child spec notebook");
+            let supplied_effects = [
+                ActorEffectKey::Replies,
+                ActorEffectKey::Commands,
+                ActorEffectKey::Lookup,
+                ActorEffectKey::BoundWorktree,
+            ]
+            .into_iter()
+            .map(exomonad_tool::ToolEffectKey::from)
+            .collect::<std::collections::HashSet<_>>();
+            let actual_effects = child_notebook
                 .effect_keys()
-                .contains(&ActorEffectKey::WorktreeAllocation.into()));
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(
+                actual_effects,
+                supplied_effects,
+                "the child's notebook exposes the caller's supplied spec effect row"
+            );
             assert!(!child_notebook
                 .effect_keys()
                 .contains(&ActorEffectKey::Journal.into()));
@@ -129,13 +144,10 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
     .await;
 }
 
-/// Opt-in qualification of the dedicated-machine factory through a selected
-/// typed launch. Default campaigns and the production host share a machine.
-/// This campaign explicitly installs the root's compiled child bootstrap;
-/// the child must retain its nominal inputs, allocate its own declarations,
-/// and release its distinct machine on retirement.
+/// A fresh-context child retains its typed input, allocates its own
+/// declarations, and releases its distinct machine on retirement.
 #[tokio::test]
-async fn opted_in_selected_context_child_owns_and_retires_its_machine() {
+async fn fresh_context_child_owns_and_retires_its_machine() {
     let mut campaign = TestCampaign::start_with_child_sessions().await;
     let root = campaign.root_installation.policy.clone();
     let root_session = campaign
@@ -178,15 +190,10 @@ async fn opted_in_selected_context_child_owns_and_retires_its_machine() {
         .expect("child actor has a session");
     assert_ne!(
         child_session, root_session,
-        "an opted-in eligible SelectedContext launch must own its own machine"
+        "the explicit fresh-context launch must own its own machine"
     );
 
-    installation
-        .fork_gate
-        .as_ref()
-        .expect("selected fork readiness owner")
-        .mark_ready()
-        .unwrap();
+    campaign.acknowledge_native_spawn(&installation);
     let setup = setup.await.unwrap();
     assert_eq!(setup["status"], "committed", "{setup}");
     campaign

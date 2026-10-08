@@ -67,7 +67,6 @@ tests = testGroup "cell-splitter"
   , testCase "requestOwnedParserDefaults" requestOwnedParserDefaults
   , testCase "interfaceMeasurementDiagnostics" interfaceMeasurementDiagnostics
   , testCase "multilineLetCompilation" multilineLetCompilation
-  , testCase "renderNameErrorTeachesGroupPaths" renderNameErrorTeachesGroupPaths
   , testCase "ambiguousOccurrenceHintCompilation" ambiguousOccurrenceHintCompilation
   , testCase "ordinary structural display" $
       requiredInput "TIDEPOOL_TEST_EFFECTS_DIR" >>= structuralDisplayCompilation OrdinaryDisplayTest

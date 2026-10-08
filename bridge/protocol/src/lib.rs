@@ -102,6 +102,7 @@ pub fn runtime_generated_files() -> Vec<GeneratedFile> {
 pub fn actor_generated_files() -> Vec<GeneratedFile> {
     let effects: Vec<_> = vec![
         effects::actor::actor(),
+        effects::resource_scope::resource_scopes(),
         effects::actor_context::actor_context(),
         effects::introspection::introspection(),
         effects::lookup::lookup(),
@@ -111,12 +112,13 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
         effects::agent_control::agent_control(),
         effects::commands::commands(),
         effects::console::console(),
+        effects::ask_user::ask_user(),
+        effects::green::green(),
         effects::notifications::notifications(),
         effects::jev::jev(),
         effects::model::model(),
         effects::agent_inspection::agent_inspection(),
         effects::agent_launch::agent_launch(),
-        effects::forks::forks(),
         effects::agent_tools::agent_tools(),
         effects::agent_session::agent_session(),
         effects::reflect::reflect(),

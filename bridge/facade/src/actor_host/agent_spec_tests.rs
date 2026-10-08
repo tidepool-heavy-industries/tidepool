@@ -196,7 +196,6 @@ const DESCRIPTION: &str = "Answer one fixed question about a topic.";
 
 async fn start(description: &str, answer: &str) -> TestCampaign {
     TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, description, answer);
@@ -218,7 +217,6 @@ async fn start_with_slot(answer: &str, slot: &str) -> TestCampaign {
     let slot = slot.to_owned();
     let answer = answer.to_owned();
     TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         move |config| {
             write_workspace(&config.workspace, DESCRIPTION, &answer);
@@ -246,7 +244,6 @@ async fn start_with_slot(answer: &str, slot: &str) -> TestCampaign {
 async fn start_with_cell_slot(slot: &str) -> TestCampaign {
     let slot = slot.to_owned();
     TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         move |config| {
             write_workspace(&config.workspace, DESCRIPTION, "keptwhole");
@@ -279,7 +276,6 @@ async fn start_with_sleeping_slot(answer: &str, slot: &str) -> TestCampaign {
     let slot = slot.to_owned();
     let answer = answer.to_owned();
     TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         move |config| {
             write_workspace(&config.workspace, DESCRIPTION, &answer);
@@ -428,7 +424,6 @@ async fn a_rebuilt_record_with_the_same_surface_swaps_and_later_calls_run_new_co
 #[tokio::test]
 async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() {
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");
@@ -724,7 +719,6 @@ async fn an_installer_execution_failure_keeps_source_cells_and_old_handlers() {
 #[tokio::test]
 async fn a_workspace_without_a_spec_installs_the_empty_default() {
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
@@ -768,7 +762,6 @@ async fn a_workspace_without_a_spec_installs_the_empty_default() {
 #[tokio::test]
 async fn the_run_spec_module_is_installed_for_a_child_with_a_checkout() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
@@ -840,7 +833,6 @@ async fn the_run_spec_module_is_installed_for_a_child_with_a_checkout() {
 #[tokio::test]
 async fn a_child_checkout_spec_edit_cannot_replace_the_run_spec() {
     let mut campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
@@ -1330,10 +1322,17 @@ async fn a_slots_own_tool_use_does_not_bring_it_back_round_on_itself() {
 // its checkout to have a layer of its own.
 // ---------------------------------------------------------------------------
 
-const CODING_CHILD: &str = "let campaign = \"agent-spec\" :: CampaignLabel\n\
-     let group = \"checkout\" :: ForkGroupLabel\n\
-     let leaf = [label|editor|]\n\
-     worker <- unfoldDeferred (batch campaign group) (child (withLifetime ActorOwned (coding @Text projectHead (assignment leaf ()))))\n";
+const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
+     import Tidepool.Actors.Exomonad\n\
+     import Tidepool.Effects.Core (Commands, Lookup)\n\
+     import qualified AgentSpec as Spec\n\
+     import qualified Project.Tools as Tools\n\
+     Right seed <- checkpoint \"agent-spec child context\"\n\
+     Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
+       ((defaultSpawnOptions (Spec.agentSpec :: A.AgentSpec Tools.SpecTools '[Replies, Commands, Lookup, BoundWorktree]))\n\
+         { spawnLabel = Just \"editor\", spawnLifetime = ActorOwned\n\
+         , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" })\n\
+     Right worker <- request @Text child () (defaultRequestOptions { requestLabel = Just \"editor\" })\n";
 
 fn commit(workspace: &Path, message: &str) {
     let git = |args: &[&str]| {
@@ -1373,9 +1372,9 @@ async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResiden
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        worktree_grant(child.effective_role.role()),
+        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
     );
-    child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&child);
     child
 }
 
@@ -1414,7 +1413,7 @@ data MyTools mode = MyTools
 tools :: Member Cmd.Commands effects => MyTools (AsServerT (Eff effects))
 tools = MyTools
   { shell = Shell.tools
-  , probe = tool "Answer one fixed question about a topic." (\_ -> pure "one")
+  , probe = presentWith id $ tool "Answer one fixed question about a topic." (\_ -> pure "one")
   }
 
 agentSpec :: Member Cmd.Commands effects => AgentSpec MyTools effects
@@ -1424,7 +1423,6 @@ agentSpec = defaultSpec { specTools = tools }
 /// A campaign whose configured spec installs the nesting record.
 async fn start_nested() -> TestCampaign {
     TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");

@@ -3308,7 +3308,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
     assert_eq!(resident.binding_names_in(public), before_refusal);
     std::fs::write(
         &support,
-        include_str!("fixtures/quoted-template-support.hs").replace("[label|x|]", "[label|xx|]"),
+        include_str!("fixtures/quoted-template-support.hs").replace("[fmt|x|]", "[fmt|xx|]"),
     )
     .unwrap();
     try_execute_cell_with_template_imports_expectation(

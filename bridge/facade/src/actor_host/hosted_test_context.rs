@@ -26,7 +26,9 @@ impl StartupPolicy {
                     format!("{STARTUP_DIAGNOSTIC_SECONDS} must be an integer number of seconds")
                 })?;
                 if seconds <= STARTUP_BUDGET.as_secs() || seconds > 600 {
-                    return Err(format!("{STARTUP_DIAGNOSTIC_SECONDS} must exceed the standard 300-second budget and be at most 600 seconds"));
+                    return Err(format!(
+                        "{STARTUP_DIAGNOSTIC_SECONDS} must exceed the standard 300-second budget and be at most 600 seconds"
+                    ));
                 }
                 Ok(Self::Diagnostic { seconds })
             }
@@ -422,9 +424,10 @@ impl HostedTestDiagnostics {
 #[derive(Clone)]
 pub(super) struct ObservedInstallation {
     pub(super) actor: LocalActorRef,
+    pub(super) policy: Arc<dyn exomonad_actor::ResidentToolEndpoint>,
     pub(super) checkpoint: bool,
     pub(super) context_parent: Option<ActorRef>,
-    pub(super) role: exomonad_actor::ActorRole,
+    pub(super) capabilities: exomonad_actor::ActorCapabilities,
     pub(super) tools: Vec<exomonad_tool::HostedTool>,
     pub(super) acquisition: Option<exomonad_actor::ToolsetAcquisition>,
     pub(super) installed_at: std::time::Instant,
@@ -514,9 +517,10 @@ impl HostTestObserver {
             installation.actor.identity(),
             ObservedInstallation {
                 actor: installation.actor.clone(),
+                policy: installation.policy.clone(),
                 checkpoint: installation.checkpoint.is_some(),
                 context_parent: installation.context_parent,
-                role: installation.effective_role.role(),
+                capabilities: installation.capabilities.clone(),
                 tools: installation.policy.tools().to_vec(),
                 acquisition: installation.toolset_acquisition().cloned(),
                 installed_at: std::time::Instant::now(),
@@ -918,11 +922,11 @@ impl HostedTestRuntime {
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: impl FnOnce(
-                &Arc<embedded_harness::EmbeddedHarnessRuntime>,
-                &ActorHostConfig,
-            ) -> Arc<dyn harness::engine::ResponsesTransport>
-            + Send
-            + 'static,
+            &Arc<embedded_harness::EmbeddedHarnessRuntime>,
+            &ActorHostConfig,
+        ) -> Arc<dyn harness::engine::ResponsesTransport>
+        + Send
+        + 'static,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
             settings,
@@ -1017,7 +1021,6 @@ impl HostedTestRuntime {
             tmux_session: "unused-hosted-acceptance".into(),
             model: "test-model".into(),
             effort: exomonad_actor::ForkEffort::Low,
-            research_policy: exomonad_actor::ResearchPolicy::default(),
             pane_environment: BTreeMap::new(),
             jev: None,
         };
@@ -1229,9 +1232,13 @@ impl HostedTestRuntime {
                 } else {
                     Ok(())
                 };
-                return Err(HostedStartupError::Refused { failure, detail: format!(
-                    "production startup failed: {detail}; cleanup: {cleanup:?}; evidence: {evidence:?}"
-                ), cleanup });
+                return Err(HostedStartupError::Refused {
+                    failure,
+                    detail: format!(
+                        "production startup failed: {detail}; cleanup: {cleanup:?}; evidence: {evidence:?}"
+                    ),
+                    cleanup,
+                });
             }
         };
         let runtime = Arc::clone(&context.runtime);

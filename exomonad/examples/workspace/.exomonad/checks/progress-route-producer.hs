@@ -1,5 +1,5 @@
 {-# LANGUAGE QuasiQuotes #-}
-let campaignLabelValue = "progress-routes" :: CampaignLabel
-let wave = "workers" :: ForkGroupLabel
-let producerLabel = [label|producer|]
-(producer, updates) <- unfoldDeferred (batch campaignLabelValue wave) (childWithProgress @WorkProgress @Text (withLifetime ActorOwned $ coding projectHead (assignment producerLabel ("inspect contract" :: Text))))
+Right producerAgent <- spawnSubagent (FreshCtx "Inspect the contract and report questions as they arise.") (ForkWorktree projectHead)
+  ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just "producer" })
+Right (producer, updates) <- requestWithProgress @WorkProgress @Text producerAgent "inspect contract"
+  (defaultRequestOptions { requestReporting = Silent })

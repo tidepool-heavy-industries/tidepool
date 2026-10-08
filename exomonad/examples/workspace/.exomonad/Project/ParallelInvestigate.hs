@@ -205,10 +205,10 @@ chooseNextProbe question probes = do
         J..| J.many #probe probeName probeContext probes))
   pure $ case selected of
     Left failure -> Left (ProbeChoiceUnavailable (Text.pack (show failure)))
-    Right answer -> case J.settle J.careful answer
+    Right response -> case J.settle J.careful (J.answers response)
       (#unresolved (\() -> Nothing) J..| #probe (\_ probe -> Just probe)) of
       Left doubt -> Left (ProbeChoiceUnresolved doubt.why)
-      Right (J.Settled probe) -> Right probe
+      Right settled -> let probe = J.settledValue settled in Right probe
 
 -- | The original outcome is never replaced by a diagnostic command's outcome.
 data FollowupStop

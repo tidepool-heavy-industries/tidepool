@@ -5,7 +5,6 @@ use super::test_campaign::{
 #[tokio::test]
 async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
     let campaign = TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
         |admission| admission,
         |config| {
             configure_notebook_lookup_workspace(config);

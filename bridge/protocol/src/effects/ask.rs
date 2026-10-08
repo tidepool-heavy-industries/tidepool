@@ -1,9 +1,6 @@
 //! The `Ask` suspension — decode-only.
 //!
-//! `ask schema prompt` (structured operator elicitation) — the fallback
-//! [`crate::schema::HandlingClass::Ask`] routing, and also the shape a
-//! malformed `AskUserWith` degrades to (handled by the harness, not
-//! here — see the runtime's decoder contract).
+//! `ask schema prompt` is the retained structured operator elicitation boundary.
 //!
 //! The raw `askRaw` wrapper is supplied by `ask_effect_def!` in
 //! `bridge/mcp/src/effect_defs.rs`. This decode-only description is listed in

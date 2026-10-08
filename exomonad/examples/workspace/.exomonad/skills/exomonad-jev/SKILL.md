@@ -16,22 +16,57 @@ determines what to observe next. Compose these stages as functions, reuse packet
 as values, and retain results for later projections. Measure latency and usage
 for the workload you are building.
 
-Everything named in this skill is **shipped**: `J.ask`, `J.ask1`, `J.askWith`,
-`J.choice`, `J.noul`, `J.score`, `J.each`, `J.optional`, `J.alt`, `J..|`,
-`J.many`, `J.level`, `J.state`, `J.rawState`, `J.field`, `J.settle`,
-`J.takenUnder`, `J.judge`, `J.holds`, `J.grade`, `J.graded`, `J.handle`,
-`J.taken`, `J.contenders`, `J.explain`, `J.massAtOrAbove`, `J.answers`,
-`J.resolvedModel`, `J.lenient`, `J.careful`, `J.strict`. The one exception is
-the **effect type** `Jev`, which a record actor's row must name and which is not
-re-exported by the workbench surface: `import Tidepool.Effects.Core (Jev)`.
-Nothing from `.exomonad/workspace/Project` appears here.
+`Jev.Operators` is the public interface for both notebook cells and authored
+modules. An explicit effect signature imports the effect type with
+`import Tidepool.Effects.Core (Jev)`. These compositions require no Project
+workflow helpers.
 
 `import qualified Jev.Operators as J` is in scope; `:=` and `:&` read
 unqualified.
 
 `J.ask1 state question` asks one; `J.ask state packet` asks a whole packet in
-one round trip. Both return `Either J.JevError _`. Read the error and fall back
+one round trip. Both return a typed Jev call error or a response. Use
+`J.answers response` to project the answer payload; retain the response when
+you need its model, usage or diagnostics. Read the typed error and fall back
 to your own policy; never retry blindly.
+
+Call errors retain preparation, typed host cause, and response decoding as
+separate cases. A circuit-open result includes its retry delay; client setup
+failure remains distinct from an unconfigured endpoint. Usage counts are
+optional: unknown or malformed usage stays unknown, and measured zero is
+`Just 0`. `fmap` and `J.mapResponse` transform the answer payload while preserving
+model, usage, diagnostics and the original answer evidence. A response's
+`originalAnswerEvidence` display describes that original judgment, even when
+its current payload is a function or an action. Displaying it does not inspect
+or run that payload.
+
+To inspect a call before sending it, retain `J.prepare model state packet`.
+`J.executePrepared prepared` calls the same production host as `J.ask`
+and uses that original decoder and payloads. `display prepared` inspects its
+validated model, input and questions without demanding captured action payloads.
+`J.request prepared` reads the wire body for transport or recording;
+`J.decode prepared body` decodes a recorded response through the original call
+without contacting Jev or running any selected continuation. Each explicit
+`J.executePrepared` sends a new request; retaining a prepared call does not
+cache a service response.
+
+A prepared call fixes its model and input. Reuse a question value across
+contrasting inputs, preparing each input separately; the existing prepared
+request does not change when another input is constructed.
+
+Return the typed response from a composition when later cells need it. For
+example, end the successful and failed branches with the original `result`
+after displaying small projections, then bind that result in the notebook.
+`fmap J.usage result` observes metadata later; `fmap J.answers result` projects
+the answers explicitly. Ending with only `display` retains the display handle,
+not the response.
+
+Keep observation functions independent of presentation: return their typed
+response and require only `Member Jev effects` when that is their only effect.
+The caller can display it, apply several policies, or pass it to another
+function. Those operations reuse the same judgment. A new call belongs after
+changed evidence or a changed question, or when another service observation is
+deliberately wanted.
 
 ## Compose the questions
 
@@ -112,8 +147,9 @@ packet to a function that wants it as one value. A choice answer has `.key`,
 `.expectation`, `.confidence` and `.masses`. Those fields are all there is: an
 answer cannot be built or matched, and what it decides is reached through
 `J.settle`, `J.judge`, `J.grade`, `J.taken` and `J.takenUnder`. Ending a cell
-with the bound `answer` shows every distribution — do that the first few times
-you write a packet, then project what the next decision needs.
+with the bound `answer` retains the typed value without displaying it. Use
+`display answer` while learning a packet, then display only the projection the
+next decision needs.
 
 Use `J.handle` or `J.settle` for dispatch: each handler receives the alternative's
 original typed payload, including its captured values or prepared action. `.key`
@@ -128,17 +164,24 @@ whatever it is.
 
 A policy sets three floors: mass, margin and confidence. `J.lenient`,
 `J.careful` and `J.strict` provide increasing thresholds; choose them against
-actual decisions and outcomes. `J.handle` follows the winner directly;
+actual decisions and outcomes. Policy constructors are abstract;
+`J.customPolicy mass margin confidence` validates a `Custom` policy. A nominal
+policy tag records which policy ran; it does not grant authority or establish
+semantic certainty. `J.handle` follows the winner directly;
 `J.settle` adds a doubt branch when the program benefits from another read,
 another question or a handback. `J.settle policy answer
-handlers` returns `Either J.Doubt (J.Settled p r)`: `Right (J.Settled result)`
-through the handler for the alternative that won, or `Left` a
+handlers` returns `Either J.Doubt (J.Settled p r)`: `Right settled` carries
+the handler result, available through `J.settledValue settled`, or `Left` a
 `J.Doubt { cause, why }` whose `cause` is `NearTie`, `Underweight` or
 `Unconfident` and whose `why` is the line a log reads. `J.takenUnder` is the
 same with no handler list when every alternative carries the same type of
 payload, `J.judge` and `J.holds` do it for a noul — a doubt is not a no, and
 both read as `False` under `J.holds`, which is why it is a separate verb.
 Choose the projection that preserves the distinctions your continuation uses.
+A settled value has an opaque preview because its payload can be an action.
+To inspect an ordinary settled Bool, use
+`display (fmap J.settledValue (J.judge J.careful predicate))`.
+Project an action only when the continuation is ready to run it.
 
 `Right` means the winning alternative cleared the floors: a confident
 `insufficient_evidence` is also a `Right` and can select a read-more continuation.
@@ -195,9 +238,11 @@ let gate = J.choice "Which of these describes the candidate?"
 answer <- J.ask1 (J.state (#owned_paths := (["src/Retry.hs", "tests/RetrySpec.hs"] :: [Text]) :& #diff_stat := diffStat :& #test_output := testOutput :& #review_scope := ("retry bounds only" :: Text))) gate
 display (case answer of
   Left err -> "jev unavailable: " <> T.pack (show err)
-  Right a -> case J.takenUnder J.careful a of
-    Left doubt -> "hold: " <> doubt.why
-    Right (J.Settled verdict) -> a.key <> " -> " <> verdict <> "; " <> J.explain J.careful a)
+  Right response ->
+    let a = J.answers response
+    in case J.takenUnder J.careful a of
+      Left doubt -> "hold: " <> doubt.why
+      Right settled -> a.key <> " -> " <> J.settledValue settled <> "; " <> J.explain J.careful a)
 ```
 
 The example uses `J.careful` to demonstrate settlement. Choose thresholds from
@@ -240,7 +285,7 @@ answer <- J.ask1 (J.state (#test_output := ("FAIL [ 0.2s] tidepool-runtime sessi
   (J.choice "Which prepared continuation matches this test output?"
     (J.alt #inspect_by_hand "The output names neither a single test nor a target" (pure ("reading the failure by hand" :: Text))
       J..| J.many #rerun (\(k, _, _) -> k) (\(_, w, _) -> w) runners))
-next <- either (const (pure "jev unavailable; inspecting by hand")) (\a -> J.handle a (#inspect_by_hand id J..| #rerun (\_ (_, _, action) -> action))) answer
+next <- either (const (pure "jev unavailable; inspecting by hand")) (\response -> J.handle (J.answers response) (#inspect_by_hand id J..| #rerun (\_ (_, _, action) -> action))) answer
 display next
 ```
 
@@ -261,7 +306,7 @@ let packet =
         :& #per := J.each fst (\(k, d) -> #relevant := J.noul ("Is " <> k <> " (" <> d <> ") on the path the timeout takes?")) candidates
         :& #fixed := J.noul "Given that the retry loop changed yesterday, is the timeout already fixed?"
 answer <- J.ask (J.state (#failure := ("fetch times out after 3 retries" :: Text))) packet
-display (fmap (\r -> (either (.why) (\(J.Settled (k, _)) -> k) (J.takenUnder J.lenient r.best), [(k, s.relevant.yes) | ((k, _), s) <- r.per], r.fixed.yes)) answer)
+display (fmap (\r -> let a = J.answers r in (either (.why) (J.settledValue) (J.takenUnder J.lenient a.best), [(k, s.relevant.yes) | ((k, _), s) <- a.per], a.fixed.yes)) answer)
 ```
 
 When several items may each qualify, ask one `noul` per item with `J.each`, not
@@ -286,6 +331,37 @@ When the answer resolves nothing useful, return to ordinary reasoning with the
 packet's evidence still bound in the cell. Nothing is recomputed, and a
 recurring handback is the signal to write that branch by hand. The `doc jev`
 topic points back to this skill as its canonical reference.
+
+## Compose a human dialogue
+
+Define the domain choices once when both Jev and a person can select them.
+A `NonEmpty` collection can retain each choice's semantic key and condition,
+human-facing `View`, and original typed payload. Build `J.many` from the
+conditions and rows; build `F.option` from their views and the same rows.
+The form's occurrence identities belong to the form, and neither continuation
+needs to reconstruct a payload from the selected key or its rendered label.
+
+The semantic condition explains when a choice applies; the human view explains
+what choosing it means. They can be different presentations of the same domain
+value. Constructing an option, preparing its request, and inspecting the
+response leave its action unevaluated. Sequencing the chosen action runs it;
+sequencing it twice runs it twice.
+
+Use ordinary `case` to distinguish a Jev call failure, a policy doubt, and a
+settled alternative that asks for more information. Each can have its own
+continuation. A human question is an authored decision in that continuation:
+handle `F.Submitted`, `F.Dismissed` and `F.FormUnavailable` explicitly. Keep
+the original response when human input changes what the program does next.
+Independent fields compose applicatively inside one form; a later form can
+depend on the submitted value in the same `Eff` program. Answered forms remain
+in chat as the next question is appended.
+
+The shared modules `Examples.JevPreparedWorkflow` and
+`Examples.JevFormWorkflow` are compiled examples. The first separates a
+Jev-only observation from its notebook presentation. The second shares domain
+choices across Jev and human forms, retains the original response, and selects
+an original continuation with a structured preview. Import them through the
+ordinary shared source root, or adapt their functions to your domain.
 
 ## Reusable working patterns
 
@@ -354,7 +430,7 @@ let classify :: Text -> Handler [(Text, Text)] MyEffects (); classify output = d
             J..| J.alt #insufficient_evidence "`check_output` is empty or does not name a tool, a rule or a test" "ask for the full check output"))
       case answer of
         Left err -> modify' (++ [("jev_unavailable", T.pack (show err))])
-        Right a -> modify' (++ [(either (const "doubt") (\(J.Settled act) -> act) (J.takenUnder J.lenient a), a.key <> " " <> T.pack (show a.confidence))])
+        Right response -> let a = J.answers response in modify' (++ [(either (const "doubt") J.settledValue (J.takenUnder J.lenient a), a.key <> " " <> T.pack (show a.confidence))])
 ```
 
 For a compiled command → choice → effectful continuation example, read

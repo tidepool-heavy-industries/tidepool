@@ -1,8 +1,10 @@
+use std::borrow::Cow;
+
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
 use crate::{
-    ActorEffectProfile, ActorPlacement, ActorRef, ActorSessionContext, ActorSourceImports,
-    EffectiveRole,
+    ActorCapabilities, ActorEffectProfile, ActorPlacement, ActorRef, ActorSessionContext,
+    ActorSourceImports,
 };
 
 /// The host or lineage owner chooses persistence independently of actor names
@@ -17,24 +19,23 @@ pub enum ActorPersistencePolicy {
 /// Immutable execution attributes selected before an actor is spawned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
-    label: String,
+    label: Option<String>,
     profile: ActorEffectProfile,
     effect_policy: EffectRunPolicy,
     live_payload: LivePayloadPolicy,
     placement: ActorPlacement,
     source_imports: ActorSourceImports,
-    role: EffectiveRole,
+    capabilities: ActorCapabilities,
     creator: Option<ActorRef>,
     supervisor_parent: Option<ActorRef>,
     context_parent: Option<ActorRef>,
     actor_path: Option<tidepool_repr::ActorPath>,
     persistence_policy: ActorPersistencePolicy,
-    fork_group: Option<crate::ForkGroupId>,
     fork_effort: Option<crate::ForkEffort>,
     model: Option<crate::Model>,
     instructions: Option<String>,
     fork_budget: Option<(i64, i64)>,
-    fork_boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+    checkpoint_boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
     checkpoint_token: Option<String>,
     source_layer: std::sync::Arc<[std::path::PathBuf]>,
 }
@@ -42,33 +43,48 @@ pub struct ActorDescriptor {
 impl ActorDescriptor {
     #[must_use]
     pub fn new(label: impl Into<String>, placement: ActorPlacement) -> Self {
+        Self::new_optional(Some(label.into()), placement)
+    }
+
+    #[must_use]
+    pub(crate) fn new_optional(label: Option<String>, placement: ActorPlacement) -> Self {
         Self {
-            label: label.into(),
+            label,
             profile: ActorEffectProfile::ReadWrite,
             effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             placement,
             source_imports: ActorSourceImports::default(),
-            role: EffectiveRole::coding(),
+            capabilities: ActorCapabilities::default(),
             creator: None,
             supervisor_parent: None,
             context_parent: None,
             actor_path: None,
             persistence_policy: ActorPersistencePolicy::Ephemeral,
-            fork_group: None,
             fork_effort: None,
             model: None,
             instructions: None,
             fork_budget: None,
-            fork_boundary: None,
+            checkpoint_boundary: None,
             checkpoint_token: None,
             source_layer: std::sync::Arc::from([]),
         }
     }
 
     #[must_use]
-    pub fn label(&self) -> &str {
-        &self.label
+    pub fn authored_label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    #[must_use]
+    pub fn display_label(&self) -> Cow<'_, str> {
+        match &self.label {
+            Some(label) => Cow::Borrowed(label),
+            None => self
+                .actor_path
+                .as_ref()
+                .map_or(Cow::Borrowed(""), |path| Cow::Owned(path.to_string())),
+        }
     }
 
     #[must_use]
@@ -125,8 +141,10 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn fork_boundary(&self) -> Option<&tidepool_runtime::session::WorkbenchForkBoundary> {
-        self.fork_boundary.as_ref()
+    pub fn checkpoint_boundary(
+        &self,
+    ) -> Option<&tidepool_runtime::session::ContextCheckpointBoundary> {
+        self.checkpoint_boundary.as_ref()
     }
 
     pub fn checkpoint_token(&self) -> Option<&str> {
@@ -139,11 +157,11 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub(crate) fn with_fork_boundary(
+    pub(crate) fn with_checkpoint_boundary(
         mut self,
-        boundary: Option<tidepool_runtime::session::WorkbenchForkBoundary>,
+        boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
     ) -> Self {
-        self.fork_boundary = boundary;
+        self.checkpoint_boundary = boundary;
         self
     }
 
@@ -159,14 +177,25 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn effective_role(&self) -> &EffectiveRole {
-        &self.role
+    pub fn capabilities(&self) -> &ActorCapabilities {
+        &self.capabilities
     }
 
     #[must_use]
-    pub fn with_effective_role(mut self, role: EffectiveRole) -> Self {
-        self.role = role;
+    pub fn with_capabilities(mut self, capabilities: ActorCapabilities) -> Self {
+        self.capabilities = capabilities;
         self
+    }
+
+    /// Root identity follows ancestry, independently of available effects.
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.creator.is_none()
+            && self.supervisor_parent.is_none()
+            && self.context_parent.is_none()
+            && self.actor_path.as_ref().is_some_and(
+                |path| matches!(path.segments(), [segment] if segment.as_str() == "root"),
+            )
     }
 
     #[must_use]
@@ -209,21 +238,10 @@ impl ActorDescriptor {
         self.actor_path.as_ref()
     }
 
+    /// Canonical identity is independent of the authored descriptive label.
     #[must_use]
     pub fn with_actor_path(mut self, path: tidepool_repr::ActorPath) -> Self {
-        self.label = path.to_string();
         self.actor_path = Some(path);
-        self
-    }
-
-    #[must_use]
-    pub fn fork_group(&self) -> Option<crate::ForkGroupId> {
-        self.fork_group
-    }
-
-    #[must_use]
-    pub fn with_fork_group(mut self, group: crate::ForkGroupId) -> Self {
-        self.fork_group = Some(group);
         self
     }
 
@@ -316,8 +334,85 @@ impl ActorDescriptor {
             effect_policy: self.effect_policy,
             live_payload: self.live_payload,
             source_imports: self.source_imports.clone(),
-            haskell_effects_alias: self.role.haskell_effects_type(),
+            haskell_effects_alias: self.capabilities.haskell_effects_type(),
             source_layer: self.source_layer.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor() -> ActorDescriptor {
+        ActorDescriptor::new(
+            "an arbitrary human label",
+            ActorPlacement {
+                session: tidepool_repr::SessionId(1),
+                lexical_scope: tidepool_codegen::scope::ScopeId(1),
+                resource_scope: tidepool_codegen::suspension::RealmId(1),
+            },
+        )
+    }
+
+    #[test]
+    fn canonical_path_admission_preserves_authored_labels() {
+        let first_path = tidepool_repr::ActorPath::parse("spawn-first").unwrap();
+        let second_path = tidepool_repr::ActorPath::parse("spawn-second").unwrap();
+        let first = descriptor().with_actor_path(first_path.clone());
+        let second = descriptor().with_actor_path(second_path.clone());
+        assert_eq!(first.display_label(), "an arbitrary human label");
+        assert_eq!(second.display_label(), first.display_label());
+        assert_eq!(first.actor_path(), Some(&first_path));
+        assert_eq!(second.actor_path(), Some(&second_path));
+        assert_ne!(first.actor_path(), second.actor_path());
+    }
+
+    #[test]
+    fn unlabeled_actor_displays_its_canonical_path() {
+        let path = tidepool_repr::ActorPath::parse("spawn-unlabeled").unwrap();
+        let unlabeled = ActorDescriptor::new_optional(None, descriptor().placement())
+            .with_actor_path(path.clone());
+        assert_eq!(unlabeled.display_label(), "spawn-unlabeled");
+        assert_eq!(unlabeled.actor_path(), Some(&path));
+    }
+
+    #[test]
+    fn absent_and_explicit_empty_labels_remain_distinct_after_path_reassignment() {
+        let first_path = tidepool_repr::ActorPath::parse("spawn-first").unwrap();
+        let second_path = tidepool_repr::ActorPath::parse("spawn-second").unwrap();
+        let absent = ActorDescriptor::new_optional(None, descriptor().placement())
+            .with_actor_path(first_path.clone());
+        let empty =
+            ActorDescriptor::new("", descriptor().placement()).with_actor_path(first_path.clone());
+        assert_eq!(absent.authored_label(), None);
+        assert_eq!(absent.display_label(), "spawn-first");
+        assert_eq!(empty.authored_label(), Some(""));
+        assert_eq!(empty.display_label(), "");
+        let absent = absent.with_actor_path(second_path.clone());
+        let empty = empty.with_actor_path(second_path.clone());
+        assert_eq!(absent.authored_label(), None);
+        assert_eq!(absent.display_label(), "spawn-second");
+        assert_eq!(empty.authored_label(), Some(""));
+        assert_eq!(empty.display_label(), "");
+        assert_eq!(absent.actor_path(), Some(&second_path));
+        assert_eq!(empty.actor_path(), Some(&second_path));
+    }
+
+    #[test]
+    fn root_identity_requires_canonical_path_and_independent_ancestry() {
+        let unbound = descriptor();
+        assert!(!unbound.is_root());
+        let root = unbound
+            .with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap())
+            .with_capabilities(ActorCapabilities::default().with_effect_keys(Vec::new()));
+        assert!(
+            root.is_root(),
+            "effect availability does not identify the root"
+        );
+        let parent = ActorRef::first(crate::ActorId(1));
+        assert!(!root.clone().with_creator(parent).is_root());
+        assert!(!root.clone().with_supervisor_parent(parent).is_root());
+        assert!(!root.with_context_parent(parent).is_root());
     }
 }

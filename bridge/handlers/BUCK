@@ -11,6 +11,7 @@ rust_filegroup(
         "Cargo.toml": "bridge/handlers/Cargo.toml",
         "src/effect_glue.rs": "bridge/handlers/src/effect_glue.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_bound_worktree_rs]": "bridge/handlers/src/generated/bound_worktree.rs",
+        "//bridge/protocol:generated[bridge_handlers_src_generated_console_rs]": "bridge/handlers/src/generated/console.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_exec_rs]": "bridge/handlers/src/generated/exec.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_journal_rs]": "bridge/handlers/src/generated/journal.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_mod_rs]": "bridge/handlers/src/generated/mod.rs",
@@ -95,6 +96,7 @@ rust_filegroup(
         "Cargo.toml": "bridge/handlers/Cargo.toml",
         "src/effect_glue.rs": "bridge/handlers/src/effect_glue.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_bound_worktree_rs]": "bridge/handlers/src/generated/bound_worktree.rs",
+        "//bridge/protocol:generated[bridge_handlers_src_generated_console_rs]": "bridge/handlers/src/generated/console.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_exec_rs]": "bridge/handlers/src/generated/exec.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_journal_rs]": "bridge/handlers/src/generated/journal.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_mod_rs]": "bridge/handlers/src/generated/mod.rs",
@@ -199,6 +201,7 @@ rust_filegroup(
     mapped_srcs = {
         "Cargo.toml": "bridge/handlers/Cargo.toml",
         "//bridge/protocol:generated[bridge_handlers_src_generated_bound_worktree_rs]": "bridge/handlers/src/generated/bound_worktree.rs",
+        "//bridge/protocol:generated[bridge_handlers_src_generated_console_rs]": "bridge/handlers/src/generated/console.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_exec_rs]": "bridge/handlers/src/generated/exec.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_journal_rs]": "bridge/handlers/src/generated/journal.rs",
         "//bridge/protocol:generated[bridge_handlers_src_generated_mod_rs]": "bridge/handlers/src/generated/mod.rs",

@@ -1,4 +1,5 @@
 //! Lightweight native-command actors. The backend retains ownership of OS processes.
+use crate::request::ResourceCleanupOwner;
 use crate::{ActorRef, KernelContext};
 use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
@@ -174,6 +175,7 @@ impl CommandBackendRequest {
 struct Shared {
     /// The controlling actor; replacement moves it to the successor.
     owner: Mutex<ActorRef>,
+    cleanup_owner: Mutex<ResourceCleanupOwner>,
     phase: watch::Sender<CommandStatus>,
     backend: Mutex<Option<Arc<BoundedBackend>>>,
     input: Mutex<CommandInput>,
@@ -453,6 +455,7 @@ impl CommandJobs {
             reply: Mutex::new(Some(reply)),
         });
         let shared = Arc::new(Shared {
+            cleanup_owner: Mutex::new(ResourceCleanupOwner::Actor),
             owner: Mutex::new(parent.identity()),
             phase: watch::channel(CommandStatus::CommandQueued).0,
             backend: Mutex::new(None),
@@ -513,7 +516,7 @@ impl CommandJobs {
             .lock()
             .insert(id.clone(), Entry { actor, shared });
         if let Some(invocation) = invocation {
-            if let Err(error) = invocation.register_command(id.clone()) {
+            if let Err(error) = invocation.register_command_with_jobs(self, &id) {
                 // No backend has been dispatched. Close its supply channel before
                 // cancelling the queued owner; the resource retains cleanup evidence.
                 drop(request);
@@ -562,7 +565,31 @@ impl CommandJobs {
     }
 
     pub(crate) fn set_source_probe(&self, id: &str, probe: String) -> Result<(), CommandError> {
-        *self.shared(id)?.source_probe.lock() = Some(probe);
+        let command = self.shared(id)?;
+        let mut linked = command.source_probe.lock();
+        let mut pair = vec![
+            (id.to_owned(), command.clone()),
+            (probe.clone(), self.shared(&probe)?),
+        ];
+        pair.sort_by(|(left, _), (right, _)| left.cmp(right));
+        pair.dedup_by(|(left, _), (right, _)| left == right);
+        let mut authority = Vec::new();
+        let mut membership = Vec::new();
+        for (_, shared) in &pair {
+            authority.push(shared.owner.lock());
+            membership.push(shared.cleanup_owner.lock());
+        }
+        if authority.windows(2).any(|pair| *pair[0] != *pair[1])
+            || membership.windows(2).any(|pair| *pair[0] != *pair[1])
+        {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        if linked.as_ref().is_some_and(|existing| existing != &probe) {
+            return Err(CommandError::CommandInvalid(
+                "command source probe is already linked".into(),
+            ));
+        }
+        *linked = Some(probe);
         Ok(())
     }
 
@@ -610,6 +637,130 @@ impl CommandJobs {
     /// The actor that controls a job.
     pub(crate) fn owner(&self, id: &str) -> Result<ActorRef, CommandError> {
         Ok(self.shared(id)?.owner())
+    }
+
+    pub(crate) fn cleanup_owner(
+        &self,
+        caller: ActorRef,
+        id: &str,
+    ) -> Result<ResourceCleanupOwner, CommandError> {
+        let shared = self.shared(id)?;
+        if shared.owner() != caller {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        let owner = shared.cleanup_owner.lock().clone();
+        Ok(owner)
+    }
+
+    /// Called under both cleanup owners' admission gates. One registry fence
+    /// moves the command and its source probe with the membership callback.
+    pub(crate) fn transfer_cleanup_owner<T>(
+        &self,
+        caller: ActorRef,
+        id: &str,
+        expected: &ResourceCleanupOwner,
+        destination: ResourceCleanupOwner,
+        publish_membership: impl FnOnce(Option<&str>) -> T,
+    ) -> Result<T, CommandError> {
+        self.transfer_cleanup_owner_internal(
+            None,
+            caller,
+            id,
+            expected,
+            destination,
+            publish_membership,
+        )
+    }
+
+    pub(crate) fn transfer_cleanup_owner_in_context<T>(
+        &self,
+        kernel: &KernelContext,
+        caller: ActorRef,
+        id: &str,
+        expected: &ResourceCleanupOwner,
+        destination: ResourceCleanupOwner,
+        publish_membership: impl FnOnce(Option<&str>) -> T,
+    ) -> Result<T, CommandError> {
+        if kernel.identity() != caller {
+            return Err(CommandError::CommandUnauthorized);
+        }
+        self.transfer_cleanup_owner_internal(
+            Some(kernel),
+            caller,
+            id,
+            expected,
+            destination,
+            publish_membership,
+        )
+    }
+
+    fn transfer_cleanup_owner_internal<T>(
+        &self,
+        kernel: Option<&KernelContext>,
+        caller: ActorRef,
+        id: &str,
+        expected: &ResourceCleanupOwner,
+        destination: ResourceCleanupOwner,
+        publish_membership: impl FnOnce(Option<&str>) -> T,
+    ) -> Result<T, CommandError> {
+        let command = self.shared(id)?;
+        let probe_id = command.source_probe.lock();
+        let mut owners = vec![(id.to_owned(), command.clone())];
+        if let Some(probe) = probe_id.as_ref() {
+            owners.push((probe.clone(), self.shared(probe)?));
+        }
+        owners.sort_by(|(left, _), (right, _)| left.cmp(right));
+        owners.dedup_by(|(left, _), (right, _)| left == right);
+        let cells = {
+            let entries = self.entries.lock();
+            owners
+                .iter()
+                .map(|(id, _)| {
+                    entries
+                        .get(id)
+                        .map(|entry| entry.actor.get_cell())
+                        .ok_or_else(|| {
+                            CommandError::CommandUnavailable(
+                                "command resource is no longer retained".into(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut authority = Vec::new();
+        let mut membership = Vec::new();
+        for (_, owner) in &owners {
+            let actor = owner.owner.lock();
+            if *actor != caller {
+                return Err(CommandError::CommandUnauthorized);
+            }
+            authority.push(actor);
+            let marker = owner.cleanup_owner.lock();
+            if &*marker != expected {
+                return Err(CommandError::CommandUnauthorized);
+            }
+            membership.push(marker);
+        }
+        let source_run = *expected == ResourceCleanupOwner::Run;
+        let destination_run = destination == ResourceCleanupOwner::Run;
+        let result = if source_run || destination_run {
+            let kernel = kernel.ok_or_else(|| {
+                CommandError::CommandUnavailable(
+                    "run transfer requires its actor resource owner".into(),
+                )
+            })?;
+            kernel
+                .with_resource_lifetime_transfer(&cells, source_run, destination_run, || {
+                    Ok::<_, CommandError>(publish_membership(probe_id.as_deref()))
+                })
+                .map_err(CommandError::CommandUnavailable)??
+        } else {
+            publish_membership(probe_id.as_deref())
+        };
+        for marker in &mut membership {
+            **marker = destination.clone();
+        }
+        Ok(result)
     }
 
     /// Replace a job's settlement with a newly reserved request, after the
@@ -1370,6 +1521,7 @@ mod bounded_backend_tests {
 
     fn finished_shared_with_hanging_backend() -> Shared {
         Shared {
+            cleanup_owner: Mutex::new(ResourceCleanupOwner::Actor),
             owner: Mutex::new(ActorRef::first(ActorId(1))),
             phase: watch::channel(CommandStatus::CommandFinished(CommandResult {
                 outcome: CommandOutcome::CommandExited(0),

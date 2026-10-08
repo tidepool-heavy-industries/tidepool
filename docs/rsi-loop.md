@@ -108,56 +108,47 @@ an inadequate packet.
 
 ## Working defaults
 
-Prioritize parallel work and Luna delegation, with Sol owning shared decisions
-and integration. Prefer broad worker trees, add depth for coherent component
-ownership, and keep a modest experimental bias toward useful nesting. Independent
-review within the tree provides assurance; a busy root or a repair round is not
-itself a failure. Measure overlapping useful work, work shifted to Lunas, defects
-caught by independent review, and avoidable coordination separately.
+Choose the number and shape of agent requests from the task's dependencies and
+independent work. Keep shared decisions with an owner, and divide work only when
+that reduces a real dependency or gives an independent result. Review, repair,
+and integration are useful steps when risk warrants them; a small bounded change
+may need one owner and one focused check. Measure useful overlap, defects found,
+coordination cost, and accepted-delivery time separately.
 
-Include one bounded ambitious orchestration experiment per iteration. Explore
-Haskell notebook composition deliberately: combine commands, retained evidence,
-Jev judgments, child admission, routing and joins where that reduces total tool
-calls and model rounds while preserving failure boundaries and evidence. Promote
-successful compositions into compiled examples. Code owns authoritative facts;
-Jev supplies typed semantic judgments where those facts need interpretation.
+Explore Haskell notebook composition deliberately: combine commands, retained
+evidence, Jev judgments, typed requests, routing, and `Await` joins where that
+reduces total tool calls and model rounds while preserving failure boundaries.
+Promote a composition into a compiled example when an authored consumer needs it.
+Code owns authoritative facts; Jev supplies typed semantic judgments where those
+facts need interpretation.
 
-Aim for near-zero avoidable orientation at actor activation. Supply stable
-interaction mechanics in the shared prompt, role-specific workflow in role
-instructions, and current source/environment/ownership/check facts in the task
-packet. The first useful action should be apparent without reconstructing how
-to use the harness. Validate environment and helper availability before promising
-them; prompts do not repair a broken runtime surface.
+Aim for low avoidable orientation at activation. Put stable interaction mechanics
+in the shared guide, task-specific facts and acceptance in the request, and live
+runtime authority in status. The first useful action should be apparent without
+reconstructing how to use the harness. Validate environment and helper
+availability before promising them; prompts do not repair a missing runtime
+surface.
 
 Audit each actor's initial tool sequence through its first useful task action.
-Record time and calls spent on harness/API/environment discovery separately from
-necessary source inspection, contract analysis and failure investigation. A first
-edit is not the only useful action. Count rediscovery and wrong turns throughout
-the assignment too. Replace repeated discovery with precise, source-backed entry
-points and compiled examples; avoid blanket bans on reading or a larger ritual
-inventory. Keep changing facts after the shared prefix so inheritance stays useful.
+Record calls spent on API or environment discovery separately from necessary
+source inspection, contract analysis, and failure investigation. Replace repeated
+discovery with precise source-backed entry points and compiled examples. Keep
+changing facts with the request so an explicit context snapshot can be delivered
+when needed.
 
-A clean win is a known, implementable solution, even when implementation spans
-several layers. Separate that work from unresolved design questions and experiments.
-For the current harness workload, prove extension points through standalone stubs
-and production consumers before attempting Exomonad integration.
+A clean win is a known, implementable solution, even when it spans several
+layers. Separate that work from unresolved design questions and experiments.
+For the current harness workload, prove extension points through standalone
+stubs and production consumers before attempting Exomonad integration.
 
-### Recursive delegation experiment
+### Agent workflow experiment
 
-The execution workflow is live scaffold → unfold → checked integration → next
-ready batch. WorkPlan's preauthored graph is removed. Sol holds cross-component
-choices; Luna owners recursively define shared boundaries and delegate ready
-implementation. Target at least three Luna implementation levels on average,
-with terminal-leaf justification instead of a mandatory fork count. Reviews do
-not count toward implementation depth. Nested review checks leaf changes and
-component joins at their respective boundaries.
-
-The hypothesis is shorter accepted-delivery wall time through parallel work at
-several depths, plus fewer parent relay rounds through checked ReviewFlow and
-bounded relays of existing decisions. Measure useful depth, overlap, time to
-first useful fork, blocked dependency time, source corrections, reviewed defects,
-parent relays and accepted-delivery time from existing run evidence. A deeper
-tree is not success if the same work is serialized or repeatedly re-reviewed.
+A useful hypothesis is shorter accepted-delivery time when independent
+obligations proceed concurrently and exact candidates receive focused review.
+Test it on a representative task. Measure overlap, dependency waits, source
+corrections, reviewed defects, parent relay work, and accepted-delivery time from
+retained evidence. More agents or deeper delegation are not success when the same
+work stays serialized or is reviewed repeatedly.
 
 ## Method: reconstruct the workflow before tuning its mechanisms
 
@@ -249,10 +240,9 @@ Find small recurring sequences where authored Haskell can save frontier model
 rounds, improve results, or supply a bounded stronger judgment to a cheaper node.
 
 Move exact operations into deterministic code and contextual decisions into
-bounded Jev judgments. Use a focused Astra consultation when consequential
-uncertainty needs frontier reasoning; retain its useful policy or procedure in
-Haskell where possible. This can give Luna nodes access to stronger judgment at
-the needed boundary without upgrading every round. A compiled procedure does not
+bounded Jev judgments. Choose a model tier from the uncertainty and expected
+value of the decision; retain useful policy or procedure in Haskell where
+possible. A compiled procedure does not
 itself establish Astra-level judgment quality: evaluate the resulting decisions.
 
 Start with modest, composable wins. A follow-up that saves a few frontier rounds
@@ -415,8 +405,8 @@ crossings are accounted for and actions assigned, not when every cost is zero.
 
 ## 3. Run and observe
 
-The Exomonad root owns assignment, integration and product delivery. The external
-supervisor owns the experiment and observation. Operator and developer experience
+The request owner coordinates product delivery. The external supervisor owns
+the experiment and observation. Operator and developer experience
 is part of the same experiment: retain build, launch, monitoring, recovery and
 cleanup friction encountered by the supervisor, with the same evidence standards
 as actor friction. Track preparation and supervision costs separately from the
@@ -424,7 +414,7 @@ product run; either may motivate the next improvement. Use existing traces, reta
 outputs, commits and typed results. Interview at meaningful boundaries. Avoid
 creating an observer management tree or waking actors just to collect status.
 
-While a wave runs, use bounded subagent work to remove confirmed technical debt
+While a task runs, use bounded agent work to remove confirmed technical debt
 and improve the next development cycle: duplicate mechanisms, unclear ownership,
 dead paths and types that leave invariants to callers. Give each change an owner,
 real consumer and focused verification; keep its integration separate from the

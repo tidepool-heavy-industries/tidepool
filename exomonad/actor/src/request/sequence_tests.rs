@@ -349,6 +349,8 @@ struct WatchModel {
     dependencies: Vec<usize>,
     any: bool,
     allow_failure: bool,
+    captured: Vec<Option<Result<(), ResponseFailure>>>,
+    decision: Option<readiness::Decision>,
     result: WatchResult,
     forgotten: bool,
     observed_by_owner: bool,
@@ -677,6 +679,8 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                     watches.push(WatchModel {
                         id: watch,
                         owner: caller_owner,
+                        captured: vec![None; dependencies.len()],
+                        decision: None,
                         dependencies,
                         any,
                         allow_failure,
@@ -794,48 +798,83 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
             }
         }
 
-        // A settled watch retains its readiness/failure. A released dependency
-        // invalidates Pending/Ready; an earlier Unavailable outcome is retained.
+        // Observe primary request facts independently. Each leaf keeps its
+        // first terminal fact; the whole expression keeps its first terminal
+        // outcome, including an initial left-biased race.
         let mut expected_notices = Vec::new();
         for watch in watches.iter_mut().filter(|watch| !watch.forgotten) {
             let previous = watch.result.clone();
-            if !matches!(watch.result, WatchResult::Failed { .. }) {
-                if let Some(key) = watch
-                    .dependencies
-                    .iter()
-                    .find(|key| requests[**key].released)
-                {
-                    watch.result = WatchResult::Failed {
-                        request: *key,
-                        failure: ResponseFailure::Released,
-                    };
-                } else if watch.result == WatchResult::Pending {
-                    let failure =
-                        watch
-                            .dependencies
+            if watch.result == WatchResult::Pending {
+                for (index, key) in watch.dependencies.iter().enumerate() {
+                    if watch.captured[index].is_none() {
+                        watch.captured[index] = if requests[*key].released {
+                            Some(Err(ResponseFailure::Released))
+                        } else {
+                            requests[*key].outcome.clone()
+                        };
+                    }
+                }
+                let selected = if watch.any {
+                    watch
+                        .captured
+                        .iter()
+                        .position(Option::is_some)
+                        .map(|index| vec![index])
+                        .or_else(|| watch.dependencies.is_empty().then(Vec::new))
+                } else if watch.captured.iter().all(Option::is_some) {
+                    Some((0..watch.dependencies.len()).collect())
+                } else {
+                    None
+                };
+                let failure = if watch.any {
+                    selected.as_ref().and_then(|indexes| {
+                        indexes
                             .iter()
-                            .find_map(|key| match &requests[*key].outcome {
+                            .find_map(|index| match &watch.captured[*index] {
                                 Some(Err(failure)) if !watch.allow_failure => {
-                                    Some((*key, failure.clone()))
+                                    Some((watch.dependencies[*index], failure.clone()))
                                 }
                                 _ => None,
-                            });
-                    if let Some((request, failure)) = failure {
-                        watch.result = WatchResult::Failed { request, failure };
-                    } else {
-                        let outcomes = watch
-                            .dependencies
-                            .iter()
-                            .map(|key| requests[*key].outcome.is_some());
-                        let ready = if watch.any {
-                            outcomes.into_iter().any(|ready| ready)
-                        } else {
-                            outcomes.into_iter().all(|ready| ready)
-                        };
-                        if ready {
-                            watch.result = WatchResult::Ready;
+                            })
+                    })
+                } else {
+                    watch
+                        .captured
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, fact)| match fact {
+                            Some(Err(failure)) if !watch.allow_failure => {
+                                Some((watch.dependencies[index], failure.clone()))
+                            }
+                            _ => None,
+                        })
+                };
+                if let Some((request, failure)) = failure {
+                    watch.result = WatchResult::Failed { request, failure };
+                } else if let Some(indexes) = selected {
+                    let mut decision = readiness::Decision::default();
+                    for index in &indexes {
+                        let node = if *index == 0 { 0 } else { index * 2 - 1 };
+                        let failure = watch.captured[*index]
+                            .as_ref()
+                            .unwrap()
+                            .as_ref()
+                            .err()
+                            .cloned();
+                        decision.leaves.push((node, failure));
+                    }
+                    if watch.any && !indexes.is_empty() {
+                        let selected = indexes[0];
+                        for right_index in (1..watch.dependencies.len()).rev() {
+                            let left = selected < right_index;
+                            decision.choices.push((right_index * 2, left));
+                            if !left {
+                                break;
+                            }
                         }
                     }
+                    watch.decision = Some(decision);
+                    watch.result = WatchResult::Ready;
                 }
             }
             if previous != watch.result {
@@ -1072,7 +1111,7 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
 impl WatchModel {
     fn observation(
         &self,
-        requests: &[RequestModel],
+        _requests: &[RequestModel],
         ids: &[RequestId],
     ) -> Result<WatchObservation, ReplyError> {
         if self.forgotten {
@@ -1086,15 +1125,9 @@ impl WatchModel {
                 progress_revision: None,
                 watched: true,
             }),
-            WatchResult::Ready => WatchObservation::Ready(
-                self.dependencies
-                    .iter()
-                    .filter_map(|key| match &requests[*key].outcome {
-                        Some(Err(failure)) => Some((ids[*key], failure.clone())),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
+            WatchResult::Ready => {
+                WatchObservation::Ready(self.decision.clone().expect("captured decision"))
+            }
             WatchResult::Failed { request, failure } => WatchObservation::Unavailable {
                 request: ids[*request],
                 failure: failure.clone(),

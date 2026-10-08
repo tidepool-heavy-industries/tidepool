@@ -408,7 +408,7 @@ mod tests {
         let receipt = WorktreeReceipt {
             worktree_id: WorktreeId::from_raw(id),
             cwd,
-            branch: BranchName::from_raw("test"),
+            branch: Some(BranchName::from_raw("test")),
             source_head: GitOid::from_raw("0000000000000000000000000000000000000000"),
             snapshot_ref: None,
             origin: WorktreeOrigin::CurrentRepository,
@@ -453,7 +453,7 @@ mod tests {
             .put(&WorktreeReceipt {
                 worktree_id: ancestor_id,
                 cwd: ancestor_cwd,
-                branch: BranchName::from_raw("exomonad/worktree/ancestor"),
+                branch: Some(BranchName::from_raw("exomonad/worktree/ancestor")),
                 source_head: GitOid::from_raw("0".repeat(40)),
                 snapshot_ref: None,
                 origin: WorktreeOrigin::CurrentRepository,
@@ -468,7 +468,7 @@ mod tests {
         let receipt = WorktreeReceipt {
             worktree_id: id,
             cwd,
-            branch: BranchName::from_raw("exomonad/worktree/retained-child"),
+            branch: Some(BranchName::from_raw("exomonad/worktree/retained-child")),
             source_head: GitOid::from_raw("0".repeat(40)),
             snapshot_ref: None,
             origin: WorktreeOrigin::CurrentRepository,

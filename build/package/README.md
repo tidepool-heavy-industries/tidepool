@@ -209,10 +209,14 @@ and `--service-slice NAME.slice` use the runner's fresh delegated user services
 inside an already admitted user slice. Reports retain these scheduling choices.
 The frozen descriptor is the authority for the exact M1/M2 case rosters, counts
 and deadlines. M2 has a 600-second default watchdog; unfinished-parent survival,
-nominal publication join, checkpoint release and the selected coding child each
-have 900 seconds. The selected child case scaffolds the shipped workspace and
-passes a `Project.Work` Task from the root to a coding child through compiler
-admission, then checks the child's narrower effect row and original typed reply.
+nominal publication join, checkpoint release and
+`actor_host::fresh_child_tests::scaffolded_selected_coding_child_preserves_workspace_input_and_effect_row`
+each have 900 seconds. This case scaffolds the shipped workspace and passes a
+`Project.Work` Task from the root to a spawned child through compiler admission
+with the explicitly supplied `defaultWorkbenchSpec` effect row
+`[Replies, Commands, Lookup, BoundWorktree]`; it verifies that exact row, rejects
+a Journal-using notebook call at compile time, and checks that the typed
+candidate reply preserves the task's original source and obligation.
 Checkpoint release retains the issuer settlement, observer creation,
 original-scope read/reply and final cleanup in one watchdog; the measured issuer
 portion already took 538 seconds before those later phases. These outer process
@@ -249,11 +253,16 @@ compiler. It refuses a different compiler mode or parallel test execution. One
 executed passing test means that twenty sequentially admitted children completed
 their actual native replies and the parent verified twenty typed answers; it is
 not a claim of twenty concurrent children. The scenario requires twenty unique
-actors and installation scopes, typed `DeploymentOriginal` acquisition matching
-the frozen workspace's completed inventory, unchanged external-quoter execution
-bytes after its input changes from 41 to 42, and zero compiler requests during
-child setup. Partial progress and per-child rows retain observed counts on
-failure. The existing hosted outcome records scenario and cleanup separately;
+actors and installation scopes. The root's typed `DeploymentOriginal` acquisition
+must match the frozen workspace's completed inventory. Children reuse one actual
+supplied spec, have explicit live installation origin without a source-prepared
+acquisition receipt, and return typed answers of 41 through its native probe.
+External-quoter execution bytes must remain unchanged from preparation before
+its input changes from 41 to 42 through the parent's public spec import, every
+child installation and every native reply. Each child setup and its attributed
+compiled installer phase must submit zero compiler requests. Partial progress
+and per-child rows retain observed counts on failure. The existing hosted
+outcome records scenario and cleanup separately;
 scenario completion alone does not establish confirmed host cleanup.
 
 First preparation is reported separately. Setup P95 below one second remains

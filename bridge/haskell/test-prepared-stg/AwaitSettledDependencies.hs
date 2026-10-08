@@ -1,6 +1,6 @@
 module AwaitSettledDependencies where
 
-import Tidepool.Agent.Ref (internalAgentRef)
+import Tidepool.Agent.Ref.Internal (internalAgentRef)
 import Tidepool.Agent.Reply.Internal
   ( RequestId (..)
   , Response

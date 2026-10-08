@@ -61,16 +61,15 @@ async fn run_native_reply_case(case: NativeReplyCase) {
         tidepool_mcp::sleep_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("effect module");
-    let mut include = effects.include_paths().to_vec();
-    include.push(eval_harness::prelude_path());
-    include.push(eval_harness::actor_sources_path());
+    let include = crate::resident_workbench::request_tests::fixture_include_roots(&effects);
     let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
     for import in [
         "qualified Tidepool.Actor as Mailbox",
-        "Tidepool.Agent.Reply (Replies, detachRequest)",
+        "Tidepool.Agent.Reply (Replies, retainRequest)",
         "Tidepool.Agent.Watch (Watches)",
-        "Tidepool.Agent.Ref (AgentProtocol(..))",
-        "qualified Tidepool.Agent.Ref as AgentRef",
+        "Tidepool.Agent.Ref.Internal (AgentProtocol(..))",
+        "Tidepool.Effects.Core (WorkerLifetime(..))",
+        "qualified Tidepool.Agent.Ref.Internal as AgentRef",
         "qualified Tidepool.Actors.Internal.Agent as Agents",
     ] {
         preamble = insert_preamble_imports(&preamble, import);
@@ -96,7 +95,7 @@ async fn run_native_reply_case(case: NativeReplyCase) {
     let requester = forest
         .new_workbench(
             "terminal-transfer-requester".into(),
-            crate::EffectiveRole::root().with_effect_keys(vec![
+            crate::ActorCapabilities::default().with_effect_keys(vec![
                 crate::ActorEffectKey::Actor,
                 crate::ActorEffectKey::Replies,
             ]),
@@ -379,7 +378,7 @@ async fn private_three_item_cell_refusal_keeps_receipts_and_actor_live() {
         let actor = forest
             .new_workbench(
                 "private-publication-refusal".into(),
-                crate::EffectiveRole::root().with_effect_keys(Vec::new()),
+                crate::ActorCapabilities::default().with_effect_keys(Vec::new()),
             )
             .await
             .expect("root workbench");

@@ -62,7 +62,6 @@ pub struct TreeNode {
     pub depth: usize,
     pub parent: Option<String>,
     pub label: String,
-    pub role: exomonad_actor::ActorRole,
     pub model: Option<String>,
     pub effort: Option<String>,
     /// Whether the actor has its own provider session; inline forks do not.
@@ -370,9 +369,28 @@ pub(super) fn build(
     window: TimeWindow,
     observation: &Observation,
 ) -> Review {
+    build_with_tree(
+        run,
+        actors,
+        trace,
+        trace_unavailable,
+        window,
+        observation,
+        tree(run, trace),
+    )
+}
+
+fn build_with_tree(
+    run: &Path,
+    actors: &[ActorNode],
+    trace: Option<&TraceEvents>,
+    trace_unavailable: &str,
+    window: TimeWindow,
+    observation: &Observation,
+    tree: Section<Vec<TreeNode>>,
+) -> Review {
     let now = observation.now_unix_ms;
     let queue = read_host_inputs(run, actors, observation.codex_home.as_deref());
-    let tree = tree(run, trace);
     let labels: BTreeMap<&str, &str> = match &tree {
         Section::Available { rows } => rows
             .iter()
@@ -473,12 +491,21 @@ fn tree(run: &Path, trace: Option<&TraceEvents>) -> Section<Vec<TreeNode>> {
             }
         }
     };
+    Section::Available {
+        rows: tree_from_records(&records, trace),
+    }
+}
+
+fn tree_from_records(
+    records: &[exomonad_actor::DurableActorRecord],
+    trace: Option<&TraceEvents>,
+) -> Vec<TreeNode> {
     let key = |actor: exomonad_actor::ActorRef| actor.to_string();
     let first =
         |at: Option<u64>, candidate: u64| Some(at.map_or(candidate, |at| at.min(candidate)));
     let mut nodes: BTreeMap<String, TreeNode> = BTreeMap::new();
     let mut children: BTreeMap<Option<String>, Vec<String>> = BTreeMap::new();
-    for record in &records {
+    for record in records {
         let admission = &record.admission;
         let actor = key(admission.actor);
         let parent = admission.supervisor_parent.map(key);
@@ -492,8 +519,7 @@ fn tree(run: &Path, trace: Option<&TraceEvents>) -> Section<Vec<TreeNode>> {
                 actor,
                 depth: 0,
                 parent,
-                label: admission.label.clone(),
-                role: admission.role,
+                label: admission.display_label().to_owned(),
                 model: admission.model.clone(),
                 effort: admission.effort.map(|effort| {
                     match effort {
@@ -580,7 +606,7 @@ fn tree(run: &Path, trace: Option<&TraceEvents>) -> Section<Vec<TreeNode>> {
         }
     }
     ordered.extend(nodes.into_values());
-    Section::Available { rows: ordered }
+    ordered
 }
 
 type HostInputs = BTreeMap<String, BTreeMap<u64, HostInput>>;
@@ -1152,16 +1178,15 @@ impl Review {
         let mut output = String::new();
         render(
             &mut output,
-            "tree (actor label role model/effort session | started launched first_call first_reply last_reply | standing terminal):",
+            "tree (actor label model/effort session | started launched first_call first_reply last_reply | standing terminal):",
             &self.tree,
             |output, rows| {
                 for node in rows {
                     output.push_str(&format!(
-                        "\n  {}{} {} {} {}/{} {} | {} {} {} {} {} | {}{} {}",
+                        "\n  {}{} {} {}/{} {} | {} {} {} {} {} | {}{} {}",
                         "  ".repeat(node.depth),
                         node.actor,
                         node.label,
-                        node.role,
                         node.model.as_deref().unwrap_or("-"),
                         node.effort.as_deref().unwrap_or("-"),
                         if node.own_session { "session" } else { "inline" },
@@ -1436,35 +1461,6 @@ mod tests {
         )
         .unwrap();
         fs::write(workspace.join(".exomonad/logs/run-7.jsonl"), TRACE).unwrap();
-        let admission = |id: u64, parent: Option<u64>, label: &str, role: &str| {
-            json!({"version":2,"event":"admitted","admission":{
-                "actor":{"id":id,"incarnation":1},"label":label,
-                "creator":parent.map(|id| json!({"id":id,"incarnation":1})),
-                "supervisor_parent":parent.map(|id| json!({"id":id,"incarnation":1})),
-                "context_parent":null,"actor_path":null,"role":role,
-                "model":"executor","effort":"medium","instructions":null,
-                "launch_worktrees":[],"source_layer":[]}})
-        };
-        let bind = |id: u64, thread: &str| {
-            [
-                json!({"version":2,"event":"application_prepared","actor":{"id":id,"incarnation":1},
-                    "binding_path":format!("/run/{id}-1/binding.json")}),
-                json!({"version":2,"event":"application_bound","actor":{"id":id,"incarnation":1},
-                    "conversation":thread}),
-            ]
-        };
-        let mut journal = vec![
-            json!({"version":2,"event":"created"}),
-            admission(1, None, "root", "root"),
-            admission(2, Some(1), "lead", "coding"),
-            admission(3, Some(1), "work", "research"),
-        ];
-        journal.extend(bind(1, "thread-root"));
-        journal.extend(bind(2, "thread-lead"));
-        for (index, row) in journal.iter_mut().enumerate() {
-            row["sequence"] = json!(index + 1);
-        }
-        fs::write(run.join("actor-lifecycle.v2.jsonl"), lines(&journal)).unwrap();
         fs::write(
             run.join("2-1/binding.json"),
             json!({"version":5,"thread":"thread-lead"}).to_string(),
@@ -1520,19 +1516,86 @@ mod tests {
         (run, codex)
     }
 
-    fn observe(run: &Path, codex: Option<PathBuf>, after_write_ms: u64) -> crate::run_map::RunMap {
+    fn fixture_records() -> Vec<exomonad_actor::DurableActorRecord> {
+        use exomonad_actor::{
+            ActorId, ActorRef, ApplicationConversation, DurableActorAdmission,
+            DurableActorApplication, DurableActorRecord, ForkEffort,
+        };
+        let actor = |id| ActorRef::first(ActorId(id));
+        [
+            (1, None, "root", Some("thread-root")),
+            (2, Some(1), "lead", Some("thread-lead")),
+            (3, Some(1), "work", None),
+        ]
+        .into_iter()
+        .map(|(id, parent, label, thread)| DurableActorRecord {
+            admission: DurableActorAdmission {
+                actor: actor(id),
+                label: Some(label.into()),
+                creator: parent.map(actor),
+                supervisor_parent: parent.map(actor),
+                context_parent: None,
+                actor_path: None,
+                effect_keys: vec![],
+                descendant_depth: 8,
+                descendant_active_children: None,
+                model: Some("executor".into()),
+                effort: Some(ForkEffort::Medium),
+                instructions: None,
+                launch_worktrees: vec![],
+                source_layer: vec![],
+            },
+            startup: None,
+            application: thread.map(|thread| DurableActorApplication {
+                binding_path: PathBuf::from(format!("/run/{id}-1/binding.json")),
+                conversation: Some(ApplicationConversation::Codex {
+                    thread_id: thread.into(),
+                }),
+                intended_conversation: None,
+                accepted_source: None,
+            }),
+            terminal: None,
+        })
+        .collect()
+    }
+
+    fn observe_raw(run: &Path, observation: &Observation) -> crate::run_map::RunMap {
+        read_observed_run(run, Limits::default(), TimeWindow::default(), observation).unwrap()
+    }
+
+    fn observation(run: &Path, codex: Option<PathBuf>, after_write_ms: u64) -> Observation {
         let written = modified_ms(&run.join("2-1/inbox.cursor")).unwrap();
-        read_observed_run(
-            run,
+        Observation {
+            now_unix_ms: written + after_write_ms,
+            codex_home: codex,
+            slowest_calls: 1,
+        }
+    }
+
+    fn observe(run: &Path, codex: Option<PathBuf>, after_write_ms: u64) -> crate::run_map::RunMap {
+        let observation = observation(run, codex, after_write_ms);
+        let mut report = observe_raw(run, &observation);
+        let (_, trace) = super::super::trace::read_trace(
+            &run.parent()
+                .unwrap()
+                .join("workspace/.exomonad/logs/run-7.jsonl"),
             Limits::default(),
             TimeWindow::default(),
-            &Observation {
-                now_unix_ms: written + after_write_ms,
-                codex_home: codex,
-                slowest_calls: 1,
+            &mut Vec::new(),
+            &super::super::TimelineFilter::default(),
+        );
+        report.review = build_with_tree(
+            run,
+            &report.actors,
+            Some(&trace),
+            "",
+            TimeWindow::default(),
+            &observation,
+            Section::Available {
+                rows: tree_from_records(&fixture_records(), Some(&trace)),
             },
-        )
-        .unwrap()
+        );
+        report
     }
 
     fn rows<T>(section: &Section<T>) -> &T {
@@ -1671,8 +1734,7 @@ mod tests {
         ));
 
         fs::remove_file(dir.path().join("workspace/.exomonad/logs/run-7.jsonl")).unwrap();
-        fs::remove_file(run.join("actor-lifecycle.v2.jsonl")).unwrap();
-        let report = observe(&run, None, RECOVERY_GRACE_MS);
+        let report = observe_raw(&run, &observation(&run, None, RECOVERY_GRACE_MS));
         let review = &report.review;
         assert!(matches!(review.tree, Section::Unavailable { .. }));
         assert!(matches!(review.notifications, Section::Unavailable { .. }));

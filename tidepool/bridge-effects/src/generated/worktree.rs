@@ -19,6 +19,13 @@ pub enum WireError {
     },
 }
 
+/// Opaque run-issued grant for an existing workspace backing.
+#[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(name = "WorkspaceHandle")]
+pub struct WtWorkspaceHandle {
+    pub raw: String,
+}
+
 /// Haskell `WorktreeId` — opaque durable identity. `data`, not a synonym: PRD
 /// 19 requires that a `GitOid` can never be passed where a worktree id is
 /// wanted.
@@ -159,7 +166,7 @@ pub struct WtGitFailureReceipt {
 pub struct WtWorktreeReceipt {
     pub tree_id: WtWorktreeId,
     pub cwd: String,
-    pub branch: WtBranchName,
+    pub branch: Option<WtBranchName>,
     pub source_head: WtGitOid,
     pub snapshot_ref: Option<WtGitRef>,
     pub created_at: i64,
@@ -220,6 +227,21 @@ pub enum WtMergeOutcome {
     CreatedMergeCommit(WtGitOid, WtGitOid, WtGitOid),
     /// Automatic integration stopped cleanly. The target is restored; use ordinary Git.
     ManualGitRequired(WtGitOid, WtGitOid, String, Vec<String>),
+}
+
+impl WtWorkspaceHandle {
+    /// An untrusted raw value becomes a wire id here — infallibly:
+    /// this identity carries no string policy.
+    #[must_use]
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self { raw: raw.into() }
+    }
+
+    /// The validated payload.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
 }
 
 impl WtWorktreeId {

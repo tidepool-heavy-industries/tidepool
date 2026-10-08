@@ -4,13 +4,13 @@ This file guides contributors; it is not part of the shipped model prompt.
 
 - `../../bridge/facade/src/actor_host/prompt_catalog.rs` owns prompt composition and
   catalog identity. `base.md` plus `api-guide.md` form one frozen shared superset
-  across roles. Workspace core overrides are selected once at swarm startup;
-  never vary the selected prefix by role or live bindings.
+  for every actor; `agent.md` is one task-neutral developer instruction. Workspace
+  core overrides are selected once at run startup, never by actor role or live bindings.
 - Optimize instructions for model decisions: use established technical vocabulary
   with its actual semantics; explain Exomonad-specific departures. Give each contract
   one canonical home, and move rare recovery detail behind targeted discovery.
   Use semantic compression: preserve relevant concepts and the conditions that
-  change their application. Inspect the assembled role and tool layers too.
+  change their application. Inspect the assembled base, agent, and tool layers too.
   Record prompt size as an observation, not an arbitrary acceptance ceiling;
   provider-enforced tool limits still apply.
 - Shape recognition and method selection: describe dependencies, transformations,
@@ -39,18 +39,18 @@ This file guides contributors; it is not part of the shipped model prompt.
 - Keep core callable signatures and representative examples in `api-guide.md`.
   Avoid ritual startup inventories; recommend targeted discovery only for missing
   information. Check against live/public types rather than inventing API shapes.
-- Keep role-specific instructions and runtime authority observations separate.
-  Inherited bindings and descriptions do not transfer permissions or reply ownership.
-- Keep Git project workflow policy in `exomonad-project-work`: recursive
-  scaffold, ready batches, independent review, repair and checked integration.
-  Base and relevant roles carry a clear load cue; general notebook and actor
-  programming stays compositional. API skills own their mechanics. Delivery of
+- Keep shared instructions, task requests, and runtime authority observations
+  separate. Inherited bindings and descriptions do not transfer permissions or
+  reply ownership.
+- Keep optional Git project delivery policy in `exomonad-project-work`. The
+  shared instructions carry its load cue; general notebook and actor programming
+  stays compositional. API skills own their mechanics. Delivery of
   a baseline is not acknowledgment or verified incorporation.
 - Recheck cautionary guidance against current source and behavior. Remove obsolete
   workarounds and incident-derived prohibitions; state live constraints through
   the composition they affect and a working way to proceed. Do not preserve an
   old restriction merely because it once prevented a failure.
-- Describe omitted fork effort through the native launch selector's inherited
+- Describe omitted model effort through the native launch selector's inherited
   default; native Codex goals remain disabled on all Exomonad nodes. Verify policy
   against the production selector, not the fallback launch helper.
 - Preserve active-update admission/presentation/incorporation distinctions and
@@ -58,8 +58,23 @@ This file guides contributors; it is not part of the shipped model prompt.
 - Keep `haskell-tool-instructions.md` within its provider size limit. Prompt
   edits must remain compatible with the host's catalog and actual tool surface.
 
-`../../bridge/facade/src/actor_host/documentation_tests.rs` executes the guide examples
-and checks its signature fences. Run its focused
-`shared_api_guide_example_handles_success_and_unavailable` test and the prompt
-catalog tests when changing shipped guide/composition behavior. Update examples
-and owning tests together; unavailable results must not look like success.
+Executable guide and reflection fences use `haskell source=<identity>`. Their
+authored notebook sources live in
+`../../bridge/facade/src/actor_host/fixtures/api-guide/`; `PublishedExample` in
+`../../bridge/facade/src/actor_host/documentation_tests.rs` binds each identity to
+the source executed by the resident consumer tests. Change the authored source
+and published fence together. The source equality gate tolerates reordered
+fences and prose edits, and rejects missing, duplicate, or unknown identities.
+
+Run `actor_host::documentation_tests::published_notebook_sources_match_authored_fixtures`,
+the affected `published_*` resident consumer tests, and the prompt catalog tests
+when changing those examples or prompt composition. Request success, retained
+target cancellation, unavailable forms, complete command stdout without replay,
+lookup discovery, and unbound reflection have separate consumer assertions.
+The canonical `Examples.JevPreparedWorkflow` and `Examples.JevFormWorkflow`
+modules own Jev/form composition; their host tests (`JevPreparedTest`,
+`FormLifecycleTest`, `FormJevDialogueTest`) and native
+`resident_actor::jev_form_runtime_tests` own its success, refusal, and cleanup
+coverage. Do not recover examples by fence position or assert tutorial prose
+as runtime behavior. Compilation and actual nonzero execution remain separate
+qualification obligations.

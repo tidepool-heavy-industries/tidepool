@@ -1,5 +1,5 @@
 _ <- do
   let target = Ref.internalAgentRef 17 1
-      requestLabel = either (P.error . P.show) id (Agents.labelFromText "opaque-input")
-  _ <- Agents.request @() target (Agents.assignment requestLabel (Original.make 42))
+      options = Agents.defaultRequestOptions { Agents.requestLabel = Just "opaque-input" }
+  _ <- Agents.request @() target (Original.make 42) options
   pure ()

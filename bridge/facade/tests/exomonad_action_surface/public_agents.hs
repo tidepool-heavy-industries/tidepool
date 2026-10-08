@@ -7,13 +7,11 @@ module ExomonadPublicAgents where
 import Control.Monad.Freer (Eff)
 import Data.Text (Text)
 import Prelude
-import Tidepool.Agent.Contract (AsServerT)
-import Tidepool.Actors.Exomonad
+import Tidepool.Agent.Contract (AgentSpec, NoTools, defaultSpec)
+import Tidepool.Actors.Exomonad hiding (result)
 import Tidepool.Actors.Observe (actorContext)
 import qualified Tidepool.Actors.Exomonad as Exomonad
-import qualified Tidepool.Tools as Tools
 
--- Pinned cell signatures must resolve through the authored facade.
 type ReplyPin = Exomonad.Reply Int
 type StopControlPin = Exomonad.AgentStopControlOutcome
 type ProfilePin protocol effects = Exomonad.EffectProfile protocol effects
@@ -24,90 +22,69 @@ type CancellationPin = Exomonad.Void
 type DurationInputPin = Exomonad.Natural
 type GitFailurePin = Exomonad.GitFailureReceipt
 
--- Every interactive role installs the workspace's tool record. Keep these
--- specializations beside the public role aliases so a new tool effect cannot
--- drift out of one role unnoticed.
-coreTools :: Tools.Tools (AsServerT (Eff CoreEffects))
-coreTools = Tools.tools
+type MinimalSpec = AgentSpec NoTools '[]
 
-researchTools :: Tools.Tools (AsServerT (Eff ResearchEffects))
-researchTools = Tools.tools
+minimalSpec :: MinimalSpec
+minimalSpec = defaultSpec
 
-researchLeafTools :: Tools.Tools (AsServerT (Eff ResearchLeafEffects))
-researchLeafTools = Tools.tools
+spawnFresh :: Text -> Eff ActorEffects (Either SpawnError AgentRef)
+spawnFresh prompt =
+  spawnSubagent (FreshCtx prompt) SameDir (defaultSpawnOptions minimalSpec)
 
-codingTools :: Tools.Tools (AsServerT (Eff CodingEffects))
-codingTools = Tools.tools
+spawnFromCheckpoint
+  :: ContextCheckpoint
+  -> Workspace
+  -> Eff ActorEffects (Either SpawnError AgentRef)
+spawnFromCheckpoint context workspace =
+  spawnSubagent (ForkCtx context) workspace (defaultSpawnOptions minimalSpec)
 
-integrationTools :: Tools.Tools (AsServerT (Eff IntegrationEffects))
-integrationTools = Tools.tools
+spawnWithActualSpec :: SpawnOptions NoTools '[] -> Eff ActorEffects (Either SpawnError AgentRef)
+spawnWithActualSpec options = spawnSubagent (FreshCtx "inspect the project") SameDir options
 
-rootTools :: Tools.Tools (AsServerT (Eff ActorEffects))
-rootTools = Tools.tools
-
-startCoding :: WorktreeHandle -> Eff ActorEffects AgentRef
-startCoding = startAgent . withAgentLifetime ActorOwned . codingAgent
-
-startReview :: Text -> Eff ActorEffects AgentRef
-startReview = startAgent . withAgentLifetime ActorOwned . readonlyAgent
-
-startPersisted :: AgentLaunchSpec -> Eff ActorEffects AgentRef
-startPersisted = startAgent . withAgentLifetime ActorOwned
-
-submit
-  :: AgentRef
-  -> Label
-  -> input
-  -> Eff ActorEffects (Response result)
-submit actor name value = request actor (assignment name value)
-
-submitPersisted
-  :: AgentRef
-  -> Label
-  -> input
-  -> Eff ActorEffects (Response result)
-submitPersisted actor name value = do
-  response <- request actor (assignment name value)
-  Right () <- detachRequest response
-  pure response
-
-submitProgress
-  :: AgentRef
-  -> Assignment input
-  -> Eff ActorEffects (Response result, Progress progress)
-submitProgress = requestWithProgress
+submitRaw :: AgentRef -> Int -> Eff ActorEffects (Either RequestError (Request Text))
+submitRaw agent input = request @Text agent input defaultRequestOptions
 
 submitWithOnlyReplies
   :: AgentRef
-  -> Label
-  -> input
-  -> Eff '[Replies] (Response result)
-submitWithOnlyReplies actor name value = request actor (assignment name value)
+  -> Eff '[Replies] (Either RequestError (Request Text))
+submitWithOnlyReplies agent = request @Text agent ("inspect this" :: Text) defaultRequestOptions
 
-submitConfigured
-  :: AgentRef
-  -> Label
-  -> Duration
-  -> input
-  -> Eff ActorEffects (Response result)
-submitConfigured actor name timeout value =
-  request actor ((assignment name value)
-    { guidance = Just "inspect the typed input before acting"
-    , deadline = Just timeout
+submitConfigured :: AgentRef -> Text -> Eff ActorEffects (Either RequestError (Request Text))
+submitConfigured agent input = request @Text agent input
+  (defaultRequestOptions
+    { requestLabel = Just "review / API"
+    , requestGuidance = Just "inspect the typed input before acting"
+    , requestDeadline = Just (milliseconds 2500)
     })
 
-compose
-  :: Response left
-  -> Response right
-  -> Await (ResponseResult left, ResponseResult right)
-compose left right = (,) <$> awaitResponse left <*> awaitResponse right
+submitWithProgress
+  :: AgentRef
+  -> Text
+  -> Eff ActorEffects (Either RequestError (Request Text, Progress Int))
+submitWithProgress agent input =
+  requestWithProgress @Int @Text agent input defaultRequestOptions
+
+subSecondRequest
+  :: AgentRef
+  -> Eff ActorEffects (Either RequestError (Request Text))
+subSecondRequest agent = request @Text agent ("quick check" :: Text)
+  (defaultRequestOptions { requestDeadline = Just (milliseconds 25) })
+
+composeSettlements
+  :: Request left
+  -> Request right
+  -> Await (Either ResponseFailure left, Either ResponseFailure right)
+composeSettlements left right = (,) <$> settlement left <*> settlement right
+
+awaitOne :: Request value -> Eff ActorEffects (Either AwaitError value)
+awaitOne = await . Exomonad.result
 
 watchBoth
-  :: WatchLabel
-  -> Response left
-  -> Response right
-  -> Eff ActorEffects (Watch (ResponseResult left, ResponseResult right))
-watchBoth label left right = watch label (compose left right)
+  :: Maybe Text
+  -> Request left
+  -> Request right
+  -> Eff ActorEffects (Watch (Either ResponseFailure left, Either ResponseFailure right))
+watchBoth label left right = watch label (composeSettlements left right)
 
 stop :: AgentRef -> Eff ActorEffects StopOutcome
 stop = stopAgent
@@ -121,181 +98,41 @@ inspectAll = listAgentsFull
 inspectSelf :: Eff ActorEffects ActorContextInfo
 inspectSelf = actorContext
 
-inspectResponseActor :: Response result -> Eff ActorEffects AgentObservation
-inspectResponseActor = observeAgent . responseActor
-
-inspectForkGroup
-  :: Response result
-  -> Eff '[AgentInspection] (Maybe ForkGroupSnapshot)
-inspectForkGroup response = case forkGroupHandle response of
-  Nothing -> pure Nothing
-  Just group -> observeForkGroup group
-
-cacheFacts
-  :: AgentRosterEntry
-  -> (Maybe ProviderUsageObservation, Maybe CacheBoundaryReason, Int)
-cacheFacts entry =
-  (rosterFirstUsage entry, rosterCacheBoundary entry, rosterEventWatermark entry)
-
-workbenchPosture :: AgentRosterEntry -> AgentWorkbenchPosture
-workbenchPosture = rosterWorkbenchPosture
-
-activationFacts :: ActorContextInfo -> (ActivationKind, Int)
-activationFacts context =
-  (contextActivationKind context, contextEventWatermark context)
-
-currentTree :: Eff CodingEffects (Either WorktreeError WorktreeHandle)
-currentTree = boundWorktree
-
-cancel :: Response result -> Eff '[Replies] CancelRequestOutcome
+cancel :: Request value -> Eff '[Replies] CancelRequestOutcome
 cancel = cancelRequest
 
-releaseResponse :: Response result -> Eff '[Replies] ForgetResponseOutcome
-releaseResponse = forgetResponse
+releaseRequest :: Request value -> Eff '[Replies] ForgetResponseOutcome
+releaseRequest = forgetResponse
 
-releaseWatch :: Watch result -> Eff '[Watches] ForgetWatchOutcome
+retainRequestForActor :: Request value -> Eff '[Replies] (Either ReplyError ())
+retainRequestForActor pending = retainRequest pending ActorOwned
+
+releaseWatch :: Watch value -> Eff '[Watches] ForgetWatchOutcome
 releaseWatch = forgetWatch
 
 releaseAgent :: AgentRef -> Eff ActorEffects AgentForgetOutcome
 releaseAgent = forgetAgent
 
+retainAgentForActor :: AgentRef -> Eff '[AgentControl] (Either AgentRetentionError ())
+retainAgentForActor agent = retainAgent agent ActorOwned
+
 retainedAgentDependencies :: AgentForgetOutcome -> ([RequestId], [WatchId])
-retainedAgentDependencies outcome =
-  case outcome of
-    AgentForgetRetained requests watches -> (requests, watches)
-    AgentForgotten -> ([], [])
-    AgentForgetRunning -> ([], [])
-    AgentForgetUnavailable -> ([], [])
+retainedAgentDependencies outcome = case outcome of
+  AgentForgetRetained requests watches -> (requests, watches)
+  AgentForgotten -> ([], [])
+  AgentForgetRunning -> ([], [])
+  AgentForgetUnavailable -> ([], [])
+  AgentForgetOutputPending _ -> ([], [])
 
-inspectCleanup :: Response result -> Eff '[AgentInspection] (Maybe CleanupPlan)
-inspectCleanup response = case forkGroupHandle response of
-  Nothing -> pure Nothing
-  Just group -> Just <$> planCleanup group
+safeHead :: Eff ActorEffects (Either WorktreeError GitOid)
+safeHead = boundWorktree >>= either (pure . Left) worktreeHead
 
-inspectCleanupFor :: Response result -> Eff '[AgentInspection] CleanupPlan
-inspectCleanupFor = planCleanupFor
+currentWorkspaceGrant :: Eff ActorEffects (Either WorktreeError WorkspaceHandle)
+currentWorkspaceGrant = currentWorkspace
 
-runCleanup :: CleanupPlan -> Eff '[AgentControl] CleanupReceipt
-runCleanup = executeCleanup
-
-cleanupBlocked :: CleanupPlan -> Bool
-cleanupBlocked plan =
-  not (null (cleanupPlanPendingResponses plan))
-    || not (null (cleanupPlanPendingWatches plan))
-    || maybe False (const True) (cleanupPlanRefusal plan)
-
-safeHead
-  :: WorktreeHandle
-  -> Eff CodingEffects (Either WorktreeError GitOid)
-safeHead = worktreeHead
-
-launchFacts
-  :: Response result
-  -> (Int, Int, ForkRole, ForkWorkspaceAccess, WorktreeReceipt)
-launchFacts worker = case responseAdmission worker of
-  Nothing -> error "response was not created by child"
-  Just receipt ->
-    ( launchedActorId receipt
-    , launchedActorIncarnation receipt
-    , launchedRole receipt
-    , launchedWorkspaceAccess receipt
-    , launchedWorktree receipt
-    )
-
-heterogeneousUnfold
-  :: ForkGroupPath
-  -> Label
-  -> Label
-  -> Eff ActorEffects (Response Text, Response Int)
-heterogeneousUnfold group textLeaf intLeaf =
-  unfoldDeferred group $
-    (,)
-      <$> child (withLifetime ActorOwned (withEffort High (researching @Text projectHead (assignment textLeaf ()))))
-      <*> child (withLifetime ActorOwned (withEffort Low (coding @Int projectHead (assignment intLeaf ()))))
-
-progressiveUnfold
-  :: ForkGroupPath
-  -> Label
-  -> Eff ActorEffects (Response Text, Progress Int)
-progressiveUnfold group leaf =
-  unfoldDeferred group $
-    childWithProgress @Int (withLifetime ActorOwned (researching @Text projectHead (assignment leaf ())))
-
-homogeneousUnfold
-  :: ForkGroupPath
-  -> [Label]
-  -> Eff ActorEffects [Response Text]
-homogeneousUnfold group leaves =
-  unfoldDeferred group $
-    traverse
-      (\leaf -> child (withLifetime ActorOwned (researching @Text projectHead (assignment leaf ()))))
-      leaves
-
-recoverableUnfold
-  :: ForkGroupPath
-  -> Label
-  -> Eff ActorEffects (Either UnfoldError (Response Text))
-recoverableUnfold group leaf =
-  attemptUnfoldDeferred group $
-    child (withLifetime ActorOwned (researching @Text projectHead (assignment leaf ())))
-
-checkpointUnfold
-  :: ContextCheckpoint
-  -> ForkGroupPath
-  -> Label
-  -> Eff ActorEffects (Response Text)
-checkpointUnfold checkpoint group leaf =
-  unfold group $
-    child (withLifetime ActorOwned (withContext (fromCheckpoint checkpoint)
-      (researching @Text projectHead (assignment leaf ()))))
-
-selectedUnfold
-  :: ForkGroupPath
-  -> Label
-  -> Eff ActorEffects (Either UnfoldError (Response Text))
-selectedUnfold group leaf =
-  attemptUnfold group $
-    child (withLifetime ActorOwned (withContext (selected id)
-      (researching @Text projectHead (assignment leaf ("inspect only" :: Text)))))
-
-configuredBranch
-  :: Duration
-  -> Label
-  -> Branch ResearchEffects () Text
-configuredBranch timeout leaf =
-  withEffort Medium $
-    researching @Text projectHead ((assignment leaf ())
-      { guidance = Just "inspect only", deadline = Just timeout })
-
-tenMinuteDeadline :: Duration
-tenMinuteDeadline = minutes 10
-
-tenMinuteDeadlineInSeconds :: Duration
-tenMinuteDeadlineInSeconds = seconds 600
-
-subSecondRequest
-  :: AgentRef
-  -> Label
-  -> Eff ActorEffects (Response Text)
-subSecondRequest actor label =
-  request actor ((assignment label ()) { deadline = Just (milliseconds 25) })
-
-type TinyResearchEffects = '[Replies, ActorContext]
-
-narrowResearch
-  :: ForkGroupPath
-  -> Label
-  -> Eff ActorEffects (Response Text)
-narrowResearch group leaf =
-  unfoldDeferred group $
-    child $
-      withLifetime ActorOwned $
-        narrowed
-          (knownEffects @TinyResearchEffects)
-          (inspectionPolicy projectHead)
-          (assignment leaf ())
-
-usageTotals :: ActorContextInfo -> Maybe (ProviderUsageScope, ProviderUsageCompleteness, Int, Int, Int)
+usageTotals
+  :: ActorContextInfo
+  -> Maybe (ProviderUsageScope, ProviderUsageCompleteness, Int, Int, Int)
 usageTotals context = fmap project (contextUsageSummary context)
   where
     project summary =
@@ -309,8 +146,9 @@ usageTotals context = fmap project (contextUsageSummary context)
 latestWorkerTurn :: AgentRosterEntry -> Maybe ProviderUsageSummary
 latestWorkerTurn = rosterLatestTurnUsage
 
-watchReport :: WatchState (ResponseResult Text) -> WatchState Text
-watchReport = fmap responseValue
+watchReport :: WatchState (Either ResponseFailure Text) -> WatchState Text
+watchReport = fmap (either (const "request failed") id)
 
+-- The unqualified import above intentionally hides this facade function.
 result :: Int
 result = 42

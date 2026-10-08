@@ -338,7 +338,7 @@ pub struct ActorRuntimeObservation {
     pub latest_turn_usage_summary: Option<exomonad_model::ProviderUsageSummary>,
     pub workbench_posture: ActorWorkbenchPosture,
     pub workspace: Option<ActorWorkspaceObservation>,
-    pub launch_role: Option<crate::EffectiveRole>,
+    pub launch_capabilities: Option<crate::ActorCapabilities>,
     pub launched_at_unix_ms: Option<i64>,
     /// Set by the host while it launches this actor's provider application
     /// (the current launch phase); cleared once the provider binds.
@@ -376,26 +376,19 @@ impl ActorRuntimeObservation {
     /// Fixed per-incarnation launch orientation; detailed observations remain in status.
     #[must_use]
     pub fn launch_orientation(&self) -> Option<String> {
-        let role = self.launch_role.as_ref()?;
-        let budget = role.descendants();
-        let mut text = format!(
-            "Actor authority: role={:?}; native_tools={:?}; workspace={:?}; descendant_depth={}; max_active_children={}.",
-            role.role(), role.native_tools(), role.workspace(),
-            budget.maximum_depth, crate::render_child_budget(budget.maximum_active_children),
-        );
-        if let Some(workspace) = &self.workspace {
-            text.push_str("\nWorkspace binding: ");
-            text.push_str(&format!(
-                "workspace_path={:?} (native tools); expected_branch={:?}; seed={}",
-                workspace.workspace_path,
-                workspace.expected_branch.as_deref().unwrap_or("unassigned"),
-                "currentCheckout"
-            ));
-            if role.role() == crate::ActorRole::Root && workspace.worktree_id.is_none() {
-                text.push_str("\nRoot checkout: writable project repository. currentCheckout resolves this checkout when seeding children; in a bound child it resolves that child's checkout. Explicit worktree and commit references remain fixed.");
-            }
-        }
-        Some(text)
+        let capabilities = self.launch_capabilities.as_ref()?;
+        let budget = capabilities.descendants();
+        let effects = capabilities
+            .effect_keys()
+            .iter()
+            .map(|effect| effect.haskell_name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "Actor effects: [{effects}]; descendant_depth={}; max_active_children={}",
+            budget.maximum_depth,
+            crate::render_child_budget(budget.maximum_active_children),
+        ))
     }
 
     /// One compact line for a parent's status view of this actor:
@@ -676,9 +669,13 @@ impl ActorRuntimeObservationHandle {
         })
     }
 
-    pub fn publish_launch_role(&self, role: crate::EffectiveRole, launched_at_unix_ms: i64) {
+    pub fn publish_launch_capabilities(
+        &self,
+        capabilities: crate::ActorCapabilities,
+        launched_at_unix_ms: i64,
+    ) {
         let mut observation = self.inner.write();
-        observation.launch_role = Some(role);
+        observation.launch_capabilities = Some(capabilities);
         observation.launched_at_unix_ms = Some(launched_at_unix_ms);
     }
 

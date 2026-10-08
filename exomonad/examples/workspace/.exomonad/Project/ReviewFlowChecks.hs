@@ -15,7 +15,7 @@ oneComponent = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-loop-first\" :: CampaignLabel"
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-loop-first\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-first\" :: Text"
     <> "\nlet sourcePlan = RequiresSiblingCommits [sourceHead]")
   script owner "review-flow-loop"
@@ -65,14 +65,14 @@ oneComponent = do
   awaitCell owner "one component retains exact reviewed evidence, correction, and one repair"
     ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (flowRepairCount state == 1 && length (flowReviewerRequests state) == 3 && length (flowRepairRequests state) == 1 && case flowStage state of { ReviewAccepted reviewed -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral revised <> "; _ -> False }) }")
   script owner "review-flow-cleanup"
-  assertCell owner "coordinator records cleanup of both distinct reviewer groups"
-    "case cleanup of { ReviewCleanupAttempted groups -> length groups == 2 && map (length . snd) groups == [1,1]; _ -> False }"
+  assertCell owner "coordinator records one typed cleanup history for each reviewer actor"
+    "import Data.List (nub)\nimport Tidepool.Agent.Ref (agentIdentity)\ncase cleanup of { ReviewCleanupAttempted outcomes -> do { state <- R.call (reviewSnapshot (R.client flow)) (); let agents = map (agentIdentity . fst) outcomes; let known = nub (map agentIdentity (flowReviewerAgents state)); pure (length agents == length known && and [agent `elem` known | agent <- agents] && and [left /= right | (i,left) <- zip [0..] agents, right <- drop (i + 1) agents] && all (all (\\outcome -> case outcome of { StoppedNow -> True; StoppedRetaining _ -> True; StoppedReleasing -> True; AlreadyStopped -> True; StopUnavailable -> True; StopUnauthorized -> True; StopFailed _ -> True })) (map snd outcomes)) }; _ -> False }"
   void $ turn owner "again <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\nstate <- R.call (reviewSnapshot (R.client flow)) ()\npure ()"
-  assertCell owner "repeat and snapshot retain original cleanup outcomes"
-    "let sameReceipt left right = left == right; sameGroups left right = length left == length right && and [a == b && length old == length new && and (zipWith sameReceipt old new) | ((a,old),(b,new)) <- zip left right] in case (cleanup, again, flowCleanupResult state) of { (ReviewCleanupAttempted original, ReviewCleanupAttempted repeated, Just (ReviewCleanupAttempted retained)) -> sameGroups original repeated && sameGroups original retained; _ -> False }"
-  void $ turn owner "retry <- R.call (reviewCleanup (R.client flow)) ReviewCleanupRetryRefused\nlet refused receipts = case reverse receipts of { latest:_ -> case cleanupReceiptSteps latest of { [CleanupBlocked _] -> True; [CleanupStalePlan] -> True; _ -> False }; [] -> True }"
-  assertCell owner "explicit retry only reruns previously refused groups"
-    "case (cleanup, retry) of { (ReviewCleanupAttempted before, ReviewCleanupAttempted after) -> length before == length after && and [groupOld == groupNew && length new == length old + (if refused old then 1 else 0) | ((groupOld,old),(groupNew,new)) <- zip before after]; _ -> False }"
+  assertCell owner "repeat and snapshot retain per-agent cleanup histories"
+    "import Tidepool.Agent.Ref (agentIdentity)\nlet identities = map (\\(agent, history) -> (agentIdentity agent, history))\ncase (cleanup, again, flowCleanupResult state) of { (ReviewCleanupAttempted original, ReviewCleanupAttempted repeated, Just (ReviewCleanupAttempted retained)) -> identities original == identities repeated && identities original == identities retained; _ -> False }"
+  void $ turn owner "retry <- R.call (reviewCleanup (R.client flow)) ReviewCleanupRetryRefused"
+  assertCell owner "explicit retry adds a stop outcome only for retryable agents"
+    "import Tidepool.Agent.Ref (agentIdentity)\nlet retryable outcome = case outcome of { StoppedRetaining _ -> True; StoppedReleasing -> True; StopUnavailable -> True; StopFailed _ -> True; _ -> False }\ncase (cleanup, retry) of { (ReviewCleanupAttempted before, ReviewCleanupAttempted after) -> length before == length after && and [case lookup (agentIdentity agent) [(agentIdentity nextAgent, history) | (nextAgent, history) <- after] of { Just new -> length new == length old + (case reverse old of { latest:_ -> if retryable latest then 1 else 0; [] -> 0 }); Nothing -> False } | (agent, old) <- before]; _ -> False }"
   void $ turn owner "R.finish flow"
 
 failurePaths :: Member RecipeCheck effects => Eff effects ()
@@ -80,7 +80,7 @@ failurePaths = do
   owner2 <- root
   base2 <- git owner2 ["rev-parse", "HEAD"]
   void $ turn owner2 ("let sourceHead = " <> gitOidLiteral base2
-    <> "\nlet limit = 0 :: Int\nlet campaignName = \"review-loop-budget\" :: CampaignLabel"
+    <> "\nlet limit = 0 :: Int\nlet campaignName = \"review-loop-budget\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-budget\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner2 "review-flow-loop"
@@ -93,15 +93,15 @@ failurePaths = do
     "let request = sessionInput :: ReviewRequest\nrespond (Produced (Repair (reviewInput request) [\"one finding\"]))"
   awaitCell owner2 "zero repair budget stops without dispatching another request"
     "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (flowRepairCount state == 0 && null (flowRepairRequests state) && case flowStage state of { ReviewStopped (RepairBudgetSpent 0 _ _) -> True; _ -> False }) }"
-  void $ turn owner2 "receipt <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (case receipt of { ReviewCleanupAttempted groups -> (length groups, map (map cleanupReceiptComplete . snd) groups); _ -> (0 :: Int, []) })"
-  assertCell owner2 "stopped review retains its reviewer cleanup receipt"
-    "case receipt of { ReviewCleanupAttempted groups -> length groups == 1 && all (not . null . snd) groups; _ -> False }"
+  void $ turn owner2 "receipt <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show receipt)"
+  assertCell owner2 "stopped review retains its reviewer stop outcome"
+    "case receipt of { ReviewCleanupAttempted outcomes -> length outcomes == 1 && case reverse (snd (head outcomes)) of { StoppedNow : _ -> True; StoppedRetaining _ : _ -> True; StoppedReleasing : _ -> True; AlreadyStopped : _ -> True; StopUnavailable : _ -> True; StopUnauthorized : _ -> True; StopFailed _ : _ -> True; [] -> False }; _ -> False }"
   void $ turn owner2 "R.finish flow"
   void restart
   owner3 <- root
   base3 <- git owner3 ["rev-parse", "HEAD"]
   void $ turn owner3 ("let sourceHead = " <> gitOidLiteral base3
-    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-loop-stale\" :: CampaignLabel"
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-loop-stale\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-stale\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner3 "review-flow-loop"
@@ -113,7 +113,7 @@ failurePaths = do
   awaitCell owner3 "stale candidate stops before reviewer admission with exact receipt heads"
     ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (null (flowReviewerRequests state) && case (flowStage state, flowCandidateReceipts state) of { (ReviewStopped (CandidateSourceRefused _), [Right receipt]) -> case responseValue receipt of { Produced candidate -> candidateCommit candidate == " <> gitOidLiteral base3 <> " && case responseWorktree receipt of { WorktreeObserved _ _ observation -> WT.headOid (WT.submittedHead observation) == " <> gitOidLiteral actual <> "; _ -> False }; _ -> False }; _ -> False }) }")
   void $ turn owner3 "cleanup <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show cleanup)"
-  assertCell owner3 "terminal flow without reviewer has no group to clean"
+  assertCell owner3 "terminal flow without a reviewer has no agent to stop"
     "case cleanup of { ReviewCleanupNoReviewer -> True; _ -> False }"
   void $ turn owner3 "R.finish flow"
 
@@ -123,7 +123,7 @@ sourcePreflight = do
   baseline <- git owner ["rev-parse", "HEAD"]
   sibling <- checkpoint owner "sibling-source.txt" "required sibling\n" "required sibling source"
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-missing\" :: CampaignLabel"
+    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-missing\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-missing\" :: Text"
     <> "\nlet sourcePlan = RequiresSiblingCommits [" <> gitOidLiteral sibling <> "]")
   script owner "review-flow-loop"
@@ -139,7 +139,7 @@ sourcePreflight = do
   base2 <- git owner2 ["rev-parse", "HEAD"]
   sibling2 <- checkpoint owner2 "sibling-source.txt" "separate sibling\n" "separate sibling source"
   void $ turn owner2 ("let sourceHead = " <> gitOidLiteral base2
-    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-partial\" :: CampaignLabel"
+    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-partial\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-partial\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner2 "review-flow-loop"
@@ -162,7 +162,7 @@ emptyFindings = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-empty\" :: CampaignLabel"
+    <> "\nlet limit = 2 :: Int\nlet campaignName = \"review-loop-empty\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-coordinator-empty\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner "review-flow-loop"
@@ -187,7 +187,7 @@ effectfulRouting = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet campaignName = \"review-flow-effectful\" :: CampaignLabel"
+    <> "\nlet campaignName = \"review-flow-effectful\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-effectful-coordinator\" :: Text")
   script owner "review-flow-effectful"
   worker <- activation
@@ -213,15 +213,15 @@ effectfulRouting = do
     "case result of { ReviewRouteResult HonorReview DeterministicRoute -> True; _ -> False }"
   void $ turn owner
     "receipt <- R.call (reviewCleanup (R.client flow)) ReviewCleanupOnce\ninspectFull (show receipt)"
-  assertCell owner "effectful escalation retains terminal cleanup receipt"
-    "case receipt of { ReviewCleanupAttempted groups -> not (null groups) && all (not . null . snd) groups; _ -> False }"
+  assertCell owner "effectful escalation retains typed terminal stop outcomes"
+    "case receipt of { ReviewCleanupAttempted outcomes -> not (null outcomes) && all (not . null . snd) outcomes; _ -> False }"
   void $ turn owner "R.finish flow"
   void restart
   owner2 <- root
   baseline2 <- git owner2 ["rev-parse", "HEAD"]
   void $ turn owner2 ("let sourceHead = " <> gitOidLiteral baseline2
     <> "\nlet limit = 1 :: Int\nlet sourcePlan = ComponentReview"
-    <> "\nlet campaignName = \"review-flow-semantic\" :: CampaignLabel"
+    <> "\nlet campaignName = \"review-flow-semantic\" :: Text"
     <> "\nlet coordinatorName = \"review-flow-semantic-coordinator\" :: Text")
   script owner2 "review-flow-semantic"
   worker2 <- activation
@@ -244,7 +244,7 @@ workflowExample = do
   owner <- root
   source <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral source
-    <> "\nlet campaignName = \"review-workflow-accepted\" :: CampaignLabel"
+    <> "\nlet campaignName = \"review-workflow-accepted\" :: Text"
     <> "\nlet coordinatorName = \"review-workflow-accepted-coordinator\" :: Text"
     <> "\nlet routeCriteria = [\"Escalate if acceptance or paths change.\"] :: [Text]")
   script owner "review-flow-workflow"
@@ -261,9 +261,9 @@ workflowExample = do
   awaitCell owner "workflow reads exact accepted terminal state"
     ("do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case flowStage state of { ReviewAccepted reviewed -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral candidate <> "; _ -> False }) }")
   script owner "review-flow-workflow-interview"
-  void $ turn owner "inspectFull (show interviewRetention)"
-  assertCell owner "workflow retains each original interview request in actor lifetime"
-    "length interviewRequests == 1 && interviewRetention == [Right ()]"
+  void $ turn owner "inspectFull (show interviewRequests)"
+  assertCell owner "workflow retains each caller-owned interview request"
+    "length interviewRequests == 1"
   script owner "review-flow-workflow-interview-result"
   void $ turn owner "inspectFull (show retainedInterviews)"
   assertCell owner "delivered interview request is not an answer"
@@ -283,15 +283,15 @@ workflowExample = do
     "case retainedInterviews of { Just [receipt] -> \"Observed exact source\" `Text.isInfixOf` responseValue receipt; _ -> False }"
   script owner "review-flow-workflow-close"
   void $ turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowCleanupResult state))"
-  assertCell owner "accepted workflow retains typed cleanup after interview"
-    ("case (flowStage state, flowCleanupResult state) of { (ReviewAccepted reviewed, Just (ReviewCleanupAttempted groups)) -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral candidate <> " && not (null groups); _ -> False }")
+  assertCell owner "accepted workflow retains each reviewer stop outcome after interview"
+    ("case (flowStage state, flowCleanupResult state) of { (ReviewAccepted reviewed, Just (ReviewCleanupAttempted outcomes)) -> candidateCommit (reviewedCandidate reviewed) == " <> gitOidLiteral candidate <> " && length outcomes == length (flowReviewerAgents state) && all (not . null . snd) outcomes; _ -> False }")
   void $ turn owner "R.finish flow"
 
   void restart
   owner2 <- root
   source2 <- git owner2 ["rev-parse", "HEAD"]
   void $ turn owner2 ("let sourceHead = " <> gitOidLiteral source2
-    <> "\nlet campaignName = \"review-workflow-escalated\" :: CampaignLabel"
+    <> "\nlet campaignName = \"review-workflow-escalated\" :: Text"
     <> "\nlet coordinatorName = \"review-workflow-escalated-coordinator\" :: Text"
     <> "\nlet routeCriteria = [] :: [Text]")
   script owner2 "review-flow-workflow"
@@ -305,9 +305,9 @@ workflowExample = do
   awaitCell owner2 "workflow escalates without promoting Repair or dispatching implementation"
     "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (flowRepairCount state == 0 && null (flowRepairRequests state) && case flowStage state of { ReviewStopped (ReviewEscalated _) -> True; _ -> False }) }"
   script owner2 "review-flow-workflow-interview"
-  void $ turn owner2 "inspectFull (show interviewRetention)"
+  void $ turn owner2 "inspectFull (show interviewRequests)"
   assertCell owner2 "escalated workflow retains original reviewer interview request"
-    "length interviewRequests == 1 && interviewRetention == [Right ()]"
+    "length interviewRequests == 1"
   interview2 <- activation
   check "escalated reviewer remains available for precleanup interview"
     (checkActor interview2 == checkActor reviewer2)
@@ -316,8 +316,8 @@ workflowExample = do
   script owner2 "review-flow-workflow-interview-result"
   script owner2 "review-flow-workflow-close"
   void $ turn owner2 "state <- R.call (reviewSnapshot (R.client flow)) ()\ninspectFull (show (flowStage state, flowCleanupResult state))"
-  assertCell owner2 "escalated workflow retains typed cleanup after interview"
-    "case (flowStage state, flowCleanupResult state) of { (ReviewStopped (ReviewEscalated _), Just (ReviewCleanupAttempted groups)) -> not (null groups); _ -> False }"
+  assertCell owner2 "escalated workflow retains per-reviewer stop outcomes after interview"
+    "case (flowStage state, flowCleanupResult state) of { (ReviewStopped (ReviewEscalated _), Just (ReviewCleanupAttempted outcomes)) -> length outcomes == length (flowReviewerAgents state) && all (not . null . snd) outcomes; _ -> False }"
   void $ turn owner2 "R.finish flow"
 
 -- The initial response may settle before any review actor subscribes.
@@ -326,7 +326,7 @@ lateCandidate = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-late-source\" :: CampaignLabel"
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-late-source\" :: Text"
     <> "\nlet coordinatorName = \"review-late-coordinator\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner "review-flow-late-setup"
@@ -352,7 +352,7 @@ replacement = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner ("let sourceHead = " <> gitOidLiteral baseline
-    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-replacement\" :: CampaignLabel"
+    <> "\nlet limit = 1 :: Int\nlet campaignName = \"review-replacement\" :: Text"
     <> "\nlet coordinatorName = \"review-replacement-coordinator\" :: Text"
     <> "\nlet sourcePlan = ComponentReview")
   script owner "review-flow-loop"

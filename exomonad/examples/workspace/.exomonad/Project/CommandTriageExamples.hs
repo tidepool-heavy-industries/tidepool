@@ -24,8 +24,8 @@ type TriagePacket = ("fault" J.::= J.Choice FaultOptions)
 diagnoseCheck
   :: Member Jev effects
   => RepeatAllowance -> Text -> Text
-  -> Eff effects (Either J.JevError
-       (J.Response (J.Packet TriagePacket), Either J.Doubt (J.Settled J.Careful Followup)))
+  -> Eff effects (Either (J.JevError J.JevCallError)
+       (J.Response (J.Packet TriagePacket J.Answers), Either J.Doubt (J.Settled J.Careful Followup)))
 diagnoseCheck = diagnose testFailureCriteria
 
 -- A second authored client changes the policy, not the request/decoder code.
@@ -44,8 +44,8 @@ packageFetchCriteria = testFailureCriteria
 diagnoseFetch
   :: Member Jev effects
   => Text -> Text
-  -> Eff effects (Either J.JevError
-       (J.Response (J.Packet TriagePacket), Either J.Doubt (J.Settled J.Careful Followup)))
+  -> Eff effects (Either (J.JevError J.JevCallError)
+       (J.Response (J.Packet TriagePacket J.Answers), Either J.Doubt (J.Settled J.Careful Followup)))
 diagnoseFetch = diagnose packageFetchCriteria NoRepeat
 
 triageState reference excerpt = J.state (#retainedResult := (reference :: Text) :& #diagnostic := (excerpt :: Text))
@@ -59,8 +59,8 @@ triagePacket criteria allowance = #fault := faultQuestion criteria
 diagnose
   :: Member Jev effects
   => TriageCriteria -> RepeatAllowance -> Text -> Text
-  -> Eff effects (Either J.JevError
-       (J.Response (J.Packet TriagePacket), Either J.Doubt (J.Settled J.Careful Followup)))
+  -> Eff effects (Either (J.JevError J.JevCallError)
+       (J.Response (J.Packet TriagePacket J.Answers), Either J.Doubt (J.Settled J.Careful Followup)))
 diagnose criteria allowance reference excerpt = do
   result <- J.ask (triageState reference excerpt) (triagePacket criteria allowance)
   pure $ fmap (\response ->

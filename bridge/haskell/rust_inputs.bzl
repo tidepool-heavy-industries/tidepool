@@ -2,6 +2,7 @@
 load("@prelude//:rules.bzl", "export_file")
 
 def declare_rust_test_inputs():
+    export_file(name = "rust_input_examples_model_turns_Examples_JevFormWorkflow_hs", src = "examples/model-turns/Examples/JevFormWorkflow.hs", out = "JevFormWorkflow.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_src_Tidepool_HarnessSource_hs", src = "src/Tidepool/HarnessSource.hs", out = "HarnessSource.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_BadAssociated_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/BadAssociated.hs", out = "BadAssociated.hs", visibility = ["PUBLIC"])
     export_file(name = "rust_input_test_cell_splitter_fixtures_declaration_join_exact_isolation_BadClass_hs", src = "test-cell-splitter/fixtures/declaration-join/exact-isolation/BadClass.hs", out = "BadClass.hs", visibility = ["PUBLIC"])

@@ -1,3 +1,5 @@
+bridge/mcp/src/generated/console.rs
+bridge/handlers/src/generated/console.rs
 bridge/mcp/src/generated/exec.rs
 bridge/handlers/src/generated/exec.rs
 bridge/mcp/src/generated/journal.rs
@@ -10,9 +12,12 @@ bridge/mcp/src/generated/repo_event.rs
 tidepool/bridge-effects/src/generated/repo_event.rs
 bridge/handlers/src/generated/repo_event.rs
 bridge/mcp/src/generated/ask_user.rs
+tidepool/bridge-effects/src/generated/ask_user.rs
 bridge/mcp/src/generated/read_state.rs
 bridge/mcp/src/generated/recipe_check.rs
 bridge/mcp/src/generated/green.rs
+bridge/mcp/src/generated/resource_scopes.rs
+tidepool/bridge-effects/src/generated/resource_scopes.rs
 bridge/mcp/src/generated/actor.rs
 bridge/mcp/src/generated/actor_context.rs
 bridge/mcp/src/generated/introspection.rs
@@ -25,9 +30,9 @@ bridge/mcp/src/generated/commands.rs
 tidepool/bridge-effects/src/generated/commands.rs
 bridge/mcp/src/generated/notifications.rs
 bridge/mcp/src/generated/jev.rs
+tidepool/bridge-effects/src/generated/jev.rs
 bridge/mcp/src/generated/agent_inspection.rs
 bridge/mcp/src/generated/agent_launch.rs
-bridge/mcp/src/generated/forks.rs
 bridge/mcp/src/generated/agent_tools.rs
 bridge/mcp/src/generated/agent_session.rs
 bridge/mcp/src/generated/reflect.rs
@@ -57,6 +62,7 @@ bridge/haskell/lib/Tidepool/Internal/ActorProfiles.hs
 tidepool/runtime/src/generated/ask.rs
 tidepool/runtime/src/generated/mod.rs
 exomonad/actor/src/generated/actor.rs
+exomonad/actor/src/generated/resource_scopes.rs
 exomonad/actor/src/generated/actor_context.rs
 exomonad/actor/src/generated/introspection.rs
 exomonad/actor/src/generated/lookup.rs
@@ -66,12 +72,13 @@ exomonad/actor/src/generated/sleep.rs
 exomonad/actor/src/generated/agent_control.rs
 exomonad/actor/src/generated/commands.rs
 exomonad/actor/src/generated/console.rs
+exomonad/actor/src/generated/ask_user.rs
+exomonad/actor/src/generated/green.rs
 exomonad/actor/src/generated/notifications.rs
 exomonad/actor/src/generated/jev.rs
 exomonad/actor/src/generated/model_call.rs
 exomonad/actor/src/generated/agent_inspection.rs
 exomonad/actor/src/generated/agent_launch.rs
-exomonad/actor/src/generated/forks.rs
 exomonad/actor/src/generated/agent_tools.rs
 exomonad/actor/src/generated/agent_session.rs
 exomonad/actor/src/generated/reflect.rs

@@ -1,119 +1,25 @@
 ---
 name: exomonad-cleanup
-description: Retain a pre-retirement kaizen interview, then retire Exomonad workers and fork groups deliberately — inspect a cleanup plan, execute it, and read the two-phase stop outcomes. Load before retiring anything, or when a stop reports that resources are still retained.
+description: Retire hosted agents deliberately and inspect retained cleanup outcomes. Load when an agent is finished or when teardown reports retained resources.
 ---
 
-Cleanup is a decision, not housekeeping. Keep valuable specialists; retire a
-group when its obligations are settled and you know they are.
-At local completion, the parent reads the handoff, reviews the exact source,
-integrates and checks it, then closes the collector and retires the completed
-group before its own final delivery. `finishWorkBatch` closes only the collector.
+Retire an agent when its request work is settled and its result has been reviewed.
+Settlement, closing an observer, stopping an actor, and releasing host resources
+are distinct outcomes. Keep useful agents available while named work remains.
+Before stopping one, retain its typed result, exact source identity, relevant
+progress and cleanup evidence. A dirty worktree remains available after its
+actor stops; retirement does not delete source, branches, commits, or user files.
 
-## Before retirement: kaizen interview
+Read the current status and retained receipts before acting. New requests,
+children, or resource changes can make an earlier cleanup observation stale.
+Treat refusal and partial cleanup as typed outcomes with their own next action;
+do not repeat an uncertain effect without its receipt. A pending release is a
+pending fact: continue independent work and read the eventual notice. If a
+resource stays retained, report its identity, owner, reason, and required
+repository or host action.
 
-Before retiring completed model actors, obtain and retain a brief interview
-while their context is still available. Include the root at run completion and
-workers/reviewers with relevant firsthand evidence. Reuse answers already in
-handoffs or friction reports; ask follow-ups only for missing useful evidence.
-
-Ask what helped, what caused waits or confusion, and which recurring work could
-have been handled by a helper or actor. Include useful and failed automation,
-coordination/review handoffs, and one concrete change they would try next.
-Request exact calls, commands, commits or artifacts where available; separate
-observations from inferred causes and unmeasured savings.
-
-Read the answers before retiring the actor. Retain them in the project's
-interview/friction record with actor and run identities, then route actionable
-findings to a fix, bounded experiment or explicit deferred item. An interview
-request being delivered is not an answer. Do not repeat an already retained
-interview to satisfy ceremony. For an unresponsive actor or urgent stop, retain
-the available trace and record that the interview was unavailable; do not delay
-necessary cancellation or resource release.
-
-## Plan and execute
-
-For routine retirement, plan and execute in one cell:
-
-```haskell
-cleanupReceipt <- executeCleanup =<< planCleanupFor worker
-display (cleanupReceiptPlan cleanupReceipt)
-```
-
-Given a retained `worker :: Response result`, `planCleanupFor` extracts its fork
-group and returns a refusing plan for a response that was never admitted through
-`unfold`.
-
-If you already hold a `ForkGroupHandle` — from `forkGroupHandle` or
-`observeForkGroup` — call `planCleanup` on it directly. To inspect the plan
-before execution, separate planning and execution:
-
-```haskell
-cleanupPlan <- planCleanupFor worker
-display cleanupPlan
-```
-
-Inspect the plan, then execute it in a separate cell:
-
-```haskell
-cleanupReceipt <- executeCleanup cleanupPlan
-display (cleanupReceiptPlan cleanupReceipt)
-```
-
-Execution honors the actor incarnations and activity revisions that were
-inspected. A new descendant, request, or watch makes the plan stale, and
-`CleanupStalePlan` is a typed refusal: no teardown has begun, and
-`cleanupReceiptPlan` shows the current scope to inspect before planning again.
-Polling a handle or finishing already-observed work does not make a plan stale.
-Pending obligations stay blockers, including a descendant's outbound requests.
-The plan covers the exact owned group, its siblings within that group, and nested
-descendants. One pending member or unconfirmed provider turn refuses the whole
-group before any stop; settled members of that same group are not released
-piecemeal. Separately admitted sibling groups have their own handles and can be
-released independently. Keep a blocked group only for named unfinished work.
-Retrying an inspected plan cannot widen its scope; a survivor that has accepted
-new work needs a fresh plan.
-
-The typed roster separates request work from provider health. `IdleRetained`
-requires a successful, non-stale provider completion and no request work;
-`SettledAwaitingProvider` means the request settled while the provider is still
-active; `NeedsAttention` covers failed, interrupted, unknown or stale
-observations. Cleanup rechecks this immediately before retiring each live
-actor. For a stuck or failed worker use `stopAgent` explicitly — a control
-action, not a claim that the provider was idle.
-
-## Stopping has two phases
-
-First the actor publishes its terminal state; then the host releases its
-process, pane, tool service, socket and workspace view. `stopAgent` and each
-`CleanupStoppedActor` step wait for the second phase, and the outcome says
-which of them happened:
-
-```haskell
-stopped <- stopAgent (responseActor worker)
-display stopped
-```
-
-- `StoppedNow` — both phases completed. This is final; no notice follows.
-- `StoppedRetaining detail` — the actor is stopped, and the named resources
-  stay retained on purpose. Also final; no notice follows. Read `detail` and
-  decide whether anything still needs a repository or host action.
-- `StoppedReleasing` — release had not settled within the wait. Exactly one
-  later notice reports how it ended. Do not poll for it, and do not re-issue
-  the stop: the release is underway and a second call cannot speed it up.
-
-Treat `StoppedReleasing` as a pending fact in your own state, not as a failure,
-and continue useful work until its notice arrives.
-
-## Nothing is deleted
-
-Cleanup never deletes worktrees, branches, commits, build evidence or user
-files. A dirty worktree stays available after its actor is retired, which is
-exactly what you want when the reason for retiring was that the worker was
-stuck. Any repository cleanup is a separate, explicit Git decision made after
-you have read what is there.
-
-`releaseGroup groupHandle` is the scoped form used during a wave: it asks the
-existing cleanup owner to release an eligible group. Retain the receipt; a
-blocked step leaves the entire group with its current owner, and that is
-information, not an error to retry in a loop. `doc cleanup` carries the same
-material in fallback form.
+For a parent with work in progress, continue after retiring an unrelated child.
+Do not use a shared group name as actor identity or cleanup authority. Actor
+identity, request ownership, workspace attachment, and filesystem retention are
+separate facts. Consult the live cleanup declarations and `doc cleanup` for the
+specific operations available in this runtime.

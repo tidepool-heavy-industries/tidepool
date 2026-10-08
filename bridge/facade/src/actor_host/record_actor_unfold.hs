@@ -11,11 +11,13 @@
 {-# LANGUAGE TypeOperators #-}
 
 module LaunchFixture where
+
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Record as R
 import Tidepool.Actors.Exomonad
+import qualified Tidepool.Agent.Contract as A
 
 data Launcher mode = Launcher
   { launcherState :: mode :- State (Maybe Text)
@@ -25,15 +27,17 @@ data Launcher mode = Launcher
   } deriving Generic
 
 launchDefinition =
-  R.definition "launch-review" (Actor.Selected (knownEffects @ResearchEffects)) Launcher
+  R.definition "launch-review" (Actor.Selected (knownEffects @'[AgentLaunch, Replies, Actor])) Launcher
     { launcherState = Nothing
     , saveReply = \result -> R.put (Just (either (const "unavailable") responseValue result))
     , readReply = \() -> R.get
     , launchAndAwait = \() -> do
-        worker <- unfold (batch "resident" "review")
-          (child (withLifetime ActorOwned (withContext (selected (\input -> input))
-            (researching @Text currentCheckout
-              (assignment [label|review|] ("reply once" :: Text))))))
+        Right workerAgent <- spawnSubagent (FreshCtx "Return the requested typed result.")
+          (ForkWorktree currentCheckout)
+          ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies]))
+            { spawnLabel = Just "review", spawnLifetime = ActorOwned })
+        Right worker <- request @Text workerAgent ("reply once" :: Text)
+          (defaultRequestOptions { requestLabel = Just "review" })
         own <- R.self @Launcher
         _ <- R.forwardResult worker (saveReply own)
         pure ()

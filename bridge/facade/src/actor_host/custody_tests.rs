@@ -3,7 +3,9 @@
     reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
 )]
 use super::*;
-use exomonad_actor::{ForkWorkspaceCustody, ResidentToolEndpoint};
+use exomonad_actor::{
+    ResidentToolEndpoint, WorkspaceAdmission, WorkspaceCustody, WorkspaceSelection,
+};
 use exomonad_worktree::WorktreeHandle;
 
 pub(super) fn custody_fixture() -> (
@@ -11,7 +13,7 @@ pub(super) fn custody_fixture() -> (
     tempfile::TempDir,
     WorktreeHandle,
     Arc<Mutex<BindingTable>>,
-    Arc<ActorForkWorkspaceAdmission>,
+    Arc<ActorWorkspaceAdmission>,
 ) {
     let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
     repository
@@ -58,10 +60,16 @@ async fn bootstrapping_a_campaign_leaves_the_source_repository_clean() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
-    let (_repo, _runtime, tree, _bindings, admission) = custody_fixture();
+    let (_repo, _runtime, _tree, _bindings, admission) = custody_fixture();
     let owner = ActorRef::first(exomonad_actor::ActorId(7));
+    admission
+        .authority
+        .install_grant(owner.into(), ActorWorktreeGrant::Repository);
     let _custody = admission
-        .install_custody(owner, tree.id().as_str(), exomonad_actor::ActorRole::Coding)
+        .prepare(owner, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(owner)
         .unwrap();
     let (entered, ready) = oneshot::channel();
     let (release, released) = oneshot::channel();
@@ -72,14 +80,10 @@ async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
         released.blocking_recv().unwrap();
     });
     ready.await.unwrap();
-    let mut preparation = admission.admit(
+    let mut preparation = admission.prepare(
         owner,
-        "root/async-child".into(),
-        ForkWorkspaceSeed::CurrentCheckout(tidepool_bridge_effects::WtDirtyPolicy::RequireClean),
-        exomonad_actor::ForkWorkspacePolicy {
-            native_tools: exomonad_actor::NativeToolClass::Coding,
-            workspace: exomonad_actor::WorkspaceAccess::WritableBound,
-        },
+        WorkspaceSelection::ForkDirectory(exomonad_actor::WorkspaceSeedWire::CurrentCheckout),
+        Some(exomonad_worktree::WorkspaceAccess::ReadWrite),
     );
     std::future::poll_fn(|cx| {
         assert!(preparation.as_mut().poll(cx).is_pending());
@@ -103,70 +107,119 @@ async fn custody_admission_waits_for_git_without_blocking_the_runtime() {
         std::fs::read_to_string(handle.cwd().join("README.md")).unwrap(),
         "seed"
     );
-    assert_ne!(handle.id(), tree.id());
+    assert_ne!(handle.cwd(), admission.manager.source_repository());
 }
 
-#[test]
-fn custody_is_exact_and_released_only_after_last_owner() {
-    let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
-    let actor = ActorRef::first(exomonad_actor::ActorId(7));
-    let custody = admission
-        .install_custody(actor, tree.id().as_str(), exomonad_actor::ActorRole::Coding)
-        .unwrap();
-    assert!(admission
-        .install_custody(actor, tree.id().as_str(), exomonad_actor::ActorRole::Coding)
-        .is_err());
-    for other in [
-        ActorRef::first(exomonad_actor::ActorId(8)),
-        ActorRef {
-            incarnation: exomonad_actor::Incarnation(2),
-            ..actor
-        },
-    ] {
-        assert!(admission
-            .install_custody(other, tree.id().as_str(), exomonad_actor::ActorRole::Coding)
-            .is_err());
-    }
-    let host = custody.clone();
-    drop(host);
-    assert!(bindings.lock().current(tree.id()).is_some());
-    drop(custody);
-    assert!(bindings.lock().current(tree.id()).is_none());
-    assert!(tree.cwd().join("README.md").exists());
-    let rebound = admission
-        .install_custody(actor, tree.id().as_str(), exomonad_actor::ActorRole::Coding)
-        .unwrap();
-    drop(rebound);
-    assert!(bindings.lock().current(tree.id()).is_none());
-}
-
-#[test]
-fn custody_retains_binding_when_process_cleanup_is_uncertain() {
-    let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
-    let custody = admission
-        .install_custody(
-            ActorRef::first(exomonad_actor::ActorId(7)),
-            tree.id().as_str(),
-            exomonad_actor::ActorRole::Coding,
-        )
-        .unwrap();
-    custody.process_may_exist();
-    drop(custody);
-    assert!(bindings.lock().current(tree.id()).is_some());
-}
-
-#[test]
-fn custody_rejects_missing_worktrees_without_binding() {
+#[tokio::test]
+async fn custody_is_exact_and_released_only_after_last_owner() {
     let (_repo, _runtime, _tree, bindings, admission) = custody_fixture();
     let actor = ActorRef::first(exomonad_actor::ActorId(7));
-    for tree in ["../outside", "wt-absent"] {
-        assert!(admission
-            .install_custody(actor, tree, exomonad_actor::ActorRole::Coding)
-            .is_err());
-        assert!(bindings
-            .lock()
-            .current(&WorktreeId::from_raw(tree))
-            .is_none());
+    admission
+        .authority
+        .install_grant(actor.into(), ActorWorktreeGrant::Repository);
+    let first = admission
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap();
+    let second = admission
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap();
+    let custody = first.install(actor).unwrap();
+    let bound_tree = admission.authority.bound_worktree(actor.into()).unwrap();
+    let backing = admission.manager.lookup(&bound_tree).unwrap().unwrap();
+    assert!(
+        second.install(actor).is_err(),
+        "one exact actor cannot acquire duplicate custody"
+    );
+    let peer = ActorRef::first(exomonad_actor::ActorId(8));
+    let peer_custody = admission
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(peer)
+        .unwrap();
+    let host = custody.clone();
+    drop(host);
+    assert!(bindings
+        .lock()
+        .membership(
+            &bound_tree,
+            &WorktreePrincipal::exact_actor("custody-test", actor.id.0, actor.incarnation.0),
+        )
+        .is_some());
+    drop(custody);
+    assert!(admission.authority.bound_worktree(actor.into()).is_none());
+    assert_eq!(
+        admission.authority.bound_worktree(peer.into()),
+        Some(bound_tree.clone())
+    );
+    assert!(backing.cwd().join("README.md").exists());
+    let rebound = admission
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(actor)
+        .unwrap();
+    drop(rebound);
+    assert_eq!(
+        admission.authority.bound_worktree(peer.into()),
+        Some(bound_tree.clone())
+    );
+    drop(peer_custody);
+    assert_eq!(
+        bindings.lock().participants(&bound_tree).unwrap().count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn custody_retains_binding_when_process_cleanup_is_uncertain() {
+    let (_repo, _runtime, _tree, bindings, admission) = custody_fixture();
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    admission
+        .authority
+        .install_grant(actor.into(), ActorWorktreeGrant::Repository);
+    let custody = admission
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(actor)
+        .unwrap();
+    let bound_tree = admission.authority.bound_worktree(actor.into()).unwrap();
+    let backing = admission.manager.lookup(&bound_tree).unwrap().unwrap();
+    custody.process_may_exist();
+    drop(custody);
+    assert!(bindings
+        .lock()
+        .membership(
+            &bound_tree,
+            &WorktreePrincipal::exact_actor("custody-test", actor.id.0, actor.incarnation.0),
+        )
+        .is_some());
+    assert!(backing.cwd().join("README.md").exists());
+}
+
+#[tokio::test]
+async fn custody_rejects_missing_workspaces_without_binding() {
+    let (_repo, _runtime, _tree, bindings, admission) = custody_fixture();
+    let actor = ActorRef::first(exomonad_actor::ActorId(7));
+    for raw in ["../outside", "wt-absent"] {
+        let invalid =
+            WorkspaceSelection::ExistingDirectory(tidepool_bridge_effects::WtWorkspaceHandle {
+                raw: raw.into(),
+            });
+        assert!(admission.prepare(actor, invalid, None).await.is_err());
+    }
+    for raw in ["../outside", "wt-absent"] {
+        assert_eq!(
+            bindings
+                .lock()
+                .participants(&WorktreeId::from_raw(raw))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 }
 
@@ -179,35 +232,24 @@ enum InstallPhase {
 #[derive(Clone)]
 struct DelayedCustody {
     phase: InstallPhase,
-    inner: Arc<dyn ForkWorkspaceAdmission>,
+    inner: Arc<dyn WorkspaceAdmission>,
     entered: mpsc::UnboundedSender<(ActorRef, oneshot::Sender<()>)>,
 }
 
-impl ForkWorkspaceAdmission for DelayedCustody {
-    fn admit(
+impl WorkspaceAdmission for DelayedCustody {
+    fn prepare(
         &self,
         owner: ActorRef,
-        path: String,
-        seed: ForkWorkspaceSeed,
-        policy: exomonad_actor::ForkWorkspacePolicy,
-    ) -> exomonad_actor::ForkWorkspaceAdmissionFuture<'_> {
+        selection: WorkspaceSelection,
+        access: Option<exomonad_actor::WorkspaceAccess>,
+    ) -> exomonad_actor::WorkspaceAdmissionFuture<'_> {
         let controller = self.clone();
         Box::pin(async move {
-            let prepared = self.inner.admit(owner, path, seed, policy).await?;
-            Ok(exomonad_actor::PreparedForkWorkspace::new(
+            let prepared = self.inner.prepare(owner, selection, access).await?;
+            Ok(exomonad_actor::PreparedWorkspaceAttachment::new(
                 prepared.handle().clone(),
                 move |actor| controller.delay_installation(actor, || prepared.install(actor)),
             ))
-        })
-    }
-    fn install_custody(
-        &self,
-        _actor: ActorRef,
-        _worktree: &str,
-        _role: exomonad_actor::ActorRole,
-    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
-        Err(ForkWorkspaceAdmissionError {
-            detail: "admitted child must consume its owned preparation".into(),
         })
     }
 }
@@ -216,22 +258,25 @@ impl DelayedCustody {
     fn delay_installation(
         &self,
         actor: ActorRef,
-        install: impl FnOnce() -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError>,
-    ) -> Result<Arc<dyn ForkWorkspaceCustody>, ForkWorkspaceAdmissionError> {
+        install: impl FnOnce() -> Result<
+            Arc<dyn WorkspaceCustody>,
+            exomonad_actor::WorkspaceAdmissionError,
+        >,
+    ) -> Result<Arc<dyn WorkspaceCustody>, exomonad_actor::WorkspaceAdmissionError> {
         let mut install = Some(install);
         let installed = match self.phase {
             InstallPhase::BeforeBind => None,
             InstallPhase::AfterBind => Some(install.take().unwrap()()?),
         };
         let (release, ready) = oneshot::channel();
-        self.entered
-            .send((actor, release))
-            .map_err(|_| ForkWorkspaceAdmissionError {
+        self.entered.send((actor, release)).map_err(|_| {
+            exomonad_actor::WorkspaceAdmissionError {
                 detail: "test custody controller dropped".into(),
-            })?;
+            }
+        })?;
         ready
             .blocking_recv()
-            .map_err(|_| ForkWorkspaceAdmissionError {
+            .map_err(|_| exomonad_actor::WorkspaceAdmissionError {
                 detail: "test custody installation cancelled".into(),
             })?;
         match installed {
@@ -317,21 +362,22 @@ async fn custody_assert_request(
 
 #[tokio::test]
 async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
-    let mut campaign = test_campaign::TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
-        |admission| admission,
-        test_campaign::configure_notebook_jev_workspace,
-    )
-    .await;
+    // Each effectful assertion must evaluate its typed observation/value and
+    // fail on a mismatch before committing; pure notebook values stay opaque.
+    let assert_committed = |response: &serde_json::Value| {
+        assert_eq!(response["status"], "committed", "{response:?}");
+    };
+    let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let first = tests::dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/inherited_response_producer.hs",
-        ),
-    )
-    .await;
-    assert_eq!(first["status"], "committed", "{first:?}");
+    let producer_dispatch = tokio::spawn(async move {
+        tests::dispatch_haskell_script(
+            root.as_ref(),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/inherited_response_producer.hs",
+            ),
+        )
+        .await
+    });
     let producer = campaign
         .next_deployment(
             "producer installation",
@@ -344,21 +390,33 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
         .await;
     campaign.authority.install_grant(
         producer.actor.identity().into(),
-        worktree_grant(producer.effective_role.role()),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
-    producer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&producer);
+    let first = tokio::time::timeout(Duration::from_secs(120), producer_dispatch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first["status"], "committed", "{first:?}");
     custody_activation(&mut campaign).await;
 
     // The observer's inherited source tip includes `worker`, whose typed
     // ExitCell is still pending at this fork boundary.
-    let second = tests::dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/inherited_response_observer.hs",
-        ),
-    )
-    .await;
-    assert_eq!(second["status"], "committed", "{second:?}");
+    let root = campaign.root_installation.policy.clone();
+    let observer_policy = root.clone();
+    let observer_dispatch = tokio::spawn(async move {
+        tests::dispatch_haskell_script(
+            observer_policy.as_ref(),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/inherited_response_observer.hs",
+            ),
+        )
+        .await
+    });
     let observer = campaign
         .next_deployment(
             "observer installation",
@@ -371,25 +429,36 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
         .await;
     campaign.authority.install_grant(
         observer.actor.identity().into(),
-        worktree_grant(observer.effective_role.role()),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
-    observer.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&observer);
+    let second = tokio::time::timeout(Duration::from_secs(120), observer_dispatch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second["status"], "committed", "{second:?}");
     custody_activation(&mut campaign).await;
 
     let watch = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "inheritedWatch <- watch (\"inherited-ready\" :: WatchLabel) (awaitResponse worker)",
+        "inheritedWatch <- watch (Just \"inherited-ready\") (response worker)",
     )
     .await;
     assert_eq!(watch["status"], "committed", "{watch:?}");
-    let pending =
-        tests::dispatch_haskell_script(observer.policy.as_ref(), "pollWatch inheritedWatch").await;
-    assert_eq!(pending["status"], "committed", "{pending:?}");
-    assert!(pending.to_string().contains("WatchPending"), "{pending:?}");
+    let pending = tests::dispatch_haskell_script(
+        observer.policy.as_ref(),
+        "import qualified Tidepool.Effects as Effects\npending <- pollWatch inheritedWatch\n_ <- case pending of { WatchPending _ -> pure (); _ -> Effects.error \"inherited watch was not pending\" }",
+    )
+    .await;
+    assert_committed(&pending);
 
     let reply = tests::dispatch_haskell_script(
         producer.policy.as_ref(),
-        "respond ((sessionInput :: Text), (\\x -> x + (1 :: Int)))",
+        "respond (((sessionInput :: Text), map (+ 1) [1 .. 400 :: Int]), (\\x -> x + (1 :: Int)))",
     )
     .await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
@@ -436,12 +505,20 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     )
     .await;
     assert_eq!(extracted["status"], "committed", "{extracted:?}");
-    assert!(extracted.to_string().contains("custody"), "{extracted:?}");
-    assert!(extracted.to_string().contains("42"), "{extracted:?}");
+
+    // The projection's private subscription is already released. Keep its
+    // lazy value unforced until both the public watch and response are gone.
+    let forgotten_watch =
+        tests::dispatch_haskell_script(observer.policy.as_ref(), "forgetWatch inheritedWatch")
+            .await;
+    assert_eq!(
+        forgotten_watch["status"], "committed",
+        "{forgotten_watch:?}"
+    );
 
     let queued = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "queuedWatch <- watch (\"queued-ready\" :: WatchLabel) (awaitResponse worker)",
+        "queuedWatch <- watch (Just \"queued-ready\") (result worker)",
     )
     .await;
     assert_eq!(queued["status"], "committed", "{queued:?}");
@@ -450,48 +527,34 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     assert_eq!(handoff["status"], "replied", "{handoff:?}");
     let returned = tests::dispatch_haskell_script(
         root.as_ref(),
-        "forwardedState <- pollResponse observer\nlet forwarded = case forwardedState of { ResponseReady answer -> responseValue answer; _ -> error \"typed handoff was not ready\" }\nforwardedState2 <- pollResponse forwarded\ninspectFull (case forwardedState2 of { ResponseReady answer -> let (label, run) = responseValue answer in (label, run 41); _ -> error \"forwarded response was not ready\" })",
+        "forwardedState <- pollResponse observer\nlet forwarded = case forwardedState of { ResponseReady answer -> responseValue answer; _ -> error \"typed handoff was not ready\" }",
     ).await;
     assert_eq!(returned["status"], "committed", "{returned:?}");
-    assert!(returned.to_string().contains("42"), "{returned:?}");
 
-    let released = tests::dispatch_haskell_script(root.as_ref(), "forgetResponse worker").await;
-    assert_eq!(released["status"], "committed", "{released:?}");
-    assert!(
-        released.to_string().contains("ResponseForgotten"),
-        "{released:?}"
-    );
+    let released = tests::dispatch_haskell_script(root.as_ref(),
+        "import qualified Tidepool.Effects as Effects\nreleased <- forgetResponse worker\n_ <- case released of { ResponseForgotten -> pure (); _ -> Effects.error \"source response was not forgotten\" }").await;
+    assert_committed(&released);
     let expired = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        "expired <- pollResponse worker\ninspectFull expired\ninspectFull (fst retained, snd retained 41)",
+        include_str!("inherited_response_released.hs"),
     )
     .await;
-    assert_eq!(expired["status"], "committed", "{expired:?}");
-    assert!(expired.to_string().contains("ReplyStale"), "{expired:?}");
-    assert!(expired.to_string().contains("custody"), "{expired:?}");
-    assert!(expired.to_string().contains("42"), "{expired:?}");
-    let forwarded_expired =
-        tests::dispatch_haskell_script(root.as_ref(), "pollResponse forwarded").await;
-    assert_eq!(
-        forwarded_expired["status"], "committed",
-        "{forwarded_expired:?}"
-    );
-    assert!(
-        forwarded_expired.to_string().contains("ReplyStale"),
-        "{forwarded_expired:?}"
-    );
+    assert_committed(&expired);
+    let watch_expired = tests::dispatch_haskell_script(
+        observer.policy.as_ref(),
+        "expiredWatch <- pollWatch inheritedWatch\n_ <- case expiredWatch of { WatchUnavailable (AwaitRejected ReplyStale) -> pure (); _ -> Effects.error \"released public watch did not refuse observation\" }",
+    )
+    .await;
+    assert_committed(&watch_expired);
+    let forwarded_expired = tests::dispatch_haskell_script(root.as_ref(),
+        "expiredForwarded <- pollResponse forwarded\n_ <- case expiredForwarded of { ResponseUnavailable (ResponseRejected ReplyStale) -> pure (); _ -> Effects.error \"borrowed released response did not refuse observation\" }").await;
+    assert_committed(&forwarded_expired);
+    // A different watch captured successful settlement before source release.
+    // Its decision and the filled Haskell cell remain independently readable.
     let queued_after_release =
-        tests::dispatch_haskell_script(observer.policy.as_ref(), "pollWatch queuedWatch").await;
-    assert_eq!(
-        queued_after_release["status"], "committed",
-        "{queued_after_release:?}"
-    );
-    assert!(
-        queued_after_release
-            .to_string()
-            .contains("ResponseReleased"),
-        "{queued_after_release:?}"
-    );
+        tests::dispatch_haskell_script(observer.policy.as_ref(),
+            "queuedState <- pollWatch queuedWatch\n_ <- case queuedState of { WatchReady answer -> let ((label, values), run) = answer in if label == \"custody\" && values == [2 .. 401] && run 41 == 42 then pure () else Effects.error \"settled watch result changed\"; _ -> Effects.error \"settled watch lost its captured result\" }").await;
+    assert_committed(&queued_after_release);
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }
@@ -499,16 +562,13 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
 #[tokio::test]
 async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     let (entered, mut installing) = mpsc::unbounded_channel();
-    let mut campaign = test_campaign::TestCampaign::start_with_admission(
-        exomonad_actor::ResearchPolicy::default(),
-        |inner| {
-            Arc::new(DelayedCustody {
-                inner,
-                entered,
-                phase: InstallPhase::BeforeBind,
-            })
-        },
-    )
+    let mut campaign = test_campaign::TestCampaign::start_with_admission(|inner| {
+        Arc::new(DelayedCustody {
+            inner,
+            entered,
+            phase: InstallPhase::BeforeBind,
+        })
+    })
     .await;
     let policy = campaign.root_installation.policy.clone();
     let launched = tokio::spawn(async move {
@@ -553,30 +613,16 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
             .await;
         assert_eq!(child.actor.identity(), actor);
         assert!(child.worktree_custody.is_some());
-        campaign
-            .authority
-            .install_grant(actor.into(), worktree_grant(child.effective_role.role()));
+        campaign.authority.install_grant(
+            actor.into(),
+            ActorWorktreeGrant::Bound {
+                enumerate: false,
+                allocate: true,
+                integrate: true,
+            },
+        );
+        campaign.acknowledge_native_spawn(&child);
         installed.push(child);
-    }
-    // Neither child can run before the whole fork boundary is acknowledged.
-    // A child may already park and queue its activation (SessionReady only
-    // appends to its durable inbox); its provider session is bound, and so
-    // reads that inbox, only after the gate commits (the host's binding
-    // discovery waits on `wait_committed`). What must not happen yet is any
-    // child finishing or retiring.
-    let children: Vec<_> = installed
-        .iter()
-        .map(|child| child.actor.identity())
-        .collect();
-    campaign.assert_no_deployment("fork boundary not yet acknowledged", |event| match event {
-        LocalResidentDeployment::ChildExited { notice } => {
-            children.contains(&notice.child.identity())
-        }
-        LocalResidentDeployment::Retired { actor, .. } => children.contains(actor),
-        _ => false,
-    });
-    for child in &installed {
-        child.fork_gate.as_ref().unwrap().mark_ready().unwrap();
     }
     let result = tokio::time::timeout(Duration::from_secs(120), launched)
         .await
@@ -584,8 +630,8 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         .unwrap();
     assert_eq!(result["status"], "committed", "{result:?}");
     installed.sort_by(|a, b| a.label.cmp(&b.label));
-    assert!(installed[0].label.ends_with("/first"));
-    assert!(installed[1].label.ends_with("/second"));
+    assert_eq!(installed[0].label, "first");
+    assert_eq!(installed[1].label, "second");
     assert_ne!(installed[0].launch_worktrees, installed[1].launch_worktrees);
     let mut seen = [false; 2];
     for _ in 0..2 {
@@ -678,9 +724,14 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         .await;
     assert_eq!(leaf.actor.identity(), actor);
     assert_eq!(leaf.context_parent, Some(installed[0].actor.identity()));
-    campaign
-        .authority
-        .install_grant(actor.into(), worktree_grant(leaf.effective_role.role()));
+    campaign.authority.install_grant(
+        actor.into(),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
+    );
     let leaf_tree = campaign
         .worktrees
         .lookup(&WorktreeId::from_raw(&leaf.launch_worktrees[0]))
@@ -693,7 +744,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         .unwrap();
     assert_eq!(leaf_tree.source_head().as_str(), parent_head.trimmed());
     assert_ne!(parent_head.trimmed(), sibling_head.trimmed());
-    leaf.fork_gate.as_ref().unwrap().mark_ready().unwrap();
+    campaign.acknowledge_native_spawn(&leaf);
     let result = tokio::time::timeout(Duration::from_secs(120), nested)
         .await
         .unwrap()
@@ -704,7 +755,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     custody_assert_request(installed[0].policy.as_ref(), "nested", &activation).await;
     let watch = tests::dispatch_haskell_script(
         installed[0].policy.as_ref(),
-        "let readyLabel = \"custody-leaf-ready\" :: WatchLabel\nleafReady <- watch readyLabel (awaitResponse nested)",
+        "leafReady <- watch (Just \"custody-leaf-ready\") (result nested)",
     )
     .await;
     assert_eq!(watch["status"], "committed", "{watch:?}");
@@ -882,7 +933,10 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     }
     drop(installed);
     for id in ids {
-        assert!(campaign.bindings.lock().current(&id).is_none());
+        assert_eq!(
+            campaign.bindings.lock().participants(&id).unwrap().count(),
+            0
+        );
         assert!(campaign
             .worktrees
             .lookup(&id)
@@ -895,22 +949,19 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
 }
 
 #[tokio::test]
-async fn custody_install_failure_prevents_provider_publication() {
+async fn custody_install_failure_prevents_policy_publication() {
     let (entered, mut installing) = mpsc::unbounded_channel();
-    let mut campaign = test_campaign::TestCampaign::start_with_admission(
-        exomonad_actor::ResearchPolicy::default(),
-        |inner| {
-            Arc::new(DelayedCustody {
-                inner,
-                entered,
-                phase: InstallPhase::BeforeBind,
-            })
-        },
-    )
+    let mut campaign = test_campaign::TestCampaign::start_with_admission(|inner| {
+        Arc::new(DelayedCustody {
+            inner,
+            entered,
+            phase: InstallPhase::BeforeBind,
+        })
+    })
     .await;
     let policy = campaign.root_installation.policy.clone();
     let launched = tokio::spawn(async move {
-        tests::dispatch_haskell_script(
+        tests::dispatch_haskell_script_result(
             policy.as_ref(),
             &tidepool_testing::fixture_source("bridge/facade/src/actor_host/custody_siblings.hs"),
         )
@@ -926,8 +977,13 @@ async fn custody_install_failure_prevents_provider_publication() {
         .await
         .unwrap()
         .unwrap();
-    // The enclosing tool committed before deferred child bootstrap ran.
-    assert_eq!(result["status"], "committed", "{result:?}");
+    assert!(
+        result.is_err()
+            || result
+                .as_ref()
+                .is_ok_and(|value| value["status"] != "committed"),
+        "failed custody committed its spawn call: {result:?}"
+    );
     drop(installing);
     campaign
         .next_deployment(
@@ -935,7 +991,7 @@ async fn custody_install_failure_prevents_provider_publication() {
             Duration::from_secs(120),
             move |event| match event {
                 LocalResidentDeployment::PolicyInstalled(child) => panic!(
-                    "provider published despite custody failure: {:?}",
+                    "native policy published despite custody failure: {:?}",
                     child.actor.identity()
                 ),
                 LocalResidentDeployment::Retired { actor: retired, .. } if retired == actor => {
@@ -960,24 +1016,40 @@ async fn custody_install_failure_prevents_provider_publication() {
 
 async fn cancel_at_install_phase(phase: InstallPhase) {
     let (entered, mut installing) = mpsc::unbounded_channel();
-    let mut campaign = test_campaign::TestCampaign::start_with_admission(
-        exomonad_actor::ResearchPolicy::default(),
-        |inner| {
-            Arc::new(DelayedCustody {
-                inner,
-                entered,
-                phase,
-            })
-        },
-    )
+    let mut campaign = test_campaign::TestCampaign::start_with_admission(|inner| {
+        Arc::new(DelayedCustody {
+            inner,
+            entered,
+            phase,
+        })
+    })
     .await;
+    let (invocation, completion) =
+        test_campaign::original_tool_call(exomonad_tool::OriginalOperation {
+            origin: exomonad_tool::ConversationOrigin::External {
+                thread_id: "custody-cancellation".into(),
+            },
+            request_id: "delayed-spawn".into(),
+            call_id: "delayed-spawn".into(),
+        });
     let policy = campaign.root_installation.policy.clone();
-    let launched = tokio::spawn(async move {
-        tests::dispatch_haskell_script(
-            policy.as_ref(),
-            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/custody_single.hs"),
-        )
-        .await
+    let launched = tokio::spawn({
+        let policy = policy.clone();
+        let invocation = invocation.clone();
+        async move {
+            policy
+                .dispatch_json_boxed(exomonad_tool::ToolInvocation {
+                    context: Some(invocation),
+                    name: exomonad_actor::HASKELL_TOOL.into(),
+                    arguments: exomonad_tool::ToolArguments::Raw(
+                        &tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/custody_single.hs",
+                        )
+                        .into(),
+                    ),
+                })
+                .await
+        }
     });
     let (actor, release) = tokio::time::timeout(Duration::from_secs(120), installing.recv())
         .await
@@ -996,42 +1068,44 @@ async fn cancel_at_install_phase(phase: InstallPhase) {
             .is_some(),
         matches!(phase, InstallPhase::AfterBind)
     );
-    assert_eq!(launched.await.unwrap()["status"], "committed");
-    let policy = campaign.root_installation.policy.clone();
-    let stopped = tokio::spawn(async move {
-        tests::dispatch_haskell_script(policy.as_ref(), "stopAgent (responseActor worker)").await
-    });
-    // On this current-thread executor the stop handler runs from publishing
-    // this posture through recording shutdown intent before its first await.
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            if matches!(campaign.root_installation.runtime_observation.snapshot().workbench_posture,
-                exomonad_actor::ActorWorkbenchPosture::AwaitingEffect { effect, .. } if effect == "stopAgent") {
-                break;
-            }
-            assert!(!stopped.is_finished(), "stop finished without entering the pending retirement");
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    // Poll the exact native cancellation owner through admission before
+    // releasing installation. The actor handle is not published by spawn yet.
+    let mut cancelled = policy.cancel_workbench_boxed(invocation);
+    std::future::poll_fn(|cx| {
+        assert!(cancelled.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
     release.send(()).unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(120), stopped)
+    let outcome = tokio::time::timeout(Duration::from_secs(120), cancelled)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(result["status"], "committed", "{result:?}");
     assert!(
-        result["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("StoppedNow"),
-        "{result:?}"
+        matches!(
+            outcome,
+            exomonad_actor::WorkbenchCancellationOutcome::Cancelled { .. }
+        ),
+        "{outcome:?}"
     );
+    let result = tokio::time::timeout(Duration::from_secs(120), launched)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.is_err()
+            || result
+                .as_ref()
+                .is_ok_and(|value| value["status"] != "committed"),
+        "cancelled spawn call committed: {result:?}"
+    );
+    policy.complete_boxed(completion).await.unwrap();
     campaign.forest.shutdown().await;
     (&mut campaign.hosted).await.unwrap();
     for event in campaign.drain_ready() {
         if let LocalResidentDeployment::PolicyInstalled(child) = event {
             panic!(
-                "provider published for cancelled bootstrap: {:?}",
+                "native policy published for cancelled spawn: {:?}",
                 child.actor.identity()
             );
         }
@@ -1044,70 +1118,33 @@ async fn cancel_at_install_phase(phase: InstallPhase) {
 }
 
 #[tokio::test]
-async fn custody_actor_cancellation_during_delayed_install_releases_exact_binding() {
+async fn custody_spawn_cancellation_during_delayed_install_releases_exact_binding() {
     cancel_at_install_phase(InstallPhase::BeforeBind).await;
 }
 
 #[tokio::test]
-async fn custody_actor_cancellation_after_binding_prevents_provider_publication() {
+async fn custody_spawn_cancellation_after_binding_prevents_policy_publication() {
     cancel_at_install_phase(InstallPhase::AfterBind).await;
 }
 
-fn copy_fixture_sources(source: &Path, destination: &Path) {
-    std::fs::create_dir_all(destination).unwrap();
-    for entry in std::fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let target = destination.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_fixture_sources(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
 #[tokio::test]
-async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
-    let private_sources = tempfile::tempdir().unwrap();
-    copy_fixture_sources(
-        &crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
-        private_sources.path(),
-    );
-    let agent_module = private_sources
-        .path()
-        .join("Tidepool/Actors/Internal/Agent.hs");
-    let original = std::fs::read_to_string(&agent_module).unwrap();
-    let initial = "\\() -> attachAgent Nothing";
-    assert_eq!(original.matches(initial).count(), 1);
-    std::fs::write(
-        &agent_module,
-        original.replace(
-            initial,
-            tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host/custody_boot_failure.hs",
-            )
-            .trim(),
-        ),
-    )
-    .unwrap();
+async fn custody_haskell_installer_failure_after_install_releases_binding() {
     let (entered, mut installing) = mpsc::unbounded_channel();
-    let mut campaign = test_campaign::TestCampaign::start_with_config(
-        exomonad_actor::ResearchPolicy::default(),
-        |inner| {
-            Arc::new(DelayedCustody {
-                inner,
-                entered,
-                phase: InstallPhase::AfterBind,
-            })
-        },
-        |config| config.haskell_root = private_sources.path().to_path_buf(),
-    )
+    let mut campaign = test_campaign::TestCampaign::start_with_admission(|inner| {
+        Arc::new(DelayedCustody {
+            inner,
+            entered,
+            phase: InstallPhase::AfterBind,
+        })
+    })
     .await;
     let root = campaign.root_installation.policy.clone();
     let launched = tokio::spawn(async move {
-        tests::dispatch_haskell_script(
+        tests::dispatch_haskell_script_result(
             root.as_ref(),
-            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/custody_single.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/custody_boot_failure.hs",
+            ),
         )
         .await
     });
@@ -1128,14 +1165,20 @@ async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
         .is_some());
     release.send(()).unwrap();
     let result = launched.await.unwrap();
-    assert_eq!(result["status"], "committed", "{result:?}");
+    assert!(
+        result.is_err()
+            || result
+                .as_ref()
+                .is_ok_and(|value| value["status"] != "committed"),
+        "failed installer committed its spawn call: {result:?}"
+    );
     let failed = campaign
         .next_deployment(
-            "bootstrap-failure retirement",
+            "installer-failure retirement",
             Duration::from_secs(120),
             |event| match event {
                 LocalResidentDeployment::PolicyInstalled(child) => panic!(
-                    "provider published after bootstrap error: {:?}",
+                    "native policy published after installer error: {:?}",
                     child.actor.identity()
                 ),
                 LocalResidentDeployment::Retired { actor, terminal } => {
@@ -1143,7 +1186,7 @@ async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
                     assert!(
                         terminal
                             .summary
-                            .contains("intentional Haskell bootstrap failure"),
+                            .contains("intentional Haskell installer failure"),
                         "{terminal:?}"
                     );
                     Ok(actor)
@@ -1169,16 +1212,42 @@ async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
 
 #[tokio::test]
 async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
-    let (_repo, _runtime, tree, bindings, admission) = custody_fixture();
+    let (_repo, _runtime, tree, _bindings, admission) = custody_fixture();
     let holder = ActorRef::first(exomonad_actor::ActorId(11));
-    let _custody = admission
-        .install_custody(
+    admission
+        .authority
+        .install_grant(holder.into(), ActorWorktreeGrant::Repository);
+    let attachment = admission
+        .prepare(
             holder,
-            tree.id().as_str(),
-            exomonad_actor::ActorRole::Coding,
+            WorkspaceSelection::ForkDirectory(exomonad_actor::WorkspaceSeedWire::CommittedSource(
+                tidepool_bridge_effects::WtWorktreeSource::SourceWorktree(
+                    tidepool_bridge_effects::WtWorktreeId {
+                        raw: tree.id().as_str().into(),
+                    },
+                ),
+            )),
+            Some(exomonad_worktree::WorkspaceAccess::ReadWrite),
         )
+        .await
         .unwrap();
-    let authority = ActorWorktreeAuthority::new("custody-test", bindings);
+    let tree = admission
+        .manager
+        .lookup(&WorktreeId::from_raw(
+            &attachment.handle().handle_receipt.tree_id.raw,
+        ))
+        .unwrap()
+        .unwrap();
+    let _custody = attachment.install(holder).unwrap();
+    let authority = admission.authority.clone();
+    authority.install_grant(
+        holder.into(),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: false,
+            integrate: false,
+        },
+    );
     let source = admission.manager.source_repository().to_owned();
 
     let held = resident_command_roots(&authority, &admission.manager, &source, holder).unwrap();
@@ -1234,9 +1303,9 @@ async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
     );
 }
 
-#[test]
-fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolation() {
-    let (_repo, _runtime, child_tree, bindings, admission) = custody_fixture();
+#[tokio::test]
+async fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolation() {
+    let (_repo, _runtime, child_tree, _bindings, admission) = custody_fixture();
     let source = admission.manager.source_repository();
     let root_tree = admission
         .manager
@@ -1255,19 +1324,41 @@ fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolation() {
     let operator = ActorRef::first(exomonad_actor::ActorId(22));
     let ungranted = ActorRef::first(exomonad_actor::ActorId(23));
     let child = ActorRef::first(exomonad_actor::ActorId(24));
-    let _custody = admission
-        .install_custody(
-            child,
-            child_tree.id().as_str(),
-            exomonad_actor::ActorRole::Coding,
-        )
-        .unwrap();
-    let authority = ActorWorktreeAuthority::new("custody-test", bindings);
+    let authority = admission.authority.clone();
     authority.install_grant(root.into(), ActorWorktreeGrant::Repository);
     authority.install_grant(operator.into(), ActorWorktreeGrant::RepositoryReadOnly);
+    admission
+        .authority
+        .install_grant(child.into(), ActorWorktreeGrant::Repository);
+    let attachment = admission
+        .prepare(
+            child,
+            WorkspaceSelection::ForkDirectory(exomonad_actor::WorkspaceSeedWire::CommittedSource(
+                tidepool_bridge_effects::WtWorktreeSource::SourceWorktree(
+                    tidepool_bridge_effects::WtWorktreeId {
+                        raw: child_tree.id().as_str().into(),
+                    },
+                ),
+            )),
+            Some(exomonad_worktree::WorkspaceAccess::ReadWrite),
+        )
+        .await
+        .unwrap();
+    let child_tree = admission
+        .manager
+        .lookup(&WorktreeId::from_raw(
+            &attachment.handle().handle_receipt.tree_id.raw,
+        ))
+        .unwrap()
+        .unwrap();
+    let _custody = attachment.install(child).unwrap();
     authority.install_grant(
         child.into(),
-        worktree_grant(exomonad_actor::ActorRole::Coding),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
     let bubblewrap = resolve_scope_bubblewrap(&BTreeMap::new()).unwrap();
     let write = |actor, cwd: &Path, file: &str| {
