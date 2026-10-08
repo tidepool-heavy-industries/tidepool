@@ -1,5 +1,8 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+# Override explicitly with `just --set native_profile production test-lib ...`.
+native_profile := "fast-dev"
+
 # Buck actions use configured, materialized Nix tools; resource admission is external.
 default:
     @just --list
@@ -11,53 +14,53 @@ build *targets:
 # Native libtest runners own discovery, nonzero counts, isolation, and evidence.
 [positional-arguments]
 test-lib package *args:
-    python3 scripts/native-workflow.py test-lib "$@"
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} test-lib "$@"
 
 [positional-arguments]
 test-target package target *args:
-    python3 scripts/native-workflow.py test-target "$@"
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} test-target "$@"
 
 [positional-arguments]
 test-bin package binary *args:
-    python3 scripts/native-workflow.py test-bin "$@"
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} test-bin "$@"
 
 [positional-arguments]
 test-list package kind target="":
-    python3 scripts/native-workflow.py test-list "$1" "$2" ${3:+"$3"}
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} test-list "$1" "$2" ${3:+"$3"}
 
 # Run a named native Rust/Tasty target, forwarding its owning runner's arguments.
 [positional-arguments]
 test-native target *args:
-    bash scripts/buck2-run.sh run --local-only -c remote.enabled=false "$1" -- "${@:2}"
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} test-native "$@"
 
 [positional-arguments]
 suite package:
-    python3 scripts/native-workflow.py suite "$1"
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} suite "$1"
 
 [positional-arguments]
 suite-plan package:
-    python3 scripts/native-workflow.py suite-plan "$1"
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} suite-plan "$1"
 
 quick:
-    python3 scripts/native-workflow.py quick
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} quick
 
 # Link all registered native consumers. This compiles harnesses without executing them.
 check:
-    python3 scripts/native-workflow.py check
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} check
 
 lint:
-    python3 scripts/native-workflow.py lint
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} lint
 
 [positional-arguments]
 fixtures-check *cohorts:
-    python3 scripts/native-workflow.py fixtures-check "$@"
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} fixtures-check "$@"
 
 probe-opacity-check:
     bash scripts/buck2-run.sh build --local-only -c remote.enabled=false //bridge/haskell:probe_opacity
 
 # Broad integration gate; use focused targets during ordinary development.
 verify:
-    python3 scripts/native-workflow.py verify
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} verify
 
 test-toolchain-scripts:
     bash scripts/buck2-run.sh test --local-only -c remote.enabled=false //scripts:toolchain_script_tests
@@ -67,7 +70,7 @@ test-workflow-scripts:
 
 # A raw build is frozen/qualified explicitly before it can own a run.
 exomonad-build:
-    bash scripts/buck2-run.sh build --local-only -c remote.enabled=false //build/package:native_runtime_bundle
+    bash scripts/buck2-run.sh build --local-only -c remote.enabled=false -c {{quote("tidepool.profile=" + native_profile)}} //build/package:native_runtime_bundle
 
 [positional-arguments]
 exomonad-freeze *args:

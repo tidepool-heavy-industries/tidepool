@@ -26,6 +26,12 @@ export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_workbench_SKI
 
 export_file(name = "workspace_clippy", src = ".clippy.toml", visibility = ["PUBLIC"])
 filegroup(
+    name = "native_profile_test_sources",
+    srcs = {source: source for source in [".buckconfig", "build/native_profile.bzl"]},
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
     name = "qualification_inputs",
     srcs = {source: source for source in glob([
         "BUCK", "Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", ".buckconfig", ".gitmodules", ".clippy.toml",

@@ -112,6 +112,72 @@ class NativeWorkflowTests(unittest.TestCase):
             workflow.buck("run", ["//pkg:scenario"], ["--exact", "scenario::valid"])
         self.assertEqual(call.call_args.args[0][-4:], ["//pkg:scenario", "--", "--exact", "scenario::valid"])
 
+    def resolved_command(self, arguments):
+        with patch.object(workflow, "roster", return_value=ROSTER), \
+             patch.object(workflow.subprocess, "call", return_value=0) as call, \
+             contextlib.redirect_stderr(io.StringIO()) as report:
+            self.assertEqual(workflow.main(arguments), 0)
+        return call.call_args.args[0], report.getvalue()
+
+    def test_profile_is_explicit_and_reported_in_actual_focused_buck_argv(self):
+        for profile in workflow.PROFILES:
+            with self.subTest(profile=profile):
+                command, report = self.resolved_command([
+                    "--profile", profile, "test-target", "example", "scenario",
+                    "--", "--exact", "scenario::valid", "--expected-count", "1",
+                ])
+                self.assertEqual(command[2:9], [
+                    "run", "--local-only", "-c", "remote.enabled=false",
+                    "-c", f"tidepool.profile={profile}", "//pkg:scenario",
+                ])
+                self.assertEqual(command[9:], [
+                    "--", "--exact", "scenario::valid", "--expected-count", "1",
+                ])
+                self.assertIn(f"Tidepool native profile: {profile}", report)
+
+    def test_library_default_ignores_ambient_profile_requests(self):
+        with patch.dict(os.environ, {"TIDEPOOL_NATIVE_PROFILE": "production"}):
+            command, report = self.resolved_command(["test-lib", "example"])
+        self.assertIn("tidepool.profile=fast-dev", command)
+        self.assertNotIn("tidepool.profile=production", command)
+        self.assertIn("Tidepool native profile: fast-dev", report)
+
+    def test_native_target_retains_runner_arguments_without_roster_discovery(self):
+        with patch.object(workflow, "roster") as roster, \
+             patch.object(workflow.subprocess, "call", return_value=0) as call, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(workflow.main([
+                "--profile", "production", "test-native", "//native:case",
+                "--", "--pattern", "one leaf",
+            ]), 0)
+            roster.assert_not_called()
+        command = call.call_args.args[0]
+        self.assertEqual(command[-4:], ["//native:case", "--", "--pattern", "one leaf"])
+        self.assertIn("tidepool.profile=production", command)
+
+    def test_invalid_profile_refuses_before_native_launch(self):
+        with patch.object(workflow.subprocess, "call") as call, \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as refused:
+                workflow.main(["--profile", "unknown", "test-lib", "example"])
+        self.assertEqual(refused.exception.code, 2)
+        call.assert_not_called()
+
+    def test_discovery_and_compile_only_selection_use_the_explicit_profile(self):
+        for arguments in (["test-list", "example", "libraries"], ["check"]):
+            with self.subTest(arguments=arguments):
+                command, _ = self.resolved_command(["--profile", "debug", *arguments])
+                self.assertIn("tidepool.profile=debug", command)
+        with patch.object(workflow, "roster", return_value=ROSTER), \
+             patch.object(workflow.subprocess, "call", return_value=0) as call, \
+             patch.object(workflow.subprocess, "run", return_value=types.SimpleNamespace(
+                 stdout="root//bridge/haskell:control\n")) as query, \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(workflow.main(["--profile", "production", "verify"]), 0)
+        self.assertIn("tidepool.profile=production", query.call_args.args[0])
+        for launch in call.call_args_list:
+            self.assertIn("tidepool.profile=production", launch.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

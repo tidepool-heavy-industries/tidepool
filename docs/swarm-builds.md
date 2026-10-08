@@ -32,6 +32,37 @@ test counts, exit status and log before reporting. Building a `rust_test` target
 only links its executable; use an accepted focused runner to execute tests.
 Do not claim remote qualification from local results.
 
+### Test profiles and link inputs
+
+Ordinary `just test-lib`, `test-target`, `test-bin`, `test-native`, `quick` and
+`suite` commands explicitly select and report `fast-dev`. Use
+`just --set native_profile production test-lib PACKAGE --exact FULL_NAME --expected-count 1`
+for an optimized test, or pass `--profile production` before the command to
+`scripts/native-workflow.py`. The same Just variable selects the profile for
+`exomonad-build`. Frozen qualification still requires its explicit matching
+`--expect-profile`; a fast-dev result does not qualify production bytes.
+
+Fast-dev compiles test harnesses at O0, including engine unit tests that compile
+their owning code again. The production libraries of `tidepool-codegen`,
+`tidepool-repr` and `tidepool-heap` remain O3 and are reused by consumers. This
+policy follows package identity and rule kind, so renaming a target cannot
+change its optimization. Production selects O3 throughout and GHC `-O2`; debug
+selects O0 throughout. Third-party Rust targets retain the pinned toolchain's
+existing optimization policy.
+
+Native linking retains the pinned GCC driver and selects the declared Nix LLD
+output through its rooted binary directory. Configure refuses a missing LLD
+executable and retains that output with the generation; ambient linkers do not
+substitute for it. Reconfigure after this input changes.
+
+Measure first profile materialization, cached compilation, and counted
+execution separately. A cold fast-dev graph cannot establish steady-state
+edit latency. Preserve production cache entries and frozen executables when
+comparing profiles: a later build can replace a materialized executable at a
+shared output path. Compiler-free focused cohorts should declare only their
+actual runtime resources; full configure still materializes its wider selected
+toolchain and is a separate setup cost.
+
 ### Parallel frozen acceptance
 
 The existing system `build.slice` limits the Buck daemon and its descendants

@@ -1,20 +1,18 @@
 load("@prelude//:rules.bzl", "rust_binary", "rust_library", "rust_test", "sh_test")
 load("//build:native_profile.bzl", "rust_optimization_level")
 
-_HOT_CRATES = ["tidepool_codegen", "tidepool_repr", "tidepool_heap"]
-
-def _common(name, package_name, package_dir, version, env, rustc_flags):
+def _common(name, package_name, package_dir, version, env, rustc_flags, is_library = False):
     manifest_env = {
         "CARGO_MANIFEST_DIR": package_dir,
         "CARGO_PKG_NAME": package_name,
         "CARGO_PKG_VERSION": version,
     }
     manifest_env.update(env)
-    opt = rust_optimization_level(name, _HOT_CRATES)
+    opt = rust_optimization_level(package_name, is_library)
     return (manifest_env, ["-Copt-level=" + opt] + rustc_flags)
 
 def tidepool_rust_library(name, package_name, package_dir, version, env = {}, rustc_flags = [], **kwargs):
-    compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
+    compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags, is_library = True)
     rust_library(name = name, env = compiler_env, rustc_flags = flags, **kwargs)
 
 def tidepool_rust_binary(name, package_name, package_dir, version, env = {}, rustc_flags = [], **kwargs):

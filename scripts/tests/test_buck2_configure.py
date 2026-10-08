@@ -71,6 +71,10 @@ elif args[0] == 'build':
         (target / 'bin').mkdir(exist_ok=True)
         (target / 'bin/buck2').write_text('#!/bin/sh\\nexit 0\\n')
         (target / 'bin/buck2').chmod(0o755)
+    if name == 'buck-lld' and not os.environ.get('TEST_MISSING_LLD'):
+        (target / 'bin').mkdir(exist_ok=True)
+        (target / 'bin/ld.lld').write_text('#!/bin/sh\\nexit 0\\n')
+        (target / 'bin/ld.lld').chmod(0o755)
     link = Path(args[args.index('--out-link') + 1])
     link.symlink_to(target if os.environ.get('TEST_WRONG_ROOT') != name else target.parent)
 elif args[0] == 'path-info':
@@ -296,6 +300,26 @@ else:
         result = self.run_configure(extra_env={"TEST_WRONG_ROOT": "buck-rust"})
         self.assert_failed_generation_preserves_config(result)
         self.assertIn("output/root mismatch", result.stderr)
+
+    def test_pinned_lld_is_rooted_and_declared_in_action_search_path(self):
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        generation, = self.generations()
+        configured = (generation / "config").read_text()
+        lld = self.outputs / "buck-lld"
+        self.assertIn("lld_bin = " + str(lld / "bin"), configured)
+        action_path = next(line.split(" = ", 1)[1] for line in configured.splitlines()
+                           if line.startswith("action_path = "))
+        self.assertIn(str(lld / "bin"), action_path.split(":"))
+        self.assertEqual((generation / "roots/buck-lld").resolve(), lld)
+        self.assertIn(str(lld), (generation / "outputs.tsv").read_text())
+
+    def test_missing_pinned_lld_refuses_without_ambient_linker_fallback(self):
+        (self.root / ".buckconfig.local").write_text("previous configuration\n")
+        self.executable("ld.lld", "#!/bin/sh\nexit 0\n")
+        result = self.run_configure(extra_env={"TEST_MISSING_LLD": "1"})
+        self.assert_failed_generation_preserves_config(result)
+        self.assertIn("Prepared pinned LLD executable is unavailable", result.stderr)
 
     def test_unavailable_ghc_libdir_refuses_configuration(self):
         (self.root / ".buckconfig.local").write_text("previous configuration\n")
