@@ -21,5 +21,8 @@ tidepool-bridge-derive.workspace = true
 tidepool-bridge-effects.workspace = true
 frunk.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
