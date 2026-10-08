@@ -31,12 +31,10 @@ pub(super) struct ReplacementCustody {
     sources: Option<crate::request::sources::ActorSourceConnections>,
     worktree: Option<Arc<dyn crate::WorkspaceCustody>>,
     retained: Vec<RetainedHandler>,
-    _admissions: Vec<tokio::sync::OwnedRwLockReadGuard<bool>>,
 }
 
 pub(super) struct ReplacementTransfer {
     send: tokio::sync::oneshot::Sender<ReplacementCustody>,
-    admissions: Vec<tokio::sync::OwnedRwLockReadGuard<bool>>,
 }
 
 impl<H, O> ResidentKernelBehavior<H, O>
@@ -53,6 +51,7 @@ where
             .stage_replacement(kernel.identity(), definition)
             .await?;
         let placement = staged.descriptor.placement();
+        let session_startup_custody = staged.session_startup.clone();
         let root_admission = self
             .environment
             .root_admission_closed
@@ -85,15 +84,28 @@ where
         let (successor, parent_admission) = match kernel.spawn_successor(behavior).await {
             Ok(successor) => successor,
             Err(error) => {
-                self.environment
-                    .runner
-                    .retire_root_placement(placement)
-                    .await?;
+                if let Some(cleanup) = crate::local_actor::startup_cleanup(&error) {
+                    if !cleanup.is_confirmed() {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "{error}; replacement candidate cleanup unconfirmed: {cleanup:?}"
+                        )));
+                    }
+                } else {
+                    self.environment
+                        .runner
+                        .retire_root_placement(placement)
+                        .await?;
+                }
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     error.to_string(),
                 ));
             }
         };
+        // Directory insertion committed this successor's membership. Admission
+        // guards protect preparation, not the later custody transfer.
+        drop(parent_admission);
+        drop(root_admission);
+        drop(session_startup_custody);
         if let Err(error) = self.transfer_worktree(successor.identity()).await {
             successor
                 .abort_prepared_replacement()
@@ -132,12 +144,7 @@ where
             }
             return Err(ResidentActorWorkbenchError::ActorProtocol(detail));
         }
-        self.replacement_transfer = Some(ReplacementTransfer {
-            send: transfer,
-            admissions: std::iter::once(root_admission)
-                .chain(parent_admission)
-                .collect(),
-        });
+        self.replacement_transfer = Some(ReplacementTransfer { send: transfer });
         Ok(successor)
     }
 
@@ -185,7 +192,6 @@ where
             sources: self.source_connections.take(),
             worktree: self.worktree_custody.take(),
             retained: std::mem::take(&mut self.retained_replacements),
-            _admissions: transfer.admissions,
         };
         if let Err(custody) = transfer.send.send(custody) {
             self.source_connections = custody.sources;
@@ -247,8 +253,17 @@ where
         actor: ActorRef,
         definition: crate::ActorReplacementDefinition,
     ) -> Result<StagedHandler, ResidentActorWorkbenchError> {
-        let placement = definition.child.descriptor.placement();
-        let result = self.stage_replacement_inner(actor, definition).await;
+        let mut placement = definition.child.descriptor.placement();
+        let session_startup = (placement.session != self.descriptor.placement().session
+            && self.environment.runner.supports_child_sessions())
+        .then(|| {
+            self.environment
+                .runner
+                .child_session_startup_lease(placement.session)
+        });
+        let result = self
+            .stage_replacement_inner(actor, definition, session_startup.clone(), &mut placement)
+            .await;
         if let Err(error) = &result {
             // Temporary roots drop before retiring this isolated scope.
             if let Err(cleanup) = self
@@ -269,6 +284,8 @@ where
         &self,
         actor: ActorRef,
         definition: crate::ActorReplacementDefinition,
+        session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
+        placement: &mut crate::ActorPlacement,
     ) -> Result<StagedHandler, ResidentActorWorkbenchError> {
         let reject = |detail: &str| ResidentActorWorkbenchError::ActorProtocol(detail.into());
         let checkpoint = match &self.standing {
@@ -292,14 +309,6 @@ where
             record_workspace,
             seed,
         } = definition.child;
-        let session_startup = (descriptor.placement().session
-            != self.descriptor.placement().session
-            && self.environment.runner.supports_child_sessions())
-        .then(|| {
-            self.environment
-                .runner
-                .child_session_startup_lease(descriptor.placement().session)
-        });
         if !launch_worktrees.is_empty() || record_workspace.is_some() {
             return Err(reject(
                 "replacement must preserve the actor's worktree custody",
@@ -327,6 +336,7 @@ where
                 descriptor = descriptor
                     .with_session(self.descriptor.placement().session)
                     .with_lexical_scope(lexical_scope);
+                *placement = descriptor.placement();
                 (entry, checkpoint.value.clone())
             } else {
                 let child_session = descriptor.placement().session;
@@ -342,6 +352,7 @@ where
                     .await
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
                 descriptor = descriptor.with_lexical_scope(lexical_scope);
+                *placement = descriptor.placement();
                 let entry = self
                     .environment
                     .runner

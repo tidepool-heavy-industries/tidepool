@@ -2,10 +2,11 @@
 
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ChildPlacementPhase {
     Prepared(crate::ActorPlacement),
     ActorOwned(ActorRef),
+    ActorCleanup(crate::ResidentCleanupOutcome),
     Reclaiming(crate::ActorPlacement),
     CleanupRetained(crate::ActorPlacement),
     Released,
@@ -43,11 +44,23 @@ impl ChildPlacementCustody {
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
-        if matches!(
-            *self.0.lock(),
-            ChildPlacementPhase::ActorOwned(_) | ChildPlacementPhase::Released
-        ) {
-            return Ok(());
+        {
+            let phase = self.0.lock();
+            match &*phase {
+                ChildPlacementPhase::ActorCleanup(cleanup) => {
+                    return if cleanup.is_confirmed() {
+                        Ok(())
+                    } else {
+                        Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "child startup cleanup remains retained: {cleanup:?}"
+                        )))
+                    };
+                }
+                ChildPlacementPhase::ActorOwned(_) | ChildPlacementPhase::Released => {
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
         if self.1.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -92,6 +105,17 @@ impl ChildPlacementCustody {
         }
     }
 
+    fn record_startup_cleanup(&self, cleanup: crate::ResidentCleanupOutcome) {
+        let mut phase = self.0.lock();
+        if matches!(*phase, ChildPlacementPhase::Prepared(_))
+            || matches!(*phase, ChildPlacementPhase::ActorOwned(actor) if actor == cleanup.actor())
+        {
+            // Admission refusal can run actor cleanup before `start` transfers
+            // placement custody. Its exact observation still owns settlement.
+            *phase = ChildPlacementPhase::ActorCleanup(cleanup);
+        }
+    }
+
     fn take_unadmitted(&self) -> Option<crate::ActorPlacement> {
         let mut phase = self.0.lock();
         match *phase {
@@ -101,6 +125,7 @@ impl ChildPlacementCustody {
                 Some(placement)
             }
             ChildPlacementPhase::ActorOwned(_)
+            | ChildPlacementPhase::ActorCleanup(_)
             | ChildPlacementPhase::Reclaiming(_)
             | ChildPlacementPhase::Released => None,
         }
@@ -264,6 +289,12 @@ where
         admission,
     } = prepared;
     let _startup_guard = SpawnStartupGuard(continuation.spawn_admission.clone());
+    // A failed spawn can drop its behavior before refusal cleanup finishes.
+    // Keep the original machine preparation lease outside that await.
+    let _session_startup_custody = admission
+        .as_ref()
+        .ok()
+        .and_then(|admission| admission.child_session_startup.clone());
     let context = &continuation.context;
     let result = Box::pin(async {
         let ChildLaunchAdmission {
@@ -414,6 +445,9 @@ where
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             descriptor = descriptor.with_lexical_scope(lexical_scope);
+            continuation
+                .placement_custody
+                .update(descriptor.placement());
             environment
                 .runner
                 .transfer_custody(
@@ -573,6 +607,7 @@ where
 {
     use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
     if let Some(cleanup) = crate::local_actor::startup_cleanup(error) {
+        custody.record_startup_cleanup(cleanup.clone());
         return crate::local_actor::combine_cleanup(
             crate::local_actor::combine_cleanup(cleanup.hook().clone(), cleanup.realm().clone()),
             cleanup.children().clone(),
