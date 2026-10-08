@@ -853,6 +853,8 @@ fn linear_view_history_reports_retained_read_projection_cost() {
     }
     assert!(prior_read_caches.iter().all(|reads| reads.upgrade().is_none()));
     assert!(prior_leases.iter().all(|lease| lease.upgrade().is_some()));
+    drop(prior_read_caches);
+    drop(prior_leases);
 
     let before = read_history_census(&latest, &[]);
     assert_eq!(before.custody_view_leases, length + 1);
@@ -902,7 +904,7 @@ fn linear_view_history_reports_retained_read_projection_cost() {
     eprintln!(
         "{}",
         serde_json::json!({
-            "kind": "artifact_view_tip_read_history_census",
+            "kind": "artifact_view_read_history_census",
             "pid": std::process::id(),
             "history_length": length,
             "retention_mode": "latest_public_view_only",
