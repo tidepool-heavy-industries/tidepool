@@ -201,6 +201,7 @@ enum CampaignRoot {
         model_factory: Option<Arc<dyn exomonad_actor::CellModelFactory>>,
     },
     Dedicated,
+    FormHost(Arc<dyn exomonad_actor::FormHost>),
 }
 
 impl TestCampaign {
@@ -446,6 +447,10 @@ impl TestCampaign {
         Self::start_with_admission(|admission| admission).await
     }
 
+    pub(super) async fn start_with_form_host(host: Arc<dyn exomonad_actor::FormHost>) -> Self {
+        Self::start_configured(|admission| admission, |_| {}, CampaignRoot::FormHost(host)).await
+    }
+
     /// Opt into the existing dedicated-machine factory. Ordinary campaigns
     /// retain the production host's shared-machine policy.
     pub async fn start_with_child_sessions() -> Self {
@@ -564,6 +569,10 @@ impl TestCampaign {
                     &config, transform, None, None,
                 )
                 .await
+            }
+            CampaignRoot::FormHost(host) => {
+                super::model_free::ModelFreeSession::start_with_form_host(&config, transform, host)
+                    .await
             }
         }
         .unwrap();

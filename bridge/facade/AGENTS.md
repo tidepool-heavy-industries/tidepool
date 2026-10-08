@@ -10,3 +10,7 @@ For launch and prompt changes, use focused owning tests such as
 library. When changing launch configuration or tool contracts, update the
 scripted-provider fixtures, check exact test selections actually ran, and
 compile changed consumers.
+
+Rich views and human forms share `FormHost`, installed before actor admission.
+A form-unavailable campaign that still publishes views needs the production
+display delegate and an explicit typed refusal at form opening.

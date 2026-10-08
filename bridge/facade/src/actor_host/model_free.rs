@@ -85,6 +85,23 @@ impl ModelFreeSession {
         .await
     }
 
+    #[cfg(test)]
+    pub(super) async fn start_with_form_host(
+        config: &ActorHostConfig,
+        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
+        host: Arc<dyn exomonad_actor::FormHost>,
+    ) -> Result<Self> {
+        Self::start_configured(
+            config,
+            transform,
+            None,
+            None,
+            ROOT_POLICY_INSTALL_TIMEOUT,
+            |forest, _, _| Ok(forest.with_form_host(host)),
+        )
+        .await
+    }
+
     async fn start_configured(
         config: &ActorHostConfig,
         transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,

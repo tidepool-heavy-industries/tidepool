@@ -923,7 +923,18 @@ async fn published_request_example_retains_success_and_target_cancellation() {
 
 #[tokio::test]
 async fn published_human_form_example_handles_unbound_host() {
-    let mut campaign = TestCampaign::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        Arc::new(harness::store::Store::open(directory.path().join("store.sqlite")).unwrap());
+    let host = Arc::new(DisplayOnlyHost {
+        display: super::form_output::host(
+            store.clone(),
+            "published-human-form".into(),
+            Arc::new(std::sync::OnceLock::new()),
+        ),
+        openings: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut campaign = TestCampaign::start_with_form_host(host.clone()).await;
     let root = campaign.root_installation.policy.clone();
     displayed(
         &mut campaign,
@@ -934,7 +945,7 @@ async fn published_human_form_example_handles_unbound_host() {
     let unavailable = displayed(
         &mut campaign,
         root.as_ref(),
-        "display (case scopeAnswer of { F.FormUnavailable _ -> True; _ -> False })",
+        "display (case scopeAnswer of { F.FormUnavailable F.FormNotInstalled -> True; _ -> False })",
     )
     .await;
     assert_eq!(
@@ -942,8 +953,97 @@ async fn published_human_form_example_handles_unbound_host() {
         "True",
         "{unavailable}"
     );
+    assert_eq!(host.openings.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let origin = harness::store::actor_output::ActorOutputOrigin {
+        run: "published-human-form".into(),
+        native_actor: campaign.actor.identity().id.0,
+        incarnation: campaign.actor.identity().incarnation.0,
+    };
+    let pages = store.actor_output_page(&origin, 0, 10).unwrap();
+    assert_eq!(
+        pages.outputs.len(),
+        3,
+        "narration, evidence, unavailable branch"
+    );
+    assert!(pages
+        .outputs
+        .iter()
+        .all(|output| output.emission().page.view.is_some()));
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
+}
+
+/// Rich views and form admission share FormHost. Delegate views to the real
+/// durable owner while declining form admission with its typed absent-service cause.
+struct DisplayOnlyHost {
+    display: Arc<dyn exomonad_actor::FormHost>,
+    openings: std::sync::atomic::AtomicUsize,
+}
+
+impl exomonad_actor::FormHost for DisplayOnlyHost {
+    fn changed(
+        &self,
+    ) -> futures_util::future::BoxFuture<'static, Result<(), tidepool_bridge_effects::FormCause>>
+    {
+        panic!("a refused form must not wait for submission")
+    }
+
+    fn open(
+        &self,
+        _: &exomonad_actor::FormPublication,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Result<(), tidepool_bridge_effects::FormCause> {
+        self.openings
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(tidepool_bridge_effects::FormCause::FormNotInstalled)
+    }
+
+    fn attempt(
+        &self,
+        _: exomonad_actor::ActorRef,
+        _: &str,
+    ) -> Result<Option<tidepool_bridge_effects::FormAttempt>, tidepool_bridge_effects::FormCause>
+    {
+        panic!("a refused form must not read a submission")
+    }
+
+    fn reject(
+        &self,
+        _: exomonad_actor::ActorRef,
+        _: &str,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Result<tidepool_bridge_effects::FormTransition, tidepool_bridge_effects::FormCause> {
+        panic!("a refused form must not reject a submission")
+    }
+
+    fn commit(
+        &self,
+        _: exomonad_actor::ActorRef,
+        _: &str,
+        _: &str,
+        _: &serde_json::Value,
+    ) -> Result<tidepool_bridge_effects::FormTransition, tidepool_bridge_effects::FormCause> {
+        panic!("a refused form must not commit a submission")
+    }
+
+    fn close(
+        &self,
+        _: exomonad_actor::ActorRef,
+        _: &str,
+    ) -> Result<(), tidepool_bridge_effects::FormCause> {
+        panic!("refused admission must not retain a form lease for cleanup")
+    }
+
+    fn display(
+        &self,
+        publication: &exomonad_actor::FormPublication,
+        display_slot: u64,
+        view: &serde_json::Value,
+    ) -> Result<(), tidepool_bridge_effects::FormCause> {
+        self.display.display(publication, display_slot, view)
+    }
 }
 
 #[tokio::test]
