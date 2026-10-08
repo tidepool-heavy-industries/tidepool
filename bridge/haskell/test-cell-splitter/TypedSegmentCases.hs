@@ -438,7 +438,7 @@ metadataFieldOwners index shape selectors = case shape of
 renderModuleIdentity :: Module -> String
 renderModuleIdentity owner = unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner)
 
--- hscTidy reassigns binder Uniques while preserving the published module and OccName.
+-- Published roots use module and OccName; internal GHC Uniques are local to a compiler representation.
 publishedNameIdentity :: Name -> (Maybe Module, OccName)
 publishedNameIdentity name = (nameModule_maybe name, nameOccName name)
 
