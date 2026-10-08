@@ -13,6 +13,7 @@ use super::test_campaign::{
 };
 use super::*;
 use harness::model::{AgentPath, CallId, OperationId, RequestId};
+use serde_json::{json, Value};
 use std::{collections::VecDeque, time::Instant};
 
 const WORKLOAD_COHORT: &str = "three-actor-capture";

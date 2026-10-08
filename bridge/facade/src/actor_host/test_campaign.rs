@@ -5,6 +5,7 @@ use exomonad_tool::{
     ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation, ToolInvocationContext,
     ToolInvocationOrigin,
 };
+use serde_json::Value;
 
 /// Dispatch and completion share one original operation; namespaces identify nested calls.
 pub(super) fn original_tool_call(
