@@ -255,7 +255,7 @@ impl CapturedHostTransport {
                     self.setup_ready.notified().await;
                     let source = match self.scenario {
                         HostedScenario::LocalActorStartup => {
-                            "seed <- R.call (readSeed (R.client seedStore)) ()\ngroup <- R.call (readGroup (R.client groupStore)) ()\ndisplay (case (seed, group) of (Nothing, Nothing) -> True; _ -> False)".to_owned()
+                            "seed <- R.call (readSeed (R.client seedStore)) ()\nagents <- R.call (readAgents (R.client groupStore)) ()\ndisplay (case seed of Nothing -> null agents; _ -> False)".to_owned()
                         }
                         HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked) => {
                             tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_and_await.hs")
