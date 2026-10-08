@@ -3395,6 +3395,9 @@ async fn shutdown_children(
 }
 
 #[cfg(test)]
+mod reply_settlement_history;
+
+#[cfg(test)]
 mod tests {
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
