@@ -1,4 +1,5 @@
 import importlib.util
+import itertools
 import json
 from pathlib import Path
 import tempfile
@@ -92,6 +93,41 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                           }},
         })
         return record_path
+
+    def make_complete_case(self, cohort="harness-eight-phase"):
+        record = self.make_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        rows = reporter.read_jsonl(phase_path)
+        environment, activation = rows[:2]
+        environment.update(workload_cohort=cohort, workload_roster=list(reporter.KNOWN_ROSTERS[cohort]),
+                           prepared_root_entry_supplied=True)
+        environment["deployment"].update({
+            "TIDEPOOL_PREPARED_ROOT_ENTRY": "/frozen/root-entry",
+            "TIDEPOOL_COMPILER_MODULES": "/frozen/catalog/catalog.json",
+            "TIDEPOOL_COMPILER_DEPLOYMENT": "/frozen/compiler/compiler-deployment.json",
+        })
+        activation["logical_compiler_requests"] = 0
+        if cohort == "three-actor-capture":
+            activation["sequence"] = 0
+        workload = [
+            {"schema": 1, "phase": name, "sequence": index, "completed": True,
+             "call_id": "usecase-3" if name in ("reuse-retained", "root-fork-capture")
+                        else f"case-{index}",
+             "logical_compiler_requests": 1 if name in ("reuse-retained", "root-fork-capture") else 0,
+             "wall_ns": 1000, "source": "retained source"}
+            for index, name in enumerate(reporter.KNOWN_ROSTERS[cohort]) if name != "activation"
+        ]
+        self.write_jsonl(phase_path, [environment, activation, *workload])
+        payload = json.loads(record.read_text())
+        payload["execution"].update({
+            "exit_code": 0, "process_cleanup_status": "confirmed",
+            "hosted_cleanup_status": "confirmed", "compiler_cleanup_status": "confirmed",
+            "compiler_cleanup_observation_complete": True,
+        })
+        if cohort == "three-actor-capture":
+            payload["test"] = "actor_host::scripted_three_actor_performance::production_harness_three_actor_capture_phases"
+        self.write_json(record, payload)
+        return record
 
     def test_joins_phase_to_host_and_physical_service_but_keeps_queue_at_admission_scope(self):
         report = reporter.analyze(self.make_case())
@@ -205,7 +241,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual(report["startup_scope"]["unowned_host_submission_count"], 1)
         self.assertEqual(report["queue_evidence"]["status"], "complete")
         self.assertEqual(report["startup_scope"]["assignment_policy"],
-                         "only_exact_workload_phase_span; no count or timestamp assignment")
+                         "exact_declared_phase_or_root_startup_owner; no count or timestamp assignment")
 
     def test_startup_owner_requires_and_accepts_explicit_phase_span(self):
         record = self.make_case()
@@ -256,7 +292,8 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                            "request_ordinal": 1, "compile_request": "toolset-digest"}
         host.append({"target": "tidepool_extract_cmd::endpoint", "fields": {
             "message": "compiler request identified", "transport": "daemon", **toolset_request},
-            "spans": [{"name": "workspace_toolsets_prepare", "actor_path": "root"}]})
+            "spans": [{"name": "workspace_toolsets_prepare", "workspace": "/test/workspace",
+                       "deployment": "/test/prepared"}]})
         toolset_service = json.loads(json.dumps(daemon[0]))
         toolset_service["span"].update(toolset_request)
         daemon.append(toolset_service)
@@ -394,6 +431,107 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         report = reporter.analyze(record)
         self.assertEqual(report["phase_coverage"]["observed_workload_record_count"], 1)
         self.assertTrue(report["runner"]["phase_trace"].endswith("/phases.jsonl"))
+
+    def test_conflicting_compiler_owners_are_ambiguous_and_never_credited_twice(self):
+        for cohort in reporter.KNOWN_ROSTERS:
+            with self.subTest(cohort=cohort):
+                record = self.make_complete_case(cohort)
+                phase_path = self.root / "artifacts/phases.jsonl"
+                phases = reporter.read_jsonl(phase_path)
+                second_phase = "first-arithmetic" if cohort == "harness-eight-phase" else "child-alpha-reply"
+                next(phase for phase in phases if phase["phase"] == second_phase)["logical_compiler_requests"] = 1
+                self.write_jsonl(phase_path, phases)
+                host_path = self.root / "artifacts/host.jsonl"
+                host = reporter.read_jsonl(host_path)
+                host[-1]["fields"]["workload_phase"] = second_phase
+                self.write_jsonl(host_path, host)
+                report = reporter.analyze(record)
+                self.assertEqual(report["whole_physical_stream_reconciliation"]["status"], "complete")
+                self.assertEqual(report["workload_request_service_joins"]["status"], "partial_or_unknown")
+                self.assertEqual(report["workload_request_service_joins"]["exact_phase_request_join_count"], 0)
+                self.assertEqual(report["startup_scope"]["ambiguous_owner_submission_count"], 1)
+                ambiguity = report["unattributed_compiler_submissions"][0]
+                self.assertEqual(ambiguity["phase_attribution"], "ambiguous")
+                self.assertEqual(len(ambiguity["owner_candidates"]), 2)
+
+    def test_nested_executions_and_agreeing_owners_are_order_independent(self):
+        record = self.make_complete_case("three-actor-capture")
+        phase_path = self.root / "artifacts/phases.jsonl"
+        phases = reporter.read_jsonl(phase_path)
+        next(phase for phase in phases if phase["phase"] == "child-alpha-reply")["logical_compiler_requests"] = 1
+        self.write_jsonl(phase_path, phases)
+        host_path = self.root / "artifacts/host.jsonl"
+        base = reporter.read_jsonl(host_path)
+        base.append({"target": "exomonad_actor::resident_tools", "fields": {
+            "message": "workbench cell dispatched to its actor", "context_call_id": "case-4",
+            "execution": "exec-child"}})
+        base[2]["spans"] = [{"name": "cell", "execution": "exec-child"}]
+        for order in itertools.permutations(base):
+            self.write_jsonl(host_path, order)
+            result = reporter.analyze(record)
+            self.assertEqual(result["workload_request_service_joins"]["exact_phase_request_join_count"], 0)
+            self.assertEqual(result["startup_scope"]["ambiguous_owner_submission_count"], 1)
+        # Independent observations agreeing on one owner retain one physical join.
+        base[2].pop("spans")
+        base[2]["fields"]["workload_phase"] = "root-fork-capture"
+        self.write_jsonl(host_path, base)
+        result = reporter.analyze(record)
+        self.assertEqual(result["workload_request_service_joins"]["exact_phase_request_join_count"], 1)
+
+    def test_all_queue_events_count_even_when_duplicate_timing_is_invalid(self):
+        record = self.make_complete_case()
+        compiler_path = self.root / "artifacts/compiler/compiler.jsonl"
+        original = reporter.read_jsonl(compiler_path)
+        for invalid in (None, -1, True, "invalid"):
+            duplicate = json.loads(json.dumps(original[-1]))
+            duplicate["fields"]["queue_ms"] = invalid
+            for order in itertools.permutations([*original, duplicate]):
+                self.write_jsonl(compiler_path, order)
+                result = reporter.analyze(record)
+                self.assertEqual(result["queue_evidence"]["status"], "partial_or_unknown")
+                self.assertEqual(result["queue_observations"][0]["queue_event_count"], 2)
+                self.assertEqual(result["queue_observations"][0]["invalid_timing_record_count"], 1)
+
+    def test_phase_measurements_require_nonnegative_json_integers(self):
+        record = self.make_complete_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        original = reporter.read_jsonl(phase_path)
+        for field in ("wall_ns", "logical_compiler_requests"):
+            for invalid in (None, -1, True, 1.5, "1000"):
+                phases = json.loads(json.dumps(original))
+                phases[2][field] = invalid
+                self.write_jsonl(phase_path, phases)
+                result = reporter.analyze(record)
+                self.assertEqual(result["phase_measurements"]["status"], "partial_or_unknown")
+                self.assertIn(field, result["phase_measurements"]["invalid_records"][0]["invalid_fields"])
+        phases = json.loads(json.dumps(original))
+        phases[1].pop("wall_ns")
+        self.write_jsonl(phase_path, phases)
+        self.assertEqual(reporter.analyze(record)["phase_measurements"]["invalid_records"][0]["phase"], "activation")
+        self.write_jsonl(phase_path, original)
+        self.assertEqual(reporter.analyze(record)["phase_measurements"]["status"], "complete")
+
+    def test_actor_prepare_startup_owner_requires_canonical_root_path(self):
+        record = self.make_case()
+        host_path = self.root / "artifacts/host.jsonl"
+        compiler_path = self.root / "artifacts/compiler/compiler.jsonl"
+        original_host = reporter.read_jsonl(host_path)
+        original_daemon = reporter.read_jsonl(compiler_path)
+        request = {"daemon_epoch": "epoch-a", "admission_id": 8,
+                   "request_ordinal": 1, "compile_request": "startup-digest"}
+        service = json.loads(json.dumps(original_daemon[0]))
+        service["span"].update(request)
+        queue = {"fields": {"phase": "compiler_queue", "queue_ms": 0,
+                            "daemon_epoch": "epoch-a", "admission_id": 8}}
+        self.write_jsonl(compiler_path, [*original_daemon, service, queue])
+        for name in ("compile_root", "actor_application_prepare"):
+            for path in (None, "", "/root", "root/child", "root"):
+                span = {"name": name, "actor_path": path}
+                self.write_jsonl(host_path, [*original_host, {
+                    "target": "tidepool_extract_cmd::endpoint",
+                    "fields": {"message": "compiler request identified", **request}, "span": span}])
+                status = reporter.analyze(record)["startup_scope"]["owner_status"]
+                self.assertEqual(status == "complete", path == "root")
 
     def test_retained_producer_shapes_do_not_invent_execution_correlation(self):
         # Sanitized event shapes from the retained process-cleanup host JSONL

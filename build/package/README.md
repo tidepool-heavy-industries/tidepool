@@ -303,10 +303,15 @@ provider replies are scripted. The frozen owner runs its bundled
 Behavioral and measurement outcomes remain separate. `behavioral_completed`
 requires the one executed passing case and controls the cohort exit status.
 The measurement report separately records phase coverage, exact workload
-request/service joins, whole observed physical-stream reconciliation, raw trace
+request/service joins with one reconciled owner per physical submission, whole
+observed physical-stream reconciliation, nonnegative integer phase measurements, raw trace
 capture versus truncated detailed samples, queue admission evidence, explicit
 startup ownership, cleanup, and descriptor/profile identity. Missing or
-ambiguous joins remain partial; unknown queue or startup evidence is not inferred
+ambiguous joins remain partial; every queue event counts, including invalid or
+duplicate records. The selected cohort seals its named workload roster, rather
+than accepting a shortened roster from observed output. Root startup attribution
+requires the production preparation owner or canonical `actor_path = "root"`;
+missing actor paths remain unknown. Queue or startup evidence is not inferred
 from counts or timestamps. `measurement.completed` becomes true only when every
 required evidence dimension is complete. It imposes no latency threshold and
 does not establish provider network performance. These supplementary cohorts do

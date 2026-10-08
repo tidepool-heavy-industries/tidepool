@@ -758,7 +758,7 @@ class NativeQualificationTests(unittest.TestCase):
             }
             measured = qualification.analyze_harness_performance(
                 descriptor, [record], [runner_path],
-                {'measurement_reporter': qualification.HARNESS_PERFORMANCE_REPORTER},
+                qualification.cohorts()['harness-performance'],
                 True, descriptor_path)
             self.assertEqual(measured['status'], 'qualified')
             self.assertTrue(measured['completed'])
@@ -769,10 +769,78 @@ class NativeQualificationTests(unittest.TestCase):
             descriptor['environment']['TIDEPOOL_PREPARED_ROOT_ENTRY'] = '/different/root-entry'
             refused_match = qualification.analyze_harness_performance(
                 descriptor, [record], [runner_path],
-                {'measurement_reporter': qualification.HARNESS_PERFORMANCE_REPORTER},
+                qualification.cohorts()['harness-performance'],
                 True, descriptor_path)
             self.assertEqual(refused_match['status'], 'partial')
             self.assertFalse(refused_match['qualification']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
+
+    def test_measurement_mutants_cannot_qualify_a_passing_frozen_case(self):
+        from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
+        mutations = {
+            "control": None,
+            "short_unknown_roster": "workload_contract_matches_selected_cohort",
+            "missing_wall": "phase_measurements_complete",
+            "negative_wall": "phase_measurements_complete",
+            "malformed_duplicate_queue": "queue_evidence_complete",
+            "conflicting_owners": "workload_request_service_joins_complete",
+            "wrong_compiler_mode": "resident_compiler_mode_matches_cohort",
+        }
+        for mutation, refused_dimension in mutations.items():
+            with self.subTest(mutation=mutation):
+                fixture = HarnessUsecasePerfReportTests()
+                fixture.setUp()
+                self.addCleanup(fixture.tearDown)
+                runner_path = fixture.make_complete_case()
+                phase_path = fixture.root / "artifacts/phases.jsonl"
+                phases = reporter.read_jsonl(phase_path)
+                if mutation == "short_unknown_roster":
+                    phases[0].update(workload_cohort="typo-cohort", workload_roster=["reuse-retained"])
+                    only_phase = next(phase for phase in phases if phase["phase"] == "reuse-retained")
+                    only_phase["sequence"] = 0
+                    phases = [*phases[:2], only_phase]
+                elif mutation in ("missing_wall", "negative_wall"):
+                    for phase in phases[1:]:
+                        if mutation == "missing_wall":
+                            phase.pop("wall_ns", None)
+                        else:
+                            phase["wall_ns"] = -1
+                elif mutation == "malformed_duplicate_queue":
+                    compiler_path = fixture.root / "artifacts/compiler/compiler.jsonl"
+                    daemon = reporter.read_jsonl(compiler_path)
+                    duplicate = json.loads(json.dumps(daemon[-1]))
+                    duplicate["fields"].pop("queue_ms")
+                    fixture.write_jsonl(compiler_path, [*daemon, duplicate])
+                elif mutation == "conflicting_owners":
+                    next(phase for phase in phases if phase["phase"] == "first-arithmetic")["logical_compiler_requests"] = 1
+                    host_path = fixture.root / "artifacts/host.jsonl"
+                    host = reporter.read_jsonl(host_path)
+                    host[-1]["fields"]["workload_phase"] = "first-arithmetic"
+                    fixture.write_jsonl(host_path, host)
+                fixture.write_jsonl(phase_path, phases)
+                record = json.loads(runner_path.read_text())
+                if mutation == "wrong_compiler_mode":
+                    record["execution"]["compiler_mode"] = "direct"
+                    fixture.write_json(runner_path, record)
+                bundle = fixture.root / "bundle"
+                reporter_path = bundle / "share/exomonad/harness-usecase-perf-report.py"
+                reporter_path.parent.mkdir(parents=True)
+                shutil.copy2(Path(__file__).resolve().parents[1] / "harness-usecase-perf-report.py", reporter_path)
+                descriptor_path = fixture.root / "qualification.json"
+                descriptor_path.write_text("verified by run_cohort")
+                descriptor = {
+                    "bundle_root": str(bundle), "source_oid": "a" * 40,
+                    "harness_revision": "b" * 40, "profile": "production",
+                    "stdlib_mode": "catalog-backed", "startup_mode": "prepared",
+                    "environment": phases[0]["deployment"],
+                }
+                measured = qualification.analyze_harness_performance(
+                    descriptor, [record], [runner_path], qualification.cohorts()["harness-performance"],
+                    True, descriptor_path)
+                self.assertEqual(measured["completed"], mutation == "control")
+                self.assertTrue(measured["qualification"]["prerequisites"]["counted_behavior_passed"])
+                if refused_dimension:
+                    self.assertFalse(measured["qualification"]["prerequisites"][refused_dimension])
+                    self.assertEqual(measured["status"], "partial")
 
     def test_frozen_cohort_refuses_diagnostic_startup_override_before_execution(self):
         with patch.dict(os.environ, {'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600'}):

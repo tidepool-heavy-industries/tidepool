@@ -123,6 +123,7 @@ def cohorts() -> dict:
                                     "compiler_mode": "owned-resident", "max_jobs": 1,
                                     "retain_artifacts": True,
                                     "measurement_reporter": HARNESS_PERFORMANCE_REPORTER,
+                                    "workload_cohort": "harness-eight-phase",
                                     "required_stdlib_mode": "catalog-backed",
                                     "required_startup_mode": "prepared",
                                     "required_environment": ["TIDEPOOL_COMPILER_MODULES",
@@ -132,6 +133,7 @@ def cohorts() -> dict:
                 "ignored": True, "timeout": 2400, "compiler_mode": "owned-resident",
                 "max_jobs": 1, "retain_artifacts": True,
                 "measurement_reporter": HARNESS_PERFORMANCE_REPORTER,
+                "workload_cohort": "three-actor-capture",
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY"]}}
 
@@ -1374,7 +1376,16 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
     phase_entry = observed_deployment.get("TIDEPOOL_PREPARED_ROOT_ENTRY")
     prepared_match = (phase_env.get("prepared_root_entry_supplied") is True
                       and expected_entry is not None and str(expected_entry) == str(phase_entry))
+    coverage = report.get("phase_coverage") or {}
+    expected_workload = cohort.get("workload_cohort")
+    expected_roster = reporter.KNOWN_ROSTERS.get(expected_workload)
+    workload_matches = (expected_roster is not None and coverage.get("cohort") == expected_workload
+                        and coverage.get("expected_order") == list(expected_roster))
     prerequisites = {
+        "workload_contract_matches_selected_cohort": workload_matches,
+        "resident_compiler_mode_matches_cohort": execution.get("compiler_mode") ==
+                                                  cohort.get("compiler_mode") == "owned-resident",
+        "phase_measurements_complete": (report.get("phase_measurements") or {}).get("status") == "complete",
         "counted_behavior_passed": behavioral_completed and record.get("passed") is True
                                       and execution.get("executed_test_count") == 1
                                       and execution.get("exit_code") == 0,
