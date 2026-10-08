@@ -1600,6 +1600,12 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
     if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
         config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
     }
+    let mut config = proptest::test_runner::contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::shared_request_site_composes_but_demands_unique_original_preview_context"
+    ));
     TestRunner::new(config)
         .run(
             &(proptest::collection::vec(0usize..2, 2..24), any::<usize>()),

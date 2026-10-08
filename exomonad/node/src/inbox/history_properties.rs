@@ -873,6 +873,9 @@ fn configuration(name: &'static str) -> Config {
     if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
         config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
     }
+    let mut config = proptest::test_runner::contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(name);
     config
 }
 

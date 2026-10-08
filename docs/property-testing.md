@@ -146,6 +146,15 @@ seed paths from `CARGO_MANIFEST_DIR` or `file!()`: those can identify disposable
 Buck source projections. Run from the checkout root so the declared relative
 path resolves into the source tree.
 
+The `proptest!` macro applies `contextualize_config` to its configured value.
+For a manually constructed `TestRunner`, call
+`proptest::test_runner::contextualize_config(config)` **after** applying suite
+defaults and native seed-path overrides. Otherwise environment controls such as
+`PROPTEST_CASES`, `PROPTEST_RNG_SEED`, or
+`PROPTEST_DISABLE_FAILURE_PERSISTENCE` can be overwritten by those defaults.
+Set `source_file` and `test_name` on the resulting config before constructing
+the runner so persisted failures retain the native test identity.
+
 For custom runners, keep generated production replay inside the configured
 runner so failures receive shrinking and persistence. Separate deterministic
 regressions from generator-support checks. If a failed setup prevents generated

@@ -1134,6 +1134,12 @@ fn generated_request_lifecycle_matches_observable_model() {
         config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
         eprintln!("request sequence seed persistence: {path}");
     }
+    let mut config = proptest::test_runner::contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::generated_request_lifecycle_matches_observable_model"
+    ));
     let mut runner = TestRunner::new(config);
     let mut cohort = Coverage::default();
     for topology in [vec![0, 0], vec![0, 1], vec![0, 0, 1], vec![0, 1, 2]] {

@@ -23,7 +23,7 @@
 //! well-defined.
 
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestRunner};
+use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
 use tidepool_repr::datacon_table::DataConCollision;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 
@@ -54,6 +54,17 @@ fn assert_equivalent(dcs: &[DataCon]) {
         sequential, batched,
         "extend_checked diverged from folding insert_checked over {dcs:?}"
     );
+}
+
+fn property_config(test_name: &'static str) -> Config {
+    let mut config = Config::with_cases(2000);
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+    }
+    let mut config = proptest::test_runner::contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(test_name);
+    config
 }
 
 fn dc(
@@ -474,7 +485,10 @@ fn arb_turns() -> impl Strategy<Value = Vec<Vec<DataCon>>> {
 
 #[test]
 fn multiturn_merge_matches_flattened_sequential_property() {
-    let mut runner = TestRunner::new(Config::with_cases(2000));
+    let mut runner = TestRunner::new(property_config(concat!(
+        module_path!(),
+        "::multiturn_merge_matches_flattened_sequential_property"
+    )));
     runner
         .run(&arb_turns(), |turns| {
             let merged = merge_all_turns(&turns);
@@ -537,7 +551,10 @@ fn arb_datacon_seq() -> impl Strategy<Value = Vec<DataCon>> {
 
 #[test]
 fn extend_checked_matches_sequential_insert_checked_property() {
-    let mut runner = TestRunner::new(Config::with_cases(2000));
+    let mut runner = TestRunner::new(property_config(concat!(
+        module_path!(),
+        "::extend_checked_matches_sequential_insert_checked_property"
+    )));
     runner
         .run(&arb_datacon_seq(), |seq| {
             let sequential = fold_sequential(&seq);

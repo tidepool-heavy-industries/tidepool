@@ -1318,6 +1318,9 @@ fn config(name: &'static str) -> Config {
         config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
         eprintln!("activation phase seed persistence: {path}");
     }
+    let mut config = proptest::test_runner::contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(name);
     config
 }
 
