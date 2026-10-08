@@ -231,8 +231,11 @@ fn selected_package_closure(
     certified: &CertifiedProducts,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<BTreeMap<(String, String), PackageInterfaceWitness>, CompileError> {
-    package_availability_with_validation(current, certified, validation)?
-        .select(&certified.groups, &[])
+    package_availability_with_validation(current, certified, validation)?.select(
+        &certified.groups,
+        &[],
+        &validation.inventory,
+    )
 }
 
 #[test]

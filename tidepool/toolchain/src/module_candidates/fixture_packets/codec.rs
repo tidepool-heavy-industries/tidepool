@@ -149,6 +149,7 @@ enum CodecOperation {
     CandidateExpandedWithinBound,
     ReceiptFacts,
     CertificateFacts,
+    SegmentItemFacts,
     InputFacts,
     Purpose,
     RequestTypes,
@@ -191,6 +192,7 @@ enum CodecRequest {
     Candidate(CandidateCase),
     ReceiptFacts(PathBuf),
     CertificateFacts(PathBuf),
+    SegmentItemFacts(PathBuf),
     InputFacts(PathBuf, PathBuf),
     Purpose(PurposeCase, Vec<PathBuf>, Option<NativeBytes>),
     RequestTypes(NativeBytes, HelperRecipe, Option<NativeBytes>),
@@ -244,6 +246,10 @@ fn packet_request(root: &Path) -> CodecRequest {
             let [path] = decode_arguments(&arguments, 1);
             CodecRequest::CertificateFacts(path)
         }
+        CodecOperation::SegmentItemFacts => {
+            let [path] = decode_arguments(&arguments, 1);
+            CodecRequest::SegmentItemFacts(path)
+        }
         CodecOperation::InputFacts => {
             let (proof, evidence) = decode_arguments(&arguments, 2);
             CodecRequest::InputFacts(proof, evidence)
@@ -280,6 +286,7 @@ fn source_boot_codec_packet_producer() {
         }
         CodecRequest::ReceiptFacts(path) => receipt_facts(&root, absolute_path(&path)),
         CodecRequest::CertificateFacts(path) => certificate_facts(&root, absolute_path(&path)),
+        CodecRequest::SegmentItemFacts(path) => segment_item_facts(&root, absolute_path(&path)),
         CodecRequest::InputFacts(proof, evidence) => {
             input_facts(&root, absolute_path(&proof), absolute_path(&evidence))
         }
@@ -527,6 +534,46 @@ fn certificate_facts(root: &Path, path: &Path) {
                         .collect(),
                 })
                 .collect(),
+        },
+    );
+}
+
+fn segment_item_facts(root: &Path, path: &Path) {
+    let item = crate::certified_products::decode_segment_item_with_operation(
+        &bounded_bytes(path, MANIFEST_LIMIT),
+        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+    )
+    .expect("production segment item decoder");
+    let global_sha256 = item
+        .globals
+        .iter()
+        .map(|global| hex(&crate::certified_products::fixture_global_sha256(global)))
+        .collect();
+    write_facts(
+        root,
+        "segment_item_facts",
+        &CertificateFacts {
+            owners: item
+                .globals
+                .iter()
+                .map(|global| (&global.owner).into())
+                .collect(),
+            global_sha256,
+            packages: item
+                .packages
+                .into_iter()
+                .map(|((unit, module), witness)| PackageFact {
+                    unit,
+                    module,
+                    interface_path: witness.selected_path,
+                    interface_sha256: hex(&witness.sha256),
+                })
+                .collect(),
+            modules: vec![],
+            targets: vec![TargetFact {
+                name: "item".into(),
+                references: (0..item.globals.len()).collect(),
+            }],
         },
     );
 }

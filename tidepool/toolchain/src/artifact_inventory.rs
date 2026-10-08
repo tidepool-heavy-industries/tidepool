@@ -1294,12 +1294,18 @@ impl ArtifactInventory {
         let mut implicit = Vec::new();
         for entry in &expanded {
             if let ArtifactPayload::Original(product) = &entry.payload {
-                implicit.push(Arc::new(ArtifactEntry::canonical(
-                    product
-                        .module_interface()
-                        .ok_or_else(|| failure("native canonical carrier missing"))?
-                        .clone(),
-                )));
+                let canonical = product
+                    .module_interface()
+                    .ok_or_else(|| failure("native canonical carrier missing"))?;
+                // Matched compiler issuance can supply the canonical carrier
+                // together with its native entry. Preserve that immutable
+                // handle rather than constructing an identical carrier again.
+                if !expanded.iter().any(|available| {
+                    matches!(&available.payload,
+                    ArtifactPayload::Canonical(existing) if existing == canonical)
+                }) {
+                    implicit.push(Arc::new(ArtifactEntry::canonical(canonical.clone())));
+                }
             }
         }
         expanded.extend(implicit);

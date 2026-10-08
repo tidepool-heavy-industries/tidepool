@@ -18,7 +18,6 @@ module Tidepool.CompilerProducts
   , CurrentOriginalInventory, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , currentReconciledOriginalProducts
-  , selectPreparedOriginalSessionOutputs
   ) where
 
 import Codec.CBOR.Encoding
@@ -83,7 +82,7 @@ import Tidepool.ExecutionSource
   , executionSourceInheritedOwners )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, selectFinalizedSessionOutputs, LocalFinalizedAdmission
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, LocalFinalizedAdmission
   , finalizedLocalAdmissions, localFinalizedCore )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult(..), PipelineResult(..), PreparedModuleObserver(..), PreparedModuleCompletionInputs(..)
@@ -100,7 +99,6 @@ import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, seria
 import Tidepool.HomeProducts
   ( AdmittedFinalizedOriginal, admittedOriginalModule
   , admittedOriginalProof, admittedOriginalInterface, originalVersionLookup, originalVersionSeal )
-import Tidepool.Session (CapturedSessionInterface)
 import Tidepool.FinalizedModule (finalizedHomeModInfo)
 import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.Timing
@@ -212,15 +210,6 @@ data CurrentOriginalInventory = CurrentOriginalInventory
     -- Already admitted native originals are imports, never fresh emitted groups.
   , currentOriginalExternalNames :: Map.Map Name SymbolIdentity
   }
-
-selectPreparedOriginalSessionOutputs
-  :: OriginalInterfaceArtifacts -> [CapturedSessionInterface]
-  -> PreparedProductContext -> IO PreparedProductContext
-selectPreparedOriginalSessionOutputs originals outputs context = do
-  inventory <- maybe (fail "typed output projection lacks its admitted original inventory") pure
-    (preparedCurrentOriginalInventory context)
-  selected <- selectFinalizedSessionOutputs originals outputs (currentOriginalFinalized inventory)
-  pure context {preparedCurrentOriginalInventory = Just (inventory {currentOriginalFinalized = selected})}
 
 currentOriginalBinders :: CurrentOriginalInventory -> Set.Set SymbolIdentity
 currentOriginalBinders inventory = Set.fromList (Map.elems (currentOriginalExternalNames inventory))

@@ -5,7 +5,6 @@
 -- names these bounded files; it never duplicates their payloads inline.
 module Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts
-  , selectFinalizedSessionOutputs
   , emptyFinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals, finalizedValueInterfaceSeals
   , LocalFinalizedAdmission, finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedHomeUnits, localFinalizedSourceSha256
@@ -45,7 +44,7 @@ import Tidepool.ExactHydration
 import Tidepool.FinalizedModule (FinalizedModule(..), homeInterfaceUsageOwners)
 import Tidepool.FinalizedCore (captureFinalizedCore, isUnsupportedFinalizedCore)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, decodeCapturedPackageImports)
-import Tidepool.Session (CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence)
+import Tidepool.Session (capturedSessionInterface, capturedSessionInterfaceEvidence)
 
 -- The producer's strict profile limits match the owning Rust receipt decoder.
 interfaceLimit, packageLimit, coreLimit, payloadLimit :: Int
@@ -68,7 +67,6 @@ data FinalizedArtifactFailure
   | InvalidFinalizedPackage String String
   | FinalizedPayloadTooLarge String
   | FinalizedInventoryTooLarge
-  | UnadmittedFinalizedSessionOutput String String
   | CapturedFinalizedPayloadChanged FilePath
   deriving Show
 instance Exception FinalizedArtifactFailure
@@ -274,43 +272,6 @@ materializeFinalizedModuleArtifacts directory artifacts@(FinalizedModuleArtifact
           unless (owned == bytes) $
             throwIO (CapturedFinalizedPayloadChanged output)
         pure (FinalizedModuleArtifacts units (Just (CapturedModules destination rows)) values)
-
--- The full original/source inventory remains immutable. Only same-request
--- produced type outputs project to a packet's completed/current capture prefix;
--- imported interfaces and every retained dependency seal remain unchanged.
-selectFinalizedSessionOutputs
-  :: OriginalInterfaceArtifacts -> [CapturedSessionInterface]
-  -> FinalizedModuleArtifacts -> IO FinalizedModuleArtifacts
-selectFinalizedSessionOutputs originals selected artifacts@(FinalizedModuleArtifacts units modules values) = do
-  let key snapshot = let (owner,_) = capturedSessionInterface snapshot
-        in (T.pack (unitString (moduleUnit owner)), T.pack (moduleNameString (moduleName owner)))
-      facts snapshot = (capturedSessionInterface snapshot, capturedSessionInterfaceEvidence snapshot)
-      produced = Map.fromList [(key snapshot,snapshot) | snapshot <- originalProducedSessionInterfaces originals]
-      selectedKeys = Set.fromList (map key selected)
-      valueKey (CapturedValueInterface unit name _ _ _) = (unit,name)
-      keep value = Map.notMember (valueKey value) produced || valueKey value `Set.member` selectedKeys
-      kept = filter keep values
-      dropped = Set.fromList [valueKey value | value <- values, not (keep value)]
-      required = [(unit,name) | CapturedModule _ _ _ _ _ _ requirements _ <- capturedRows artifacts
-            , (unit,name,_) <- requirements]
-        ++ [(unit,name) | CapturedValueInterface _ _ _ _ requirements <- kept
-            , (unit,name,_) <- requirements]
-  forM_ (duplicates (map key selected)) $ \(unit,name) ->
-    throwIO (DuplicateFinalizedOwner (T.unpack unit) (T.unpack name))
-  forM_ selected $ \snapshot -> do
-    let owner@(unit,name) = key snapshot
-    unless (maybe False ((== facts snapshot) . facts) (Map.lookup owner produced)) $
-      throwIO (UnadmittedFinalizedSessionOutput (T.unpack unit) (T.unpack name))
-    (packages,_,_) <- maybe (throwIO (MissingFinalizedPackages (T.unpack unit) (T.unpack name))) pure
-      (capturedSessionInterfaceEvidence snapshot)
-    case [value | value <- values, valueKey value == owner] of
-      [CapturedValueInterface _ _ (CapturedPayload _ interfaceSHA _) (CapturedPayload _ packageSHA _) _]
-        | interfaceSHA == digest (snd (capturedSessionInterface snapshot))
-          && packageSHA == digest packages -> pure ()
-      _ -> throwIO (UnadmittedFinalizedSessionOutput (T.unpack unit) (T.unpack name))
-  forM_ (filter (`Set.member` dropped) required) $ \(unit,name) ->
-    throwIO (MissingFinalizedDependency (T.unpack unit) (T.unpack name))
-  pure (FinalizedModuleArtifacts units modules kept)
 
 finalizedInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
 finalizedInterfaceSeals artifacts =

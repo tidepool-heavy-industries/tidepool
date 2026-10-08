@@ -1844,8 +1844,7 @@ pub(crate) struct ExactSourceAdmission {
 pub(crate) struct ExactProgramSegmentAdmission {
     request: ExactCompilationRequest,
     admissions: Vec<ExactSourceAdmission>,
-    original_products: std::sync::OnceLock<crate::certified_products::ParsedModuleProducts>,
-    original_sources: crate::certified_products::RetainedOriginalSources,
+    original_products: std::sync::OnceLock<crate::certified_products::CertifiedSegmentOriginals>,
 }
 impl ExactProgramSegmentAdmission {
     fn validate_request(&self, request: &ExactCompilationRequest) -> Result<(), CompileError> {
@@ -1903,45 +1902,51 @@ impl ExactProgramSegmentAdmission {
             source: first,
         })
     }
+    pub(crate) fn physical_request(&self) -> &ExactCompilationRequest {
+        &self.request
+    }
+
+    pub(crate) fn item_admission<'a>(
+        &'a self,
+        request: &ExactCompilationRequest,
+        path: &Path,
+        source: &str,
+    ) -> Result<ExactProductAdmission<'a>, CompileError> {
+        self.validate_request(request)?;
+        let source = self
+            .admissions
+            .iter()
+            .find(|admission| admission.witness.matches_source(path, source))
+            .ok_or_else(|| failure("item source differs from its admitted segment"))?;
+        Ok(ExactProductAdmission {
+            request: &self.request,
+            source,
+        })
+    }
+
+    pub(crate) fn install_original_products(
+        &mut self,
+        products: crate::certified_products::CertifiedSegmentOriginals,
+    ) -> Result<(), CompileError> {
+        self.original_products
+            .set(products)
+            .map_err(|_| failure("segment originals already admitted"))
+    }
+
     pub(crate) fn original_products(
         &self,
         request: &ExactCompilationRequest,
-        bytes: &[u8],
-        package_bundle: &[u8],
         operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    ) -> Result<&crate::certified_products::ParsedModuleProducts, CompileError> {
+    ) -> Result<&crate::certified_products::CertifiedSegmentOriginals, CompileError> {
         self.validate_request(request)?;
-        if self.original_products.get().is_none() {
-            let parsed = crate::certified_products::ParsedModuleProducts::decode_with_operation(
-                bytes,
-                package_bundle,
-                operation.clone(),
-            )
-            .map_err(compiler_evidence_failure)?;
-            self.original_products
-                .set(parsed)
-                .map_err(|_| failure("segment inventory concurrently initialized"))?;
-        }
-        let parsed = self
+        let products = self
             .original_products
             .get()
-            .ok_or_else(|| failure("segment inventory absent"))?;
-        parsed
-            .validate_observation(bytes, package_bundle, operation)
-            .map_err(compiler_evidence_failure)?;
-        Ok(parsed)
-    }
-
-    pub(crate) fn available_original_sources(
-        &self,
-        request: &ExactCompilationRequest,
-        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
-        operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    ) -> Result<Arc<crate::certified_products::AvailableOriginalSources>, CompileError> {
-        self.validate_request(request)?;
-        self.original_sources
-            .admit(products, operation)
-            .map_err(compiler_evidence_failure)
+            .ok_or_else(|| failure("segment original facts not admitted"))?;
+        if !Arc::ptr_eq(products.operation(), operation) {
+            return Err(failure("segment originals have another accounting owner"));
+        }
+        Ok(products)
     }
 
     pub(crate) fn admissions(&self) -> &[ExactSourceAdmission] {
@@ -2238,12 +2243,23 @@ impl ExactProductAdmission<'_> {
             if let Some(entry) = retained_interfaces.get(&owner) {
                 match &entry.payload {
                     ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface)
-                        if self.request.checked_value_imports.matches_interface(interface) => {
-                            // Compiler-issued thin value interfaces define no
-                            // instances. Nominal requirements are not scope edges.
-                            scaffold.push(ExactLexicalNode { owner, imports: Vec::new() });
-                        }
-                    _ => return Err(failure("checked value instance evidence differs from its exact interface authority")),
+                        if self
+                            .request
+                            .checked_value_imports
+                            .matches_interface(interface) =>
+                    {
+                        // Compiler-issued thin value interfaces define no
+                        // instances. Nominal requirements are not scope edges.
+                        scaffold.push(ExactLexicalNode {
+                            owner,
+                            imports: Vec::new(),
+                        });
+                    }
+                    _ => {
+                        return Err(failure(
+                            "checked value instance evidence differs from its exact interface authority",
+                        ));
+                    }
                 }
             }
         }
@@ -2702,7 +2718,6 @@ impl ExactCompilationRequest {
             request: self.clone(),
             admissions: self.validate_outputs(root)?,
             original_products: std::sync::OnceLock::new(),
-            original_sources: Default::default(),
         })
     }
     pub(crate) fn admit_program_segment_support_with_selection(
@@ -5686,6 +5701,36 @@ pub(crate) fn certified_product_artifact_view_with_validation(
         .admit_shared_with_demand(&view, entries, demand)
 }
 
+/// Segment-original entries were issued once from immutable canonical/native
+/// facts. Each item adds only its checked type view and selects its own demand.
+pub(crate) fn certified_segment_artifact_view_with_validation(
+    producer: [u8; 32],
+    originals: &crate::certified_products::CertifiedSegmentOriginals,
+    values: &[CertifiedValueInterface],
+    baseline: Option<&ArtifactView>,
+    demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<ArtifactView, CompileError> {
+    if !Arc::ptr_eq(originals.operation(), &validation.inventory) {
+        return Err(failure("segment artifacts have another accounting owner"));
+    }
+    let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
+    validation
+        .inventory
+        .reserve::<Arc<ArtifactEntry>>(originals.artifact_entries().len() + values.len())
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    let mut entries = originals.artifact_entries().to_vec();
+    if values
+        .iter()
+        .any(|value| value.interface().toolchain_identity_sha256() != producer)
+    {
+        return Err(failure("captured value has another compiler producer"));
+    }
+    entries.extend(originals.selected_value_entries(values).cloned());
+    view.inventory()
+        .admit_shared_with_demand(&view, entries, demand)
+}
+
 /// Admit only the inventory's selected dependency closure. Original byte custody
 /// remains complete; previously admitted groups must survive unchanged.
 pub(crate) fn certify_artifact_view_groups_with_validation(
@@ -7679,7 +7724,10 @@ mod tests {
                 stored_graph_paths += owner.graph_paths.len();
             });
             assert_eq!(stored_rows, descendants + 4);
-            println!("retained-descendants count={descendants} immutable_written_bytes={written_bytes} transient_inherited_rows={inherited_rows} retained_row_handles={stored_rows} retained_group_handles={stored_groups} retained_graph_handles={stored_graph_paths} final_rows={}", previous.len());
+            println!(
+                "retained-descendants count={descendants} immutable_written_bytes={written_bytes} transient_inherited_rows={inherited_rows} retained_row_handles={stored_rows} retained_group_handles={stored_groups} retained_graph_handles={stored_graph_paths} final_rows={}",
+                previous.len()
+            );
         }
     }
 
@@ -10141,72 +10189,6 @@ mod tests {
         }
         let segment = request.admit_program_segment(&output).unwrap();
         assert_eq!(segment.admissions().len(), 2);
-        // These are neutral current-wire definitions, not native/source authority.
-        let original = crate::certified_products::tests::original_groups_fixture(
-            "Observed",
-            vec![(3, vec![]), (11, vec![])],
-            1,
-            &BTreeMap::new(),
-        );
-        let operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
-            Default::default(),
-        ));
-        let first = segment
-            .original_products(&request, original.product_bytes(), b"", &operation)
-            .unwrap();
-        assert_eq!(
-            first.products()[0]
-                .groups
-                .iter()
-                .map(|group| group.original_ordinal())
-                .collect::<Vec<_>>(),
-            vec![3, 11]
-        );
-        let spent = operation.work_usage().unwrap().0;
-        let second = segment
-            .original_products(&request, original.product_bytes(), b"", &operation)
-            .unwrap();
-        assert!(std::ptr::eq(first, second));
-        // A repeat pays its physical comparison, not another typed decode/framing.
-        assert_eq!(
-            operation.work_usage().unwrap().0 - spent,
-            original.product_bytes().len()
-        );
-        let mut changed_body = original.product_bytes().to_vec();
-        changed_body[0] ^= 1;
-        for (body, package) in [
-            (changed_body.as_slice(), b"".as_slice()),
-            (original.product_bytes(), b"changed".as_slice()),
-        ] {
-            assert!(
-                matches!(segment.original_products(&request, body, package, &operation),
-                Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
-                    crate::certified_products::CertificationError::Mismatch("physical segment original inventory changed")))
-            );
-        }
-        let foreign_operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
-            Default::default(),
-        ));
-        assert!(
-            matches!(segment.original_products(&request, original.product_bytes(), b"", &foreign_operation),
-            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
-                crate::certified_products::CertificationError::Mismatch("shared inventory accounting owner")))
-        );
-        assert_eq!(foreign_operation.work_usage().unwrap().0, 0);
-        let independent = request.admit_program_segment(&output).unwrap();
-        let independently_parsed = independent
-            .original_products(&request, original.product_bytes(), b"", &foreign_operation)
-            .unwrap();
-        assert!(!std::ptr::eq(first, independently_parsed));
-        assert!(foreign_operation.work_usage().unwrap().0 > original.product_bytes().len());
-        let remaining = operation.work_usage().unwrap().1;
-        operation.charge(remaining).unwrap();
-        assert!(
-            matches!(segment.original_products(&request, original.product_bytes(), b"", &operation),
-            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
-                crate::certified_products::CertificationError::Product(tidepool_repr::execution_schema::ParseError::LimitExceeded("work"))))
-        );
-        assert_eq!(operation.work_usage().unwrap().1, 0);
         let mut evidence: crate::cache::DependencyEvidence =
             serde_json::from_str(receipt.as_array().unwrap()[7].as_text().unwrap()).unwrap();
         evidence.cache_safe = false;
@@ -11150,7 +11132,9 @@ mod tests {
             std::fs::read(&files[&graph.digest()].path).unwrap(),
             graph.bytes()
         );
-        println!("retained-graph parent_written_bytes={parent_written_bytes} descendant_written_bytes={child_written_bytes} graph_files=1");
+        println!(
+            "retained-graph parent_written_bytes={parent_written_bytes} descendant_written_bytes={child_written_bytes} graph_files=1"
+        );
     }
 
     #[test]
@@ -11304,7 +11288,9 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
-        println!("scope6 complete retained closure: two graphs above four MiB retained; missing original refused");
+        println!(
+            "scope6 complete retained closure: two graphs above four MiB retained; missing original refused"
+        );
     }
 
     #[test]

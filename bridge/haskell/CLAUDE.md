@@ -260,8 +260,14 @@ share the native thin writer and emit no prepared products or source compilation
 
 ## Compiler-issued execution recipes
 
-`TPCERT` version 9 retains one closed source-recipe result after its finalized-module
-envelope: `["ordinary"]`, `["exact-unavailable", reason]`, or
+`TPCERT` version 10 is a closed sum of ordinary products, segment originals,
+and segment items. `CurrentOriginalInventory` emits immutable modules, native
+groups, package availability, captured finalization and execution recipes once
+at the segment root. Item receipts carry complete target global witnesses and
+only target package additions. Captured future value types remain private; exact
+checked-item selection determines their visibility. Older versions are refused.
+Ordinary and segment-original variants retain one closed source-recipe result
+after their finalized-module envelope: `["ordinary"]`, `["exact-unavailable", reason]`, or
 `["exact-available", SHA]`. An available result binds the immutable
 `execution-source.cbor` in the owning compiler output directory. The descriptor
 contains no worker-selected path. Metadata keeps its four MiB bound and the

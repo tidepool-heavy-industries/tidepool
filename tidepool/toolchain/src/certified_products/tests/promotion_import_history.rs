@@ -395,6 +395,18 @@ fn certify_promotion(
 
 #[test]
 fn retained_core_promotion_rekeys_nonempty_source_import_history() {
+    check_retained_core_promotion_history(14);
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config { cases: 8, ..Default::default() })]
+    #[test]
+    fn segment_item_count_does_not_repeat_original_proof_issuance(item_count in 1_usize..25) {
+        check_retained_core_promotion_history(item_count);
+    }
+}
+
+fn check_retained_core_promotion_history(item_count: usize) {
     let root = tempfile::tempdir().unwrap();
     let target_source = "module Target where\n";
     let producer = [31; 32];
@@ -594,11 +606,6 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         None
     )
     .is_err());
-    assert!(
-        promoted.certified_originals.lock().unwrap().is_empty(),
-        "failed certification installs no proof"
-    );
-    let first_work_start = promoted.operation.work_usage().unwrap().0;
     let certified = certify_products(
         None,
         &promoted_packet,
@@ -614,7 +621,6 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         None,
     )
     .unwrap();
-    let first_work = promoted.operation.work_usage().unwrap().0 - first_work_start;
     let selected_owners = certified
         .source_selection
         .selected_original_owners()
@@ -666,113 +672,261 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         matches!(&g.imports[..], [PendingImportOwner::Source { owner, original_ordinal, binder: imported }] if owner == current_b.owner() && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
 
-    // A segment's later item receipts repeat the same native module facts.
-    // They retain their own target and value admission; completed native proof
-    // custody is shared after all current promotion checks run again.
-    for item in 1..14 {
-        let repeated_work_start = promoted.operation.work_usage().unwrap().0;
-        let repeated = certify_products(
-            None,
-            &promoted_packet,
-            &promoted,
-            &evidence_bytes,
-            &input,
-            root.path(),
-            &normalized,
-            target_source,
-            &producer,
-            &include,
-            Some(&exact),
-            None,
-        )
-        .unwrap();
-        let repeated_work = promoted.operation.work_usage().unwrap().0 - repeated_work_start;
-        assert!(repeated_work < first_work,
-            "item {item} still admits all current facts with less work: first={first_work} repeated={repeated_work}");
-        for original in [current_a, current_b] {
-            let observed = repeated
-                .recovery_products
-                .iter()
-                .find(|product| product.owner() == original.owner())
-                .unwrap();
-            assert!(
-                Arc::ptr_eq(
-                    original.original_native().unwrap(),
-                    observed.original_native().unwrap()
-                ),
-                "item {item} reuses completed native proof"
-            );
-            assert_eq!(observed, original);
-        }
+    let inventory_decodes_before = MODULE_PRODUCT_INVENTORY_DECODES.with(std::cell::Cell::get);
+    let receipt_decodes_before = SEGMENT_ORIGINAL_RECEIPT_DECODES.with(std::cell::Cell::get);
+    let item_decodes_before = SEGMENT_ITEM_RECEIPT_DECODES.with(std::cell::Cell::get);
+    let shared_raw = ParsedModuleProducts::decode(&promoted_bytes, &package_bundle()).unwrap();
+    let mut validation = PackageInterfaceValidation::with_inventory(shared_raw.operation().clone());
+    // Encode current neutral facts, then enter the strict production decoder.
+    let modules = promoted_packet.modules.iter().map(|module| {
+        value_array([
+            value_text(match module.origin {
+                ProductOrigin::Fresh => "fresh",
+                ProductOrigin::Cached => "cached",
+                ProductOrigin::RetainedCore => "retained-core",
+            }),
+            value_text(&module.unit),
+            value_text(&module.module),
+            module
+                .module_version
+                .as_ref()
+                .map_or(Value::Null, |version| value_text(hex(&version.0))),
+            value_text(hex(&module.source_sha256)),
+            value_text(hex(&module.skinny_iface_sha256)),
+            value_text(hex(&module.product_sha256)),
+            value_text(hex(&module.dependency_witness_sha256)),
+            value_array(module.groups.iter().map(|group| {
+                value_array([
+                    Value::Integer((group.original_ordinal as u64).into()),
+                    value_array(group.globals.iter().map(value_global)),
+                ])
+            })),
+        ])
+    });
+    let mut facts = empty_product_facts();
+    facts.as_array_mut().unwrap()[2] = value_array(modules);
+    let mut wire = dictionary_receipt(&facts);
+    let payload = receipt_payload_mut(&mut wire);
+    payload[0] = value_text("segment-originals");
+    payload.remove(2);
+    payload[4] = fixture_envelope_value(&promoted_packet.finalization);
+    assert!(matches!(
+        promoted_packet.source_recipe,
+        WorkerExecutionSource::ExactUnavailable(SourceRecipeUnavailable::NoFreshOriginals)
+    ));
+    payload[5] = value_array([
+        value_text("exact-unavailable"),
+        value_text("no-fresh-originals"),
+    ]);
+    for (row, module) in payload[1]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(&promoted_packet.modules)
+    {
+        row.as_array_mut().unwrap()[9] = value_array(module.interface_requirements.iter().map(
+            |((unit, name), seal)| {
+                value_array([value_text(unit), value_text(name), value_text(hex(seal))])
+            },
+        ));
+    }
+    let shared_receipt = decode_segment_originals_with_operation(
+        &receipt_bytes(&wire),
+        root.path(),
+        &validation.inventory,
+    )
+    .unwrap();
+    let shared = CertifiedSegmentOriginals::issue(
+        shared_raw,
+        shared_receipt,
+        &evidence_bytes,
+        &input,
+        root.path(),
+        target_source,
+        &producer,
+        &include,
+        None,
+        &exact,
+        &[],
+        None,
+        &mut validation,
+    )
+    .unwrap();
+    assert_eq!(
+        MODULE_PRODUCT_INVENTORY_DECODES.with(std::cell::Cell::get) - inventory_decodes_before,
+        1
+    );
+    assert_eq!(
+        SEGMENT_ORIGINAL_RECEIPT_DECODES.with(std::cell::Cell::get) - receipt_decodes_before,
+        1
+    );
+    let immutable_counts = (
+        MODULE_PRODUCT_INVENTORY_DECODES.with(std::cell::Cell::get),
+        ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
+        HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
+    );
+    let empty_delta = receipt_bytes(&value_array([
+        value_text("TPCERT"),
+        Value::Integer(10.into()),
+        value_array([value_text("segment-item"), value_array([]), value_array([])]),
+    ]));
+    let native_issues = HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get);
+    let prepared = testing::prepare(testing::wire_program()).unwrap();
+    for item in 0..item_count {
+        let (selected, globals, additions) = shared
+            .select_item(
+                decode_segment_item_with_operation(&empty_delta, &validation.inventory).unwrap(),
+                &prepared,
+                &[],
+                None,
+                &mut validation,
+            )
+            .unwrap();
+        assert!(globals.is_empty() && additions.is_empty());
+        assert!(
+            Arc::ptr_eq(&selected.groups, &shared.products.groups),
+            "item {item} shares module groups"
+        );
+        assert!(Arc::ptr_eq(
+            &selected.recovery_products,
+            &shared.products.recovery_products
+        ));
+        assert!(Arc::ptr_eq(
+            &selected.module_interfaces,
+            &shared.products.module_interfaces
+        ));
+        assert!(Arc::ptr_eq(
+            &selected.source_selection.modules,
+            &shared.products.source_selection.modules
+        ));
         assert_eq!(
-            repeated
+            selected
                 .source_selection
                 .selected_original_owners()
                 .cloned()
                 .collect::<BTreeSet<_>>(),
             selected_owners
         );
+        assert_eq!(
+            (
+                MODULE_PRODUCT_INVENTORY_DECODES.with(std::cell::Cell::get),
+                ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
+                HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
+            ),
+            immutable_counts,
+            "item {item} cannot decode immutable module facts"
+        );
+        assert_eq!(
+            HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get),
+            native_issues,
+            "item selection cannot issue another module proof"
+        );
     }
-    assert_eq!(promoted.certified_originals.lock().unwrap().len(), 2);
-    let publication = promoted.copy_for_publication().unwrap();
-    assert!(
-        publication.certified_originals.lock().unwrap().is_empty(),
-        "publication owns no prior item certification"
+    assert_eq!(
+        SEGMENT_ITEM_RECEIPT_DECODES.with(std::cell::Cell::get) - item_decodes_before,
+        item_count
     );
-    assert_eq!(promoted.certified_originals.lock().unwrap().len(), 2);
-    let packages = BTreeMap::new();
-    let mut other_validation = PackageInterfaceValidation::default();
-    let cross_operation = promoted.reused_certified_original(
-        OriginalCertificationObservation {
-            owner: current_a.owner(),
-            source_sha256: current_a.source_sha256().unwrap(),
-            interface: current_a.module_interface().unwrap(),
-            interface_bytes: current_a.interface_bytes(),
-            product_bytes: current_a.product_bytes(),
-            package_bytes: current_a.package_imports_bytes(),
-            groups: &[],
-            interface_requirements: current_a.module_interface().unwrap().requirements(),
-            packages: &packages,
-            execution_source: current_a.execution_source(),
-        },
-        &mut other_validation,
-    );
-    assert!(
-        matches!(
-            cross_operation,
-            Err(CertificationError::Mismatch("inventory accounting owner"))
-        ),
-        "cross operation refusal: {cross_operation:?}"
-    );
-
-    let bounded = ParsedModuleProducts::decode(&promoted_bytes, &package_bundle()).unwrap();
-    let staged_bytes = promoted_packet.modules.len()
-        * std::mem::size_of::<&crate::recovery_artifacts::CertifiedRecoveryProduct>();
-    let first_bytes = std::mem::size_of::<(
-        CachedHomeOwner,
-        crate::recovery_artifacts::CertifiedRecoveryProduct,
-        [usize; 4],
-    )>() + 2 * (current_a.owner().unit.len() + current_a.owner().module.len());
-    let remaining = bounded.operation.work_usage().unwrap().1;
-    bounded
-        .operation
-        .charge(remaining - staged_bytes - first_bytes)
+    // Distinct real file selections are item additions, never shared state.
+    for ordinal in 0..2 {
+        let path = root.path().join(format!("target-package-{ordinal}.hi"));
+        let payload = [0x40 + ordinal as u8];
+        std::fs::write(&path, payload).unwrap();
+        let identity = SymbolIdentity {
+            unit: "external-package".into(),
+            module: format!("External{ordinal}"),
+            ..testing::identity("unused", "entry")
+        };
+        let global = AcceptedGlobal {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Package {
+                unit: identity.unit.clone(),
+                module: identity.module.clone(),
+                binder: identity.clone(),
+                interface_digest: sha(&payload),
+            },
+        };
+        let mut wire = testing::wire_program();
+        wire.globals.push(GlobalDecl {
+            identity: identity.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let target = testing::prepare(wire).unwrap();
+        let owner = (identity.unit.clone(), identity.module.clone());
+        let witness = PackageInterfaceWitness {
+            selected_path: path.clone(),
+            sha256: sha(&payload),
+        };
+        let addition = || SegmentItemReceipt {
+            globals: vec![global.clone()],
+            packages: BTreeMap::from([(owner.clone(), witness.clone())]),
+        };
+        let (selected, globals, packages) = shared
+            .select_item(addition(), &target, &[], None, &mut validation)
+            .unwrap();
+        assert_eq!(packages.len(), 1);
+        assert!(packages.contains_key(&owner));
+        assert!(!shared.package_availability().contains_key(&owner));
+        certify_target_owners_with_validation(
+            &target,
+            &globals,
+            &selected.groups,
+            &selected.source_selection,
+            &packages,
+            &mut validation,
+        )
         .unwrap();
-    let refusal =
-        bounded.retain_completed_promotions(&promoted_packet, &certified.recovery_products);
-    assert!(
-        matches!(
-            refusal,
-            Err(CertificationError::Product(
-                tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+        let (_, _, next_packages) = shared
+            .select_item(
+                SegmentItemReceipt {
+                    globals: vec![],
+                    packages: BTreeMap::new(),
+                },
+                &prepared,
+                &[],
+                None,
+                &mut validation,
+            )
+            .unwrap();
+        assert!(!next_packages.contains_key(&owner));
+        let mut unused = addition();
+        unused.globals.clear();
+        assert!(matches!(
+            shared.select_item(unused, &prepared, &[], None, &mut validation),
+            Err(CertificationError::Mismatch(
+                "item package has no target demand"
             ))
+        ));
+        std::fs::write(&path, [0xFF]).unwrap();
+        let mut recapture = PackageInterfaceValidation::with_inventory(shared.operation().clone());
+        assert!(matches!(
+            shared.select_item(addition(), &target, &[], None, &mut recapture),
+            Err(CertificationError::StaleEvidence)
+        ));
+    }
+    let mut other_validation = PackageInterfaceValidation::default();
+    assert!(matches!(
+        shared.select_item(
+            SegmentItemReceipt {
+                globals: vec![],
+                packages: BTreeMap::new()
+            },
+            &prepared,
+            &[],
+            None,
+            &mut other_validation,
         ),
-        "atomic retention refusal: {refusal:?}"
-    );
-    assert!(
-        bounded.certified_originals.lock().unwrap().is_empty(),
-        "admission refusal installs no partial proof"
-    );
+        Err(CertificationError::Mismatch(
+            "segment inventory accounting owner"
+        ))
+    ));
+    let publication = shared.raw().copy_for_publication().unwrap();
+    assert_eq!(publication.products(), shared.raw().products());
 
     let independent = ParsedModuleProducts::decode(&promoted_bytes, &package_bundle()).unwrap();
     let independent_result = certify_products(
@@ -970,12 +1124,6 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         None
     )
     .is_err());
-    assert_eq!(
-        promoted.certified_originals.lock().unwrap().len(),
-        2,
-        "failed observations leave completed custody intact"
-    );
-
     let first_a_owner = current_a.owner().clone();
     let first_b_owner = current_b.owner().clone();
     let mut owner_history = prior

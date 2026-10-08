@@ -61,6 +61,24 @@ the former eval and invocation cache layouts; neither is read or written.
 identities for workspace capture and reload. Those identities describe a source
 snapshot; they do not determine which files a compiled program consumed.
 
+## Segment original facts
+
+`ExactProgramSegmentAdmission` owns the physical request and consumed-source
+witnesses. Its `TPCERT10` segment-original packet is read, decoded and certified
+once; native, canonical and recovery custody stays shared. Segment-item packets
+carry target global witnesses and package additions, with independent checked
+entry, selected type visibility, package demand and executable closure admission.
+Available module or site censuses cannot choose an item's execution context.
+The initial exact request and that item's selected closure retain that authority.
+Ordinary compilation uses the separate closed ordinary packet variant.
+
+Candidate publication occurs once after every item of that segment seals and
+rechecks mutable source observations at publication. A failed or cancelled
+segment publishes no original suggestions. Whole-program and value publication
+keep their existing atomic owners. A fresh admission operation authenticates
+physical artifacts afresh; an existing shared owner needs no repeated immutable
+byte observation or proof memo.
+
 ## Immutable build fixtures
 
 `tidepool_prepared_fixture` in `build/haskell/prepared_fixture.bzl` invokes

@@ -1521,22 +1521,19 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
               Nothing (map T.pack (prWarnings result)) [outputArtifact]
             writePreparedArtifacts itemDirectory [outputArtifact]
             writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory (paProgram outputArtifact)
-            let certified = sharedProducts
-            ordinal <- typedEntryOriginalOrdinal certified (preparedRootIdentity (typedItemRoot item))
+            ordinal <- typedEntryOriginalOrdinal sharedProducts (preparedRootIdentity (typedItemRoot item))
             BS.writeFile (itemDirectory </> "turn.cbor") (encodeTurnOut turn)
             writeTypedItemReceipt itemDirectory scope itemAdmission rendered typedPlan
               (preparedRootIdentity (typedSegmentOriginalRoot typed)) (preparedRootIdentity (typedItemRoot item)) ordinal
-            pure (generation,captures,certified,itemDirectory)
+            pure (generation,captures)
           validateDependencyEvidence (preparedFreshDependencies prepared)
-          (_,_,certified,firstDirectory) <- case emitted of
-            value : _ -> pure value
-            [] -> fail "typed segment emitted no items"
-          extended <- retainProgramProducts firstDirectory prepared certified sourceOwner scope
+          when (null emitted) (fail "typed segment emitted no items")
+          extended <- retainProgramProducts directory prepared sharedProducts sourceOwner scope
           retainedImports <- retainProgramSourceImports (programSourceImports state) prepared
-            (certifiedFinalizedArtifacts certified) extended
+            (certifiedFinalizedArtifacts sharedProducts) extended
           let completedState = recordTypedSegment finalized typedPlan expressionObservations captureSignatures rendered
                 state {programExact=extended,programSourceImports=retainedImports}
-          next <- foldM (\current (generation,captures,_,_) ->
+          next <- foldM (\current (generation,captures) ->
             addProgramValue stagingRoot generation captures current) completedState emitted
           modifyIORef' batches (++ [batch])
           pure next

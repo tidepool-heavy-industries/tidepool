@@ -70,7 +70,7 @@ pub(super) fn issued_original(
         None,
     )
     .unwrap();
-    let original = certified.recovery_products.into_iter().next().unwrap();
+    let original = certified.recovery_products.iter().next().unwrap().clone();
     assert!(original
         .original_native()
         .unwrap()

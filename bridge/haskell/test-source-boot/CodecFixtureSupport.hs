@@ -4,7 +4,7 @@ module CodecFixtureSupport
   ( CandidateCodecCase(..), writeCandidateCodecFixture
   , PurposeCodecCase(..), readPurposeCodecFixture, readRequestTypesCodecFixture, readExpressionItemCodecFixture
   , ReceiptCodecFacts(..), readReceiptCodecFacts
-  , CodecImportOwner(..), CertificateCodecFacts(..), readCertificateCodecFacts
+  , CodecImportOwner(..), CertificateCodecFacts(..), readCertificateCodecFacts, readSegmentItemCodecFacts
   , CompilerInputCodecFacts(..), readCompilerInputCodecFacts
   , readCodecTerm
   ) where
@@ -82,7 +82,13 @@ data CertificateCodecFacts = CertificateCodecFacts
   } deriving (Eq,Show)
 
 readCertificateCodecFacts :: FilePath -> FilePath -> IO CertificateCodecFacts
-readCertificateCodecFacts work path = readFacts work "certificate_facts" [text path] $ \term -> do
+readCertificateCodecFacts = readProductCodecFacts "certificate_facts"
+
+readSegmentItemCodecFacts :: FilePath -> FilePath -> IO CertificateCodecFacts
+readSegmentItemCodecFacts = readProductCodecFacts "segment_item_facts"
+
+readProductCodecFacts :: String -> FilePath -> FilePath -> IO CertificateCodecFacts
+readProductCodecFacts operation work path = readFacts work operation [text path] $ \term -> do
   fields <- closedMap ["owners","packages","modules","targets","global_sha256"] term
   CertificateCodecFacts <$> field fields "owners" (array importOwner)
     <*> field fields "packages" (array packageFact)

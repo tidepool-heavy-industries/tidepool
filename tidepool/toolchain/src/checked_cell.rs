@@ -994,11 +994,13 @@ pub(crate) struct CheckedValueInputs {
 
 /// Same-request type outputs captured from the reserved checked-value owner.
 /// These are not submitted inputs and grant no live native values.
+#[derive(Clone, Debug)]
 pub(crate) struct ProducedValueTypeInterfaces {
     interfaces: Arc<[ProducedValueTypeInterface]>,
     selection: ProducedValueTypeSelection,
 }
 
+#[derive(Clone, Debug)]
 struct ProducedValueTypeSelection(std::ops::Range<usize>);
 
 impl ProducedValueTypeSelection {
@@ -1083,12 +1085,24 @@ mod produced_type_selection_tests {
     }
 }
 
+#[derive(Debug)]
 struct ProducedValueTypeInterface {
     ordinal: usize,
     interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
 }
 
 impl ProducedValueTypeInterfaces {
+    pub(crate) fn owns_artifact(&self, artifact: crate::artifact_inventory::ArtifactId) -> bool {
+        self.interfaces
+            .iter()
+            .any(|output| output.interface.artifact_id() == artifact)
+    }
+
+    pub(crate) fn selects_artifact(&self, artifact: crate::artifact_inventory::ArtifactId) -> bool {
+        self.interfaces()
+            .any(|interface| interface.artifact_id() == artifact)
+    }
+
     /// Select one actual item from the once-captured segment inventory. Earlier
     /// outputs may supply type dependencies; its own output is mandatory and
     /// later outputs cannot authorize any row in this item's packet.

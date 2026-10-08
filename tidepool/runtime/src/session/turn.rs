@@ -1643,7 +1643,7 @@ pub struct TurnCertification {
     pub package_interfaces:
         tidepool_toolchain::certified_products::CertifiedTargetPackageInterfaces,
     /// Exact owned compiler products for recovery publication after admission.
-    pub recovery_products: Vec<CertifiedRecoveryProduct>,
+    pub recovery_products: Arc<[CertifiedRecoveryProduct]>,
     purpose: TurnPurpose,
 }
 
@@ -1718,7 +1718,7 @@ impl Default for TurnCertification {
             groups: Arc::from([]),
             target_owners: Vec::new(),
             package_interfaces: Default::default(),
-            recovery_products: Vec::new(),
+            recovery_products: Arc::from([]),
             purpose: TurnPurpose::Ordinary,
         }
     }
@@ -1735,7 +1735,7 @@ impl TurnCertification {
             groups: artifacts.certified_groups.clone().into(),
             target_owners: target.pending_imports.clone(),
             package_interfaces: target.package_interfaces.clone(),
-            recovery_products: artifacts.recovery_products.clone(),
+            recovery_products: artifacts.recovery_products.clone().into(),
             ..Default::default()
         }
     }
@@ -2692,13 +2692,16 @@ fn audit_current_native_emission(
 ) {
     let requirements = tidepool_toolchain::prepared_artifact::production_requirements().unwrap();
     let mut observed = 0;
-    for item in program
-        .items()
-        .iter()
-        .filter(|item| item.native().is_some())
-    {
+    for (index, segment) in program.typed_segments().iter().enumerate() {
+        if !segment
+            .items()
+            .iter()
+            .any(|item| program.items()[item.ordinal()].native().is_some())
+        {
+            continue;
+        }
         observed += 1;
-        let directory = directory.join(format!("item-{}", item.checked_item().index()));
+        let directory = directory.join(format!("segment-{index}"));
         let receipt_path = directory.join("certified-products.cbor");
         let native_path = directory.join("module-products.cbor");
         assert!(std::fs::metadata(&receipt_path).unwrap().len() <= 32 << 20);
@@ -2708,7 +2711,9 @@ fn audit_current_native_emission(
         // this request's emission, before inherited custody is appended.
         let receipt: CborValue =
             ciborium::de::from_reader(std::fs::File::open(receipt_path).unwrap()).unwrap();
-        let receipt_modules = receipt.as_array().unwrap()[2].as_array().unwrap();
+        let payload = receipt.as_array().unwrap()[2].as_array().unwrap();
+        assert_eq!(payload[0].as_text(), Some("segment-originals"));
+        let receipt_modules = payload[1].as_array().unwrap();
         let emitted = tidepool_repr::execution_schema::parse_module_products(
             &std::fs::read(native_path).unwrap(),
             &requirements,
@@ -3229,6 +3234,75 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
     let valid = offer
         .admit_cell_program(root)
         .expect("unchanged original worker receipts must admit");
+    // Reuse this actual producer/admission fixture for generated cross-item
+    // observations; the oracle comes from checked ordinals and reserved capture
+    // owners, independently of the shared packet's complete private inventory.
+    {
+        use proptest::prelude::*;
+        let native = valid
+            .items()
+            .iter()
+            .filter(|item| item.native().is_some())
+            .collect::<Vec<_>>();
+        let captures = native
+            .iter()
+            .filter_map(|item| {
+                item.native()
+                    .unwrap()
+                    .value_interface()
+                    .map(|(module, _)| (item.checked_item().index(), module))
+            })
+            .collect::<Vec<_>>();
+        assert!(!native.is_empty() && !captures.is_empty());
+        let mut runner = proptest::test_runner::TestRunner::new(proptest::test_runner::Config {
+            cases: 32,
+            ..Default::default()
+        });
+        runner
+            .run(
+                &(0_usize..native.len(), 0_usize..captures.len()),
+                |(item_index, capture_index)| {
+                    let item = native[item_index];
+                    let (ordinal, module) = captures[capture_index];
+                    let selected = item.native_products().unwrap().artifact_view.descriptors();
+                    let (table, _) = read_metadata(item.native_metadata_bytes().unwrap()).unwrap();
+                    let sites = match decode_turn_out(item.native_turn_bytes().unwrap()).unwrap() {
+                        DecodedTurnOut::Bind { asks, .. } | DecodedTurnOut::Expr { asks, .. } => {
+                            asks
+                        }
+                        _ => panic!("native item has another turn kind"),
+                    };
+                    let execution = item
+                        .native()
+                        .unwrap()
+                        .original_execution_context(
+                            &item.native().unwrap().target_owned(),
+                            &table,
+                            &sites,
+                        )
+                        .unwrap()
+                        .artifact_view()
+                        .descriptors();
+                    if ordinal > item.checked_item().index() {
+                        prop_assert!(
+                            selected.iter().all(|entry| entry.owner.module != module),
+                            "future capture entered selected item view"
+                        );
+                        prop_assert!(
+                            execution.iter().all(|entry| entry.owner.module != module),
+                            "future capture entered original execution context"
+                        );
+                    } else if ordinal == item.checked_item().index() {
+                        prop_assert!(
+                            selected.iter().any(|entry| entry.owner.module == module),
+                            "current capture type missing"
+                        );
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
     let index = valid
         .items()
         .iter()
@@ -3307,13 +3381,15 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
         .value_interface()
         .expect("this worker control produces an actual capture")
         .0;
-    let products_path = root.join(format!("item-{index}/certified-products.cbor"));
+    let products_path = segment.join("certified-products.cbor");
     let products_original = std::fs::read(&products_path).unwrap();
     let products: CborValue = ciborium::de::from_reader(products_original.as_slice()).unwrap();
     fn captured_owner(row: &CborValue) -> (&str, &str) {
         observed_receipt_owner(row, ObservedReceiptOwnerRow::CapturedValue)
     }
-    let value_rows = products.as_array().unwrap()[6].as_array().unwrap()[3]
+    let value_rows = products.as_array().unwrap()[2].as_array().unwrap()[4]
+        .as_array()
+        .unwrap()[3]
         .as_array()
         .unwrap();
     let output_index = value_rows
@@ -3335,15 +3411,27 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
         })
         .expect("the later segment must produce a real reserved capture");
     let future_module = future.native().unwrap().value_interface().unwrap().0;
-    let future_directory = root.join(format!("item-{}", future.checked_item().index()));
+    let future_segment_index = valid
+        .typed_segments()
+        .iter()
+        .position(|segment| {
+            segment
+                .items()
+                .iter()
+                .any(|item| item.ordinal() == future.checked_item().index())
+        })
+        .unwrap();
+    let future_directory = root.join(format!("segment-{future_segment_index}"));
     let future_bytes = std::fs::read(future_directory.join("certified-products.cbor")).unwrap();
     let future_products: CborValue = ciborium::de::from_reader(future_bytes.as_slice()).unwrap();
-    let future_row = future_products.as_array().unwrap()[6].as_array().unwrap()[3]
+    let future_row = future_products.as_array().unwrap()[2].as_array().unwrap()[4]
+        .as_array()
+        .unwrap()[3]
         .as_array()
         .unwrap()
         .iter()
         .find(|row| row.as_array().unwrap()[1].as_text() == Some(future_module))
-        .expect("the later capture must have genuine completed type evidence")
+        .expect("later segment owns its actual capture type")
         .clone();
     let same_segment_future = valid.items()[index + 1..declaration]
         .iter()
@@ -3359,27 +3447,45 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
         .value_interface()
         .unwrap()
         .0;
-    let same_segment_directory = root.join(format!(
-        "item-{}",
+    assert_ne!(same_segment_module, output_module);
+    assert!(
+        value_rows
+            .iter()
+            .any(|row| row.as_array().unwrap()[1].as_text() == Some(same_segment_module)),
+        "shared originals privately capture later types once"
+    );
+    let first_view = &valid.items()[index]
+        .native_products()
+        .unwrap()
+        .artifact_view;
+    assert!(
+        !first_view
+            .descriptors()
+            .iter()
+            .any(|entry| entry.owner.module == same_segment_module
+                || entry.owner.module == future_module),
+        "future types cannot enter the earlier item's selected view"
+    );
+    let future_item_path = root.join(format!(
+        "item-{}/certified-products.cbor",
         same_segment_future.checked_item().index()
     ));
-    let same_segment_bytes =
-        std::fs::read(same_segment_directory.join("certified-products.cbor")).unwrap();
-    let same_segment_products: CborValue =
-        ciborium::de::from_reader(same_segment_bytes.as_slice()).unwrap();
-    let same_segment_row = same_segment_products.as_array().unwrap()[6]
-        .as_array()
-        .unwrap()[3]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row.as_array().unwrap()[1].as_text() == Some(same_segment_module))
-        .expect("the later same-segment capture must have genuine completed type evidence")
-        .clone();
-    assert_ne!(same_segment_module, output_module);
-    assert!(value_rows
-        .iter()
-        .all(|row| row.as_array().unwrap()[1].as_text() != Some(same_segment_module)));
+    let first_item_path = root.join(format!("item-{index}/certified-products.cbor"));
+    let first_delta = std::fs::read(&first_item_path).unwrap();
+    let future_delta = std::fs::read(future_item_path).unwrap();
+    assert_ne!(first_delta, future_delta, "actual item targets differ");
+    {
+        let restore_delta = RestoreReceipt {
+            path: first_item_path.clone(),
+            original: first_delta,
+        };
+        std::fs::write(&first_item_path, future_delta).unwrap();
+        assert!(
+            offer.admit_cell_program(root).is_err(),
+            "a later target delta cannot authorize this item"
+        );
+        drop(restore_delta);
+    }
     assert_ne!(future_module, output_module);
     assert!(
         value_rows
@@ -3387,13 +3493,15 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             .all(|row| { row.as_array().unwrap()[1].as_text() != Some(future_module) }),
         "the first segment must not already emit later capture evidence"
     );
-    for mutation in 0..5 {
+    for mutation in 0..4 {
         let restore_products = RestoreReceipt {
             path: products_path.clone(),
             original: products_original.clone(),
         };
         let mut changed = products.clone();
-        let rows = changed.as_array_mut().unwrap()[6].as_array_mut().unwrap()[3]
+        let rows = changed.as_array_mut().unwrap()[2].as_array_mut().unwrap()[4]
+            .as_array_mut()
+            .unwrap()[3]
             .as_array_mut()
             .unwrap();
         let mut restore_payload = None;
@@ -3402,10 +3510,9 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             0 => {
                 rows.remove(output_index);
             }
-            1 | 3 | 4 => {
+            1 | 3 => {
                 let mut foreign = match mutation {
                     3 => future_row.clone(),
-                    4 => same_segment_row.clone(),
                     _ => rows[output_index].clone(),
                 };
                 let row = foreign.as_array_mut().unwrap();
@@ -3415,7 +3522,6 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
                 let parent = products_path.parent().unwrap();
                 let payload_parent: &Path = match mutation {
                     3 => &future_directory,
-                    4 => &same_segment_directory,
                     _ => parent,
                 };
                 let directory = tempfile::tempdir_in(parent).unwrap();
@@ -3473,7 +3579,7 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
         );
         if let Some(expected) = match mutation {
             0 => Some("produced value type output is missing"),
-            1 | 3 | 4 => Some("captured value was not selected by the request"),
+            1 | 3 => Some("captured value was not selected by the request"),
             2 => Some("produced value type output differs from its reserved capture"),
             _ => None,
         } {

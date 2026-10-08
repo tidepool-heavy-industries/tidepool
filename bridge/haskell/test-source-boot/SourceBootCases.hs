@@ -119,7 +119,8 @@ import Tidepool.CompilerProducts
   , observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , preparedProductInventory
-  , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts )
+  , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
   ( captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
@@ -3223,6 +3224,35 @@ originalProjectionProducts = withScratch $ \work -> do
   unless (emittedInventory == encodeModuleProducts
       (map moduleProductInput (certifiedOriginalProducts currentCertificate))) $
     fail "retained original group encodings changed the emitted native inventory"
+  let segmentDirectory = captureDirectory </> "segment-originals"
+  sharedCertificate <- writeCertifiedSegmentProducts [work] currentInterfaces segmentDirectory paired issuedContext
+  sharedBytes <- BS.readFile (segmentDirectory </> "module-products.cbor")
+  unless (sharedBytes == emittedInventory) $
+    fail "segment original issuance changed the certified native inventory"
+  sharedFacts <- readCertificateCodecFacts work (segmentDirectory </> "certified-products.cbor")
+  ordinaryFacts <- readCertificateCodecFacts work (captureDirectory </> "certified-products.cbor")
+  unless (codecCertificateModules sharedFacts == codecCertificateModules ordinaryFacts
+      && null (codecCertificateTargets sharedFacts)) $
+    fail "segment originals changed module ordinals or advertised executable targets"
+  let ordinaryTarget = case codecCertificateTargets ordinaryFacts of
+        [("usesGood",references)] -> references
+        _ -> error "ordinary producer lost its selected target"
+      expectedGlobalSeals = map ((codecCertificateGlobalSeals ordinaryFacts) !!) ordinaryTarget
+  forM_ [0 .. 13 :: Int] $ \ordinal -> do
+    let itemDirectory = segmentDirectory </> ("item-" ++ show ordinal)
+        target = if even ordinal then currentProgram else safeProgram
+    createDirectory itemDirectory
+    writeCertifiedSegmentItemProducts paired sharedCertificate itemDirectory target
+    itemFacts <- readSegmentItemCodecFacts work (itemDirectory </> "certified-products.cbor")
+    unless (null (codecCertificateModules itemFacts)
+        && length (codecCertificateOwners itemFacts) == length (programGlobals target)
+        && (not (even ordinal) || codecCertificateGlobalSeals itemFacts == expectedGlobalSeals)) $
+      fail "item delta lost complete target witnesses or repeated module facts"
+    forM_ ["module-products.cbor","module-package-imports.cbor","dependencies.json","execution-source.cbor"] $ \name -> do
+      duplicated <- doesPathExist (itemDirectory </> name)
+      when duplicated (fail ("item copied segment original facts: " ++ name))
+    unchanged <- BS.readFile (segmentDirectory </> "module-products.cbor")
+    unless (unchanged == sharedBytes) (fail "item emission changed immutable original facts")
   let packetDirectory = captureDirectory </> "projected-packet"
   packetCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
     packetDirectory paired (Just issuedContext) [("usesGood",currentProgram)]

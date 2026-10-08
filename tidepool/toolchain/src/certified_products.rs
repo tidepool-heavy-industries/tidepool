@@ -171,6 +171,17 @@ pub struct PackageInterfaceWitness {
     pub sha256: [u8; 32],
 }
 
+/// Borrowed package lookup lets item additions coexist with immutable originals
+/// without copying their availability map or selecting unused packages.
+pub(crate) trait PackageInterfaceLookup {
+    fn get(&self, owner: &(String, String)) -> Option<&PackageInterfaceWitness>;
+}
+impl PackageInterfaceLookup for BTreeMap<(String, String), PackageInterfaceWitness> {
+    fn get(&self, owner: &(String, String)) -> Option<&PackageInterfaceWitness> {
+        BTreeMap::get(self, owner)
+    }
+}
+
 /// The selected package closure of one sealed target. A digest from another
 /// transaction cannot authorize a local package definition in this target.
 #[derive(Clone, Debug, Default)]
@@ -297,19 +308,336 @@ pub struct PendingCertifiedGroup {
 }
 
 pub(crate) struct CertifiedProducts {
-    pub groups: Vec<PendingCertifiedGroup>,
-    pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
-    pub module_interfaces: Vec<CertifiedModuleInterface>,
-    pub value_interfaces: Vec<crate::recovery_artifacts::CertifiedValueInterface>,
+    pub groups: Arc<[PendingCertifiedGroup]>,
+    pub recovery_products: Arc<[crate::recovery_artifacts::CertifiedRecoveryProduct]>,
+    pub module_interfaces: Arc<[CertifiedModuleInterface]>,
+    pub value_interfaces: Arc<[crate::recovery_artifacts::CertifiedValueInterface]>,
     pub retained_core_products: CertifiedRetainedCoreProducts,
     pub(crate) source_selection: CertifiedSourceSelection,
 }
 
+/// Exact original facts admitted once by the physical segment owner. Captured
+/// value interfaces stay private until that owner's checked item selects them.
+pub(crate) struct CertifiedSegmentOriginals {
+    raw: ParsedModuleProducts,
+    receipt: CertifiedReceipt,
+    products: CertifiedProducts,
+    package_availability: BTreeMap<(String, String), PackageInterfaceWitness>,
+    artifact_entries: Arc<[Arc<crate::artifact_inventory::ArtifactEntry>]>,
+    value_entries: Arc<[Arc<crate::artifact_inventory::ArtifactEntry>]>,
+    original_sources: Arc<AvailableOriginalSources>,
+}
+
+impl CertifiedSegmentOriginals {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue(
+        raw: ParsedModuleProducts,
+        receipt: CertifiedReceipt,
+        evidence_bytes: &[u8],
+        source_path: &Path,
+        root: &Path,
+        source: &str,
+        producer: &[u8],
+        include: &[PathBuf],
+        candidates: Option<&CandidateSet>,
+        exact: &crate::declaration_context::ExactProductAdmission<'_>,
+        selected_values: &[tidepool_repr::SessionModule],
+        produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<Self> {
+        if !receipt.targets.is_empty() {
+            return Err(CertificationError::Receipt(
+                "segment originals contain a target",
+            ));
+        }
+        let products = certify_products_with_validation(
+            candidates,
+            &receipt,
+            &raw,
+            evidence_bytes,
+            source_path,
+            root,
+            &exact.source.evidence,
+            source,
+            producer,
+            include,
+            Some(exact),
+            None,
+            selected_values,
+            produced,
+            validation,
+        )?;
+        let mut package_availability =
+            inherited_package_witnesses_with_validation(&products.recovery_products, validation)?;
+        for (owner, witness) in &receipt.packages {
+            if let Some(previous) = package_availability.get(owner) {
+                if previous != witness {
+                    return Err(CertificationError::Mismatch(
+                        "segment original package selection",
+                    ));
+                }
+            } else {
+                charge_package_copy(owner, witness, &validation.inventory)?;
+                package_availability.insert(owner.clone(), witness.clone());
+            }
+        }
+        let original_sources = AvailableOriginalSources::authenticate(
+            &products.recovery_products,
+            &validation.inventory,
+        )?;
+        validation
+            .inventory
+            .reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(
+                products.module_interfaces.len() + 2 * products.recovery_products.len(),
+            )?;
+        let mut artifact_entries = products
+            .module_interfaces
+            .iter()
+            .cloned()
+            .map(crate::artifact_inventory::ArtifactEntry::canonical)
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        let producer_sha =
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
+                .sha256();
+        for product in products.recovery_products.iter() {
+            let canonical = product
+                .module_interface()
+                .ok_or(CertificationError::Mismatch(
+                    "segment native canonical carrier",
+                ))?;
+            if !artifact_entries.iter().any(|entry| matches!(&entry.payload,
+                crate::artifact_inventory::ArtifactPayload::Canonical(existing) if existing == canonical)) {
+                artifact_entries.push(Arc::new(crate::artifact_inventory::ArtifactEntry::canonical(canonical.clone())));
+            }
+            artifact_entries.push(Arc::new(
+                crate::artifact_inventory::ArtifactEntry::original_with_validation(
+                    producer_sha,
+                    product.clone(),
+                    validation,
+                )
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?,
+            ));
+        }
+        validation
+            .inventory
+            .reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(
+                products.value_interfaces.len(),
+            )?;
+        let mut value_entries = Vec::with_capacity(products.value_interfaces.len());
+        for value in products.value_interfaces.iter() {
+            validation
+                .inventory
+                .charge(value.interface().unit().len() + value.interface().module().len())?;
+            validation
+                .inventory
+                .reserve::<crate::declaration_join::ExactModuleIdentity>(
+                    value.requirements().len(),
+                )?;
+            for owner in value.requirements() {
+                validation
+                    .inventory
+                    .charge(owner.unit.len() + owner.module.len())?;
+            }
+            value_entries.push(Arc::new(
+                crate::artifact_inventory::ArtifactEntry::interface(
+                    value.interface().clone(),
+                    crate::artifact_inventory::JoinedInterfaceRole::ValueInterface,
+                    value.requirements().to_vec(),
+                ),
+            ));
+        }
+        Ok(Self {
+            artifact_entries: artifact_entries.into(),
+            value_entries: value_entries.into(),
+            original_sources,
+            package_availability,
+            raw,
+            receipt,
+            products,
+        })
+    }
+
+    pub(crate) fn operation(&self) -> &Arc<InventoryOperation> {
+        self.raw.operation()
+    }
+    pub(crate) fn raw(&self) -> &ParsedModuleProducts {
+        &self.raw
+    }
+    pub(crate) fn receipt(&self) -> &CertifiedReceipt {
+        &self.receipt
+    }
+    pub(crate) fn recovery_products(
+        &self,
+    ) -> &[crate::recovery_artifacts::CertifiedRecoveryProduct] {
+        &self.products.recovery_products
+    }
+
+    pub(crate) fn package_availability(
+        &self,
+    ) -> &BTreeMap<(String, String), PackageInterfaceWitness> {
+        &self.package_availability
+    }
+
+    pub(crate) fn artifact_entries(&self) -> &[Arc<crate::artifact_inventory::ArtifactEntry>] {
+        &self.artifact_entries
+    }
+
+    pub(crate) fn original_sources(&self) -> &Arc<AvailableOriginalSources> {
+        &self.original_sources
+    }
+
+    pub(crate) fn selected_value_entries<'a>(
+        &'a self,
+        values: &'a [crate::recovery_artifacts::CertifiedValueInterface],
+    ) -> impl Iterator<Item = &'a Arc<crate::artifact_inventory::ArtifactEntry>> {
+        self.value_entries.iter().filter(move |entry| {
+            values
+                .iter()
+                .any(|value| value.artifact_id() == entry.descriptor.id)
+        })
+    }
+
+    pub(crate) fn select_item(
+        &self,
+        item: SegmentItemReceipt,
+        prepared: &PreparedProgram,
+        selected_values: &[tidepool_repr::SessionModule],
+        produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<(
+        CertifiedProducts,
+        Vec<AcceptedGlobal>,
+        BTreeMap<(String, String), PackageInterfaceWitness>,
+    )> {
+        if !Arc::ptr_eq(self.operation(), &validation.inventory) {
+            return Err(CertificationError::Mismatch(
+                "segment inventory accounting owner",
+            ));
+        }
+        for (owner, witness) in &item.packages {
+            if self.package_availability.contains_key(owner) {
+                return Err(CertificationError::Mismatch(
+                    "item repeats an original package selection",
+                ));
+            }
+            let imported = item.globals.iter().any(|global| match &global.owner {
+                ReceiptImportOwner::Package {
+                    unit,
+                    module,
+                    interface_digest,
+                    ..
+                }
+                | ReceiptImportOwner::RetainedPackage {
+                    unit,
+                    module,
+                    interface_digest,
+                    ..
+                } => (&owner.0, &owner.1, &witness.sha256) == (unit, module, interface_digest),
+                _ => false,
+            });
+            let exported = !self.receipt.finalization.home_units.contains(&owner.0)
+                && prepared
+                    .bindings()
+                    .iter()
+                    .flat_map(|group| match group {
+                        tidepool_repr::execution_schema::Group::NonRecursive(top) => {
+                            std::slice::from_ref(top)
+                        }
+                        tidepool_repr::execution_schema::Group::Recursive(tops) => tops.as_slice(),
+                    })
+                    .any(|top| {
+                        top.identity.unit == owner.0
+                            && top.identity.module == owner.1
+                            && top.identity.namespace == "value"
+                    });
+            if !imported && !exported {
+                return Err(CertificationError::Mismatch(
+                    "item package has no target demand",
+                ));
+            }
+            verify_package_interface(validation, witness)?;
+        }
+        let selected_value = |value: &&crate::recovery_artifacts::CertifiedValueInterface| {
+            if let Some(outputs) =
+                produced.filter(|outputs| outputs.owns_artifact(value.artifact_id()))
+            {
+                outputs.selects_artifact(value.artifact_id())
+            } else {
+                tidepool_repr::SessionModule::from_module_name(value.interface().module())
+                    .is_some_and(|owner| selected_values.contains(&owner))
+            }
+        };
+        let selected_count = self
+            .products
+            .value_interfaces
+            .iter()
+            .filter(selected_value)
+            .count();
+        validation
+            .inventory
+            .reserve::<crate::recovery_artifacts::CertifiedValueInterface>(selected_count)?;
+        for value in self.products.value_interfaces.iter().filter(selected_value) {
+            validation
+                .inventory
+                .charge(value.interface().unit().len() + value.interface().module().len())?;
+            validation
+                .inventory
+                .reserve::<crate::declaration_join::ExactModuleIdentity>(
+                    value.requirements().len(),
+                )?;
+            for owner in value.requirements() {
+                validation
+                    .inventory
+                    .charge(owner.unit.len() + owner.module.len())?;
+            }
+        }
+        let value_interfaces = self
+            .products
+            .value_interfaces
+            .iter()
+            .filter(selected_value)
+            .cloned()
+            .collect::<Vec<_>>();
+        if produced.is_some_and(|outputs| {
+            outputs.required().any(|required| {
+                !value_interfaces
+                    .iter()
+                    .any(|value| value.artifact_id() == required.artifact_id())
+            })
+        }) {
+            return Err(CertificationError::Mismatch(
+                "item produced type output missing",
+            ));
+        }
+        let mut source_selection = self.products.source_selection.clone();
+        source_selection.produced_types = produced.cloned();
+        for value in &value_interfaces {
+            if value.requirements().iter().any(|owner| {
+                !source_selection.contains_module(&(owner.unit.clone(), owner.module.clone()))
+            }) {
+                return Err(CertificationError::Mismatch(
+                    "item value type dependency closure",
+                ));
+            }
+        }
+        let products = CertifiedProducts {
+            groups: self.products.groups.clone(),
+            recovery_products: self.products.recovery_products.clone(),
+            module_interfaces: self.products.module_interfaces.clone(),
+            value_interfaces: value_interfaces.into(),
+            retained_core_products: self.products.retained_core_products.clone(),
+            source_selection,
+        };
+        Ok((products, item.globals, item.packages))
+    }
+}
+
 /// Assembly authority issued only after complete native promotion certification.
 /// Empty values carry no authority; the nonempty inventory remains private.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CertifiedRetainedCoreProducts {
-    products: BTreeMap<(String, String), crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    products: Arc<BTreeMap<(String, String), crate::recovery_artifacts::CertifiedRecoveryProduct>>,
 }
 
 impl CertifiedRetainedCoreProducts {
@@ -595,6 +923,10 @@ fn retain_authenticated_original_native(
 #[cfg(test)]
 thread_local! {
     pub(crate) static ORIGINAL_PRODUCT_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MODULE_PRODUCT_INVENTORY_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEGMENT_ORIGINAL_RECEIPT_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SEGMENT_ITEM_RECEIPT_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HOME_CERTIFICATION_ISSUES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static HOME_CERTIFICATION_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -1035,7 +1367,9 @@ pub(crate) fn decode_receipt_with_operation(
 ) -> CertResult<CertifiedReceipt> {
     let decoded = decode_receipt_packet_with_operation(bytes, output_dir, operation)?;
     if decoded.kind != CompleteProductKind::Ordinary {
-        return Err(CertificationError::Receipt("expected ordinary product output"));
+        return Err(CertificationError::Receipt(
+            "expected ordinary product output",
+        ));
     }
     Ok(decoded.receipt)
 }
@@ -1114,7 +1448,7 @@ fn decode_receipt_packet_with_operation(
     output_dir: Option<&Path>,
     operation: &InventoryOperation,
 ) -> CertResult<DecodedReceiptPacket> {
-    let limit = operation.limits().max_bytes;
+    let limit = COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
     if bytes.len() > limit {
         return Err(CertificationError::SizeLimit {
             format: CertificationFormat::ProductReceipt,
@@ -1133,17 +1467,49 @@ fn decode_receipt_value_in(
     operation: &InventoryOperation,
 ) -> CertResult<DecodedReceiptPacket> {
     let payload = product_receipt_payload(value)?;
-    let (kind, modules_value, targets_value, packages_value, globals_value,
-        finalization_value, recipe_value, coordinates_value) = match payload {
+    let (
+        kind,
+        modules_value,
+        targets_value,
+        packages_value,
+        globals_value,
+        finalization_value,
+        recipe_value,
+        coordinates_value,
+    ) = match payload {
         [tag, modules, targets, packages, globals, finalization, recipe, coordinates]
             if string(tag)? == "ordinary" =>
-            (CompleteProductKind::Ordinary, modules, Some(targets), packages, globals,
-             finalization, recipe, coordinates),
+        {
+            (
+                CompleteProductKind::Ordinary,
+                modules,
+                Some(targets),
+                packages,
+                globals,
+                finalization,
+                recipe,
+                coordinates,
+            )
+        }
         [tag, modules, packages, globals, finalization, recipe, coordinates]
             if string(tag)? == "segment-originals" =>
-            (CompleteProductKind::SegmentOriginals, modules, None, packages, globals,
-             finalization, recipe, coordinates),
-        _ => return Err(CertificationError::Receipt("complete product output variant")),
+        {
+            (
+                CompleteProductKind::SegmentOriginals,
+                modules,
+                None,
+                packages,
+                globals,
+                finalization,
+                recipe,
+                coordinates,
+            )
+        }
+        _ => {
+            return Err(CertificationError::Receipt(
+                "complete product output variant",
+            ))
+        }
     };
     let mut coordinates = OwnerCoordinates::decode(coordinates_value)?;
     let mut dictionary =
@@ -1274,7 +1640,8 @@ fn decode_receipt_value_in(
         }
         _ => return Err(CertificationError::Receipt("source recipe result")),
     };
-    let finalization = finalized_module::decode_envelope_with_operation(finalization_value, operation)?;
+    let finalization =
+        finalized_module::decode_envelope_with_operation(finalization_value, operation)?;
     finalization.validate_owners(&modules, &packages)?;
     Ok(DecodedReceiptPacket {
         kind,
@@ -1314,19 +1681,37 @@ fn product_receipt_payload(value: &Value) -> CertResult<&[Value]> {
 }
 
 pub(crate) fn decode_segment_originals_with_operation(
-    bytes: &[u8], root: &Path, operation: &InventoryOperation,
+    bytes: &[u8],
+    root: &Path,
+    operation: &InventoryOperation,
 ) -> CertResult<CertifiedReceipt> {
+    #[cfg(test)]
+    SEGMENT_ORIGINAL_RECEIPT_DECODES.with(|count| count.set(count.get() + 1));
+
     let decoded = decode_receipt_packet_with_operation(bytes, Some(root), operation)?;
     if decoded.kind != CompleteProductKind::SegmentOriginals {
-        return Err(CertificationError::Receipt("expected segment original output"));
+        return Err(CertificationError::Receipt(
+            "expected segment original output",
+        ));
     }
     Ok(decoded.receipt)
 }
 
 pub(crate) fn decode_segment_item_with_operation(
-    bytes: &[u8], operation: &InventoryOperation,
+    bytes: &[u8],
+    operation: &InventoryOperation,
 ) -> CertResult<SegmentItemReceipt> {
-    let value = operation.decode_value(bytes, operation.limits().max_bytes)?;
+    #[cfg(test)]
+    SEGMENT_ITEM_RECEIPT_DECODES.with(|count| count.set(count.get() + 1));
+    let limit = COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
+    if bytes.len() > limit {
+        return Err(CertificationError::SizeLimit {
+            format: CertificationFormat::ProductReceipt,
+            actual: bytes.len(),
+            limit,
+        });
+    }
+    let value = operation.decode_value(bytes, limit)?;
     let payload = product_receipt_payload(&value)?;
     let [tag, globals, packages] = payload else {
         return Err(CertificationError::Receipt("segment item output arity"));
@@ -1336,17 +1721,21 @@ pub(crate) fn decode_segment_item_with_operation(
     }
     let rows = array(globals)?;
     operation.reserve::<AcceptedGlobal>(rows.len())?;
-    let globals = rows.iter().map(|row| {
-        let global = accepted_global(row)?;
-        operation.charge(global_payload_copy_bytes(&global)?)?;
-        Ok(global)
-    }).collect::<CertResult<Vec<_>>>()?;
+    let globals = rows
+        .iter()
+        .map(|row| {
+            let global = accepted_global(row)?;
+            operation.charge(global_payload_copy_bytes(&global)?)?;
+            Ok(global)
+        })
+        .collect::<CertResult<Vec<_>>>()?;
     let packages = decode_package_rows(packages, operation)?;
     Ok(SegmentItemReceipt { globals, packages })
 }
 
 fn decode_package_rows(
-    value: &Value, operation: &InventoryOperation,
+    value: &Value,
+    operation: &InventoryOperation,
 ) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
     let rows = array(value)?;
     if rows.len() > PACKAGE_LIMIT {
@@ -1355,7 +1744,9 @@ fn decode_package_rows(
     operation.reserve::<((String, String), PackageInterfaceWitness, [usize; 4])>(rows.len())?;
     let mut packages = BTreeMap::new();
     for row in rows {
-        let [unit, module, path, seal] = sized(row, 4)? else { unreachable!() };
+        let [unit, module, path, seal] = sized(row, 4)? else {
+            unreachable!()
+        };
         let unit = string(unit)?;
         let module = string(module)?;
         let path = string(path)?;
@@ -1363,9 +1754,16 @@ fn decode_package_rows(
             return Err(CertificationError::Receipt("package witness identity/path"));
         }
         operation.charge(unit.len() + module.len() + path.len())?;
-        if packages.insert((unit.to_owned(), module.to_owned()), PackageInterfaceWitness {
-            selected_path: PathBuf::from(path), sha256: digest(seal)?,
-        }).is_some() {
+        if packages
+            .insert(
+                (unit.to_owned(), module.to_owned()),
+                PackageInterfaceWitness {
+                    selected_path: PathBuf::from(path),
+                    sha256: digest(seal)?,
+                },
+            )
+            .is_some()
+        {
             return Err(CertificationError::Receipt("duplicate package witness"));
         }
     }
@@ -1755,6 +2153,18 @@ pub(crate) fn read_bounded_with_operation(
     Ok(bytes)
 }
 
+pub(crate) fn charge_package_copy(
+    owner: &(String, String),
+    witness: &PackageInterfaceWitness,
+    operation: &InventoryOperation,
+) -> CertResult<()> {
+    operation.reserve::<((String, String), PackageInterfaceWitness, [usize; 4])>(1)?;
+    operation.charge(
+        owner.0.len() + owner.1.len() + witness.selected_path.as_os_str().as_encoded_bytes().len(),
+    )?;
+    Ok(())
+}
+
 fn verify_package_interface(
     validation: &mut PackageInterfaceValidation,
     witness: &PackageInterfaceWitness,
@@ -1867,7 +2277,8 @@ fn duplicate_source_binder(
 /// that request's validated output rows. Full retained custody is not an offer.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CertifiedSourceSelection {
-    modules: BTreeMap<(String, String), ReceiptSourceSelection>,
+    modules: Arc<BTreeMap<(String, String), ReceiptSourceSelection>>,
+    produced_types: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
 }
 
 /// Native originals selected by one certified compiler namespace. Historical
@@ -1939,6 +2350,26 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    fn visible_modules(
+        &self,
+    ) -> impl Iterator<Item = (&(String, String), &ReceiptSourceSelection)> {
+        self.modules.iter().filter(|(_, selected)| {
+            self.produced_types.as_ref().is_none_or(|outputs| {
+                !outputs.owns_artifact(selected.interface())
+                    || outputs.selects_artifact(selected.interface())
+            })
+        })
+    }
+
+    fn contains_module(&self, owner: &(String, String)) -> bool {
+        self.modules.get(owner).is_some_and(|selected| {
+            self.produced_types.as_ref().is_none_or(|outputs| {
+                !outputs.owns_artifact(selected.interface())
+                    || outputs.selects_artifact(selected.interface())
+            })
+        })
+    }
+
     pub(crate) fn selected_original_closure(
         &self,
         view: &crate::artifact_inventory::ArtifactView,
@@ -2048,8 +2479,8 @@ impl CertifiedSourceSelection {
     }
 
     fn native_selections(&self) -> impl Iterator<Item = &ReceiptNativeSelection> {
-        self.modules
-            .values()
+        self.visible_modules()
+            .map(|(_, row)| row)
             .filter_map(ReceiptSourceSelection::native)
     }
 
@@ -2068,7 +2499,7 @@ impl CertifiedSourceSelection {
         use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
         let metadata = view.metadata_snapshot();
         let mut entries = Vec::new();
-        for selected in self.modules.values() {
+        for (_, selected) in self.visible_modules() {
             let interface = metadata
                 .artifacts
                 .get(&selected.interface())
@@ -2097,14 +2528,11 @@ impl CertifiedSourceSelection {
                 entries.push(Arc::clone(entry));
             }
         }
-        let projection = CompilerInputProjection::from_issued_entries(&entries)
-            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
-        Self::from_compiler_projection(
-            &projection,
-            &metadata,
-            &InventoryOperation::new(Default::default()),
-        )?;
-        Ok(projection)
+        // The typed issuer already certified these roles and their original
+        // custody. Resolve their IDs in this item's view; converting the result
+        // back into another source selection would copy the same facts again.
+        CompilerInputProjection::from_issued_entries(&entries)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))
     }
 
     fn from_projected_originals(
@@ -2128,8 +2556,7 @@ impl CertifiedSourceSelection {
                     + std::mem::size_of::<ReceiptSourceSelection>(),
             )?;
             let key = (witness.owner.unit.clone(), witness.owner.module.clone());
-            if selected
-                .modules
+            if Arc::make_mut(&mut selected.modules)
                 .insert(
                     key,
                     ReceiptSourceSelection::Native {
@@ -2185,7 +2612,7 @@ impl CertifiedSourceSelection {
         operation.charge(
             2 * (key.0.len() + key.1.len()) + std::mem::size_of::<ReceiptSourceSelection>(),
         )?;
-        self.modules.insert(
+        Arc::make_mut(&mut self.modules).insert(
             key,
             ReceiptSourceSelection::InterfaceOnly {
                 interface: entry.descriptor.id,
@@ -2244,7 +2671,7 @@ impl CertifiedSourceSelection {
             ProductOrigin::Fresh => ReceiptSourceVersion::Fresh,
             ProductOrigin::RetainedCore => ReceiptSourceVersion::RetainedCore,
         };
-        self.modules.insert(
+        Arc::make_mut(&mut self.modules).insert(
             key,
             ReceiptSourceSelection::Native {
                 interface,
@@ -2258,7 +2685,7 @@ impl CertifiedSourceSelection {
     }
 
     fn promote(&mut self, versions: &BTreeMap<(String, String), ModuleVersion>) -> CertResult<()> {
-        for (key, selected) in &mut self.modules {
+        for (key, selected) in Arc::make_mut(&mut self.modules) {
             let ReceiptSourceSelection::Native {
                 native: selected, ..
             } = selected
@@ -2596,7 +3023,7 @@ fn resolve_receipt_owner_with_validation(
     import: ReceiptImportOwner,
     sources: &SourceGroupMap,
     selection: Option<&CertifiedSourceSelection>,
-    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    packages: &impl PackageInterfaceLookup,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<PendingImportOwner> {
     match import {
@@ -2913,7 +3340,7 @@ fn validate_package_owner(
     binder: &SymbolIdentity,
     interface_digest: &[u8; 32],
     sources: &SourceGroupMap,
-    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    packages: &impl PackageInterfaceLookup,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<()> {
     if sources.contains_module(unit, module) {
@@ -3306,6 +3733,13 @@ fn value_import(owner: &ReceiptImportOwner) -> Value {
         ]),
     }
 }
+#[cfg(test)]
+pub(crate) fn fixture_global_sha256(global: &AcceptedGlobal) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&value_global(global), &mut bytes).unwrap();
+    sha(&bytes)
+}
+
 fn value_global(global: &AcceptedGlobal) -> Value {
     value_array([
         value_identity(&global.identity),
@@ -4555,6 +4989,8 @@ fn issue_home_certification_with_validation(
     finalized_module_sha256: Option<[u8; 32]>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<HomeCertification> {
+    #[cfg(test)]
+    HOME_CERTIFICATION_ISSUES.with(|count| count.set(count.get() + 1));
     let mut witness = HomeCertification {
         owner: owner.clone(),
         execution_source_sha256,
@@ -5638,76 +6074,6 @@ pub(crate) struct ParsedModuleProducts {
     products: Vec<RawModuleProduct>,
     sidecars: Vec<Vec<u8>>,
     package_imports: Option<BTreeMap<(String, String), Vec<u8>>>,
-    // Completed output proofs remain separate from the physical request's
-    // inherited inventory. They can only reuse final custody after current
-    // receipt, promotion, source and selected dependency checks have passed.
-    certified_originals: std::sync::Mutex<
-        BTreeMap<CachedHomeOwner, crate::recovery_artifacts::CertifiedRecoveryProduct>,
-    >,
-}
-
-struct OriginalCertificationObservation<'a> {
-    owner: &'a CachedHomeOwner,
-    source_sha256: [u8; 32],
-    interface: &'a CertifiedModuleInterface,
-    interface_bytes: &'a [u8],
-    product_bytes: &'a [u8],
-    package_bytes: &'a [u8],
-    groups: &'a [PendingCertifiedGroup],
-    interface_requirements: &'a BTreeMap<(String, String), [u8; 32]>,
-    packages: &'a BTreeMap<(String, String), PackageInterfaceWitness>,
-    execution_source: Option<&'a Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
-}
-
-fn validate_certified_original_observation(
-    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
-    observation: &OriginalCertificationObservation<'_>,
-    validation: &mut PackageInterfaceValidation,
-) -> CertResult<()> {
-    let native = product
-        .original_native()
-        .filter(|native| native.matches_original(product))
-        .ok_or(CertificationError::Mismatch(
-            "segment original native anchors",
-        ))?;
-    if product.owner() != observation.owner
-        || product.source_sha256() != Some(observation.source_sha256)
-        || product.interface_bytes() != observation.interface_bytes
-        || product.product_bytes() != observation.product_bytes
-        || product.package_imports_bytes() != observation.package_bytes
-        || product.module_interface() != Some(observation.interface)
-        || native.interface_requirements != *observation.interface_requirements
-        || native.execution_source_sha256
-            != observation.execution_source.map(|graph| graph.digest())
-        || product.execution_source() != observation.execution_source
-        || observation
-            .groups
-            .iter()
-            .any(|group| group.owner() != observation.owner)
-    {
-        return Err(CertificationError::Mismatch(
-            "segment original certification changed",
-        ));
-    }
-    validation.inventory.charge(native.groups.len())?;
-    for group in observation.groups {
-        validation.inventory.charge(group.imports().len())?;
-    }
-    native.validate_groups(
-        observation
-            .groups
-            .iter()
-            .map(|group| (group.group(), group.imports())),
-    )?;
-    for (owner, package) in &native.packages {
-        if observation.packages.get(owner) != Some(package) {
-            return Err(CertificationError::Mismatch(
-                "segment original package selection",
-            ));
-        }
-        verify_package_interface(validation, package)?;
-    }
-    Ok(())
 }
 
 impl ParsedModuleProducts {
@@ -5726,6 +6092,9 @@ impl ParsedModuleProducts {
         package_bundle: &[u8],
         operation: Arc<InventoryOperation>,
     ) -> CertResult<Self> {
+        #[cfg(test)]
+        MODULE_PRODUCT_INVENTORY_DECODES.with(|count| count.set(count.get() + 1));
+
         let requirements = crate::prepared_artifact::production_requirements()
             .map_err(|_| CertificationError::Mismatch("production requirements"))?;
         let (products, sidecars) =
@@ -5744,107 +6113,7 @@ impl ParsedModuleProducts {
             products,
             sidecars,
             package_imports,
-            certified_originals: Default::default(),
         })
-    }
-
-    fn reused_certified_original(
-        &self,
-        observation: OriginalCertificationObservation<'_>,
-        validation: &mut PackageInterfaceValidation,
-    ) -> CertResult<Option<crate::recovery_artifacts::CertifiedRecoveryProduct>> {
-        if !Arc::ptr_eq(&self.operation, &validation.inventory) {
-            return Err(CertificationError::Mismatch("inventory accounting owner"));
-        }
-        let retained = self
-            .certified_originals
-            .lock()
-            .map_err(|_| CertificationError::Mismatch("segment certification owner"))?;
-        let Some(product) = retained.get(observation.owner) else {
-            return Ok(None);
-        };
-        validate_certified_original_observation(product, &observation, validation)?;
-        self.operation
-            .charge(observation.owner.unit.len() + observation.owner.module.len())?;
-        Ok(Some(product.clone()))
-    }
-
-    fn retain_completed_promotions(
-        &self,
-        receipt: &CertifiedReceipt,
-        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
-    ) -> CertResult<()> {
-        let mut retained = self
-            .certified_originals
-            .lock()
-            .map_err(|_| CertificationError::Mismatch("segment certification owner"))?;
-        let count = receipt
-            .modules
-            .iter()
-            .filter(|module| module.origin == ProductOrigin::RetainedCore)
-            .count();
-        self.operation
-            .reserve::<&crate::recovery_artifacts::CertifiedRecoveryProduct>(count)?;
-        let mut staged = Vec::with_capacity(count);
-        for accepted in receipt
-            .modules
-            .iter()
-            .filter(|module| module.origin == ProductOrigin::RetainedCore)
-        {
-            let product = products
-                .iter()
-                .find(|product| {
-                    product.owner().unit == accepted.unit
-                        && product.owner().module == accepted.module
-                })
-                .ok_or(CertificationError::Mismatch(
-                    "completed segment promotion absent",
-                ))?;
-            if let Some(previous) = retained.get(product.owner()) {
-                if previous != product {
-                    return Err(CertificationError::Mismatch(
-                        "completed segment promotion changed",
-                    ));
-                }
-                continue;
-            }
-            self.operation.reserve::<(
-                CachedHomeOwner,
-                crate::recovery_artifacts::CertifiedRecoveryProduct,
-                [usize; 4],
-            )>(1)?;
-            self.operation
-                .charge(2 * (product.owner().unit.len() + product.owner().module.len()))?;
-            staged.push(product);
-        }
-        // All checks and copy admission complete before installing any proof.
-        for product in staged {
-            retained.insert(product.owner().clone(), product.clone());
-        }
-        Ok(())
-    }
-
-    /// Every consumer supplies and checks its physical bytes under the same
-    /// admission's accounting owner before reusing decoded or certified facts.
-    pub(crate) fn validate_observation(
-        &self,
-        bytes: &[u8],
-        package_bundle: &[u8],
-        operation: &Arc<InventoryOperation>,
-    ) -> CertResult<()> {
-        if !Arc::ptr_eq(&self.operation, operation) {
-            return Err(CertificationError::Mismatch(
-                "shared inventory accounting owner",
-            ));
-        }
-        operation.charge(bytes.len())?;
-        operation.charge(package_bundle.len())?;
-        if self.bytes.as_ref() != bytes || self.package_bundle.as_ref() != package_bundle {
-            return Err(CertificationError::Mismatch(
-                "physical segment original inventory changed",
-            ));
-        }
-        Ok(())
     }
 
     /// Candidate publication needs independent mutable container ownership;
@@ -5879,7 +6148,6 @@ impl ParsedModuleProducts {
             products: self.products.clone(),
             sidecars: self.sidecars.clone(),
             package_imports: self.package_imports.clone(),
-            certified_originals: Default::default(),
         })
     }
 
@@ -7536,20 +7804,6 @@ pub(crate) fn certify_products_with_validation(
                         .map(|proof| &proof.graph),
                     ProductOrigin::RetainedCore => None,
                 };
-                if origin == ProductOrigin::RetainedCore {
-                    if let Some(product) = fresh_products.reused_certified_original(
-                        OriginalCertificationObservation {
-                            owner: &owner, source_sha256: source_sha,
-                            interface: canonical_interface, interface_bytes: interface,
-                            product_bytes, package_bytes, groups: &original,
-                            interface_requirements: &accepted.interface_requirements,
-                            packages: &receipt.packages, execution_source,
-                        },
-                        validation,
-                    )? {
-                        return Ok(product);
-                    }
-                }
                 let witness = issue_home_certification_with_validation(
                     &owner,
                     &original,
@@ -7609,7 +7863,8 @@ pub(crate) fn certify_products_with_validation(
                     product.clone(),
                 ))
             })
-            .collect::<CertResult<_>>()?,
+            .collect::<CertResult<BTreeMap<_, _>>>()?
+            .into(),
     };
     if let Some(admission) = exact {
         append_original_selection(
@@ -7634,17 +7889,16 @@ pub(crate) fn certify_products_with_validation(
         ownership_start.elapsed(),
         fresh_product_bytes.len() as u64,
     );
-    fresh_products.retain_completed_promotions(receipt, &recovery_products)?;
     tracing::info!(target: "tidepool_toolchain::module_candidates",
         phase = "candidate_certification_success",
         fresh_modules = origin_counts[0][0], fresh_group_rows = origin_counts[0][1], fresh_original_bytes = origin_counts[0][2],
         cached_modules = origin_counts[1][0], cached_group_rows = origin_counts[1][1], cached_original_bytes = origin_counts[1][2],
         retained_core_modules = origin_counts[2][0], retained_core_group_rows = origin_counts[2][1], retained_core_original_bytes = origin_counts[2][2]);
     Ok(CertifiedProducts {
-        groups,
-        recovery_products,
-        module_interfaces,
-        value_interfaces,
+        groups: groups.into(),
+        recovery_products: recovery_products.into(),
+        module_interfaces: module_interfaces.into(),
+        value_interfaces: value_interfaces.into(),
         retained_core_products,
         source_selection,
     })
@@ -7743,7 +7997,7 @@ pub(crate) fn certify_target_available_owners_with_validation(
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     selected: &[PendingCertifiedGroup],
     selection: &CertifiedSourceSelection,
-    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    packages: &impl PackageInterfaceLookup,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingImportOwner>> {
     let original = AvailableOriginalSources::authenticate(products, &validation.inventory)?;
@@ -7758,7 +8012,7 @@ pub(crate) fn certify_target_available_owners_from_membership_with_validation(
     original: &Arc<AvailableOriginalSources>,
     selected: &[PendingCertifiedGroup],
     selection: &CertifiedSourceSelection,
-    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    packages: &impl PackageInterfaceLookup,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingImportOwner>> {
     let sources = original.overlay(selected, &validation.inventory)?;
@@ -7777,7 +8031,7 @@ fn certify_target_owners_from_sources(
     accepted: &[AcceptedGlobal],
     sources: &SourceGroupMap,
     selection: Option<&CertifiedSourceSelection>,
-    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    packages: &impl PackageInterfaceLookup,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingImportOwner>> {
     if prepared.globals().len() != accepted.len() {
@@ -9196,206 +9450,6 @@ pub(crate) mod tests {
         )])
         .remove(0)
         .product
-    }
-
-    fn observe_native_fixture<'a>(
-        product: &'a crate::recovery_artifacts::CertifiedRecoveryProduct,
-        groups: &'a [PendingCertifiedGroup],
-        packages: &'a BTreeMap<(String, String), PackageInterfaceWitness>,
-    ) -> OriginalCertificationObservation<'a> {
-        OriginalCertificationObservation {
-            owner: product.owner(),
-            source_sha256: product.source_sha256().unwrap(),
-            interface: product.module_interface().unwrap(),
-            interface_bytes: product.interface_bytes(),
-            product_bytes: product.product_bytes(),
-            package_bytes: product.package_imports_bytes(),
-            groups,
-            interface_requirements: &product.original_native().unwrap().interface_requirements,
-            packages,
-            execution_source: product.execution_source(),
-        }
-    }
-
-    #[test]
-    fn retained_native_observation_rechecks_module_packages_and_allows_extra_targets() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("External.hi");
-        let alternative = root.path().join("Alternative.hi");
-        for path in [&path, &alternative] {
-            std::fs::write(path, [0x43]).unwrap();
-        }
-        let package_owner = ("external-package".into(), "External".into());
-        let packages = BTreeMap::from([(
-            package_owner.clone(),
-            PackageInterfaceWitness {
-                selected_path: path.clone(),
-                sha256: sha(&[0x43]),
-            },
-        )]);
-        let import = PendingImportOwner::Package {
-            unit: "external-package".into(),
-            module: "External".into(),
-            binder: SymbolIdentity {
-                unit: "external-package".into(),
-                ..testing::identity("External", "entry")
-            },
-            interface_digest: sha(&[0x43]),
-        };
-        let product = recovered_witness_fixtures(&[fixture_finalized_product(
-            original_groups_fixture_with_interface(
-                "Consumer",
-                vec![(7, vec![import])],
-                7,
-                &packages,
-                b"Consumer interface".to_vec(),
-            ),
-            [1; 32],
-        )])
-        .remove(0)
-        .product;
-        let source_sha = product.module_interface().unwrap().source_sha256();
-        let product = product.with_source_sha256(source_sha);
-        let groups = product
-            .original_native()
-            .unwrap()
-            .groups
-            .iter()
-            .map(AuthenticatedOriginalGroup::admitted)
-            .collect::<Vec<_>>();
-        let check = |observed: &BTreeMap<_, _>| {
-            validate_certified_original_observation(
-                &product,
-                &observe_native_fixture(&product, &groups, observed),
-                &mut PackageInterfaceValidation::default(),
-            )
-        };
-        check(&packages).unwrap();
-        let mut extra = packages.clone();
-        extra.insert(
-            ("target-only".into(), "Other".into()),
-            PackageInterfaceWitness {
-                selected_path: root.path().join("not-required-by-module.hi"),
-                sha256: [9; 32],
-            },
-        );
-        check(&extra).unwrap();
-        assert!(matches!(
-            check(&BTreeMap::new()),
-            Err(CertificationError::Mismatch(
-                "segment original package selection"
-            ))
-        ));
-        let mut changed = packages.clone();
-        changed.get_mut(&package_owner).unwrap().selected_path = alternative;
-        assert!(matches!(
-            check(&changed),
-            Err(CertificationError::Mismatch(
-                "segment original package selection"
-            ))
-        ));
-        let mut changed = packages.clone();
-        changed.get_mut(&package_owner).unwrap().sha256[0] ^= 1;
-        assert!(matches!(
-            check(&changed),
-            Err(CertificationError::Mismatch(
-                "segment original package selection"
-            ))
-        ));
-        let view = crate::declaration_context::certified_product_artifact_view_with_validation(
-            [1; 32],
-            std::slice::from_ref(&product),
-            &[],
-            &[],
-            None,
-            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap();
-        let reused = view
-            .retained_original_entry_with_validation(
-                [1; 32],
-                &product,
-                &mut PackageInterfaceValidation::default(),
-            )
-            .unwrap()
-            .unwrap();
-        let original_entry = view
-            .entries()
-            .into_iter()
-            .find(|entry| {
-                matches!(
-                    &entry.payload,
-                    crate::artifact_inventory::ArtifactPayload::Original(_)
-                )
-            })
-            .unwrap();
-        assert!(Arc::ptr_eq(&reused, &original_entry));
-        std::fs::write(&path, [0x44]).unwrap();
-        assert!(matches!(
-            check(&packages),
-            Err(CertificationError::StaleEvidence)
-        ));
-        let refusal = view.retained_original_entry_with_validation(
-            [1; 32],
-            &product,
-            &mut PackageInterfaceValidation::default(),
-        );
-        assert!(
-            matches!(refusal,
-            Err(crate::CompileError::CompilerEvidence(error)) if matches!(*error, CertificationError::StaleEvidence)),
-            "retained artifact entry rechecks package bytes"
-        );
-    }
-
-    proptest::proptest! {
-        #![proptest_config(original_native_index_property_config())]
-        #[test]
-        fn retained_native_observation_preserves_full_proof_facts(
-            generation in 1_u64..100,
-            extra_ordinal in 8_u32..30,
-            change in 0_u8..9,
-        ) {
-            let product = full_native_fixture("Memoized", vec![
-                (7, vec![PendingImportOwner::Retained {
-                    identity: testing::identity("Captured", "value"), generation,
-                }]), (extra_ordinal, vec![]),
-            ], 9);
-            let source_sha = product.module_interface().unwrap().source_sha256();
-            let product = product.with_source_sha256(source_sha);
-            let mut groups = product.original_native().unwrap().groups.iter()
-                .map(AuthenticatedOriginalGroup::admitted).collect::<Vec<_>>();
-            let packages = BTreeMap::new();
-            let mut validation = PackageInterfaceValidation::default();
-            validate_certified_original_observation(&product,
-                &observe_native_fixture(&product, &groups, &packages), &mut validation).unwrap();
-            let mut observation = observe_native_fixture(&product, &groups, &packages);
-            let mut changed_owner = product.owner().clone();
-            let mut changed_source = source_sha;
-            let changed_interface = [0xFF];
-            let changed_products = [0xFE];
-            let changed_packages = [0xFD];
-            let changed_requirements = BTreeMap::from([(("fixture".into(), "Other".into()), [7; 32])]);
-            match change {
-                0 => {},
-                1 => { changed_owner.module_version.0[0] ^= 1; observation.owner = &changed_owner; },
-                2 => { changed_source[0] ^= 1; observation.source_sha256 = changed_source; },
-                3 => observation.interface_bytes = &changed_interface,
-                4 => observation.product_bytes = &changed_products,
-                5 => observation.package_bytes = &changed_packages,
-                6 => observation.interface_requirements = &changed_requirements,
-                7 => { groups.pop(); observation = observe_native_fixture(&product, &groups, &packages); },
-                _ => {
-                    let mut imports = groups[0].imports().to_vec();
-                    let PendingImportOwner::Retained { generation, .. } = &mut imports[0] else { unreachable!() };
-                    *generation += 1;
-                    groups[0].imports = imports.into();
-                    observation = observe_native_fixture(&product, &groups, &packages);
-                },
-            }
-            let result = validate_certified_original_observation(&product, &observation, &mut validation);
-            proptest::prop_assert_eq!(result.is_ok(), change == 0, "change={} result={:?}", change, result);
-        }
     }
 
     fn check_original_native_index_against_linear_scan(raw: &[(u32, bool, bool)], query: u32) {
@@ -11253,7 +11307,8 @@ pub(crate) mod tests {
                     original.owner().module.clone(),
                 ),
                 original.clone(),
-            )]),
+            )])
+            .into(),
         };
         assert!(packet.contains_original(&original.clone()));
         assert!(!CertifiedRetainedCoreProducts::default().contains_original(&original));
@@ -14918,7 +14973,7 @@ pub(crate) mod tests {
                     .collect::<BTreeSet<_>>();
                 assert_eq!(expected_owners.len(), index + 2);
                 assert_eq!(certified.groups.len(), 2);
-                for group in &certified.groups {
+                for group in certified.groups.iter() {
                     assert_eq!(group.owner(), &owner);
                     let raw = parsed.products()[0]
                         .groups
@@ -15640,28 +15695,87 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn product_receipt_roles_are_closed_and_not_interchangeable() {
+        let root = tempfile::tempdir().unwrap();
+        let ordinary = dictionary_receipt(&empty_product_facts());
+        let mut originals = ordinary.clone();
+        let payload = receipt_payload_mut(&mut originals);
+        payload[0] = value_text("segment-originals");
+        payload.remove(2);
+        let item = value_array([
+            value_text("TPCERT"),
+            Value::Integer(10.into()),
+            value_array([value_text("segment-item"), value_array([]), value_array([])]),
+        ]);
+        let decode_originals = |value: &Value| {
+            decode_segment_originals_with_operation(
+                &receipt_bytes(value),
+                root.path(),
+                &InventoryOperation::new(Default::default()),
+            )
+        };
+        let decode_item = |value: &Value| {
+            decode_segment_item_with_operation(
+                &receipt_bytes(value),
+                &InventoryOperation::new(Default::default()),
+            )
+        };
+        assert!(decode_receipt(&receipt_bytes(&ordinary)).is_ok());
+        assert!(decode_originals(&originals).is_ok());
+        assert!(decode_item(&item).is_ok());
+        assert!(decode_receipt(&receipt_bytes(&originals)).is_err());
+        assert!(decode_receipt(&receipt_bytes(&item)).is_err());
+        assert!(decode_originals(&ordinary).is_err());
+        assert!(decode_originals(&item).is_err());
+        assert!(decode_item(&ordinary).is_err());
+        assert!(decode_item(&originals).is_err());
+        for tag in ["other", "segment-items", "segment-original"] {
+            let mut changed = item.clone();
+            receipt_payload_mut(&mut changed)[0] = value_text(tag);
+            assert!(decode_item(&changed).is_err());
+        }
+        let mut extra = item.clone();
+        receipt_payload_mut(&mut extra).push(Value::Null);
+        assert!(decode_item(&extra).is_err());
+        let mut duplicated = item;
+        let package = value_array([
+            value_text("external"),
+            value_text("Library"),
+            value_text("/tmp/Library.hi"),
+            value_text(hex(&[1; 32])),
+        ]);
+        receipt_payload_mut(&mut duplicated)[2] = value_array([package.clone(), package]);
+        assert!(matches!(
+            decode_item(&duplicated),
+            Err(CertificationError::Receipt("duplicate package witness"))
+        ));
+    }
+
+    #[test]
     fn receipt_dictionary_preserves_full_facts_and_refuses_invalid_references() {
-        let mut legacy = empty_legacy_receipt();
+        let mut facts = empty_product_facts();
         let global = dictionary_test_global();
-        let Value::Array(header) = &mut legacy else {
+        let Value::Array(header) = &mut facts else {
             unreachable!()
         };
         header[3] = value_array([value_array([
             value_text("target"),
             value_array([value_global(&global), value_global(&global)]),
         ])]);
-        let compact = dictionary_receipt(&legacy);
+        let compact = dictionary_receipt(&facts);
         let encoded = receipt_bytes(&compact);
         assert_eq!(
             decode_receipt(&encoded).unwrap().targets["target"],
             vec![global.clone(), global]
         );
+        let mut obsolete = compact.clone();
+        obsolete.as_array_mut().unwrap()[1] = Value::Integer(9.into());
         assert!(matches!(
-            decode_receipt(&receipt_bytes(&legacy)),
+            decode_receipt(&receipt_bytes(&obsolete)),
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
-                found: 2,
-                expected: 9
+                found: 9,
+                expected: 10
             })
         ));
         let mut trailing = encoded;
@@ -15682,10 +15796,8 @@ pub(crate) mod tests {
             Value::Null,
         ] {
             let mut altered = compact.clone();
-            let Value::Array(header) = &mut altered else {
-                unreachable!()
-            };
-            let Value::Array(targets) = &mut header[3] else {
+            let header = receipt_payload_mut(&mut altered);
+            let Value::Array(targets) = &mut header[2] else {
                 unreachable!()
             };
             let Value::Array(target) = &mut targets[0] else {
@@ -15695,10 +15807,8 @@ pub(crate) mod tests {
             assert!(decode_receipt(&receipt_bytes(&altered)).is_err());
         }
         let mut duplicate = compact.clone();
-        let Value::Array(header) = &mut duplicate else {
-            unreachable!()
-        };
-        let Value::Array(rows) = &mut header[5] else {
+        let header = receipt_payload_mut(&mut duplicate);
+        let Value::Array(rows) = &mut header[4] else {
             unreachable!()
         };
         rows.push(rows[0].clone());
@@ -15709,10 +15819,8 @@ pub(crate) mod tests {
             ))
         ));
         let mut unreferenced = compact;
-        let Value::Array(header) = &mut unreferenced else {
-            unreachable!()
-        };
-        header[3] = value_array([]);
+        let header = receipt_payload_mut(&mut unreferenced);
+        header[2] = value_array([]);
         assert!(matches!(
             decode_receipt(&receipt_bytes(&unreferenced)),
             Err(CertificationError::Receipt(
@@ -15723,7 +15831,7 @@ pub(crate) mod tests {
 
     #[test]
     fn certification_size_limits_identify_the_owning_format() {
-        let receipt = receipt_bytes(&dictionary_receipt(&empty_legacy_receipt()));
+        let receipt = receipt_bytes(&dictionary_receipt(&empty_product_facts()));
         let receipt_limit = receipt.len() - 1;
         let receipt_operation = InventoryOperation::new(InventoryDecodeLimits {
             max_bytes: receipt_limit,
@@ -15791,19 +15899,19 @@ pub(crate) mod tests {
             generation: 0,
         };
         let expected = vec![source.clone(), package, retained_package, source];
-        let mut legacy = empty_legacy_receipt();
-        legacy.as_array_mut().unwrap()[3] = value_array([value_array([
+        let mut facts = empty_product_facts();
+        facts.as_array_mut().unwrap()[3] = value_array([value_array([
             value_text("target"),
             value_array(expected.iter().map(value_global)),
         ])]);
-        let compact = dictionary_receipt(&legacy);
+        let compact = dictionary_receipt(&facts);
         assert_eq!(
             decode_receipt(&receipt_bytes(&compact)).unwrap().targets["target"],
             expected
         );
-        let header = array(&compact).unwrap();
-        assert_eq!(array(&header[8]).unwrap().len(), 2);
-        let source_index = array(&header[5])
+        let header = product_receipt_payload(&compact).unwrap();
+        assert_eq!(array(&header[7]).unwrap().len(), 2);
+        let source_index = array(&header[4])
             .unwrap()
             .iter()
             .position(|row| {
@@ -15811,7 +15919,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         let source_coordinate = number(
-            &array(&array(&array(&header[5]).unwrap()[source_index]).unwrap()[4]).unwrap()[1],
+            &array(&array(&array(&header[4]).unwrap()[source_index]).unwrap()[4]).unwrap()[1],
         )
         .unwrap();
         let package_coordinate = 1 - source_coordinate;
@@ -15822,7 +15930,7 @@ pub(crate) mod tests {
             Value::Integer(package_coordinate.into()),
         ] {
             let mut invalid = compact.clone();
-            invalid.as_array_mut().unwrap()[5].as_array_mut().unwrap()[source_index]
+            receipt_payload_mut(&mut invalid)[4].as_array_mut().unwrap()[source_index]
                 .as_array_mut()
                 .unwrap()[4]
                 .as_array_mut()
@@ -15830,14 +15938,16 @@ pub(crate) mod tests {
             assert!(decode_receipt(&receipt_bytes(&invalid)).is_err());
         }
         let mut duplicate = compact.clone();
-        let coordinates = duplicate.as_array_mut().unwrap()[8].as_array_mut().unwrap();
+        let coordinates = receipt_payload_mut(&mut duplicate)[7]
+            .as_array_mut()
+            .unwrap();
         coordinates.push(coordinates[0].clone());
         assert!(matches!(
             decode_receipt(&receipt_bytes(&duplicate)),
             Err(CertificationError::Receipt("duplicate owner coordinate"))
         ));
         let mut unused = compact.clone();
-        unused.as_array_mut().unwrap()[8]
+        receipt_payload_mut(&mut unused)[7]
             .as_array_mut()
             .unwrap()
             .push(value_array([
@@ -15853,7 +15963,7 @@ pub(crate) mod tests {
         // Coordinate compression does not authenticate a foreign package or
         // permit its borrowed binder to disagree with the declaration owner.
         let mut foreign = compact;
-        let coords = foreign.as_array_mut().unwrap()[8].as_array_mut().unwrap();
+        let coords = receipt_payload_mut(&mut foreign)[7].as_array_mut().unwrap();
         coords[package_coordinate as usize].as_array_mut().unwrap()[1] =
             value_text("foreign-package");
         let foreign = decode_receipt(&receipt_bytes(&foreign)).unwrap();
@@ -15875,8 +15985,8 @@ pub(crate) mod tests {
     fn dictionary_decoding_admits_typed_facts_without_encoding_storage() {
         let global = dictionary_test_global();
         let full = value_array([
-            value_text("TPCERT"),
-            Value::Integer(7.into()),
+            value_text("product-facts"),
+            value_text("dictionary"),
             value_array([]),
             value_array([]),
             value_array([]),
@@ -15885,8 +15995,8 @@ pub(crate) mod tests {
             Value::Null,
         ]);
         let compact = compact_receipt_coordinates(&full);
-        let header = array(&compact).unwrap();
-        let mut coordinates = OwnerCoordinates::decode(&header[8]).unwrap();
+        let header = product_receipt_payload(&compact).unwrap();
+        let mut coordinates = OwnerCoordinates::decode(&header[7]).unwrap();
         // A single small typed fact fits this finite budget; reconstructing
         // several Value trees solely for equality exhausts it.
         let operation = InventoryOperation::new(InventoryDecodeLimits {
@@ -15894,7 +16004,7 @@ pub(crate) mod tests {
             ..InventoryDecodeLimits::default()
         });
         let decoded =
-            GlobalDictionary::decode_with_operation(&header[5], &mut coordinates, &operation)
+            GlobalDictionary::decode_with_operation(&header[4], &mut coordinates, &operation)
                 .unwrap();
         assert_eq!(decoded.rows.len(), 1);
         assert_eq!(decoded.rows[0].0, global);
@@ -16002,56 +16112,19 @@ pub(crate) mod tests {
                     },
                 }
             }
+            let item = value_array([value_text("TPCERT"), Value::Integer(10.into()), value_array([
+                value_text("segment-item"), value_array([value_global(&left)]), value_array([]),
+            ])]);
+            let operation = InventoryOperation::new(Default::default());
+            let decoded = decode_segment_item_with_operation(&receipt_bytes(&item), &operation).unwrap();
+            proptest::prop_assert_eq!(&decoded.globals, &vec![left.clone()]);
+            proptest::prop_assert!(decoded.packages.is_empty());
             let wire_equal = receipt_bytes(&value_global(&left)) == receipt_bytes(&value_global(&right));
             let mut unique = BTreeSet::new();
             unique.insert(&left);
             let duplicate = !unique.insert(&right);
             proptest::prop_assert_eq!(duplicate, wire_equal);
             proptest::prop_assert_eq!(left == right, wire_equal);
-        }
-    }
-
-    #[test]
-    #[ignore = "requires the original 029d retained compiler transaction with 19,738 module global facts"]
-    fn receipt_dictionary_replays_fourteen_retained_items_under_one_budget() {
-        let root = PathBuf::from(
-            std::env::var_os("TIDEPOOL_RETAINED_COMPILER_TRANSACTION")
-                .expect("explicit retained compiler transaction path"),
-        );
-        let operation = InventoryOperation::new(InventoryDecodeLimits::default());
-        let expected_targets = [5, 4, 10, 4, 33, 33, 28, 28, 12, 10, 10, 5, 5, 12];
-        println!(
-            "Value={} AcceptedGlobal={} RuntimeRep={}",
-            std::mem::size_of::<Value>(),
-            std::mem::size_of::<AcceptedGlobal>(),
-            std::mem::size_of::<RuntimeRep>()
-        );
-        for (index, target_count) in expected_targets.into_iter().enumerate() {
-            let item = root.join(format!("item-{}", index + 1));
-            let bytes = std::fs::read(item.join("certified-products.cbor")).unwrap();
-            let before = operation.work_usage().unwrap().0;
-            let packet =
-                decode_receipt_packet_with_operation(&bytes, Some(&item), &operation).unwrap();
-            assert_eq!(packet.receipt.modules.len(), 39);
-            assert_eq!(
-                packet
-                    .receipt
-                    .modules
-                    .iter()
-                    .flat_map(|module| &module.groups)
-                    .map(|group| group.globals.len())
-                    .sum::<usize>(),
-                19_738
-            );
-            assert_eq!(packet.receipt.targets["__prepared"].len(), target_count);
-            let after = operation.work_usage().unwrap().0;
-            println!(
-                "item={} receipt_bytes={} dictionary_rows={} work={after} increment={}",
-                index + 1,
-                bytes.len(),
-                packet.globals.len(),
-                after - before
-            );
         }
     }
 
@@ -16073,8 +16146,8 @@ pub(crate) mod tests {
         let second = package_global("Omega");
         let compact_dictionary = |globals: &[AcceptedGlobal]| {
             let full = value_array([
-                value_text("TPCERT"),
-                Value::Integer(7.into()),
+                value_text("product-facts"),
+                value_text("dictionary"),
                 value_array([]),
                 value_array([]),
                 value_array([]),
@@ -16083,8 +16156,8 @@ pub(crate) mod tests {
                 Value::Null,
             ]);
             let compact = compact_receipt_coordinates(&full);
-            let header = array(&compact).unwrap();
-            (header[5].clone(), header[8].clone())
+            let header = product_receipt_payload(&compact).unwrap();
+            (header[4].clone(), header[7].clone())
         };
         let (first_rows, first_coordinates) = compact_dictionary(std::slice::from_ref(&first));
         let (second_rows, second_coordinates) = compact_dictionary(std::slice::from_ref(&second));
@@ -16185,92 +16258,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[ignore = "requires the retained oversized production tools receipt"]
-    fn receipt_dictionary_preserves_retained_production_facts() {
-        let path = PathBuf::from(
-            std::env::var_os("TIDEPOOL_RETAINED_PRODUCT_RECEIPT")
-                .expect("explicit retained production receipt path"),
-        );
-        let bytes = std::fs::read(&path).unwrap();
-        assert!(
-            bytes.len() > COMPILER_RECEIPT_BYTES_LIMIT,
-            "actual bounded size refusal"
-        );
-        assert!(
-            matches!(decode_receipt(&bytes), Err(CertificationError::SizeLimit {
-            format: CertificationFormat::ProductReceipt, actual, limit: COMPILER_RECEIPT_BYTES_LIMIT,
-        }) if actual == bytes.len())
-        );
-        let full: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        let header = array(&full).unwrap();
-        assert_eq!(number(&header[1]).unwrap(), 7);
-        let compact = compact_receipt_coordinates(&full);
-        let encoded = receipt_bytes(&compact);
-        let admitted = decode_receipt_in(&encoded, path.parent()).unwrap();
-        let full_globals = array(&header[5])
-            .unwrap()
-            .iter()
-            .map(accepted_global)
-            .collect::<CertResult<Vec<_>>>()
-            .unwrap();
-        let compact_header = array(&compact).unwrap();
-        for index in [0, 2, 3, 4, 6, 7] {
-            assert_eq!(
-                header[index], compact_header[index],
-                "untouched receipt facts"
-            );
-        }
-        let mut coordinates = OwnerCoordinates::decode(&compact_header[8]).unwrap();
-        let dictionary = GlobalDictionary::decode(&compact_header[5], &mut coordinates).unwrap();
-        assert_eq!(
-            dictionary
-                .rows
-                .iter()
-                .map(|(global, _)| global.clone())
-                .collect::<Vec<_>>(),
-            full_globals
-        );
-        let expand = |refs: &Value| {
-            array(refs)
-                .unwrap()
-                .iter()
-                .map(|index| full_globals[number(index).unwrap() as usize].clone())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(admitted.modules.len(), array(&header[2]).unwrap().len());
-        for (module, raw) in admitted.modules.iter().zip(array(&header[2]).unwrap()) {
-            let raw = array(raw).unwrap();
-            assert_eq!(module.groups.len(), array(&raw[8]).unwrap().len());
-            for (group, raw) in module.groups.iter().zip(array(&raw[8]).unwrap()) {
-                let raw = array(raw).unwrap();
-                assert_eq!(group.original_ordinal, number(&raw[0]).unwrap() as u32);
-                assert_eq!(group.globals, expand(&raw[1]));
-            }
-        }
-        assert_eq!(admitted.targets.len(), array(&header[3]).unwrap().len());
-        for raw in array(&header[3]).unwrap() {
-            let raw = array(raw).unwrap();
-            assert_eq!(admitted.targets[string(&raw[0]).unwrap()], expand(&raw[1]));
-        }
-        assert!(encoded.len() <= COMPILER_RECEIPT_BYTES_LIMIT);
-        eprintln!(
-            "retained-product-receipt original_bytes={} compact_bytes={} globals={} coordinates={}",
-            bytes.len(),
-            encoded.len(),
-            full_globals.len(),
-            coordinates.rows.len()
-        );
-    }
-
-    #[test]
     fn exact_recipe_receipt_requires_owning_sidecar_and_preserves_issued_bytes() {
         let root = tempfile::tempdir().unwrap();
         let (graph, _) = crate::execution_source::test_graph(root.path());
-        let mut value = dictionary_receipt(&empty_legacy_receipt());
-        let Value::Array(header) = &mut value else {
-            panic!("fixture receipt")
-        };
-        header[7] = value_array([
+        let mut value = dictionary_receipt(&empty_product_facts());
+        let header = receipt_payload_mut(&mut value);
+        header[6] = value_array([
             value_text("exact-available"),
             value_text(hex(&graph.digest())),
         ]);
@@ -16293,17 +16286,15 @@ pub(crate) mod tests {
         assert_eq!(bytes.as_ref(), graph.bytes());
         std::fs::write(&path, b"changed source recipe").unwrap();
         assert!(decode_receipt_in(&encoded, Some(root.path())).is_err());
-        let Value::Array(header) = &mut value else {
-            panic!("fixture receipt")
-        };
-        header[7] = value_array([value_text("exact-unavailable"), value_text("unknown")]);
+        let header = receipt_payload_mut(&mut value);
+        header[6] = value_array([value_text("exact-unavailable"), value_text("unknown")]);
         assert!(decode_receipt_in(&receipt_bytes(&value), Some(root.path())).is_err());
     }
 
-    fn empty_legacy_receipt() -> Value {
+    fn empty_product_facts() -> Value {
         value_array([
-            value_text("TPCERT"),
-            Value::Integer(2.into()),
+            value_text("product-facts"),
+            value_text("inline"),
             value_array([]),
             value_array([]),
             value_array([]),
@@ -16324,6 +16315,13 @@ pub(crate) mod tests {
         }
     }
 
+    fn receipt_payload_mut(value: &mut Value) -> &mut Vec<Value> {
+        let header = value.as_array_mut().unwrap();
+        assert_eq!(header[0], value_text("TPCERT"));
+        assert_eq!(header[1], Value::Integer(10.into()));
+        header[2].as_array_mut().unwrap()
+    }
+
     fn receipt_bytes(value: &Value) -> Vec<u8> {
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(value, &mut bytes).unwrap();
@@ -16334,13 +16332,14 @@ pub(crate) mod tests {
         finalized_module::encode_fixture_envelope(envelope)
     }
 
-    // Test migration of already-issued full facts. Production accepts only v9.
+    // Build the current ordinary wire from full neutral codec facts.
     fn compact_receipt_coordinates(full: &Value) -> Value {
         let mut compact = full.clone();
         let Value::Array(header) = &mut compact else {
             panic!("receipt tuple")
         };
-        assert_eq!(header[1], Value::Integer(7.into()));
+        assert_eq!(header[0], value_text("product-facts"));
+        assert_eq!(header[1], value_text("dictionary"));
         let mut coordinates = BTreeMap::new();
         for row in array(&header[5]).unwrap() {
             let row = array(row).unwrap();
@@ -16414,17 +16413,18 @@ pub(crate) mod tests {
                 _ => panic!("full witness owner"),
             };
         }
-        header[1] = Value::Integer(9.into());
         header.push(value_array(
             indexed.into_values().map(|(_, coordinate)| coordinate),
         ));
-        compact
+        let payload =
+            value_array(std::iter::once(value_text("ordinary")).chain(header[2..].iter().cloned()));
+        value_array([value_text("TPCERT"), Value::Integer(10.into()), payload])
     }
 
     fn test_dictionary(globals: &[AcceptedGlobal]) -> GlobalDictionary {
         let full = value_array([
-            value_text("TPCERT"),
-            Value::Integer(7.into()),
+            value_text("product-facts"),
+            value_text("dictionary"),
             value_array([]),
             value_array([]),
             value_array([]),
@@ -16433,17 +16433,18 @@ pub(crate) mod tests {
             Value::Null,
         ]);
         let compact = compact_receipt_coordinates(&full);
-        let header = array(&compact).unwrap();
-        let mut coordinates = OwnerCoordinates::decode(&header[8]).unwrap();
-        GlobalDictionary::decode(&header[5], &mut coordinates).unwrap()
+        let header = product_receipt_payload(&compact).unwrap();
+        let mut coordinates = OwnerCoordinates::decode(&header[7]).unwrap();
+        GlobalDictionary::decode(&header[4], &mut coordinates).unwrap()
     }
 
-    fn dictionary_receipt(legacy: &Value) -> Value {
-        let mut compact = legacy.clone();
+    fn dictionary_receipt(facts: &Value) -> Value {
+        let mut compact = facts.clone();
         let Value::Array(header) = &mut compact else {
-            panic!("legacy receipt tuple")
+            panic!("facts receipt tuple")
         };
-        assert_eq!(header[1], Value::Integer(2.into()));
+        assert_eq!(header[0], value_text("product-facts"));
+        assert_eq!(header[1], value_text("inline"));
         let mut dictionary = BTreeMap::new();
         let mut rows = |value: &Value| {
             for row in array(value).unwrap() {
@@ -16521,7 +16522,7 @@ pub(crate) mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        header[1] = Value::Integer(7.into());
+        header[1] = value_text("dictionary");
         header.push(value_array(indexed.into_values().map(|(_, row)| row)));
         header.push(fixture_envelope_value(&fixture_finalization(
             None, &modules,
@@ -16537,8 +16538,8 @@ pub(crate) mod tests {
         let source_evidence = evidence(source);
         let accepted = receipt(&bytes, &source_evidence, source);
         let value = Value::Array(vec![
-            Value::Text("TPCERT".into()),
-            Value::Integer(2.into()),
+            value_text("product-facts"),
+            value_text("inline"),
             Value::Array(vec![Value::Array(vec![
                 Value::Text("fresh".into()),
                 Value::Text("main".into()),
@@ -16583,10 +16584,8 @@ pub(crate) mod tests {
 
         let large_groups = |count: usize| {
             let mut receipt = value.clone();
-            let Value::Array(header) = &mut receipt else {
-                unreachable!()
-            };
-            let Value::Array(modules) = &mut header[2] else {
+            let header = receipt_payload_mut(&mut receipt);
+            let Value::Array(modules) = &mut header[1] else {
                 unreachable!()
             };
             let Value::Array(module) = &mut modules[0] else {
@@ -16662,12 +16661,12 @@ pub(crate) mod tests {
                     ])
                 })
                 .collect::<Vec<_>>();
-            let mut legacy = empty_legacy_receipt();
-            let Value::Array(header) = &mut legacy else {
+            let mut facts = empty_product_facts();
+            let Value::Array(header) = &mut facts else {
                 unreachable!()
             };
             header[2] = value_array(modules);
-            let compact = dictionary_receipt(&legacy);
+            let compact = dictionary_receipt(&facts);
             let bytes = receipt_bytes(&compact);
             let operation = InventoryOperation::new(InventoryDecodeLimits {
                 max_bytes: bytes.len(),
@@ -16689,8 +16688,8 @@ pub(crate) mod tests {
 
     #[test]
     fn receipt_decoder_preserves_retained_core_origin_without_fresh_finalization() {
-        let mut legacy = empty_legacy_receipt();
-        legacy.as_array_mut().unwrap()[2] = value_array([value_array([
+        let mut facts = empty_product_facts();
+        facts.as_array_mut().unwrap()[2] = value_array([value_array([
             value_text("retained-core"),
             value_text("main"),
             value_text("Original"),
@@ -16701,12 +16700,12 @@ pub(crate) mod tests {
             value_text(hex(&[4; 32])),
             value_array([]),
         ])]);
-        let mut compact = dictionary_receipt(&legacy);
+        let mut compact = dictionary_receipt(&facts);
         let decoded = decode_receipt(&receipt_bytes(&compact)).unwrap();
         assert_eq!(decoded.modules[0].origin, ProductOrigin::RetainedCore);
         assert_eq!(decoded.modules[0].module_version, None);
         assert!(decoded.finalization.modules.is_empty());
-        compact.as_array_mut().unwrap()[2].as_array_mut().unwrap()[0]
+        receipt_payload_mut(&mut compact)[1].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[0] = value_text("retained");
         assert!(matches!(
@@ -17133,8 +17132,8 @@ pub(crate) mod tests {
 
     #[test]
     fn certificate_versions_refuse_legacy_ownership_without_reinterpretation() {
-        for version in [1, 2, 3, 4, 5, 6, 7, 8] {
-            let mut receipt = dictionary_receipt(&empty_legacy_receipt());
+        for version in [1, 2, 3, 4, 5, 6, 7, 8, 9] {
+            let mut receipt = dictionary_receipt(&empty_product_facts());
             let Value::Array(rows) = &mut receipt else {
                 unreachable!()
             };
@@ -17143,7 +17142,7 @@ pub(crate) mod tests {
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 9,
+                    expected: 10,
                     ..
                 })
             ));

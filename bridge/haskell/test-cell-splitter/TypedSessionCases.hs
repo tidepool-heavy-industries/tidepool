@@ -50,9 +50,9 @@ import Tidepool.Binders
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.DependencyEvidence (DependencyEvidence(..))
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionOutputs )
+  ( newOriginalInterfaceArtifactsWithSessionOutputs )
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, selectFinalizedSessionOutputs
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts
   , finalizedValueInterfaceSeals, finalizedInterfaceSeals )
 import Tidepool.CheckedCell (captureCheckedSignature, resolveCheckedSignature)
 import Tidepool.GhcPipeline
@@ -79,17 +79,16 @@ instance Exception SessionBoundaryFailure
 type InterfaceSeal = ((T.Text, T.Text), T.Text)
 
 data PrefixAdmission = PrefixAdmission
-  OriginalInterfaceArtifacts FinalizedModuleArtifacts [CapturedSessionInterface] [CapturedSessionInterface]
+  FinalizedModuleArtifacts [CapturedSessionInterface] [CapturedSessionInterface]
 
 data PrefixFixture = PrefixFixture FilePath PreparedTypedSegmentBindings
   [(Int, InterfaceSeal)] (Map.Map Int PrefixAdmission)
 
 data PrefixHistory = PrefixHistory Int [Int] deriving Show
 
--- Compile once per selected group, then generate cheap issuer calls against
--- its real immutable captures. The oracle uses authored reservation ordinals,
--- exact home-unit owners and independently hashed interface bytes; it never
--- uses the production prefix selector to compute expected membership.
+-- Compile once, then compare the prepared capture selection with authored
+-- reservation ordinals and independently hashed interface bytes. Receipt
+-- admission and future-value refusals belong to the Rust consumer cluster.
 typedSessionPrefixProperties :: TestTree
 typedSessionPrefixProperties = withResource acquirePrefixFixture releasePrefixFixture $ \fixture ->
   testGroup "typed-session-prefix"
@@ -97,16 +96,16 @@ typedSessionPrefixProperties = withResource acquirePrefixFixture releasePrefixFi
         value@(PrefixFixture _ prepared rows admissions) <- fixture
         let admission = admissions Map.! 0
         early <- issuePrefix prepared admission 1
-        unless (sort (finalizedValueInterfaceSeals early) == sort (expectedPrefix value 0 1))
+        unless (sort early == sort (expectedPrefix value 0 1))
           (fail "item 1 published the future Val.G4 capture")
         later <- issuePrefix prepared admission 5
-        unless (sort (finalizedValueInterfaceSeals later) == sort (map snd rows))
+        unless (sort later == sort (map snd rows))
           (fail "later reader did not retain its delayed capture interface")
         -- Returning the complete output inventory at item 1 would violate
         -- prefix authority and fails this same observation.
         unless (sort (map snd rows) /= sort (expectedPrefix value 0 1))
           (fail "prefix oracle cannot distinguish future-output publication")
-    , testProperty "real prefix issuer matches exact role inventory" $
+    , testProperty "prepared capture selections preserve exact roles and immutable facts" $
         QC.checkCoverage $
         QC.forAllShrink prefixHistoryGenerator shrinkPrefixHistory $ \history@(PrefixHistory mask queries) ->
           QC.cover 10 (mask == 0) "all produced"
@@ -116,29 +115,12 @@ typedSessionPrefixProperties = withResource acquirePrefixFixture releasePrefixFi
           $ QC.cover 30 (any (>= 5) queries) "later reader"
           $ QC.ioProperty $ do
               value@(PrefixFixture _ prepared rows admissions) <- fixture
-              let admission@(PrefixAdmission _ full _ _) = admissions Map.! mask
+              let admission@(PrefixAdmission full _ _) = admissions Map.! mask
               projected <- mapM (issuePrefix prepared admission) queries
               pure $ QC.counterexample (show history) $ QC.conjoin
-                ( [sort (finalizedValueInterfaceSeals issued) QC.=== sort (expectedPrefix value mask ordinal)
+                ( [sort issued QC.=== sort (expectedPrefix value mask ordinal)
                   | (ordinal, issued) <- zip queries projected]
                   ++ [sort (finalizedInterfaceSeals full) QC.=== sort (map snd rows)] )
-    , testProperty "role and duplicate refusals preserve later issuance" $
-        QC.forAllShrink (QC.chooseInt (1, 6)) (filter (\mask -> mask >= 1 && mask <= 6) . QC.shrink) $ \mask ->
-          QC.ioProperty $ do
-            value@(PrefixFixture _ prepared _ admissions) <- fixture
-            let admission@(PrefixAdmission originals full imported produced) = admissions Map.! mask
-            wrongRole <- try (selectFinalizedSessionOutputs originals [head imported] full)
-              :: IO (Either SomeException FinalizedModuleArtifacts)
-            duplicate <- try (selectFinalizedSessionOutputs originals [head produced, head produced] full)
-              :: IO (Either SomeException FinalizedModuleArtifacts)
-            early <- issuePrefix prepared admission 1
-            later <- issuePrefix prepared admission 5
-            pure $ QC.counterexample ("role mask " ++ show mask) $ QC.conjoin
-              [ QC.property (either (const True) (const False) wrongRole)
-              , QC.property (either (const True) (const False) duplicate)
-              , sort (finalizedValueInterfaceSeals early) QC.=== sort (expectedPrefix value mask 1)
-              , sort (finalizedValueInterfaceSeals later) QC.=== sort (expectedPrefix value mask 5)
-              ]
     ]
 
 prefixHistoryGenerator :: QC.Gen PrefixHistory
@@ -158,11 +140,12 @@ expectedPrefix (PrefixFixture _ _ rows _) mask ordinal =
   [row | (index, (captureOrdinal, row)) <- zip [0 ..] rows
     , testBit mask index || captureOrdinal <= ordinal]
 
-issuePrefix :: PreparedTypedSegmentBindings -> PrefixAdmission -> Int -> IO FinalizedModuleArtifacts
-issuePrefix prepared (PrefixAdmission originals full _ produced) ordinal =
-  selectFinalizedSessionOutputs originals
-    [snapshot | snapshot <- typedSegmentSessionInterfacesThrough ordinal prepared
-      , interfaceOwner snapshot `elem` map interfaceOwner produced] full
+issuePrefix :: PreparedTypedSegmentBindings -> PrefixAdmission -> Int -> IO [InterfaceSeal]
+issuePrefix prepared (PrefixAdmission full imported produced) ordinal = do
+  let selected = map interfaceOwner imported ++
+        [interfaceOwner snapshot | snapshot <- typedSegmentSessionInterfacesThrough ordinal prepared
+          , interfaceOwner snapshot `elem` map interfaceOwner produced]
+  pure [row | row@(owner, _) <- finalizedValueInterfaceSeals full, owner `elem` selected]
 
 interfaceOwner :: CapturedSessionInterface -> (T.Text, T.Text)
 interfaceOwner snapshot = let (owner, _) = capturedSessionInterface snapshot
@@ -240,7 +223,7 @@ acquirePrefixFixture = do
         full <- captureFinalizedModuleArtifacts originals environment Map.empty Map.empty evidence directory
         unless (sort (finalizedInterfaceSeals full) == sort (map snd rows))
           (fail "real role issuer changed an exact output owner or interface digest")
-        pure (mask, PrefixAdmission originals full imported produced)
+        pure (mask, PrefixAdmission full imported produced)
       pure (PrefixFixture root prepared rows (Map.fromList admissions))
     digest = T.pack . concatMap hex . BS.unpack . SHA256.hash
     hex byte = let rendered = showHex byte "" in replicate (2 - length rendered) '0' ++ rendered
@@ -467,8 +450,8 @@ verifySigmaTransport initial root = do
     unless (eqType original resolved)
       (fail "checked signature collapsed scoped forall binders")
 
--- Use the real hydrated batch and complete snapshot evidence. Prefix
--- projection retains imported roles and refuses relabeling one as an output.
+-- Finalization captures every output once. Item visibility is carried by the
+-- prepared capture selections rather than by rewriting finalized receipts.
 verifyOutputProjection :: FilePath -> PreparedTypedSegmentBindings -> IO ()
 verifyOutputProjection root prepared = do
   let environment = typedSegmentSessionEnvironment prepared
@@ -478,34 +461,22 @@ verifyOutputProjection root prepared = do
         createDirectoryIfMissing True directory
         captureFinalizedModuleArtifacts originals environment
           Map.empty Map.empty evidence directory
-      keys = map (T.pack . moduleNameString . moduleName . fst . capturedSessionInterface)
-      seals = map (snd . fst) . finalizedValueInterfaceSeals
+      keys = map interfaceOwner
   unless (length snapshots == 2 && null (typedSegmentSessionInterfacesThrough (-1) prepared))
-    (fail "output projection requires two actual captures and an empty initial prefix")
+    (fail "capture selection requires two actual captures and an empty initial prefix")
   originals <- newOriginalInterfaceArtifactsWithSessionOutputs environment Map.empty [] [] snapshots
     (root </> "complete-output-evidence")
   full <- capture originals (root </> "complete-output-evidence")
-  unless (seals full == keys snapshots) (fail "complete original output census differs from actual batch")
-  first <- selectFinalizedSessionOutputs originals (typedSegmentSessionInterfacesThrough 0 prepared) full
-  both <- selectFinalizedSessionOutputs originals (typedSegmentSessionInterfacesThrough 1 prepared) full
-  unless (seals first == keys (take 1 snapshots) && finalizedInterfaceSeals both == finalizedInterfaceSeals full)
-    (fail "current/prior output projection lost or included the wrong generation")
-  unless (seals full == keys snapshots) (fail "prefix projection mutated the complete original inventory")
-  duplicates <- try (selectFinalizedSessionOutputs originals [head snapshots,head snapshots] full)
-    :: IO (Either SomeException FinalizedModuleArtifacts)
-  case duplicates of Left _ -> pure (); Right _ -> fail "duplicated output snapshot was admitted"
+  unless (map fst (finalizedValueInterfaceSeals full) == keys snapshots)
+    (fail "complete original output census differs from actual batch")
+  unless (keys (typedSegmentSessionInterfacesThrough 0 prepared) == keys (take 1 snapshots)
+      && keys (typedSegmentSessionInterfacesThrough 1 prepared) == keys snapshots)
+    (fail "prepared capture selection lost the current/prior generation boundary")
   imported <- newOriginalInterfaceArtifactsWithSessionOutputs environment Map.empty []
     (take 1 snapshots) (drop 1 snapshots) (root </> "imported-output-evidence")
   mixed <- capture imported (root </> "imported-output-evidence")
-  empty <- selectFinalizedSessionOutputs imported [] mixed
-  unless (seals empty == keys (take 1 snapshots))
-    (fail "empty current capture removed an imported baseline interface")
-  wrongRole <- try (selectFinalizedSessionOutputs imported (take 1 snapshots) mixed)
-    :: IO (Either SomeException FinalizedModuleArtifacts)
-  case wrongRole of Left _ -> pure (); Right _ -> fail "imported interface was relabeled as produced output"
-  valid <- selectFinalizedSessionOutputs imported (drop 1 snapshots) mixed
-  unless (finalizedInterfaceSeals valid == finalizedInterfaceSeals mixed)
-    (fail "unchanged imported/output roles did not re-admit after refusal")
+  unless (finalizedInterfaceSeals mixed == finalizedInterfaceSeals full)
+    (fail "changing exact input/output roles changed immutable interface facts")
 
 verifyBatch :: [SessionModule] -> PendingTypedSegment -> PreparedTypedSegmentBindings -> IO ()
 verifyBatch owners typed prepared = do
