@@ -12759,26 +12759,16 @@ pub(crate) mod tests {
             })
             .unwrap();
         let prior_module = SessionModule::lib(Generation(6));
-        let prior_source = format!(
-            "module {} where\nimport Fresh (entry_7)\nancestor_7 = entry_7\nentry_11 = 4\n",
-            prior_module.module_name()
-        );
-        let prior_source_path = root.path().join(format!(
-            "planned-with-child-{}/module.hs",
-            prior_module.module_name()
-        ));
         let prior_planned =
-            planned_original_history_tests::issue_planned_original_with_historical_child(
+            planned_original_history_tests::issue_planned_original_with_retained_child(
                 root.path(),
                 &historical_context,
                 prior_module,
                 &producer,
                 &include,
                 "ancestor_7",
-                &historical_child,
+                child,
                 "entry_7",
-                &support,
-                support_source,
             )
             .unwrap();
         assert_eq!(
@@ -12821,17 +12811,15 @@ pub(crate) mod tests {
             })
             .unwrap();
         let stale_fresh =
-            planned_original_history_tests::issue_planned_original_with_historical_child(
+            planned_original_history_tests::issue_planned_original_with_retained_child(
                 root.path(),
                 &planned_context,
                 SessionModule::lib(Generation(8)),
                 &producer,
                 &include,
                 "fresh_copy_7",
-                &historical_child,
+                child,
                 "entry_7",
-                &support,
-                support_source,
             );
         assert!(
             matches!(
@@ -12847,17 +12835,15 @@ pub(crate) mod tests {
             planned_module.module_name(),
             prior_module.module_name()
         );
-        let planned = planned_original_history_tests::issue_planned_original_with_historical_child(
+        let planned = planned_original_history_tests::issue_planned_original_with_retained_child(
             root.path(),
             &planned_context,
             planned_module,
             &producer,
             &include,
             "local_7",
-            prior_module_product.owner(),
+            &prior_module_product,
             "ancestor_7",
-            &prior_source_path,
-            &prior_source,
         )
         .unwrap();
         let compiler_originals = planned.request.compiler_original_products().unwrap();

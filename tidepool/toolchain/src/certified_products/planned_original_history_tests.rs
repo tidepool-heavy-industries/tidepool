@@ -147,18 +147,24 @@ pub(super) fn planned_product_sidecar_with_historical_child(
     }])
 }
 
-pub(super) fn issue_planned_original_with_historical_child(
+pub(super) fn issue_planned_original_with_retained_child(
     root: &Path,
     context: &ExactDeclarationContext,
     module: SessionModule,
     producer: &[u8],
     include: &[PathBuf],
     defined_occurrence: &str,
-    child: &CachedHomeOwner,
+    child_product: &CertifiedRecoveryProduct,
     child_occurrence: &str,
-    child_source_path: &Path,
-    child_source: &str,
 ) -> Result<IssuedOriginal, crate::CompileError> {
+    assert!(child_product.original_native().is_some());
+    assert!(child_product.module_interface().is_some());
+    let child = child_product.owner();
+    assert!(context
+        .recovery_products()
+        .iter()
+        .any(|retained| retained.owner() == child
+            && retained.module_interface() == child_product.module_interface()));
     let module_name = module.module_name();
     let source = format!(
         "module {module_name} where\nimport {} ({child_occurrence})\n{defined_occurrence} = {child_occurrence}\nentry_11 = 4\n",
@@ -170,23 +176,8 @@ pub(super) fn issue_planned_original_with_historical_child(
     std::fs::write(&input, &source).unwrap();
     let mut admitted = evidence(&source);
     admitted.modules[0].module = module_name.clone();
-    admitted.modules[0].imports = vec![crate::cache::ModuleImportEvidence {
-        qualifier: crate::cache::ImportQualifier::Unqualified,
-        module: child.module.clone(),
-        boot: false,
-        selected: Some(child_source_path.to_path_buf()),
-    }];
-    admitted.sources.push(SourceEvidence {
-        path: child_source_path.to_path_buf(),
-        sha256: hex(&sha(child_source.as_bytes())),
-    });
-    admitted.resolutions.push(crate::cache::ResolutionEvidence {
-        qualifier: crate::cache::ImportQualifier::Unqualified,
-        module: child.module.clone(),
-        boot: false,
-        selected: Some(child_source_path.to_path_buf()),
-        candidates: vec![child_source_path.to_path_buf()],
-    });
+    // sourceEvidenceGraph carries retained exact imports in the owner receipt;
+    // its fresh dependency graph contains only this newly authored module.
     let normalized = CompletedSourceEvidence::from_normalized(admitted.clone(), &source).unwrap();
     assert_canonical_materialization_premises(context);
     let context = Arc::new(context.clone());
@@ -235,6 +226,18 @@ pub(super) fn issue_planned_original_with_historical_child(
     let source_admission = request
         .admit_source(&input, &source, &evidence_bytes)
         .unwrap();
+    let home_imports = source_admission.home_imports()?;
+    assert_eq!(source_admission.evidence.modules.len(), 1);
+    assert_eq!(
+        home_imports[&crate::declaration_join::ExactModuleIdentity {
+            unit: "main".into(),
+            module: module_name.clone(),
+        }],
+        vec![crate::declaration_join::ExactModuleIdentity {
+            unit: child.unit.clone(),
+            module: child.module.clone(),
+        }],
+    );
     let authored =
         NativeAuthoredDeclarationAdmission::from_planned(&module, &source_admission).unwrap();
     let exact = ExactProductAdmission {
