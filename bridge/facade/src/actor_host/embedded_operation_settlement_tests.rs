@@ -334,6 +334,20 @@ impl ResidentToolEndpoint for ValidationOnlyEndpoint {
 
 #[derive(Clone)]
 struct SchemaRefusalTransport(Arc<std::sync::atomic::AtomicUsize>);
+
+fn schema_refusal_parameters() -> Value {
+    json!({
+        "type":"object","properties":{"choice":{"anyOf":[
+            {"type":"object","properties":{"value":{"type":"string"}},"required":[]},
+            {"type":"object","properties":{"value":{"type":["string","null"]}},"required":["value"]}
+        ]}},"required":["choice"]
+    })
+}
+
+fn schema_refusal_input() -> Value {
+    json!({"choice":{"value":null}})
+}
+
 #[async_trait::async_trait]
 impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
     async fn create(
@@ -345,7 +359,7 @@ impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
             response_id: "schema-refusal".into(),
             items: vec![harness::item::Item(json!({
                 "type":"function_call", "call_id":"schema", "name":"lookup",
-                "arguments":"\"not an object\""
+                "arguments":serde_json::to_string(&schema_refusal_input()).unwrap()
             }))],
             usage: Default::default(),
         })
@@ -454,6 +468,13 @@ impl HostActor for CloseAfterAcknowledgement {
 
 #[tokio::test]
 async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successor_request() {
+    // The schema decoder projects optional nulls; overlapping alternatives
+    // must refuse this ambiguous input before native argument admission.
+    let schema = harness::finalize::FunctionToolSchema::new(schema_refusal_parameters()).unwrap();
+    assert!(matches!(
+        schema.decode_arguments(schema_refusal_input()),
+        Err(harness::finalize::FinalizeError::AmbiguousArguments(_))
+    ));
     let (actor, task) = exomonad_actor::spawn_local_actor(None, AdmissionSentinel)
         .await
         .unwrap();
@@ -463,7 +484,7 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
         effect_keys: Vec::new(),
         name: "lookup".into(),
         description: "object input".into(),
-        input_schema: json!({"type":"object","properties":{}}),
+        input_schema: schema_refusal_parameters(),
         output_schema: None,
         kind: exomonad_tool::ToolKind::Call,
     })];
