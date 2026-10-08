@@ -12,3 +12,6 @@
 
 pub mod effect_surface;
 pub mod eval_harness;
+pub mod fixtures;
+
+pub use fixtures::fixture_source;
