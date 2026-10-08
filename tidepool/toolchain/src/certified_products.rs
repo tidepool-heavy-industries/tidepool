@@ -1429,6 +1429,7 @@ impl GlobalDictionary {
                 ));
             }
         }
+        drop(unique);
         Ok(Self {
             rows,
             used: BTreeSet::new(),
@@ -15601,9 +15602,9 @@ pub(crate) mod tests {
     fn receipt_dictionary_references_share_expansion_work_budget() {
         let global = dictionary_test_global();
         let mut dictionary = test_dictionary(std::slice::from_ref(&global));
-        let row_bytes = dictionary.rows[0].1;
+        let payload_bytes = dictionary.rows[0].1;
         let one_reference_work = std::mem::size_of::<AcceptedGlobal>()
-            + row_bytes
+            + payload_bytes
             + std::mem::size_of::<(usize, usize, usize)>();
         let operation = InventoryOperation::new(InventoryDecodeLimits {
             max_work: one_reference_work,
