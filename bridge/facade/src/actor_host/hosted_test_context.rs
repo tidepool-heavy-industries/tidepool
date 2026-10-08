@@ -1965,3 +1965,103 @@ fn cleanup_reporting_preserves_timed_out_forest_with_clean_application_receipt()
         CleanupOutcome::Failed { .. }
     ));
 }
+
+#[cfg(test)]
+mod settlement_properties {
+    use super::*;
+    use proptest::prelude::*;
+    use std::cell::{Cell, RefCell};
+
+    #[derive(Clone, Copy, Debug)]
+    enum CleanupFault {
+        None,
+        Refusal,
+        Panic,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Stage {
+        Scenario,
+        PendingReport,
+        Cleanup,
+        FinalReport,
+    }
+
+    fn config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 128;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        fn generated_settlement_fault_schedules_preserve_assertions_and_cleanup(
+            scenario_panics in any::<bool>(),
+            payload in any::<u32>(),
+            cleanup_fault in prop_oneof![
+                Just(CleanupFault::None), Just(CleanupFault::Refusal), Just(CleanupFault::Panic),
+            ],
+            report_faults in any::<[bool; 2]>(),
+            yields in any::<[u8; 2]>(),
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let journal = RefCell::new(Vec::new());
+            let cleanup_calls = Cell::new(0);
+            let mut reports = Vec::new();
+            let (scenario, cleanup, report_errors) = runtime.block_on(settle_scenario(
+                async {
+                    journal.borrow_mut().push(Stage::Scenario);
+                    for _ in 0..yields[0] % 4 { tokio::task::yield_now().await; }
+                    if scenario_panics { std::panic::panic_any(payload); }
+                    payload
+                },
+                async {
+                    cleanup_calls.set(cleanup_calls.get() + 1);
+                    journal.borrow_mut().push(Stage::Cleanup);
+                    for _ in 0..yields[1] % 4 { tokio::task::yield_now().await; }
+                    match cleanup_fault {
+                        CleanupFault::None => Ok(()),
+                        CleanupFault::Refusal => Err("controlled external cleanup refusal".into()),
+                        CleanupFault::Panic => panic!("controlled cleanup panic"),
+                    }
+                },
+                |scenario, cleanup| {
+                    let index = reports.len();
+                    journal.borrow_mut().push(if index == 0 { Stage::PendingReport } else { Stage::FinalReport });
+                    reports.push((scenario.clone(), cleanup.clone()));
+                    if report_faults[index] { Err("controlled reporting failure".into()) } else { Ok(()) }
+                },
+            ));
+            // Accepted scenario facts must survive later reporting and cleanup
+            // faults; reporting cannot prevent the one cleanup owner from running.
+            prop_assert_eq!(cleanup_calls.get(), 1);
+            prop_assert_eq!(journal.into_inner(), vec![Stage::Scenario, Stage::PendingReport, Stage::Cleanup, Stage::FinalReport]);
+            match scenario {
+                Err(original) => {
+                    prop_assert!(scenario_panics);
+                    prop_assert_eq!(original.downcast_ref::<u32>(), Some(&payload));
+                }
+                Ok(value) => {
+                    prop_assert!(!scenario_panics);
+                    prop_assert_eq!(value, payload);
+                }
+            }
+            prop_assert_eq!(cleanup.is_ok(), matches!(cleanup_fault, CleanupFault::None));
+            prop_assert_eq!(report_errors.len(), report_faults.into_iter().filter(|failed| *failed).count());
+            prop_assert_eq!(reports.len(), 2);
+            prop_assert_eq!(&reports[0].1, &CleanupOutcome::Unknown);
+            prop_assert_eq!(matches!(reports[1].1, CleanupOutcome::Confirmed), cleanup.is_ok());
+            for (scenario, _) in reports {
+                prop_assert_eq!(matches!(scenario, ScenarioOutcome::Passed), !scenario_panics);
+            }
+        }
+    }
+}

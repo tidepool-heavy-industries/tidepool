@@ -73,6 +73,7 @@ rusqlite.workspace = true
 reqwest.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 tidepool-testing.workspace = true
 tokio-tungstenite = "0.29"
 

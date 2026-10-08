@@ -192,8 +192,7 @@ pub(super) struct TestCampaign {
     pub program: Arc<tidepool_runtime::session::CompiledTurn>,
     pub child_session_factory:
         exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
-    hosted: Option<tokio::task::JoinHandle<()>>,
-    hosted_join: Option<CampaignHostedJoin>,
+    executor: CampaignExecutor,
     shutdown_observations: Vec<exomonad_actor::ForestRootShutdown>,
     settled: bool,
     deployments: tokio::sync::mpsc::Receiver<LocalResidentDeployment>,
@@ -202,6 +201,12 @@ pub(super) struct TestCampaign {
     /// than dropped, so a later call can still find them.
     pending: std::collections::VecDeque<LocalResidentDeployment>,
     pub root_installation: exomonad_actor::LocalResidentInstallation,
+}
+
+enum CampaignExecutor {
+    Running(tokio::task::JoinHandle<()>),
+    Aborting(tokio::task::JoinHandle<()>),
+    Settled(CampaignHostedJoin),
 }
 
 /// Executor completion and resource cleanup are independent observations.
@@ -270,22 +275,38 @@ impl TestCampaign {
     /// Observe a deliberate earlier retirement without giving up campaign
     /// ownership. Recovery scenarios can keep using the forest afterwards.
     pub async fn observe_hosted_completion(&mut self) -> Result<(), CampaignHostedJoin> {
-        if self.hosted_join.is_none() {
-            let mut task = self.hosted.take().expect("campaign owns its executor");
-            let observation = match tokio::time::timeout(Duration::from_secs(30), &mut task).await {
-                Ok(Ok(())) => CampaignHostedJoin::Joined,
-                Ok(Err(error)) => CampaignHostedJoin::Failed(error.to_string()),
-                Err(_) => {
-                    task.abort();
-                    let _ = tokio::time::timeout(Duration::from_secs(5), &mut task).await;
+        loop {
+            let observation = match &mut self.executor {
+                CampaignExecutor::Running(task) => {
+                    match tokio::time::timeout(Duration::from_secs(30), &mut *task).await {
+                        Ok(Ok(())) => CampaignHostedJoin::Joined,
+                        Ok(Err(error)) => CampaignHostedJoin::Failed(error.to_string()),
+                        Err(_) => {
+                            task.abort();
+                            // The executor remains owned across cancellation of
+                            // either wait. No observation can lose its handle.
+                            let CampaignExecutor::Running(task) = std::mem::replace(
+                                &mut self.executor,
+                                CampaignExecutor::Settled(CampaignHostedJoin::TimedOut),
+                            ) else {
+                                unreachable!()
+                            };
+                            self.executor = CampaignExecutor::Aborting(task);
+                            continue;
+                        }
+                    }
+                }
+                CampaignExecutor::Aborting(task) => {
+                    let _ = tokio::time::timeout(Duration::from_secs(5), &mut *task).await;
                     CampaignHostedJoin::TimedOut
                 }
+                CampaignExecutor::Settled(observation) => observation.clone(),
             };
-            self.hosted_join = Some(observation);
-        }
-        match self.hosted_join.as_ref().unwrap() {
-            CampaignHostedJoin::Joined => Ok(()),
-            other => Err(other.clone()),
+            self.executor = CampaignExecutor::Settled(observation.clone());
+            return match observation {
+                CampaignHostedJoin::Joined => Ok(()),
+                failure => Err(failure),
+            };
         }
     }
 
@@ -315,7 +336,10 @@ impl TestCampaign {
         };
         let observation = CampaignShutdown {
             forest: self.shutdown_observations.clone(),
-            hosted: self.hosted_join.clone().unwrap(),
+            hosted: match &self.executor {
+                CampaignExecutor::Settled(observation) => observation.clone(),
+                _ => unreachable!("executor completion was observed"),
+            },
             root,
         };
         if observation.is_confirmed() {
@@ -784,8 +808,7 @@ impl TestCampaign {
             forest,
             program,
             child_session_factory,
-            hosted: Some(hosted),
-            hosted_join: None,
+            executor: CampaignExecutor::Running(hosted),
             shutdown_observations: Vec::new(),
             settled: false,
             deployments,
@@ -1235,6 +1258,8 @@ pub(super) fn hosted_test_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exomonad_actor::command_jobs::CommandBackend;
+    use std::future::Future;
 
     #[test]
     fn ghc_compile_rejection_requires_authored_error_diagnostic_data() {
@@ -1370,5 +1395,215 @@ mod tests {
             "the fixture must reject its mismatched tool locally"
         );
         assert!(response.await.is_err(), "no invalid tool call was sent");
+    }
+
+    struct ShutdownCommands {
+        backend: Arc<super::super::command_test_support::TestCommands>,
+        started: tokio::sync::Semaphore,
+        cleanup_probes: std::sync::atomic::AtomicUsize,
+        unknown: bool,
+    }
+
+    impl ShutdownCommands {
+        fn new(unknown: bool) -> Arc<Self> {
+            Arc::new(Self {
+                backend: super::super::command_test_support::TestCommands::new(),
+                started: tokio::sync::Semaphore::new(0),
+                cleanup_probes: 0.into(),
+                unknown,
+            })
+        }
+
+        fn cleanup_outcome(&self) -> tidepool_bridge_effects::CommandCleanup {
+            if self.unknown {
+                tidepool_bridge_effects::CommandCleanup::CommandCleanupUnknown(
+                    "command stopped but external cleanup remains unknown".into(),
+                )
+            } else {
+                tidepool_bridge_effects::CommandCleanup::CommandClean
+            }
+        }
+    }
+
+    impl exomonad_actor::command_jobs::CommandBackend for ShutdownCommands {
+        fn execute<'a>(
+            &'a self,
+            id: &'a str,
+            spec: tidepool_bridge_effects::CommandSpec,
+            phase: tokio::sync::watch::Sender<tidepool_bridge_effects::CommandStatus>,
+        ) -> futures_util::future::BoxFuture<'a, tidepool_bridge_effects::CommandResult> {
+            Box::pin(async move {
+                self.started.add_permits(1);
+                let mut result = self.backend.execute(id, spec, phase).await;
+                result.cleanup = self.cleanup_outcome();
+                result
+            })
+        }
+
+        fn control<'a>(
+            &'a self,
+            id: &'a str,
+            operation: exomonad_actor::command_jobs::CommandControl,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), tidepool_bridge_effects::CommandError>>
+        {
+            self.backend.control(id, operation)
+        }
+
+        fn cleanup<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> futures_util::future::BoxFuture<'a, tidepool_bridge_effects::CommandCleanup> {
+            Box::pin(async move {
+                self.cleanup_probes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.cleanup_outcome()
+            })
+        }
+
+        fn output<'a>(
+            &'a self,
+            id: &'a str,
+            budget: usize,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<tidepool_bridge_effects::CommandOutput, tidepool_bridge_effects::CommandError>,
+        > {
+            self.backend.output(id, budget)
+        }
+
+        fn read<'a>(
+            &'a self,
+            id: &'a str,
+            stream: tidepool_bridge_effects::CommandStream,
+            position: tidepool_bridge_effects::CommandPosition,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<tidepool_bridge_effects::CommandPage, tidepool_bridge_effects::CommandError>,
+        > {
+            self.backend.read(id, stream, position)
+        }
+    }
+
+    async fn admit_shutdown_command(campaign: &mut TestCampaign, backend: Arc<ShutdownCommands>) {
+        let response = super::super::tests::dispatch_haskell_script(
+            campaign.root_installation.policy.as_ref(),
+            "job <- Cmd.start [bash|sleep 3600|]\nCmd.detach job",
+        )
+        .await;
+        assert_eq!(response["status"], "committed", "{response}");
+        super::super::command_test_support::backend_request(campaign)
+            .await
+            .supply(Ok(backend.clone()));
+        tokio::time::timeout(Duration::from_secs(30), backend.started.acquire())
+            .await
+            .expect("command execution was actually admitted")
+            .unwrap()
+            .forget();
+        assert_eq!(backend.backend.executions(), 1);
+        assert_eq!(
+            backend.backend.control_count(),
+            0,
+            "shutdown starts after command admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn consuming_shutdown_confirms_command_cleanup_and_hosted_join() {
+        let campaign = TestCampaign::start().await;
+        let backend = ShutdownCommands::new(false);
+        let observed = backend.clone();
+        campaign
+            .run_scenario(|campaign| {
+                Box::pin(async move {
+                    admit_shutdown_command(campaign, backend).await;
+                })
+            })
+            .await;
+        assert_eq!(observed.backend.control_count(), 1);
+        assert!(observed
+            .backend
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn consuming_shutdown_rejects_unknown_command_cleanup_after_hosted_join() {
+        let campaign = TestCampaign::start().await;
+        let backend = ShutdownCommands::new(true);
+        let observed = backend.clone();
+        campaign
+            .run_scenario_expecting_cleanup_failure(
+                |campaign| {
+                    Box::pin(async move {
+                        admit_shutdown_command(campaign, backend).await;
+                    })
+                },
+                |failure| {
+                    assert_eq!(failure.hosted, CampaignHostedJoin::Joined);
+                    let CampaignRootRetirement::Settled(root) = &failure.root else {
+                        panic!("the actual root retired with a cleanup observation: {failure:?}");
+                    };
+                    assert!(matches!(
+                        root.cleanup.realm(),
+                        exomonad_actor::CleanupComponentOutcome::Unconfirmed(_)
+                    ));
+                    assert!(
+                        failure.forest.iter().any(|outcome| matches!(outcome,
+                exomonad_actor::ForestRootShutdown::Settled(root) if !root.cleanup.is_confirmed()))
+                    );
+                },
+            )
+            .await;
+        assert_eq!(observed.backend.control_count(), 1);
+        assert!(observed
+            .backend
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            observed
+                .cleanup_probes
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0,
+            "the external owner was actually asked for cleanup evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn scenario_assertion_panic_still_consumes_campaign_cleanup() {
+        use futures_util::FutureExt;
+        let campaign = TestCampaign::start().await;
+        let root = campaign.actor.clone();
+        let result = std::panic::AssertUnwindSafe(
+            campaign.run_scenario(|_| Box::pin(async { std::panic::panic_any(91_u32) })),
+        )
+        .catch_unwind()
+        .await;
+        assert_eq!(result.unwrap_err().downcast_ref::<u32>(), Some(&91));
+        assert!(
+            root.terminal().get().is_some(),
+            "cleanup ran before original panic resumed"
+        );
+        assert!(root.terminal().cleanup().unwrap().is_confirmed());
+    }
+
+    #[tokio::test]
+    async fn cancelled_executor_observation_keeps_consuming_shutdown_available() {
+        let campaign = TestCampaign::start().await;
+        campaign
+            .run_scenario(|campaign| {
+                Box::pin(async move {
+                    let mut observation = Box::pin(campaign.observe_hosted_completion());
+                    std::future::poll_fn(|context| {
+                        assert!(
+                            observation.as_mut().poll(context).is_pending(),
+                            "a live idle actor has not completed its task"
+                        );
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
+                    drop(observation);
+                })
+            })
+            .await;
     }
 }
