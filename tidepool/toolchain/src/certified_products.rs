@@ -2145,6 +2145,7 @@ impl AvailableOriginalSources {
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
         operation: &InventoryOperation,
     ) -> CertResult<Arc<Self>> {
+        operation.reserve::<(Self, usize, usize)>(1)?;
         authenticate_original_source_membership(products, operation).map(Arc::new)
     }
 
