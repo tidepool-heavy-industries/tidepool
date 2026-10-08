@@ -730,6 +730,17 @@ where
             + Send
             + 'static,
     {
+        #[cfg(test)]
+        if std::env::var_os("TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "actor async step layout output={} output_bytes={} run_bytes={} apply_bytes={} owned_bytes={}",
+                std::any::type_name::<T>(),
+                std::mem::size_of::<T>(),
+                std::mem::size_of_val(&run),
+                std::mem::size_of_val(&apply),
+                std::mem::size_of::<OwnedExecution<H, O>>(),
+            );
+        }
         OwnedWorkbenchTask::new(Box::pin(async move {
             let (timing, cleanup) = owned.scopes();
             let deadline = owned
