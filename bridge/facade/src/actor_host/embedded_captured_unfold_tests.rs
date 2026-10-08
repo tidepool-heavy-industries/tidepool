@@ -263,8 +263,11 @@ impl CapturedHostTransport {
                             HostedScenario::LocalActorStartup => {
                                 "seed <- R.call (readSeed (R.client seedStore)) ()\ngroup <- R.call (readGroup (R.client groupStore)) ()\ndisplay (case (seed, group) of (Nothing, Nothing) -> True; _ -> False)"
                             }
-                            HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => {
+                            HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked) => {
                                 include_str!("embedded_captured_unfold_and_await.hs")
+                            }
+                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => {
+                                include_str!("embedded_shutdown_parent_join.hs")
                             }
                             HostedScenario::Captured(CapturedScenario::FailureAfterReplies) => {
                                 include_str!("embedded_captured_unfold_await_then_fail.hs")
@@ -1204,8 +1207,35 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 assert!(!gate.model_actor, "the gate is a record actor, not a provider branch");
                 assert_eq!(gate.creator, Some(actor), "the root owns the parked gate");
                 eprintln!("[captured-engine] exact sibling parks on owned actor gate {:?}", gate.actor);
-                assert!(runtime.store().claims_for_operation(&transport.operation(&root_origin, PENDING_CALL))
-                    .unwrap().iter().any(|claim| claim.state == harness::store::ClaimState::Pending));
+                let parent = transport.operation(&root_origin, PENDING_CALL);
+                let parent_identity = harness::embedding::HostIdentity {
+                    run: runtime_namespace(&campaign.config.run_directory.path()),
+                    actor: root_origin.actor().clone(),
+                    incarnation: actor.incarnation.0.to_string(),
+                };
+                let parent_native = exomonad_tool::ToolInvocationContext {
+                    origin: exomonad_tool::ToolInvocationOrigin::Model(
+                        embedded_harness::original_operation(&parent_identity, &parent).unwrap(),
+                    ),
+                    call_id: parent.call.0.clone(),
+                    namespace: None,
+                };
+                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                    let mut observations = tokio::time::interval(Duration::from_millis(20));
+                    loop {
+                        assert!(runtime.store().claims_for_operation(&parent).unwrap().iter()
+                            .any(|claim| claim.state == harness::store::ClaimState::Pending),
+                            "the original parent must remain pending until native shutdown");
+                        assert!(runtime.store().claims_for_operation(&active).unwrap().iter()
+                            .any(|claim| claim.state == harness::store::ClaimState::Pending),
+                            "the owned gate must retain the active sibling while the parent waits");
+                        if campaign.actor.hosted_workbench_waiting(&parent_native).is_some() {
+                            break;
+                        }
+                        observations.tick().await;
+                    }
+                }).await.expect("the exact parent parks on both child settlements before teardown");
+                eprintln!("[captured-engine] exact parent parks on child settlement join before teardown");
                 assert!(matches!(scheduler.wait(&failed).await.unwrap(), JobOutput::Completed(Err(_))));
                 if scenario == CapturedScenario::CoordinatorFailureAfterChildFailure {
                     campaign.observer.fail_coordination(INTENTIONAL_COORDINATOR_FAILURE);
