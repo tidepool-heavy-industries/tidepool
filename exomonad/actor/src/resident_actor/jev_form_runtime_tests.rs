@@ -267,7 +267,7 @@ impl Fixture {
         assert!(workspace.join("Jev/Operators.hs").is_file());
         include.push(workspace);
         let preamble = format!(
-            "{}\nimport qualified Jev.Operators as J\nimport qualified Tidepool.Form as F\nimport qualified Tidepool.View as V\nimport Data.List.NonEmpty (NonEmpty(..))\nimport Control.Monad (foldM, forM_)\nimport Tidepool.Inspection.Display (Display(..))\nimport qualified Examples.JevFormWorkflow as Workflow\n",
+            "{}\nimport qualified Jev.Operators as J\nimport qualified Tidepool.Form as F\nimport qualified Tidepool.View as V\nimport Data.List.NonEmpty (NonEmpty(..))\nimport Control.Monad (foldM, forM_)\nimport Tidepool.Inspection.Display (Display(..))\nimport Tidepool.Inspection.Tree (DisplayTree(..))\nimport qualified Examples.JevFormWorkflow as Workflow\n",
             tidepool_mcp::build_notebook_preamble(&declarations, false),
         );
         let directory = tempfile::tempdir().expect("session source directory");

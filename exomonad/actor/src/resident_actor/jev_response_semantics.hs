@@ -32,7 +32,10 @@ _ <- do
         Inspect -> do
           let mappedBottom = fmap (const (error "mapped payload inspected" :: Int)) response
               (preview, _) = displayWith 8192 mappedBottom
-          require (metadata mappedBottom == metadata initial && T.length preview > 0)
+              fieldsAreEvidence = case displayTree mappedBottom of
+                Constructor "Jev.Response" fields -> map fst fields == ["originalAnswerEvidence", "model", "usage", "diagnostics"]
+                _ -> False
+          require (metadata mappedBottom == metadata initial && T.length preview > 0 && fieldsAreEvidence)
             "inspection changed evidence or forced mapped payload"
           pure response
         Map -> do
@@ -66,6 +69,15 @@ _ <- do
       unknown = decoded retained (wire ("quick" :: Text) "careful" (0.7 :: Double) Null)
       zero = decoded retained (wire ("quick" :: Text) "careful" (0.7 :: Double)
         (object ["input_tokens" .= (0 :: Int), "output_tokens" .= (0 :: Int)]))
+      driftRecording = object
+        ["answers" .= object ["route" .= object
+          ["type" .= ("choice" :: Text), "choice" .= ("quick" :: Text),
+           "probabilities" .= object ["quick" .= (0.7 :: Double), "careful" .= (0.2 :: Double)],
+           "confidence" .= (0.9 :: Double)]],
+         "model" .= ("drift-fixture" :: Text),
+         "usage" .= object ["input_tokens" .= (0 :: Int)]]
+      drifted = decoded retained driftRecording
+      mappedDrift = fmap (const (error "mapped drift payload inspected" :: Int)) drifted
       missingPacket = #route J.:= J.choice "What does the input justify?"
         (J.alt #missing "No required delivery criteria were supplied" MissingInformation
           J..| J.alt #proceed "Required criteria were supplied" (error "unselected semantic payload demanded"))
@@ -77,6 +89,12 @@ _ <- do
     "identical requests lost original captured functions"
   require (J.usage unknown == J.Usage Nothing Nothing && J.usage zero == J.Usage (Just 0) (Just 0)
     && J.usage unknown /= J.usage zero) "unknown usage was treated as measured zero"
+  require (metadata mappedDrift == metadata drifted
+    && J.resolvedModel mappedDrift == "drift-fixture"
+    && J.usage mappedDrift == J.Usage (Just 0) Nothing
+    && (case J.diagnostics mappedDrift of
+      [J.DistributionDrift question total] -> question == "route" && total > 0.89 && total < 0.91
+      _ -> False)) "mapping dropped nonempty diagnostics or partially known usage"
   require (case J.takenUnder J.careful (J.answers missingResponse).route of
     Right decision -> J.settledValue decision == MissingInformation
     Left _ -> False) "confident missing-information selection became policy doubt"
