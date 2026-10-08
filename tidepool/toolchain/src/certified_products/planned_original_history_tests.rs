@@ -7,7 +7,8 @@ use crate::declaration_context::{
 use crate::declaration_join::NativeAuthoredDeclarationAdmission;
 use crate::recovery_artifacts::CertifiedRecoveryProduct;
 use proptest::prelude::*;
-use proptest::test_runner::{Config, FileFailurePersistence};
+use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+use std::cell::RefCell;
 use tidepool_repr::{Generation, SessionModule};
 
 fn planned_history_property_config() -> Config {
@@ -578,125 +579,178 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
     }
 }
 
-proptest! {
-    #![proptest_config(planned_history_property_config())]
-    #[test]
-    fn selected_planned_original_matches_generated_issue_and_retention_history(
-        (older, current) in (1u8..8, 1u8..8).prop_filter(
+#[derive(Default, serde::Serialize)]
+struct PlannedHistoryCoverage {
+    callbacks: usize,
+    completed: usize,
+    forward_by_distinct_versions: BTreeMap<usize, usize>,
+    reverse_by_distinct_versions: BTreeMap<usize, usize>,
+}
+
+#[test]
+fn selected_planned_original_matches_generated_issue_and_retention_history() {
+    let strategy = (
+        (1u8..8, 1u8..8).prop_filter(
             "history must retain distinct older and current versions",
             |(older, current)| older != current,
         ),
-        repeated in prop::collection::vec(1u8..8, 0..3),
-        reverse_custody in any::<bool>(),
-    ) {
-        let root = tempfile::tempdir().unwrap();
-        let module = SessionModule::lib(Generation(7));
-        let module_name = module.module_name();
-        let producer = [0x36; 32];
-        let include = [root.path().to_path_buf()];
-        let tags = std::iter::once(older)
-            .chain(repeated)
-            .chain(std::iter::once(current))
-            .collect::<Vec<_>>();
+        prop::collection::vec(1u8..8, 0..3),
+        any::<bool>(),
+    );
+    let mut config = proptest::test_runner::contextualize_config(planned_history_property_config());
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::selected_planned_original_matches_generated_issue_and_retention_history"
+    ));
+    let configured_cases = config.cases;
+    let configured_max_shrink_iters = config.max_shrink_iters;
+    let configuration = format!("{config:?}");
+    let mut runner = TestRunner::new(config);
+    let coverage = RefCell::new(PlannedHistoryCoverage::default());
+    let result = runner.run(
+        &strategy,
+        |((older, current), repeated, reverse_custody)| {
+            coverage.borrow_mut().callbacks += 1;
+            let root = tempfile::tempdir().unwrap();
+            let module = SessionModule::lib(Generation(7));
+            let module_name = module.module_name();
+            let producer = [0x36; 32];
+            let include = [root.path().to_path_buf()];
+            let tags = std::iter::once(older)
+                .chain(repeated)
+                .chain(std::iter::once(current))
+                .collect::<Vec<_>>();
 
-        // The flat model is keyed by the authored recipe's body tag; it does
-        // not use inventory enumeration or infer selection from the view.
-        let mut model_versions = BTreeSet::new();
-        let mut issued_by_tag = BTreeMap::new();
-        for (source_tag, tag) in tags.iter().enumerate() {
-            model_versions.insert(*tag);
-            let issued = issue_planned_original(
-                root.path(), module, &producer, &include, source_tag as u8, *tag,
-            );
-            issued_by_tag.insert(*tag, issued);
-        }
-        let selected_issue = issued_by_tag.get(&current).unwrap();
-        let selected_owner = selected_issue.certified.recovery_products[0]
-            .owner()
-            .clone();
-        let mut custody = issued_by_tag
-            .values()
-            .map(|issued| issued.certified.recovery_products[0].clone())
-            .collect::<Vec<_>>();
-        if reverse_custody {
-            custody.reverse();
-        }
-        assert_eq!(custody.len(), model_versions.len());
-        assert_eq!(
-            custody
-                .iter()
-                .map(|product| product.owner().clone())
-                .collect::<BTreeSet<_>>()
-                .len(),
-            model_versions.len(),
-            "distinct authored bodies issue distinct native owners"
-        );
-        let view = crate::declaration_context::certified_product_artifact_view(
-            CanonicalProducerIdentity::from_producer_bytes(&producer).sha256(),
-            &custody,
-            &[],
-            None,
-        )
-        .unwrap();
-        let selected = selected_issue
-            .certified
-            .source_selection
-            .selected_original_closure(&view)
-            .unwrap();
-        prop_assert_eq!(selected.products().len(), 1);
-        prop_assert_eq!(selected.products()[0].owner(), &selected_owner);
-        prop_assert_eq!(selected_owner.module.as_str(), module_name.as_str());
-        let exports = ["entry_7", "entry_11"].map(|occurrence| {
-            serde_json::json!({
-                "kind": "value",
-                "head": {
-                    "unit": "main",
-                    "module": module_name,
-                    "namespace": "value",
-                    "occurrence": occurrence,
-                    "record_parent": null
-                },
-                "children": []
-            })
-        });
-        let inventory = serde_json::json!({
-            "original_unit": "main",
-            "original_module": module_name,
-            "interface_fingerprint": "1234567890abcdef1234567890abcdef",
-            "selection": {
-                "exports": exports,
-                "instances": { "classes": [], "families": [] },
-                "family_closure": []
+            // The flat model is keyed by the authored recipe's body tag; it does
+            // not use inventory enumeration or infer selection from the view.
+            let mut model_versions = BTreeSet::new();
+            let mut issued_by_tag = BTreeMap::new();
+            for (source_tag, tag) in tags.iter().enumerate() {
+                model_versions.insert(*tag);
+                let issued = issue_planned_original(
+                    root.path(),
+                    module,
+                    &producer,
+                    &include,
+                    source_tag as u8,
+                    *tag,
+                );
+                issued_by_tag.insert(*tag, issued);
             }
-        });
-        let exact = ExactProductAdmission {
-            request: &selected_issue.request,
-            source: &selected_issue.source,
-        };
-        let source = format!("module {module_name} where\nentry_7 = 3\nentry_11 = 4\n");
-        let joined = crate::declaration_join::certify_same_offer_planned_declaration(
-            module,
-            &source,
-            &producer,
-            &selected,
-            &view,
-            &exact,
-            &include,
-            None,
-            &serde_json::to_vec(&inventory).unwrap(),
-        );
-        prop_assert!(joined.is_ok());
-        let drifted = format!("module {module_name} where\nentry_7 = 5\nentry_11 = 4\n");
-        prop_assert!(crate::declaration_join::certify_same_offer_planned_declaration(
-            module,
-            &drifted,
-            &producer,
-            &selected,
-            &view,
-            &exact,
-            &include,
-            None,
-            &serde_json::to_vec(&inventory).unwrap(),
-        ).is_err());
+            let selected_issue = issued_by_tag.get(&current).unwrap();
+            let selected_owner = selected_issue.certified.recovery_products[0]
+                .owner()
+                .clone();
+            let mut custody = issued_by_tag
+                .values()
+                .map(|issued| issued.certified.recovery_products[0].clone())
+                .collect::<Vec<_>>();
+            if reverse_custody {
+                custody.reverse();
+            }
+            assert_eq!(custody.len(), model_versions.len());
+            assert_eq!(
+                custody
+                    .iter()
+                    .map(|product| product.owner().clone())
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                model_versions.len(),
+                "distinct authored bodies issue distinct native owners"
+            );
+            let view = crate::declaration_context::certified_product_artifact_view(
+                CanonicalProducerIdentity::from_producer_bytes(&producer).sha256(),
+                &custody,
+                &[],
+                None,
+            )
+            .unwrap();
+            let selected = selected_issue
+                .certified
+                .source_selection
+                .selected_original_closure(&view)
+                .unwrap();
+            prop_assert_eq!(selected.products().len(), 1);
+            prop_assert_eq!(selected.products()[0].owner(), &selected_owner);
+            prop_assert_eq!(selected_owner.module.as_str(), module_name.as_str());
+            let exports = ["entry_7", "entry_11"].map(|occurrence| {
+                serde_json::json!({
+                    "kind": "value",
+                    "head": {
+                        "unit": "main",
+                        "module": module_name,
+                        "namespace": "value",
+                        "occurrence": occurrence,
+                        "record_parent": null
+                    },
+                    "children": []
+                })
+            });
+            let inventory = serde_json::json!({
+                "original_unit": "main",
+                "original_module": module_name,
+                "interface_fingerprint": "1234567890abcdef1234567890abcdef",
+                "selection": {
+                    "exports": exports,
+                    "instances": { "classes": [], "families": [] },
+                    "family_closure": []
+                }
+            });
+            let exact = ExactProductAdmission {
+                request: &selected_issue.request,
+                source: &selected_issue.source,
+            };
+            let source = format!("module {module_name} where\nentry_7 = 3\nentry_11 = 4\n");
+            let joined = crate::declaration_join::certify_same_offer_planned_declaration(
+                module,
+                &source,
+                &producer,
+                &selected,
+                &view,
+                &exact,
+                &include,
+                None,
+                &serde_json::to_vec(&inventory).unwrap(),
+            );
+            prop_assert!(joined.is_ok());
+            let drifted = format!("module {module_name} where\nentry_7 = 5\nentry_11 = 4\n");
+            prop_assert!(
+                crate::declaration_join::certify_same_offer_planned_declaration(
+                    module,
+                    &drifted,
+                    &producer,
+                    &selected,
+                    &view,
+                    &exact,
+                    &include,
+                    None,
+                    &serde_json::to_vec(&inventory).unwrap(),
+                )
+                .is_err()
+            );
+            let mut observed = coverage.borrow_mut();
+            observed.completed += 1;
+            let partitions = if reverse_custody {
+                &mut observed.reverse_by_distinct_versions
+            } else {
+                &mut observed.forward_by_distinct_versions
+            };
+            *partitions.entry(model_versions.len()).or_default() += 1;
+            Ok(())
+        },
+    );
+    eprintln!(
+        "planned_original_history_campaign={}",
+        serde_json::json!({
+            "configured_cases": configured_cases,
+            "configured_max_shrink_iters": configured_max_shrink_iters,
+            "configuration": configuration,
+            "observation_scope": "runner callbacks in this process, including replay and shrinking",
+            "observed": &*coverage.borrow(),
+        })
+    );
+    if let Err(error) = result {
+        panic!("planned original history property failed: {error}");
     }
 }

@@ -13020,6 +13020,49 @@ pub(crate) mod tests {
             source: &planned.source,
         };
         let baseline = Arc::new(planned_context.clone());
+        let legacy_products = planned
+            .certified
+            .recovery_products
+            .iter()
+            .filter(|product| {
+                planned.source.evidence.modules.iter().any(|row| {
+                    !row.boot
+                        && row.unit == product.owner().unit
+                        && row.module == product.owner().module
+                }) || baseline
+                    .recovery_products()
+                    .iter()
+                    .any(|retained| retained.owner() == product.owner())
+                    || planned
+                        .certified
+                        .retained_core_products
+                        .contains_original(product)
+            })
+            .collect::<Vec<_>>();
+        let mut legacy_owners = BTreeSet::new();
+        let legacy_refuses = legacy_products
+            .iter()
+            .any(|product| !legacy_owners.insert((&product.owner().unit, &product.owner().module)));
+        let legacy_fresh_versions = legacy_products
+            .iter()
+            .filter(|product| product.owner().module == "Fresh")
+            .map(|product| product.owner().clone())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            legacy_refuses && legacy_fresh_versions.len() > 1,
+            "the former full-custody predicate refuses this valid multiversion history"
+        );
+        eprintln!(
+            "planned_original_legacy_sensitivity={}",
+            serde_json::json!({
+                "full_custody_products": planned.certified.recovery_products.len(),
+                "legacy_selected_products": legacy_products.len(),
+                "legacy_fresh_versions": legacy_fresh_versions.len(),
+                "legacy_duplicate_refusal": legacy_refuses,
+                "issued_selected_products": selected.products().len(),
+                "issued_selected_fresh_versions": selected_fresh.len(),
+            })
+        );
         let joined = crate::declaration_join::certify_same_offer_planned_declaration(
             planned_module,
             &planned_source,
