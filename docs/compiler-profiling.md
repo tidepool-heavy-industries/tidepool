@@ -285,13 +285,15 @@ guess a phase.
 Interface hydration retains GHC's lazy knot: its timer covers immediate
 construction, not all later evaluation of interface details.
 Source-free declaration operations additionally emit `declaration_join` spans
-for reset, export and inventory observations, package visibility, selected
+for export and inventory observations, package visibility, selected
 instance and retained-family consistency, fingerprints, interface writing,
 package sealing and artifact revalidation. Enabled measurements force their
 scalar observations and rejection decisions within the owning phase; they do
 not deep-force `HscEnv` or the hydrated interface knot. This can move lazy work
 earlier on instrumented rejection paths. The `build_interface` envelope includes
-its nested phases, whose times must not be added to it.
+its nested phases, whose times must not be added to it. Source-free helpers
+borrow the resident compiler's fixed package facts through its guarded scope;
+they clear home visibility without creating a second EPS or unloading code.
 GC CPU is aggregate CPU and GC elapsed is wall time. Neither can be subtracted
 from another differently scoped measurement to manufacture mutator time.
 Sampling RSS can miss a brief peak; `/proc`'s VmHWM is a process lifetime high

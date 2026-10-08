@@ -169,7 +169,7 @@ import Tidepool.DependencyEvidence
   , selectedFreshHomeRequirements, renderDependencyEvidence )
 import Tidepool.ExactHydration
   ( CheckedTemplateInterface(..), CheckedTemplateImports(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
-  , readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
+  , runExactInterfaceOperation, readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
   , captureProtectedTemplateImports, renderProtectedTemplateImports
@@ -3909,17 +3909,18 @@ originalThinInterfaceTest inputFixture = withScratch $ \work -> do
   signature <- either (fail . show) (pure . snd)
     (deserialiseFromBytes (decodeListLen >> decodeString >> decodeString >> decodeCheckedSignature)
       (BSL.fromStrict offered))
-  when (inputFixture == PackageUnitThinInput) $ withExactInterfaceTransaction [] $ \environment -> do
-    void (resolveCheckedSignature environment signature)
-    external <- hscEPS environment
-    owner <- case witnessTerm of
-      TList [_,_,_,_,TList [TList [TString unit,TString name,_]]] ->
-        pure (mkModule (stringToUnit (T.unpack unit)) (mkModuleName (T.unpack name)))
-      _ -> fail "unit fixture does not have one original package owner"
-    unless (isNothing (lookupModuleEnv (eps_PIT external) owner))
-      (fail "unit fixture did not exercise signature resolution without a loaded package interface")
-    putStrLn ("thin unit fixture: unresolved original interface owner="
-      ++ unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner))
+  when (inputFixture == PackageUnitThinInput) $ withExactInterfaceTransaction [] $ \operations ->
+    runExactInterfaceOperation operations $ \environment -> do
+      void (resolveCheckedSignature environment signature)
+      external <- hscEPS environment
+      owner <- case witnessTerm of
+        TList [_,_,_,_,TList [TList [TString unit,TString name,_]]] ->
+          pure (mkModule (stringToUnit (T.unpack unit)) (mkModuleName (T.unpack name)))
+        _ -> fail "unit fixture does not have one original package owner"
+      unless (isNothing (lookupModuleEnv (eps_PIT external) owner))
+        (fail "unit fixture did not exercise signature resolution without a loaded package interface")
+      putStrLn ("thin unit fixture: unresolved original interface owner="
+        ++ unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner))
   fixture <- capturePreparedFixture work original
   scopePath <- writeGenuineMetadataScope work ["HostActivationOwner" | not packageOnly] fixture
   scope <- readExactScope scopePath >>= either fail pure
@@ -3928,8 +3929,8 @@ originalThinInterfaceTest inputFixture = withScratch $ \work -> do
   let producer = scopeProducerSha256 scope
       input = HostBindingInterfaceInput producer (replicate 64 'a') 71 "sessionInput"
         signature scopePath output (OriginalLiveInput offered)
-      emit generation purpose supplied = withExactInterfaceTransaction [] $ \environment ->
-        emitHostBindingInterface environment producer generation "sessionInput" supplied scopePath output purpose
+      emit generation purpose supplied = withExactInterfaceTransaction [] $ \operations ->
+        emitHostBindingInterface operations producer generation "sessionInput" supplied scopePath output purpose
       replace index value values = take index values ++ [value] ++ drop (index + 1) values
       encoded = toStrictByteString . encodeTerm
       refuseOffer value = do
@@ -3998,9 +3999,9 @@ originalThinInterfaceTest inputFixture = withScratch $ \work -> do
         unless (case validateCheckedTypeWitnessBytes invalid of Left _ -> True; Right _ -> False)
           (fail "canonical witness admitted a malformed envelope")
     _ -> fail "thin fixture witness is not a row"
-  withExactInterfaceTransaction [] $ \environment ->
+  withExactInterfaceTransaction [] $ \operations ->
     requireUserError "original producer" "host interface producer differs from exact scope"
-      (emitHostBindingInterface environment (replicate 64 '0') 74 "sessionInput" signature scopePath output (OriginalLiveInput offered))
+      (emitHostBindingInterface operations (replicate 64 '0') 74 "sessionInput" signature scopePath output (OriginalLiveInput offered))
   unless packageOnly $
     requireUserError "host-builder authority" "checked signature has no authenticated host representation"
       (emit 75 HostBuilt signature)

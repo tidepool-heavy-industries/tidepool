@@ -243,6 +243,7 @@ import Tidepool.DependencyEvidence
   , sourceEvidenceWithFingerprint, selectedFreshHomeRequirements )
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
@@ -1480,13 +1481,11 @@ data PendingFinalization = PendingFinalization
 -- Exact artifact operations have no authored source target. They use the
 -- extractor's same target/package flags, then create their own fresh lexical
 -- scope before loading any interface.
-withExactInterfaceTransaction :: [FilePath] -> (HscEnv -> IO a) -> IO a
-withExactInterfaceTransaction includes use = do
-  libdir <- getLibdir
-  runGhc (Just libdir) $ do
-    dflags <- getSessionDynFlags
-    _ <- setSessionDynFlags (extractionDynFlags dflags includes)
-    getSession >>= liftIO . use
+withExactInterfaceTransaction :: [FilePath] -> (ExactInterfaceOperations -> IO a) -> IO a
+withExactInterfaceTransaction includes use =
+  withResidentCompilerScopes includes $ \runScope ->
+    runScope (pure ()) $ \compiler ->
+      withScopedExactInterfaceTransaction compiler includes use
 
 runCompile :: PipelineSelection result -> Set.Set SymbolIdentity -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
 runCompile selection retained variant path includes buildProductsDir = do
@@ -4815,13 +4814,9 @@ withResidentCompilerScopes baseIncludes useRequests = do
 
 -- | Auxiliary exact-interface operations borrow the same resident owner. Home
 -- visibility starts empty; installed-package facts retain their matched closure.
-withScopedExactInterfaceTransaction :: CompilerScope -> [FilePath] -> (HscEnv -> IO a) -> IO a
-withScopedExactInterfaceTransaction compiler includes use = scopedRunGhc compiler $ do
-  current <- getSession
-  let env = hscUpdateHPT (const emptyHomePackageTable) current
-        { hsc_mod_graph=mkModuleGraph [], hsc_targets=[], hsc_type_env_vars=emptyKnotVars }
-  setSession (hscUpdateFlags (\flags -> flags {importPaths=includes}) env)
-  getSession >>= liftIO . use
+withScopedExactInterfaceTransaction :: CompilerScope -> [FilePath] -> (ExactInterfaceOperations -> IO a) -> IO a
+withScopedExactInterfaceTransaction compiler includes use =
+  use (exactInterfaceOperations (scopedRunGhc compiler) includes)
 
 selectCompilerRecoveryCaches
   :: HscEnv -> RecoveryContext -> [(Module,RecoveryContext)] -> IO CompilerRecoveryCaches

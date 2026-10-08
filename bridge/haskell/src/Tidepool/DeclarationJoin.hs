@@ -559,8 +559,8 @@ kindWire = \case
 -- | Use a fresh compiler transaction and exact home interfaces. Package
 -- evidence follows the ordinary pinned package policy. Infrastructure failures
 -- propagate to the worker handler; semantic rejection is a successful receipt.
-validateDeclarationJoin :: HscEnv -> DeclarationJoinInput -> IO DeclarationJoinOutcome
-validateDeclarationJoin initial input = do
+validateDeclarationJoin :: ExactInterfaceOperations -> DeclarationJoinInput -> IO DeclarationJoinOutcome
+validateDeclarationJoin operations input = runExactInterfaceOperation operations $ \initial -> do
   timing <- readTimingEnabled
   let reject reason diagnostic = pure (DeclarationJoinOutcome input Nothing (JoinRejected reason diagnostic))
       artifacts = implementationArtifacts input
@@ -575,12 +575,11 @@ validateDeclarationJoin initial input = do
     else do
       unchanged <- measureJoin timing "revalidate_before" rnf (artifactsUnchanged artifacts)
       if not unchanged then reject ArtifactChanged "implementation artifact bytes changed" else do
-        fresh <- timeDetailPhase timing "declaration_join" "reset" (freshExactState initial)
-        loaded <- readExactIfaceArtifacts fresh exacts
+        loaded <- readExactIfaceArtifacts initial exacts
         case loaded of
           Left diagnostic -> reject ArtifactChanged diagnostic
           Right verified -> do
-            hydrated <- hydrateExactScope fresh verified
+            hydrated <- hydrateExactScope initial verified
             writeChecks <- measureJoin timing "write_delta" (rnf . and) $ forM (declarationWrites input) $ \write -> do
               let original = [iface | (_, iface) <- verified,
                     moduleNameString (moduleName (mi_module iface)) == snapshotModule (writeModule write)]
@@ -784,18 +783,17 @@ encodeDeclarationInventory :: [DeclarationArtifact] -> BS.ByteString
 encodeDeclarationInventory artifacts = toStrictByteString $
   encodeListLen 3 <> wireText "TPDINVENTORY" <> wireText "3" <> wireList wireArtifact artifacts
 
-inspectDeclarationArtifacts :: HscEnv -> [DeclarationArtifact] -> IO DeclarationInventoryOutcome
-inspectDeclarationArtifacts initial artifacts = do
+inspectDeclarationArtifacts :: ExactInterfaceOperations -> [DeclarationArtifact] -> IO DeclarationInventoryOutcome
+inspectDeclarationArtifacts operations artifacts = runExactInterfaceOperation operations $ \initial -> do
   timing <- readTimingEnabled
   let rejected diagnostic = pure (DeclarationInventoryOutcome artifacts (Left (ArtifactChanged, diagnostic)))
   unchanged <- measureJoin timing "revalidate_before" rnf (artifactsUnchanged artifacts)
   if not unchanged then rejected "implementation artifact bytes changed" else do
-    fresh <- timeDetailPhase timing "declaration_join" "reset" (freshExactState initial)
-    loaded <- readExactIfaceArtifacts fresh (map artifactInterface artifacts)
+    loaded <- readExactIfaceArtifacts initial (map artifactInterface artifacts)
     case loaded of
       Left diagnostic -> rejected diagnostic
       Right verified -> do
-        hydrated <- hydrateExactScope fresh verified
+        hydrated <- hydrateExactScope initial verified
         inventories <- measureJoin timing "inspection_inventories"
           (forceEither (foldr (\row rest ->
             foldr (\exported next -> forceExport exported `seq` next)
