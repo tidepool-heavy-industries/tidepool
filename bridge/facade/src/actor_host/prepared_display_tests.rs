@@ -82,7 +82,7 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
         let compiled = match run_turn(HaskellTurnRequest {
             exact_context: None,
             session_id: None,
-            turn_text: source,
+            turn_text: &source,
             templates: &templates,
             include: &include_refs,
             session_root: run_root.path(),

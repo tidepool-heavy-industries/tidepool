@@ -273,7 +273,7 @@ fn driver_sources_keep_policy_private_and_preserve_explicit_public_modules() {
     let spec = tidepool_testing::fixture_source(
         "bridge/facade/src/actor_host/fixtures/configured_bootstrap_spec.hs",
     );
-    write_bootstrap_workspace(project.path(), spec);
+    write_bootstrap_workspace(project.path(), &spec);
     std::fs::write(
         authored.join("AgentSpec.hs"),
         spec.replace("ConfiguredSpec", "AgentSpec"),
@@ -327,7 +327,7 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
     let invalid_run = tempfile::tempdir().unwrap();
     write_bootstrap_workspace(
         project.path(),
-        tidepool_testing::fixture_source(
+        &tidepool_testing::fixture_source(
             "bridge/facade/src/actor_host/fixtures/configured_bootstrap_spec.hs",
         ),
     );
@@ -338,7 +338,7 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
 
     write_bootstrap_workspace(
         project.path(),
-        tidepool_testing::fixture_source(
+        &tidepool_testing::fixture_source(
             "bridge/facade/src/actor_host/fixtures/invalid_configured_bootstrap_spec.hs",
         ),
     );
@@ -405,7 +405,7 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
         hosted_test_context::HostedTestRuntime::start_configured(&settings, &provider, |config| {
             configure(
                 config,
-                tidepool_testing::fixture_source(
+                &tidepool_testing::fixture_source(
                     "bridge/facade/src/actor_host/fixtures/configured_bootstrap_spec.hs",
                 ),
             )
@@ -421,7 +421,7 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
         hosted_test_context::HostedTestRuntime::start_configured(&settings, &provider, |config| {
             configure(
                 config,
-                tidepool_testing::fixture_source(
+                &tidepool_testing::fixture_source(
                     "bridge/facade/src/actor_host/fixtures/invalid_configured_bootstrap_spec.hs",
                 ),
             );
@@ -616,7 +616,7 @@ fn typed_site_surface_callers_have_returning_contracts() {
         "childProgressProbe",
     ];
     let artifacts = tidepool_runtime::compile_targets(
-        tidepool_testing::fixture_source(
+        &tidepool_testing::fixture_source(
             "bridge/facade/src/actor_host/typed_site_return_contract.hs",
         ),
         &names,

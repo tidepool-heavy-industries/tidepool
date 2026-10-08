@@ -253,30 +253,33 @@ impl CapturedHostTransport {
                     *self.parent_prefix.lock() = Some(FrozenProviderPrefix::capture(&request));
                     self.setup_requested.notify_one();
                     self.setup_ready.notified().await;
+                    let source = match self.scenario {
+                        HostedScenario::LocalActorStartup => {
+                            "seed <- R.call (readSeed (R.client seedStore)) ()\ngroup <- R.call (readGroup (R.client groupStore)) ()\ndisplay (case (seed, group) of (Nothing, Nothing) -> True; _ -> False)".to_owned()
+                        }
+                        HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked) => {
+                            tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_and_await.hs")
+                        }
+                        HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => {
+                            tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_shutdown_parent_join.hs")
+                        }
+                        HostedScenario::Captured(CapturedScenario::FailureAfterReplies) => {
+                            tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_await_then_fail.hs")
+                        }
+                        HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => {
+                            tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_a.hs")
+                        }
+                    };
                     vec![haskell_call(
                         if self.scenario == HostedScenario::LocalActorStartup {
                             LOCAL_STARTUP_CALL
                         } else {
                             PENDING_CALL
                         },
-                        match self.scenario {
-                            HostedScenario::LocalActorStartup => {
-                                "seed <- R.call (readSeed (R.client seedStore)) ()\ngroup <- R.call (readGroup (R.client groupStore)) ()\ndisplay (case (seed, group) of (Nothing, Nothing) -> True; _ -> False)"
-                            }
-                            HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked) => {
-                                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_and_await.hs")
-                            }
-                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => {
-                                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_shutdown_parent_join.hs")
-                            }
-                            HostedScenario::Captured(CapturedScenario::FailureAfterReplies) => {
-                                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_await_then_fail.hs")
-                            }
-                            HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => {
-                                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_a.hs")
-                            }
-                        },
-                        if self.scenario == HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) {
+                        &source,
+                        if self.scenario
+                            == HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin)
+                        {
                             CallMode::Asynchronous
                         } else {
                             CallMode::Blocking
@@ -386,11 +389,11 @@ impl CapturedHostTransport {
                     vec![harness::item::Item(json!({
                         "type":"custom_tool_call", "call_id":format!("captured-child-{path}"),
                         "name":"haskell", "input":match self.scenario {
-                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) if ordinal == 0 => "display (error \"HOSTED_INTENTIONAL_CHILD_FAILURE\" :: Int)",
+                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) if ordinal == 0 => "display (error \"HOSTED_INTENTIONAL_CHILD_FAILURE\" :: Int)".to_owned(),
                             HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_shutdown_parked_child.hs"),
-                            HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => "respond (m2MakeReply sessionInput)",
+                            HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => "respond (m2MakeReply sessionInput)".to_owned(),
                             HostedScenario::Captured(CapturedScenario::FailureAfterReplies) if ordinal >= 2 => tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs"),
-                            _ => "respond capturedGetter",
+                            _ => "respond capturedGetter".to_owned(),
                         }
                     }))]
                 }
@@ -1506,7 +1509,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     &campaign,
                     &transport,
                     "captured-interrupted-group-cleanup",
-                    tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs"),
+                    &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs"),
                 )
                 .await
                 .unwrap();
@@ -1524,7 +1527,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     &campaign,
                     &transport,
                     "nominal-join-root-b",
-                    tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_b.hs"),
+                    &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_b.hs"),
                 )
                 .await
                 .expect("same-root B publishes while A remains parked");
@@ -1606,7 +1609,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         &campaign,
                         &transport,
                         "nominal-join-final-read",
-                        tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_final.hs"),
+                        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_final.hs"),
                     )
                     .await
                     .expect("final provider tool reads both A and B public declarations");
@@ -1705,7 +1708,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         &campaign,
                         &transport,
                         REUSE_CALL,
-                        tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_reuse_after_failure.hs"),
+                        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_reuse_after_failure.hs"),
                     )
                     .await
                     .expect("the failed cell's transferred capture admits and joins a third child");
@@ -1763,7 +1766,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     &campaign,
                     &transport,
                     "captured-active-cleanup-refusal",
-                    tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs"),
+                    &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs"),
                 )
                 .await
                 .unwrap();
@@ -1802,7 +1805,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 &campaign,
                 &transport,
                 "captured-group-cleanup",
-                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs"),
+                &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs"),
             )
             .await
             .expect("known original group cleanup settles");

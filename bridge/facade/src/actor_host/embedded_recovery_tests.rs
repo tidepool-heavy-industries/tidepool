@@ -33,7 +33,7 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
                         "bridge/facade/src/actor_host/fixtures/embedded_cold_declaration.hs",
                     )
                 } else {
-                    "case coldAnswer of RecoveryBox value -> value"
+                    "case coldAnswer of RecoveryBox value -> value".to_owned()
                 };
                 vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":call,
