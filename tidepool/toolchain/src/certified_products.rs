@@ -7507,12 +7507,12 @@ pub(crate) fn certify_products_with_validation(
         ownership_start.elapsed(),
         fresh_product_bytes.len() as u64,
     );
+    fresh_products.retain_completed_promotions(receipt, &recovery_products)?;
     tracing::info!(target: "tidepool_toolchain::module_candidates",
         phase = "candidate_certification_success",
         fresh_modules = origin_counts[0][0], fresh_group_rows = origin_counts[0][1], fresh_original_bytes = origin_counts[0][2],
         cached_modules = origin_counts[1][0], cached_group_rows = origin_counts[1][1], cached_original_bytes = origin_counts[1][2],
         retained_core_modules = origin_counts[2][0], retained_core_group_rows = origin_counts[2][1], retained_core_original_bytes = origin_counts[2][2]);
-    fresh_products.retain_completed_promotions(receipt, &recovery_products)?;
     Ok(CertifiedProducts {
         groups,
         recovery_products,
