@@ -1114,6 +1114,13 @@ def facade_test_cases(binary):
     all_resources = sorted(set(browser_resources + prepared_recipe_resources + capture_recipe_resources))
     prefix = "actor_host::m1_host_tests::"
     groups = [
+        ("facade_source_fixture_tests", [
+            "actor_host::tests::driver_sources_keep_policy_private_and_preserve_explicit_public_modules",
+        ], {}, {
+            "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+            "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        }, ["//bridge/testing:haskell_test_fixtures", "//bridge/haskell:facade_embedded_sources"],
+         False, False, 30),
         ("facade_process_tests", [prefix + "browser_process::tests::" + name for name in (
             "oversized_unterminated_frame_is_rejected_before_eof",
             "complete_frames_and_eof_are_observed_without_replay",

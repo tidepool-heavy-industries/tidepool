@@ -343,6 +343,31 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(cohort["exact_tests"][-1],
                          "fixtures::tests::fixture_names_refuse_absolute_and_parent_components")
 
+    def test_facade_source_fixture_cohort_declares_sources_without_compiler_inputs(self):
+        result = self.generate("--package", "tidepool")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cohort = self.rule("bridge/facade", "facade_source_fixture_tests", "tidepool_rust_test_cases")
+        self.assertEqual(cohort["binary"], ":tidepool_unit_tests")
+        # Workspace capture uses these embedded libraries, so the native test
+        # cannot depend on the source-backed development checkout fallback.
+        producer = self.rule("bridge/facade", "tidepool_build_script_run", "tidepool_buildscript_run")
+        self.assertEqual(producer["env"]["TIDEPOOL_EMBED_HASKELL"], "1")
+        binary = self.rule("bridge/facade", "tidepool_unit_tests", "tidepool_rust_binary")
+        self.assertEqual(binary["env"]["OUT_DIR"], "$(location :tidepool_build_script_run[out_dir])")
+        self.assertEqual(cohort["exact_tests"], [
+            "actor_host::tests::driver_sources_keep_policy_private_and_preserve_explicit_public_modules",
+        ])
+        self.assertEqual(cohort["expected_count"], 1)
+        self.assertEqual(cohort["resources"], [
+            "//bridge/testing:haskell_test_fixtures", "//bridge/haskell:facade_embedded_sources",
+        ])
+        self.assertEqual(cohort["resource_env"], {
+            "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+            "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        })
+        self.assertNotIn("haskell_worker", cohort)
+        self.assertNotIn("env", cohort)
+
     def test_original_source_proof_control_has_counted_worker_execution_owner(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
