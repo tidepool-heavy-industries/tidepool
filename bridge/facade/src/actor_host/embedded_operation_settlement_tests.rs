@@ -320,13 +320,13 @@ impl ResidentToolEndpoint for ValidationOnlyEndpoint {
     }
     fn complete_boxed(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         self.0.complete_boxed(boundary)
     }
     fn abort_boxed(
         &self,
-        boundary: tidepool_runtime::session::WorkbenchForkBoundary,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> ResidentToolFuture {
         self.0.abort_boxed(boundary)
     }

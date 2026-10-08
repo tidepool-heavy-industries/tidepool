@@ -698,3 +698,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "embedded_operation_settlement_tests.rs"]
+mod operation_settlement_tests;
