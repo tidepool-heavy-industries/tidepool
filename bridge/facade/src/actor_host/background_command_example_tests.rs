@@ -78,32 +78,36 @@ async fn completion_case(
 
 #[tokio::test]
 async fn background_command_example_retains_success_failure_and_unavailable_capture() {
-    let mut campaign = workspace_campaign().await;
-    committed(
-        &campaign,
-        "import qualified Project.BackgroundCommandExampleChecks",
-    )
-    .await;
-    let success = completion_case(&mut campaign, 0, false).await;
-    assert!(success.contains("CommandExited 0"), "{success}");
-    assert!(success.contains("CaptureComplete"), "{success}");
-    assert!(
-        success.contains(r#"CaptureComplete \"result\""#),
-        "{success}"
-    );
+    let campaign = workspace_campaign().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                committed(
+                    campaign,
+                    "import qualified Project.BackgroundCommandExampleChecks",
+                )
+                .await;
+                let success = completion_case(campaign, 0, false).await;
+                assert!(success.contains("CommandExited 0"), "{success}");
+                assert!(success.contains("CaptureComplete"), "{success}");
+                assert!(
+                    success.contains(r#"CaptureComplete \"result\""#),
+                    "{success}"
+                );
 
-    let failure = completion_case(&mut campaign, 7, false).await;
-    assert!(failure.contains("CommandExited 7"), "{failure}");
-    assert!(failure.contains("CaptureComplete"), "{failure}");
+                let failure = completion_case(campaign, 7, false).await;
+                assert!(failure.contains("CommandExited 7"), "{failure}");
+                assert!(failure.contains("CaptureComplete"), "{failure}");
 
-    let unavailable = completion_case(&mut campaign, 0, true).await;
-    assert!(unavailable.contains("CommandExited 0"), "{unavailable}");
-    assert!(unavailable.contains("RefusedCapture"), "{unavailable}");
-    assert!(unavailable.contains("CommandUnavailable"), "{unavailable}");
-    assert!(
-        unavailable.contains("output transport lost"),
-        "{unavailable}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                let unavailable = completion_case(campaign, 0, true).await;
+                assert!(unavailable.contains("CommandExited 0"), "{unavailable}");
+                assert!(unavailable.contains("RefusedCapture"), "{unavailable}");
+                assert!(unavailable.contains("CommandUnavailable"), "{unavailable}");
+                assert!(
+                    unavailable.contains("output transport lost"),
+                    "{unavailable}"
+                );
+            })
+        })
+        .await;
 }

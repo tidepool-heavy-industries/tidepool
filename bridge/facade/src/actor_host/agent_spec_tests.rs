@@ -332,63 +332,67 @@ async fn actor_spec_cost_measurement() {
         let before = tidepool_extract_cmd::extract_spawn_count();
         let started = Instant::now();
         let campaign = start_with_slot("measurement-one", ANNOTATES).await;
-        report(
-            &campaign,
-            "specActivation",
-            Some(round),
-            None,
-            before,
-            started,
-        );
-        let policy = campaign.root_installation.policy.as_ref();
-        let initial = probe(policy).await;
-        assert!(initial.contains("measurement-one"), "{initial}");
-        assert!(
-            initial.contains("asked about this topic twice before"),
-            "{initial}"
-        );
+        campaign
+            .run_scenario(|campaign| {
+                Box::pin(async move {
+                    report(
+                        campaign,
+                        "specActivation",
+                        Some(round),
+                        None,
+                        before,
+                        started,
+                    );
+                    let policy = campaign.root_installation.policy.as_ref();
+                    let initial = probe(policy).await;
+                    assert!(initial.contains("measurement-one"), "{initial}");
+                    assert!(
+                        initial.contains("asked about this topic twice before"),
+                        "{initial}"
+                    );
 
-        let before = tidepool_extract_cmd::extract_spawn_count();
-        let started = Instant::now();
-        let receipt = reload(policy).await;
-        report(
-            &campaign,
-            "specUnchangedReload",
-            Some(round),
-            None,
-            before,
-            started,
-        );
-        assert!(receipt.contains("swapped"), "{receipt}");
+                    let before = tidepool_extract_cmd::extract_spawn_count();
+                    let started = Instant::now();
+                    let receipt = reload(policy).await;
+                    report(
+                        campaign,
+                        "specUnchangedReload",
+                        Some(round),
+                        None,
+                        before,
+                        started,
+                    );
+                    assert!(receipt.contains("swapped"), "{receipt}");
 
-        std::fs::write(
-            campaign
-                ._repository
-                .path()
-                .join(".exomonad/Project/Tools.hs"),
-            tools_module(DESCRIPTION, "measurement-two"),
-        )
-        .unwrap();
-        let before = tidepool_extract_cmd::extract_spawn_count();
-        let started = Instant::now();
-        let receipt = reload(policy).await;
-        report(
-            &campaign,
-            "specEditedReload",
-            Some(round),
-            None,
-            before,
-            started,
-        );
-        assert!(receipt.contains("swapped"), "{receipt}");
-        let changed = probe(policy).await;
-        assert!(changed.contains("measurement-two"), "{changed}");
-        assert!(
-            changed.contains("asked about this topic twice before"),
-            "{changed}"
-        );
-        campaign.forest.shutdown().await;
-        campaign.hosted.await.unwrap();
+                    std::fs::write(
+                        campaign
+                            ._repository
+                            .path()
+                            .join(".exomonad/Project/Tools.hs"),
+                        tools_module(DESCRIPTION, "measurement-two"),
+                    )
+                    .unwrap();
+                    let before = tidepool_extract_cmd::extract_spawn_count();
+                    let started = Instant::now();
+                    let receipt = reload(policy).await;
+                    report(
+                        campaign,
+                        "specEditedReload",
+                        Some(round),
+                        None,
+                        before,
+                        started,
+                    );
+                    assert!(receipt.contains("swapped"), "{receipt}");
+                    let changed = probe(policy).await;
+                    assert!(changed.contains("measurement-two"), "{changed}");
+                    assert!(
+                        changed.contains("asked about this topic twice before"),
+                        "{changed}"
+                    );
+                })
+            })
+            .await;
     }
 }
 
@@ -397,28 +401,31 @@ async fn actor_spec_cost_measurement() {
 #[tokio::test]
 async fn a_rebuilt_record_with_the_same_surface_swaps_and_later_calls_run_new_code() {
     let campaign = start(DESCRIPTION, "one").await;
-    let workspace = campaign._repository.path().to_path_buf();
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let workspace = campaign._repository.path().to_path_buf();
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    assert!(probe(policy).await.contains("one"));
+                assert!(probe(policy).await.contains("one"));
 
-    // Only the handler body moves. The description and both schemas are
-    // spelled identically, so the declared surface cannot have changed.
-    std::fs::write(
-        workspace.join(".exomonad/Project/Tools.hs"),
-        tools_module(DESCRIPTION, "two"),
-    )
-    .unwrap();
-    let receipt = reload(policy).await;
-    assert!(receipt.contains("swapped"), "{receipt}");
-    assert!(receipt.contains("install=2"), "{receipt}");
+                // Only the handler body moves. The description and both schemas are
+                // spelled identically, so the declared surface cannot have changed.
+                std::fs::write(
+                    workspace.join(".exomonad/Project/Tools.hs"),
+                    tools_module(DESCRIPTION, "two"),
+                )
+                .unwrap();
+                let receipt = reload(policy).await;
+                assert!(receipt.contains("swapped"), "{receipt}");
+                assert!(receipt.contains("install=2"), "{receipt}");
 
-    let after = probe(policy).await;
-    assert!(after.contains("two"), "{after}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                let after = probe(policy).await;
+                assert!(after.contains("two"), "{after}");
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -518,30 +525,34 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
         },
     )
     .await;
-    let workspace = campaign._repository.path().to_path_buf();
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let workspace = campaign._repository.path().to_path_buf();
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
+                assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
 
-    std::fs::write(
-        workspace.join(".exomonad/AgentSpec.hs"),
-        tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/fixtures/spec_reload_without_slot.hs",
-        ),
-    )
-    .unwrap();
-    let receipt = reload(policy).await;
-    assert!(receipt.contains("swapped"), "{receipt}");
-    assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                std::fs::write(
+                    workspace.join(".exomonad/AgentSpec.hs"),
+                    tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/fixtures/spec_reload_without_slot.hs",
+                    ),
+                )
+                .unwrap();
+                let receipt = reload(policy).await;
+                assert!(receipt.contains("swapped"), "{receipt}");
+                assert!(policy.tools().iter().any(|tool| tool.name() == "bash"));
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn spec_reload_installs_an_already_published_source_revision() {
     let campaign = start(DESCRIPTION, "one").await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.as_ref();
     let old_request = policy.snapshot_for_request().expect("installed old spec");
     assert!(probe(old_request.as_ref()).await.contains("one"));
@@ -569,8 +580,7 @@ async fn spec_reload_installs_an_already_published_source_revision() {
         probe(old_request.as_ref()).await.contains("one"),
         "accepted old call keeps its original handler"
     );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// A changed description is a change a model would see, and the tool bridge
@@ -580,44 +590,47 @@ async fn spec_reload_installs_an_already_published_source_revision() {
 #[tokio::test]
 async fn a_changed_description_is_refused_with_the_difference_and_the_old_record_answers() {
     let campaign = start(DESCRIPTION, "one").await;
-    let workspace = campaign._repository.path().to_path_buf();
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let workspace = campaign._repository.path().to_path_buf();
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    assert!(probe(policy).await.contains("one"));
+                assert!(probe(policy).await.contains("one"));
 
-    let source_layer =
-        crate::exomonad::source::SourceLayer::new(&campaign.config.run_directory.path());
-    let before_source = source_layer.read_active().unwrap();
+                let source_layer =
+                    crate::exomonad::source::SourceLayer::new(campaign.config.run_directory.path());
+                let before_source = source_layer.read_active().unwrap();
 
-    std::fs::write(
-        workspace.join(".exomonad/Project/Tools.hs"),
-        tools_module("Answer one fixed question, and explain it.", "two"),
-    )
-    .unwrap();
-    let receipt = reload(policy).await;
-    assert!(receipt.contains("refused"), "{receipt}");
-    assert!(receipt.contains("probe: description changed"), "{receipt}");
-    assert!(!receipt.contains("swapped"), "{receipt}");
+                std::fs::write(
+                    workspace.join(".exomonad/Project/Tools.hs"),
+                    tools_module("Answer one fixed question, and explain it.", "two"),
+                )
+                .unwrap();
+                let receipt = reload(policy).await;
+                assert!(receipt.contains("refused"), "{receipt}");
+                assert!(receipt.contains("probe: description changed"), "{receipt}");
+                assert!(!receipt.contains("swapped"), "{receipt}");
 
-    // The previously installed record is still the one serving calls.
-    let after = probe(policy).await;
-    assert!(after.contains("one"), "{after}");
+                // The previously installed record is still the one serving calls.
+                let after = probe(policy).await;
+                assert!(after.contains("one"), "{after}");
 
-    assert_eq!(
-        source_layer.read_active().unwrap(),
-        before_source,
-        "refusal preserves the published source as well as handlers"
-    );
-    let cell = dispatch_haskell_script(
-        policy,
-        "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
-    )
-    .await;
-    assert!(cell.to_string().contains("one"), "{cell}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                assert_eq!(
+                    source_layer.read_active().unwrap(),
+                    before_source,
+                    "refusal preserves the published source as well as handlers"
+                );
+                let cell = dispatch_haskell_script(
+                    policy,
+                    "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+                )
+                .await;
+                assert!(cell.to_string().contains("one"), "{cell}");
+            })
+        })
+        .await;
 }
 
 /// A spec that does not typecheck fails its own reload. The edited file stays
@@ -626,92 +639,99 @@ async fn a_changed_description_is_refused_with_the_difference_and_the_old_record
 #[tokio::test]
 async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_on_disk() {
     let campaign = start(DESCRIPTION, "one").await;
-    let workspace = campaign._repository.path().to_path_buf();
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let workspace = campaign._repository.path().to_path_buf();
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    assert!(probe(policy).await.contains("one"));
+                assert!(probe(policy).await.contains("one"));
 
-    let source_layer =
-        crate::exomonad::source::SourceLayer::new(&campaign.config.run_directory.path());
-    let before_source = source_layer.read_active().unwrap();
+                let source_layer =
+                    crate::exomonad::source::SourceLayer::new(campaign.config.run_directory.path());
+                let before_source = source_layer.read_active().unwrap();
 
-    let broken =
-        tools_module(DESCRIPTION, "one").replace("pure \"one\"", "pure undefinedByThisSpecReload");
-    assert!(broken.contains("undefinedByThisSpecReload"), "{broken}");
-    std::fs::write(workspace.join(".exomonad/Project/Tools.hs"), &broken).unwrap();
-    let receipt = reload(policy).await;
-    assert!(receipt.contains("rejected"), "{receipt}");
-    assert!(receipt.contains("undefinedByThisSpecReload"), "{receipt}");
-    assert!(!receipt.contains("swapped"), "{receipt}");
+                let broken = tools_module(DESCRIPTION, "one")
+                    .replace("pure \"one\"", "pure undefinedByThisSpecReload");
+                assert!(broken.contains("undefinedByThisSpecReload"), "{broken}");
+                std::fs::write(workspace.join(".exomonad/Project/Tools.hs"), &broken).unwrap();
+                let receipt = reload(policy).await;
+                assert!(receipt.contains("rejected"), "{receipt}");
+                assert!(receipt.contains("undefinedByThisSpecReload"), "{receipt}");
+                assert!(!receipt.contains("swapped"), "{receipt}");
 
-    let after = probe(policy).await;
-    assert!(after.contains("one"), "{after}");
-    assert_eq!(
-        std::fs::read_to_string(workspace.join(".exomonad/Project/Tools.hs")).unwrap(),
-        broken,
-        "the edited file is exactly as it was written"
-    );
+                let after = probe(policy).await;
+                assert!(after.contains("one"), "{after}");
+                assert_eq!(
+                    std::fs::read_to_string(workspace.join(".exomonad/Project/Tools.hs")).unwrap(),
+                    broken,
+                    "the edited file is exactly as it was written"
+                );
 
-    assert_eq!(
-        source_layer.read_active().unwrap(),
-        before_source,
-        "refusal preserves the published source as well as handlers"
-    );
-    let cell = dispatch_haskell_script(
-        policy,
-        "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
-    )
-    .await;
-    assert!(cell.to_string().contains("one"), "{cell}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                assert_eq!(
+                    source_layer.read_active().unwrap(),
+                    before_source,
+                    "refusal preserves the published source as well as handlers"
+                );
+                let cell = dispatch_haskell_script(
+                    policy,
+                    "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+                )
+                .await;
+                assert!(cell.to_string().contains("one"), "{cell}");
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn an_installer_execution_failure_keeps_source_cells_and_old_handlers() {
     let campaign = start(DESCRIPTION, "one").await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let source_layer =
-        crate::exomonad::source::SourceLayer::new(&campaign.config.run_directory.path());
-    let before_source = source_layer.read_active().unwrap();
-    let broken = tools_module(DESCRIPTION, "two").replace(
-        "agentSpec = defaultSpec { specTools = tools }",
-        "agentSpec = error \"installer refused\"",
-    );
-    assert!(broken.contains("installer refused"));
-    std::fs::write(
-        campaign
-            ._repository
-            .path()
-            .join(".exomonad/Project/Tools.hs"),
-        &broken,
-    )
-    .unwrap();
-    let receipt = reload(policy).await;
-    assert!(receipt.contains("spec preparation failed"), "{receipt}");
-    assert!(!receipt.contains("swapped"), "{receipt}");
-    assert_eq!(source_layer.read_active().unwrap(), before_source);
-    assert!(probe(policy).await.contains("one"));
-    let cell = dispatch_haskell_script(
-        policy,
-        "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
-    )
-    .await;
-    assert!(cell.to_string().contains("one"), "{cell}");
-    assert_eq!(
-        std::fs::read_to_string(
-            campaign
-                ._repository
-                .path()
-                .join(".exomonad/Project/Tools.hs")
-        )
-        .unwrap(),
-        broken
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.as_ref();
+                let source_layer =
+                    crate::exomonad::source::SourceLayer::new(campaign.config.run_directory.path());
+                let before_source = source_layer.read_active().unwrap();
+                let broken = tools_module(DESCRIPTION, "two").replace(
+                    "agentSpec = defaultSpec { specTools = tools }",
+                    "agentSpec = error \"installer refused\"",
+                );
+                assert!(broken.contains("installer refused"));
+                std::fs::write(
+                    campaign
+                        ._repository
+                        .path()
+                        .join(".exomonad/Project/Tools.hs"),
+                    &broken,
+                )
+                .unwrap();
+                let receipt = reload(policy).await;
+                assert!(receipt.contains("spec preparation failed"), "{receipt}");
+                assert!(!receipt.contains("swapped"), "{receipt}");
+                assert_eq!(source_layer.read_active().unwrap(), before_source);
+                assert!(probe(policy).await.contains("one"));
+                let cell = dispatch_haskell_script(
+                    policy,
+                    "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+                )
+                .await;
+                assert!(cell.to_string().contains("one"), "{cell}");
+                assert_eq!(
+                    std::fs::read_to_string(
+                        campaign
+                            ._repository
+                            .path()
+                            .join(".exomonad/Project/Tools.hs")
+                    )
+                    .unwrap(),
+                    broken
+                );
+            })
+        })
+        .await;
 }
 
 /// A workspace with no conventional or configured spec installs the empty
@@ -740,28 +760,31 @@ async fn a_workspace_without_a_spec_installs_the_empty_default() {
         },
     )
     .await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let status = status(policy).await;
-    assert!(status.contains("built-in default"), "{status}");
-    assert!(status.contains("slots=[]"), "{status}");
-    assert!(!policy.tools().iter().any(|tool| tool.name() == "probe"));
-    assert!(!policy.tools().iter().any(|tool| tool.name() == "bash"));
+                let status = status(policy).await;
+                assert!(status.contains("built-in default"), "{status}");
+                assert!(status.contains("slots=[]"), "{status}");
+                assert!(!policy.tools().iter().any(|tool| tool.name() == "probe"));
+                assert!(!policy.tools().iter().any(|tool| tool.name() == "bash"));
 
-    // The Haskell workbench is untouched by any of this.
-    let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
-    assert_eq!(cell["items"][0]["output"], "2", "{cell}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                // The Haskell workbench is untouched by any of this.
+                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                assert_eq!(cell["items"][0]["output"], "2", "{cell}");
+            })
+        })
+        .await;
 }
 
 /// A child checkout can contain `AgentSpec.hs`, but the installed spec comes
 /// from the run's current graph for both root and child.
 #[tokio::test]
 async fn the_run_spec_module_is_installed_for_a_child_with_a_checkout() {
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
@@ -781,58 +804,63 @@ async fn the_run_spec_module_is_installed_for_a_child_with_a_checkout() {
         },
     )
     .await;
-    let root = campaign.root_installation.policy.clone();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
 
-    let launch = {
-        let root = root.clone();
-        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), CODING_CHILD).await })
-    };
-    let child = next_child(&mut campaign).await;
-    assert_eq!(launch.await.unwrap()["status"], "committed");
+                let launch = {
+                    let root = root.clone();
+                    tokio::spawn(async move {
+                        dispatch_haskell_script(root.as_ref(), CODING_CHILD).await
+                    })
+                };
+                let child = next_child(campaign).await;
+                assert_eq!(launch.await.unwrap()["status"], "committed");
 
-    let checkout = campaign
-        .worktrees
-        .lookup(&exomonad_worktree::WorktreeId::from_raw(
-            &child.launch_worktrees[0],
-        ))
-        .unwrap()
-        .unwrap();
-    assert!(
-        checkout.cwd().join(".exomonad/AgentSpec.hs").exists(),
-        "the checkout carries the spec module"
-    );
+                let checkout = campaign
+                    .worktrees
+                    .lookup(&exomonad_worktree::WorktreeId::from_raw(
+                        &child.launch_worktrees[0],
+                    ))
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    checkout.cwd().join(".exomonad/AgentSpec.hs").exists(),
+                    "the checkout carries the spec module"
+                );
 
-    let child_status = status(child.policy.as_ref()).await;
-    assert!(child_status.contains("run module"), "{child_status}");
-    assert!(
-        child_status.contains("AgentSpec.agentSpec"),
-        "{child_status}"
-    );
-    assert!(child_status.contains("AgentSpec.hs"), "{child_status}");
-    // One compile, two products: the declared surface, and the slot the same
-    // spec filled, retained beside the tools it sits with.
-    assert!(child_status.contains("slots=[afterTool]"), "{child_status}");
+                let child_status = status(child.policy.as_ref()).await;
+                assert!(child_status.contains("run module"), "{child_status}");
+                assert!(
+                    child_status.contains("AgentSpec.agentSpec"),
+                    "{child_status}"
+                );
+                assert!(child_status.contains("AgentSpec.hs"), "{child_status}");
+                // One compile, two products: the declared surface, and the slot the same
+                // spec filled, retained beside the tools it sits with.
+                assert!(child_status.contains("slots=[afterTool]"), "{child_status}");
 
-    // Root and child resolve the same run module.
-    let root_status = status(root.as_ref()).await;
-    assert!(root_status.contains("run module"), "{root_status}");
+                // Root and child resolve the same run module.
+                let root_status = status(root.as_ref()).await;
+                assert!(root_status.contains("run module"), "{root_status}");
 
-    // The run spec serves the child's calls and after-tool slot.
-    let answered = probe(child.policy.as_ref()).await;
-    assert!(answered.contains("one"), "{answered}");
-    assert!(
-        answered.contains("asked about this topic twice before"),
-        "{answered}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                // The run spec serves the child's calls and after-tool slot.
+                let answered = probe(child.policy.as_ref()).await;
+                assert!(answered.contains("one"), "{answered}");
+                assert!(
+                    answered.contains("asked about this topic twice before"),
+                    "{answered}"
+                );
+            })
+        })
+        .await;
 }
 
 /// A child editing historical checkout tooling cannot reload the run spec.
 #[tokio::test]
 async fn a_child_checkout_spec_edit_cannot_replace_the_run_spec() {
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, DESCRIPTION, "one");
@@ -852,43 +880,48 @@ async fn a_child_checkout_spec_edit_cannot_replace_the_run_spec() {
         },
     )
     .await;
-    let root = campaign.root_installation.policy.clone();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
 
-    let launch = {
-        let root = root.clone();
-        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), CODING_CHILD).await })
-    };
-    let child = next_child(&mut campaign).await;
-    assert_eq!(launch.await.unwrap()["status"], "committed");
+                let launch = {
+                    let root = root.clone();
+                    tokio::spawn(async move {
+                        dispatch_haskell_script(root.as_ref(), CODING_CHILD).await
+                    })
+                };
+                let child = next_child(campaign).await;
+                assert_eq!(launch.await.unwrap()["status"], "committed");
 
-    let checkout = campaign
-        .worktrees
-        .lookup(&exomonad_worktree::WorktreeId::from_raw(
-            &child.launch_worktrees[0],
-        ))
-        .unwrap()
-        .unwrap();
-    assert!(probe(child.policy.as_ref()).await.contains("one"));
-    assert!(probe(root.as_ref()).await.contains("one"));
+                let checkout = campaign
+                    .worktrees
+                    .lookup(&exomonad_worktree::WorktreeId::from_raw(
+                        &child.launch_worktrees[0],
+                    ))
+                    .unwrap()
+                    .unwrap();
+                assert!(probe(child.policy.as_ref()).await.contains("one"));
+                assert!(probe(root.as_ref()).await.contains("one"));
 
-    std::fs::write(
-        checkout.cwd().join(".exomonad/Project/Tools.hs"),
-        tools_module(DESCRIPTION, "two"),
-    )
-    .unwrap();
-    let receipt = reload(child.policy.as_ref()).await;
-    assert!(receipt.contains("unavailable"), "{receipt}");
-    assert!(
-        receipt.contains("only the run owner can reload"),
-        "{receipt}"
-    );
-    assert!(receipt.contains("run module"), "{receipt}");
+                std::fs::write(
+                    checkout.cwd().join(".exomonad/Project/Tools.hs"),
+                    tools_module(DESCRIPTION, "two"),
+                )
+                .unwrap();
+                let receipt = reload(child.policy.as_ref()).await;
+                assert!(receipt.contains("unavailable"), "{receipt}");
+                assert!(
+                    receipt.contains("only the run owner can reload"),
+                    "{receipt}"
+                );
+                assert!(receipt.contains("run module"), "{receipt}");
 
-    assert!(probe(child.policy.as_ref()).await.contains("one"));
-    assert!(probe(root.as_ref()).await.contains("one"));
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                assert!(probe(child.policy.as_ref()).await.contains("one"));
+                assert!(probe(root.as_ref()).await.contains("one"));
+            })
+        })
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -901,23 +934,26 @@ async fn a_child_checkout_spec_edit_cannot_replace_the_run_spec() {
 #[tokio::test]
 async fn an_annotation_reaches_the_model_as_derived_context_beside_the_output() {
     let campaign = start_with_slot("keptwhole", ANNOTATES).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let result = probe(policy).await;
-    assert!(result.contains("keptwhole"), "{result}");
-    assert!(
-        result.contains("Derived context, not part of the tool's output"),
-        "{result}"
-    );
-    assert!(
-        result.contains("asked about this topic twice before"),
-        "{result}"
-    );
-    assert!(result.contains("spec revision"), "{result}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                let result = probe(policy).await;
+                assert!(result.contains("keptwhole"), "{result}");
+                assert!(
+                    result.contains("Derived context, not part of the tool's output"),
+                    "{result}"
+                );
+                assert!(
+                    result.contains("asked about this topic twice before"),
+                    "{result}"
+                );
+                assert!(result.contains("spec revision"), "{result}");
+            })
+        })
+        .await;
 }
 
 /// A pruned view says it is a selection, and the whole result stays
@@ -926,30 +962,33 @@ async fn an_annotation_reaches_the_model_as_derived_context_beside_the_output() 
 #[tokio::test]
 async fn a_pruned_result_says_it_is_a_selection_and_its_handle_answers_the_whole() {
     let campaign = start_with_slot("keptwhole", PRUNES).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let result = probe(policy).await;
-    assert!(
-        result.contains("A selection of this result, not the whole of it"),
-        "{result}"
-    );
-    assert!(result.contains("the line that mattered"), "{result}");
-    assert!(result.contains("toolResult1"), "{result}");
+                let result = probe(policy).await;
+                assert!(
+                    result.contains("A selection of this result, not the whole of it"),
+                    "{result}"
+                );
+                assert!(result.contains("the line that mattered"), "{result}");
+                assert!(result.contains("toolResult1"), "{result}");
 
-    // The handle is a binding in the same lexical scope the model's own cells
-    // run in, so the whole result is one cell away.
-    let cell = dispatch_haskell_script(policy, "inspectFull toolResult1").await;
-    assert!(
-        cell["items"][0]["output"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("keptwhole"),
-        "{cell}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                // The handle is a binding in the same lexical scope the model's own cells
+                // run in, so the whole result is one cell away.
+                let cell = dispatch_haskell_script(policy, "inspectFull toolResult1").await;
+                assert!(
+                    cell["items"][0]["output"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("keptwhole"),
+                    "{cell}"
+                );
+            })
+        })
+        .await;
 }
 
 /// Abstention is silent. The model never asked for a judgement on this result,
@@ -958,23 +997,26 @@ async fn a_pruned_result_says_it_is_a_selection_and_its_handle_answers_the_whole
 #[tokio::test]
 async fn an_abstention_delivers_the_original_and_appears_only_in_the_receipt() {
     let campaign = start_with_slot("keptwhole", ABSTAINS).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let result = probe(policy).await;
-    assert!(result.contains("keptwhole"), "{result}");
-    assert!(!result.contains("[after-tool]"), "{result}");
-    assert!(!result.contains("already minimal"), "{result}");
+                let result = probe(policy).await;
+                assert!(result.contains("keptwhole"), "{result}");
+                assert!(!result.contains("[after-tool]"), "{result}");
+                assert!(!result.contains("already minimal"), "{result}");
 
-    let status = status(policy).await;
-    assert!(status.contains("after-tool#1"), "{status}");
-    assert!(
-        status.contains("abstained: the result is already minimal"),
-        "{status}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                let status = status(policy).await;
+                assert!(status.contains("after-tool#1"), "{status}");
+                assert!(
+                    status.contains("abstained: the result is already minimal"),
+                    "{status}"
+                );
+            })
+        })
+        .await;
 }
 
 /// A slot that failed is not a slot that abstained: the original result is
@@ -984,29 +1026,32 @@ async fn an_abstention_delivers_the_original_and_appears_only_in_the_receipt() {
 #[tokio::test]
 async fn a_slot_that_fails_delivers_the_original_with_one_compact_line() {
     let campaign = start_with_slot("keptwhole", FAILS).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let first = probe(policy).await;
-    assert!(first.contains("keptwhole"), "{first}");
-    assert!(first.contains("the slot did not answer"), "{first}");
-    assert!(first.contains("after-tool#1"), "{first}");
-    assert_eq!(
-        first.matches("[after-tool]").count(),
-        1,
-        "one compact line, not a diagnostic dump: {first}"
-    );
+                let first = probe(policy).await;
+                assert!(first.contains("keptwhole"), "{first}");
+                assert!(first.contains("the slot did not answer"), "{first}");
+                assert!(first.contains("after-tool#1"), "{first}");
+                assert_eq!(
+                    first.matches("[after-tool]").count(),
+                    1,
+                    "one compact line, not a diagnostic dump: {first}"
+                );
 
-    let second = probe(policy).await;
-    assert!(second.contains("keptwhole"), "{second}");
-    assert!(
-        second.contains("same failure as after-tool#1"),
-        "a repeated failure does not fill the conversation with copies: {second}"
-    );
-    assert!(!second.contains("the slot did not answer"), "{second}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                let second = probe(policy).await;
+                assert!(second.contains("keptwhole"), "{second}");
+                assert!(
+                    second.contains("same failure as after-tool#1"),
+                    "a repeated failure does not fill the conversation with copies: {second}"
+                );
+                assert!(!second.contains("the slot did not answer"), "{second}");
+            })
+        })
+        .await;
 }
 
 /// The result waits for the slot, and when the wait runs out the original is
@@ -1017,23 +1062,27 @@ async fn a_slot_that_outruns_its_wait_delivers_the_original_result() {
     // is the whole of what this knob is for.
     std::env::set_var(exomonad_actor::AFTER_TOOL_WAIT_ENV, "0");
     let campaign = start_with_slot("keptwhole", ANNOTATES).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let result = probe(policy).await;
-    assert!(result.contains("keptwhole"), "{result}");
-    assert!(result.contains("no answer within 0ms"), "{result}");
-    assert!(
-        !result.contains("asked about this topic twice before"),
-        "{result}"
-    );
+                let result = probe(policy).await;
+                assert!(result.contains("keptwhole"), "{result}");
+                assert!(result.contains("no answer within 0ms"), "{result}");
+                assert!(
+                    !result.contains("asked about this topic twice before"),
+                    "{result}"
+                );
 
-    let status = status(policy).await;
-    assert!(status.contains("timed out after 0ms"), "{status}");
+                let status = status(policy).await;
+                assert!(status.contains("timed out after 0ms"), "{status}");
 
-    std::env::remove_var(exomonad_actor::AFTER_TOOL_WAIT_ENV);
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                std::env::remove_var(exomonad_actor::AFTER_TOOL_WAIT_ENV);
+            })
+        })
+        .await;
 }
 
 /// A slot cut off while it is suspended on an effect, rather than at its first
@@ -1044,88 +1093,92 @@ async fn a_slot_that_outruns_its_wait_delivers_the_original_result() {
 async fn a_slot_cut_off_mid_effect_leaves_the_machine_answering() {
     std::env::set_var(exomonad_actor::AFTER_TOOL_WAIT_ENV, "400");
     let campaign = start_with_sleeping_slot("keptwhole", SLEEPS_THEN_ANNOTATES).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    // The first authored cell pays for the cell template's cold compile. Pay
-    // it here, so the timing below measures the cut-off and nothing else.
-    let warm = std::time::Instant::now();
-    let _ = dispatch_haskell_script(policy, "inspectFull (2 + 2 :: Int)").await;
-    eprintln!("DUMP warm-up cell before any slot [{:?}]", warm.elapsed());
-    let baseline = std::time::Instant::now();
-    let _ = dispatch_haskell_script(policy, "inspectFull (3 + 3 :: Int)").await;
-    let baseline = baseline.elapsed();
-    eprintln!("DUMP warm baseline cell [{baseline:?}]");
+                // The first authored cell pays for the cell template's cold compile. Pay
+                // it here, so the timing below measures the cut-off and nothing else.
+                let warm = std::time::Instant::now();
+                let _ = dispatch_haskell_script(policy, "inspectFull (2 + 2 :: Int)").await;
+                eprintln!("DUMP warm-up cell before any slot [{:?}]", warm.elapsed());
+                let baseline = std::time::Instant::now();
+                let _ = dispatch_haskell_script(policy, "inspectFull (3 + 3 :: Int)").await;
+                let baseline = baseline.elapsed();
+                eprintln!("DUMP warm baseline cell [{baseline:?}]");
 
-    let t0 = std::time::Instant::now();
-    let first = tokio::time::timeout(Duration::from_secs(60), probe(policy))
-        .await
-        .expect("first probe did not hang");
-    eprintln!("DUMP first probe [{:?}]: {first}", t0.elapsed());
-    assert!(first.contains("keptwhole"), "{first}");
-    assert!(first.contains("no answer within 400ms"), "{first}");
+                let t0 = std::time::Instant::now();
+                let first = tokio::time::timeout(Duration::from_secs(60), probe(policy))
+                    .await
+                    .expect("first probe did not hang");
+                eprintln!("DUMP first probe [{:?}]: {first}", t0.elapsed());
+                assert!(first.contains("keptwhole"), "{first}");
+                assert!(first.contains("no answer within 400ms"), "{first}");
 
-    // Immediately: the slot future was just dropped mid-effect. Does the next
-    // call on the same actor still work?
-    let t1 = std::time::Instant::now();
-    let second = tokio::time::timeout(Duration::from_secs(60), probe(policy))
-        .await
-        .expect("second probe did not hang");
-    eprintln!(
-        "DUMP second probe (immediately after the cut-off) [{:?}]: {second}",
-        t1.elapsed()
-    );
+                // Immediately: the slot future was just dropped mid-effect. Does the next
+                // call on the same actor still work?
+                let t1 = std::time::Instant::now();
+                let second = tokio::time::timeout(Duration::from_secs(60), probe(policy))
+                    .await
+                    .expect("second probe did not hang");
+                eprintln!(
+                    "DUMP second probe (immediately after the cut-off) [{:?}]: {second}",
+                    t1.elapsed()
+                );
 
-    // An authored cell, in the same resident workbench.
-    let t2 = std::time::Instant::now();
-    let cell = tokio::time::timeout(
-        Duration::from_secs(60),
-        dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)"),
-    )
-    .await
-    .expect("authored cell did not hang");
-    eprintln!(
-        "DUMP authored cell after cut-off [{:?}]: {cell}",
-        t2.elapsed()
-    );
-    // A slot cut off while suspended on an effect must not hold the machine
-    // against the next caller: the cell costs what a warm cell cost before.
-    assert_eq!(cell["items"][0]["output"], "2", "{cell}");
-    assert!(
+                // An authored cell, in the same resident workbench.
+                let t2 = std::time::Instant::now();
+                let cell = tokio::time::timeout(
+                    Duration::from_secs(60),
+                    dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)"),
+                )
+                .await
+                .expect("authored cell did not hang");
+                eprintln!(
+                    "DUMP authored cell after cut-off [{:?}]: {cell}",
+                    t2.elapsed()
+                );
+                // A slot cut off while suspended on an effect must not hold the machine
+                // against the next caller: the cell costs what a warm cell cost before.
+                assert_eq!(cell["items"][0]["output"], "2", "{cell}");
+                assert!(
         t2.elapsed() < baseline * 2 + Duration::from_secs(5),
         "a cell after two cut-off slots took {:?} against a warm baseline of {baseline:?}",
         t2.elapsed()
     );
 
-    // Wait past when the original 3s sleep would have elapsed, then probe and
-    // check status again.
-    tokio::time::sleep(Duration::from_secs(4)).await;
+                // Wait past when the original 3s sleep would have elapsed, then probe and
+                // check status again.
+                tokio::time::sleep(Duration::from_secs(4)).await;
 
-    let t3 = std::time::Instant::now();
-    let third = tokio::time::timeout(Duration::from_secs(60), probe(policy))
-        .await
-        .expect("third probe did not hang");
-    eprintln!(
+                let t3 = std::time::Instant::now();
+                let third = tokio::time::timeout(Duration::from_secs(60), probe(policy))
+                    .await
+                    .expect("third probe did not hang");
+                eprintln!(
         "DUMP third probe (after the original sleep would have elapsed) [{:?}]: {third}",
         t3.elapsed()
     );
 
-    let t4 = std::time::Instant::now();
-    let status_after = tokio::time::timeout(Duration::from_secs(60), status(policy))
-        .await
-        .expect("status did not hang");
-    eprintln!("DUMP status after [{:?}]: {status_after}", t4.elapsed());
-    assert!(third.contains("keptwhole"), "{third}");
-    assert!(!third.contains("slept then annotated"), "{third}");
-    assert_eq!(
-        status_after.matches("timed out after 400ms").count(),
-        3,
-        "{status_after}"
-    );
+                let t4 = std::time::Instant::now();
+                let status_after = tokio::time::timeout(Duration::from_secs(60), status(policy))
+                    .await
+                    .expect("status did not hang");
+                eprintln!("DUMP status after [{:?}]: {status_after}", t4.elapsed());
+                assert!(third.contains("keptwhole"), "{third}");
+                assert!(!third.contains("slept then annotated"), "{third}");
+                assert_eq!(
+                    status_after.matches("timed out after 400ms").count(),
+                    3,
+                    "{status_after}"
+                );
 
-    std::env::remove_var(exomonad_actor::AFTER_TOOL_WAIT_ENV);
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                std::env::remove_var(exomonad_actor::AFTER_TOOL_WAIT_ENV);
+            })
+        })
+        .await;
 }
 
 /// The root uses the run graph, and its spec is still the first
@@ -1205,36 +1258,39 @@ async fn the_root_finds_its_spec_by_convention_with_no_key_naming_it() {
 #[tokio::test]
 async fn the_repair_tools_are_never_annotated_and_cells_reach_the_slot_unmatched() {
     let campaign = start_with_slot("keptwhole", ANNOTATES).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let reloaded = reload(policy).await;
-    assert!(reloaded.contains("swapped"), "{reloaded}");
-    assert!(!reloaded.contains("[after-tool]"), "{reloaded}");
+                let reloaded = reload(policy).await;
+                assert!(reloaded.contains("swapped"), "{reloaded}");
+                assert!(!reloaded.contains("[after-tool]"), "{reloaded}");
 
-    let status_before_cell = status(policy).await;
-    assert!(
-        !status_before_cell.contains("[after-tool]"),
-        "{status_before_cell}"
-    );
+                let status_before_cell = status(policy).await;
+                assert!(
+                    !status_before_cell.contains("[after-tool]"),
+                    "{status_before_cell}"
+                );
 
-    let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
-    assert_eq!(cell["items"][0]["output"], "2", "{cell}");
+                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                assert_eq!(cell["items"][0]["output"], "2", "{cell}");
 
-    // The cell's receipt still reached the slot — as `haskell`, which this
-    // spec's `noted` does not match — so the log carries a silent invocation.
-    let status_after_cell = status(policy).await;
-    assert!(
-        status_after_cell.contains("after-tool#1 haskell"),
-        "{status_after_cell}"
-    );
-    assert!(status_after_cell.contains("silent"), "{status_after_cell}");
+                // The cell's receipt still reached the slot — as `haskell`, which this
+                // spec's `noted` does not match — so the log carries a silent invocation.
+                let status_after_cell = status(policy).await;
+                assert!(
+                    status_after_cell.contains("after-tool#1 haskell"),
+                    "{status_after_cell}"
+                );
+                assert!(status_after_cell.contains("silent"), "{status_after_cell}");
 
-    // And the slot is installed and working, so none of that was vacuous.
-    assert!(probe(policy).await.contains("twice before"));
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                // And the slot is installed and working, so none of that was vacuous.
+                assert!(probe(policy).await.contains("twice before"));
+            })
+        })
+        .await;
 }
 
 /// A haskell cell's finished receipt reaches the after-tool slot exactly once,
@@ -1243,24 +1299,27 @@ async fn the_repair_tools_are_never_annotated_and_cells_reach_the_slot_unmatched
 #[tokio::test]
 async fn a_haskell_cells_receipt_reaches_the_after_tool_slot_as_haskell() {
     let campaign = start_with_cell_slot(ANNOTATES).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
-    let output = cell["items"][0]["output"].as_str().unwrap_or_default();
-    assert!(output.contains('2'), "{cell}");
-    assert!(output.contains("[after-tool]"), "{cell}");
-    assert!(
-        output.contains("asked about this topic twice before"),
-        "{cell}"
-    );
+                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                let output = cell["items"][0]["output"].as_str().unwrap_or_default();
+                assert!(output.contains('2'), "{cell}");
+                assert!(output.contains("[after-tool]"), "{cell}");
+                assert!(
+                    output.contains("asked about this topic twice before"),
+                    "{cell}"
+                );
 
-    let status = status(policy).await;
-    assert!(status.contains("after-tool#1 haskell"), "{status}");
-    assert!(status.contains("annotated"), "{status}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                let status = status(policy).await;
+                assert!(status.contains("after-tool#1 haskell"), "{status}");
+                assert!(status.contains("annotated"), "{status}");
+            })
+        })
+        .await;
 }
 
 /// Abstention on a cell is silent, exactly as it is for a hosted tool call:
@@ -1269,21 +1328,24 @@ async fn a_haskell_cells_receipt_reaches_the_after_tool_slot_as_haskell() {
 #[tokio::test]
 async fn an_abstained_cell_receipt_is_delivered_untouched() {
     let campaign = start_with_cell_slot(ABSTAINS).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
-    assert_eq!(cell["items"][0]["output"], "2", "{cell}");
+                let cell = dispatch_haskell_script(policy, "inspectFull (1 + 1 :: Int)").await;
+                assert_eq!(cell["items"][0]["output"], "2", "{cell}");
 
-    let status = status(policy).await;
-    assert!(status.contains("after-tool#1 haskell"), "{status}");
-    assert!(
-        status.contains("abstained: the result is already minimal"),
-        "{status}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                let status = status(policy).await;
+                assert!(status.contains("after-tool#1 haskell"), "{status}");
+                assert!(
+                    status.contains("abstained: the result is already minimal"),
+                    "{status}"
+                );
+            })
+        })
+        .await;
 }
 
 /// A slot's own tool use never triggers a slot. This one runs the very
@@ -1292,29 +1354,32 @@ async fn an_abstained_cell_receipt_is_delivered_untouched() {
 #[tokio::test]
 async fn a_slots_own_tool_use_does_not_bring_it_back_round_on_itself() {
     let campaign = start_with_slot("keptwhole", REENTERS).await;
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let result = probe(policy).await;
-    assert!(
-        result.contains("the slot ran the tool body and got: keptwhole"),
-        "{result}"
-    );
-    assert_eq!(
-        result.matches("[after-tool]").count(),
-        1,
-        "one boundary, one annotation: {result}"
-    );
+                let result = probe(policy).await;
+                assert!(
+                    result.contains("the slot ran the tool body and got: keptwhole"),
+                    "{result}"
+                );
+                assert_eq!(
+                    result.matches("[after-tool]").count(),
+                    1,
+                    "one boundary, one annotation: {result}"
+                );
 
-    let status = status(policy).await;
-    assert_eq!(
-        status.matches("after-tool#").count(),
-        1,
-        "one call, one invocation: {status}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                let status = status(policy).await;
+                assert_eq!(
+                    status.matches("after-tool#").count(),
+                    1,
+                    "one call, one invocation: {status}"
+                );
+            })
+        })
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,7 +1437,11 @@ async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResiden
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
     campaign.acknowledge_native_spawn(&child);
     child
@@ -1456,61 +1525,64 @@ async fn start_nested() -> TestCampaign {
 async fn a_nested_shell_record_declares_its_tools_in_place_and_both_halves_answer() {
     use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
-    let mut campaign = start_nested().await;
-    let policy = campaign.root_installation.policy.clone();
+    let campaign = start_nested().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
 
-    // (1) The declared surface: the inner record's tools, in the inner
-    // record's own field order, at the position the `shell` field occupies —
-    // and `shell` itself is not a tool.
-    let declared: Vec<&str> = policy.tools().iter().map(|tool| tool.name()).collect();
-    let index = |name: &str| {
-        declared
-            .iter()
-            .position(|declared| *declared == name)
-            .unwrap_or_else(|| panic!("{name} is not declared: {declared:?}"))
-    };
+                // (1) The declared surface: the inner record's tools, in the inner
+                // record's own field order, at the position the `shell` field occupies —
+                // and `shell` itself is not a tool.
+                let declared: Vec<&str> = policy.tools().iter().map(|tool| tool.name()).collect();
+                let index = |name: &str| {
+                    declared
+                        .iter()
+                        .position(|declared| *declared == name)
+                        .unwrap_or_else(|| panic!("{name} is not declared: {declared:?}"))
+                };
 
-    let bash = index("bash");
-    let cancel = index("cancel_command");
-    let probe_at = index("probe");
-    assert!(bash < cancel, "{declared:?}");
-    assert!(cancel < probe_at, "{declared:?}");
-    assert!(!declared.contains(&"exec_command"), "{declared:?}");
-    assert!(!declared.contains(&"shell"), "{declared:?}");
+                let bash = index("bash");
+                let cancel = index("cancel_command");
+                let probe_at = index("probe");
+                assert!(bash < cancel, "{declared:?}");
+                assert!(cancel < probe_at, "{declared:?}");
+                assert!(!declared.contains(&"exec_command"), "{declared:?}");
+                assert!(!declared.contains(&"shell"), "{declared:?}");
 
-    // (2) The record's own tool answers.
-    assert!(probe(policy.as_ref()).await.contains("one"));
+                // (2) The record's own tool answers.
+                assert!(probe(policy.as_ref()).await.contains("one"));
 
-    // (3) The nested structured tool answers, through the shell record's own handler
-    // and the campaign's shared command owner. The command backend is the
-    // test one every other hosted command test uses, so what is checked here
-    // is that a nested `bash` reaches it and returns its output — not what a
-    // real shell would print.
-    let script = "echo nested-ok";
-    let dispatch = {
-        let policy = policy.clone();
-        tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
-            name: "bash".into(),
-            arguments: ToolArguments::Structured(serde_json::json!({"cmd":script})),
-            context: Some(ToolInvocationContext::external(
-                "nested-thread".into(),
-                "nested-turn".into(),
-                "nested-bash".into(),
-                Some("nested-bash".into()),
-                None,
-            )),
-        }))
-    };
-    let backend = super::command_test_support::TestCommands::completed("nested-ok");
-    super::command_jobs_tests::backend_request(&mut campaign)
-        .await
-        .supply(Ok(backend.clone()));
-    let receipt = dispatch.await.unwrap().unwrap();
-    assert_eq!(receipt["status"], "committed", "{receipt}");
-    let output = receipt["items"][0]["output"].as_str().unwrap();
-    assert!(output.contains("nested-ok"), "{receipt}");
-    assert_eq!(backend.executions(), 1, "{receipt}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                // (3) The nested structured tool answers, through the shell record's own handler
+                // and the campaign's shared command owner. The command backend is the
+                // test one every other hosted command test uses, so what is checked here
+                // is that a nested `bash` reaches it and returns its output — not what a
+                // real shell would print.
+                let script = "echo nested-ok";
+                let dispatch = {
+                    let policy = policy.clone();
+                    tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
+                        name: "bash".into(),
+                        arguments: ToolArguments::Structured(serde_json::json!({"cmd":script})),
+                        context: Some(ToolInvocationContext::external(
+                            "nested-thread".into(),
+                            "nested-turn".into(),
+                            "nested-bash".into(),
+                            Some("nested-bash".into()),
+                            None,
+                        )),
+                    }))
+                };
+                let backend = super::command_test_support::TestCommands::completed("nested-ok");
+                super::command_jobs_tests::backend_request(campaign)
+                    .await
+                    .supply(Ok(backend.clone()));
+                let receipt = dispatch.await.unwrap().unwrap();
+                assert_eq!(receipt["status"], "committed", "{receipt}");
+                let output = receipt["items"][0]["output"].as_str().unwrap();
+                assert!(output.contains("nested-ok"), "{receipt}");
+                assert_eq!(backend.executions(), 1, "{receipt}");
+            })
+        })
+        .await;
 }

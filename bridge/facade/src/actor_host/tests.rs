@@ -29,15 +29,13 @@ async fn finished_application_task() -> tokio::task::JoinHandle<Result<(), Strin
 #[tokio::test]
 async fn application_handoff_keeps_both_typed_failures_and_primary_source() {
     let owners = Arc::new(Mutex::new(HashMap::new()));
-    assert!(
-        handoff_application_owners(
-            owners.clone(),
-            finished_application_task().await,
-            Ok(()),
-            Ok(()),
-        )
-        .is_ok()
-    );
+    assert!(handoff_application_owners(
+        owners.clone(),
+        finished_application_task().await,
+        Ok(()),
+        Ok(()),
+    )
+    .is_ok());
 
     let cleanup_only = handoff_application_owners(
         owners.clone(),
@@ -130,15 +128,18 @@ async fn application_handoff_keeps_both_typed_failures_and_primary_source() {
 #[tokio::test]
 async fn unbounded_repository_event_await_joins_before_actor_retirement() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let baseline = campaign
-        .forest
-        .measurement_snapshot()
-        .and_then(|snapshot| snapshot.parked)
-        .expect("bootstrapped resident measurement");
-    let actor = campaign.actor.clone();
-    let policy = campaign.root_installation.policy.clone();
-    let invocation = tokio::spawn(async move {
-        policy
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let baseline = campaign
+                    .forest
+                    .measurement_snapshot()
+                    .and_then(|snapshot| snapshot.parked)
+                    .expect("bootstrapped resident measurement");
+                let actor = campaign.actor.clone();
+                let policy = campaign.root_installation.policy.clone();
+                let invocation = tokio::spawn(async move {
+                    policy
             .dispatch_json_boxed(ToolInvocation {
                 context: None,
                 name: exomonad_actor::HASKELL_TOOL.into(),
@@ -149,55 +150,61 @@ async fn unbounded_repository_event_await_joins_before_actor_retirement() {
                 ),
             })
             .await
-    });
+                });
 
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if campaign
-                .forest
-                .measurement_snapshot()
-                .and_then(|snapshot| snapshot.parked)
-                .is_some_and(|parked| parked > baseline)
-            {
-                break;
-            }
-            assert!(!invocation.is_finished(), "Event await never parked");
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("Event await did not park");
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        if campaign
+                            .forest
+                            .measurement_snapshot()
+                            .and_then(|snapshot| snapshot.parked)
+                            .is_some_and(|parked| parked > baseline)
+                        {
+                            break;
+                        }
+                        assert!(!invocation.is_finished(), "Event await never parked");
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("Event await did not park");
 
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        actor.shutdown(ActorTerminal {
-            kind: ActorExitKind::Cancelled,
-            summary: "retire parked repository event await".into(),
-            diagnostic: None,
-        }),
-    )
-    .await
-    .expect("actor retirement waited forever for Event await")
-    .expect("actor shutdown request");
-    tokio::time::timeout(Duration::from_secs(30), invocation)
-        .await
-        .expect("Event invocation did not settle after retirement")
-        .expect("Event invocation task panicked")
-        .expect_err("cancelled Event await must not complete successfully");
-    tokio::time::timeout(Duration::from_secs(30), campaign.hosted)
-        .await
-        .expect("hosted actor did not settle")
-        .expect("hosted actor task panicked");
-    assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Cancelled);
-    assert!(actor.terminal().cleanup().unwrap().is_confirmed());
-    assert_eq!(
-        campaign
-            .forest
-            .measurement_snapshot()
-            .and_then(|snapshot| snapshot.parked),
-        Some(0),
-        "retirement left an Event continuation parked"
-    );
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    actor.shutdown(ActorTerminal {
+                        kind: ActorExitKind::Cancelled,
+                        summary: "retire parked repository event await".into(),
+                        diagnostic: None,
+                    }),
+                )
+                .await
+                .expect("actor retirement waited forever for Event await")
+                .expect("actor shutdown request");
+                tokio::time::timeout(Duration::from_secs(30), invocation)
+                    .await
+                    .expect("Event invocation did not settle after retirement")
+                    .expect("Event invocation task panicked")
+                    .expect_err("cancelled Event await must not complete successfully");
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    campaign.observe_hosted_completion(),
+                )
+                .await
+                .expect("hosted actor did not settle")
+                .expect("hosted actor task panicked");
+                assert_eq!(actor.terminal().wait().await.kind, ActorExitKind::Cancelled);
+                assert!(actor.terminal().cleanup().unwrap().is_confirmed());
+                assert_eq!(
+                    campaign
+                        .forest
+                        .measurement_snapshot()
+                        .and_then(|snapshot| snapshot.parked),
+                    Some(0),
+                    "retirement left an Event continuation parked"
+                );
+            })
+        })
+        .await;
 }
 
 #[test]
@@ -316,11 +323,9 @@ fn driver_sources_keep_policy_private_and_preserve_explicit_public_modules() {
         assert!(!notebook.contains("import AgentSpec"));
         assert!(!notebook.contains("import qualified AgentSpec"));
         assert!(!sources.bootstrap_preamble.contains("ConfiguredSpec"));
-        assert!(
-            !sources
-                .bootstrap_preamble
-                .contains("Project.BootstrapWitness")
-        );
+        assert!(!sources
+            .bootstrap_preamble
+            .contains("Project.BootstrapWitness"));
     }
 }
 
@@ -364,16 +369,12 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
             "ConfiguredSpec" | "Project.BootstrapWitness"
         )
     }));
-    assert!(
-        bootstrap
-            .preamble
-            .contains("import Project.BootstrapWitness")
-    );
-    assert!(
-        !bootstrap
-            .preamble
-            .contains("import qualified ConfiguredSpec")
-    );
+    assert!(bootstrap
+        .preamble
+        .contains("import Project.BootstrapWitness"));
+    assert!(!bootstrap
+        .preamble
+        .contains("import qualified ConfiguredSpec"));
     let sources = driver_sources(
         Path::new("unused-live-actors"),
         Some(&invalid),
@@ -522,13 +523,11 @@ fn later_host_requires_missing_journals_when_prior_evidence_exists() {
         actor_journal_mode(incarnation, &binding, &actors, &run).unwrap(),
         JournalOpenMode::Resume
     );
-    assert!(
-        exomonad_actor::ActorRecoveryJournal::open_existing(
-            &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
-            "actor-lifecycle.v2.jsonl"
-        )
-        .is_err()
-    );
+    assert!(exomonad_actor::ActorRecoveryJournal::open_existing(
+        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
+        "actor-lifecycle.v2.jsonl"
+    )
+    .is_err());
     assert_eq!(
         run_journal_mode(incarnation, &binding, &run, true).unwrap(),
         JournalOpenMode::Resume
@@ -593,11 +592,9 @@ fn embedded_application_binding_does_not_require_native_launch_proof() {
 #[test]
 fn default_capabilities_include_journal() {
     let capabilities = exomonad_actor::ActorCapabilities::default();
-    assert!(
-        capabilities
-            .effect_keys()
-            .contains(&exomonad_actor::ActorEffectKey::Journal)
-    );
+    assert!(capabilities
+        .effect_keys()
+        .contains(&exomonad_actor::ActorEffectKey::Journal));
     assert!(capabilities.haskell_effects_type().contains("Journal"));
 }
 
@@ -654,59 +651,69 @@ fn typed_site_surface_callers_have_returning_contracts() {
 
 #[tokio::test]
 async fn roster_observation_preserves_host_and_sibling_workbenches() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/roster_setup.hs"),
-    )
-    .await;
-    assert_eq!(setup["status"], "committed", "{setup:?}");
-    let mut children = Vec::new();
-    while children.len() < 2 {
-        let child =
-            campaign
-                .next_deployment("roster child admission", Duration::from_secs(30), |event| {
-                    match event {
-                        LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                        LocalResidentDeployment::Retired { actor, terminal } => {
-                            panic!("{actor:?}: {terminal:?}")
-                        }
-                        other => Err(other),
-                    }
-                })
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let setup = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/roster_setup.hs",
+                    ),
+                )
                 .await;
-        children.push(child);
-    }
-    for policy in
-        std::iter::once(root.as_ref()).chain(children.iter().map(|child| child.policy.as_ref()))
-    {
-        let observed = dispatch_haskell_script(
-            policy,
-            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/roster_observe.hs"),
-        )
+                assert_eq!(setup["status"], "committed", "{setup:?}");
+                let mut children = Vec::new();
+                while children.len() < 2 {
+                    let child = campaign
+                        .next_deployment(
+                            "roster child admission",
+                            Duration::from_secs(30),
+                            |event| match event {
+                                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                                LocalResidentDeployment::Retired { actor, terminal } => {
+                                    panic!("{actor:?}: {terminal:?}")
+                                }
+                                other => Err(other),
+                            },
+                        )
+                        .await;
+                    children.push(child);
+                }
+                for policy in std::iter::once(root.as_ref())
+                    .chain(children.iter().map(|child| child.policy.as_ref()))
+                {
+                    let observed = dispatch_haskell_script(
+                        policy,
+                        &tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/roster_observe.hs",
+                        ),
+                    )
+                    .await;
+                    assert_eq!(observed["status"], "committed", "{observed:?}");
+                    let roster_type = dispatch_lookup(policy, &["AgentRosterEntry"]).await;
+                    assert!(
+                        roster_type["items"][0]["output"]
+                            .as_str()
+                            .is_some_and(|output| output.contains("rosterActorId")),
+                        "{roster_type:?}"
+                    );
+                    let next = dispatch_haskell_script(policy, "40 + 2 :: Int").await;
+                    assert_eq!(next["status"], "committed", "{next:?}");
+                    assert_eq!(next["items"][0]["output"], "42", "{next:?}");
+                }
+                let status = dispatch_status(root.as_ref(), "detailed").await;
+                assert_ne!(status["status"], "failed", "{status:?}");
+            })
+        })
         .await;
-        assert_eq!(observed["status"], "committed", "{observed:?}");
-        let roster_type = dispatch_lookup(policy, &["AgentRosterEntry"]).await;
-        assert!(
-            roster_type["items"][0]["output"]
-                .as_str()
-                .is_some_and(|output| output.contains("rosterActorId")),
-            "{roster_type:?}"
-        );
-        let next = dispatch_haskell_script(policy, "40 + 2 :: Int").await;
-        assert_eq!(next["status"], "committed", "{next:?}");
-        assert_eq!(next["items"][0]["output"], "42", "{next:?}");
-    }
-    let status = dispatch_status(root.as_ref(), "detailed").await;
-    assert_ne!(status["status"], "failed", "{status:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
 async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let target = campaign
         .forest
         .new_workbench(
@@ -773,7 +780,7 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         })
         .await
         .unwrap();
-    (&mut campaign.hosted).await.unwrap();
+    campaign.observe_hosted_completion().await.unwrap();
     let (successor, task) = campaign
         .forest
         .recover_program_root(
@@ -855,13 +862,16 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         .await
         .unwrap_err();
     assert!(conflict.to_string().contains("different Haskell input"));
-    campaign.forest.shutdown().await;
+    campaign.observe_forest_shutdown().await;
     task.await.unwrap();
+
+    })).await;
 }
 
 #[tokio::test]
 async fn actor_sources_capture_current_then_deliver_every_publication_and_settlement() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
@@ -926,85 +936,99 @@ async fn actor_sources_capture_current_then_deliver_every_publication_and_settle
     .await;
     assert_eq!(collected["status"], "committed", "{collected:?}");
     assert!(collected.to_string().contains("True"), "{collected:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
 async fn progress_retains_closures_and_watch_snapshots_across_calls() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/progress_setup.hs"),
-    )
-    .await;
-    assert_eq!(setup["status"], "committed", "{setup:?}");
-    let child = campaign
-        .next_deployment(
-            "progress child policy installation",
-            Duration::from_secs(30),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
-                other => Err(other),
-            },
-        )
-        .await;
+    let campaign = test_campaign::TestCampaign::start().await;
     campaign
-        .next_deployment(
-            "progress request activation",
-            Duration::from_secs(30),
-            |event| match event {
-                LocalResidentDeployment::SessionReady { .. } => Ok(()),
-                other => Err(other),
-            },
-        )
-        .await;
-    let first = dispatch_haskell_script(
-        child.policy.as_ref(),
-        "reportProgress (ProgressNote 1 (+ sessionInput))",
-    )
-    .await;
-    assert_eq!(first["status"], "committed", "{first:?}");
-    campaign.await_watch_ready().await;
-    let second = dispatch_haskell_script(
-        child.policy.as_ref(),
-        "reportProgress (ProgressNote 2 (* sessionInput))",
-    )
-    .await;
-    assert_eq!(second["status"], "committed", "{second:?}");
-    let captured = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/progress_observe.hs"),
-    )
-    .await;
-    assert_eq!(captured["status"], "committed", "{captured:?}");
-    assert!(captured.to_string().contains("(13, 30)"), "{captured:?}");
-    assert_eq!(captured["items"][7]["output"], "40", "{captured:?}");
-    let reply = dispatch_haskell_script(child.policy.as_ref(), "respond (42 :: Int)").await;
-    assert_eq!(reply["status"], "replied", "{reply:?}");
-    let stopped = dispatch_haskell_script(root.as_ref(), "stopAgent worker").await;
-    assert_eq!(stopped["status"], "committed", "{stopped:?}");
-    let retained = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/progress_retained.hs"),
-    )
-    .await;
-    assert_eq!(retained["status"], "committed", "{retained:?}");
-    assert_eq!(retained["items"][1]["output"], "True", "{retained:?}");
-    assert_eq!(retained["items"][2]["output"], "15", "{retained:?}");
-    assert_eq!(retained["items"][4]["output"], "50", "{retained:?}");
-    assert_eq!(retained["items"][6]["output"], "16", "{retained:?}");
-    campaign
-        .actor
-        .shutdown(ActorTerminal {
-            kind: ActorExitKind::Cancelled,
-            summary: "progress test complete".into(),
-            diagnostic: None,
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let setup = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/progress_setup.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(setup["status"], "committed", "{setup:?}");
+                let child = campaign
+                    .next_deployment(
+                        "progress child policy installation",
+                        Duration::from_secs(30),
+                        |event| match event {
+                            LocalResidentDeployment::PolicyInstalled(installation) => {
+                                Ok(installation)
+                            }
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                campaign
+                    .next_deployment(
+                        "progress request activation",
+                        Duration::from_secs(30),
+                        |event| match event {
+                            LocalResidentDeployment::SessionReady { .. } => Ok(()),
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                let first = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "reportProgress (ProgressNote 1 (+ sessionInput))",
+                )
+                .await;
+                assert_eq!(first["status"], "committed", "{first:?}");
+                campaign.await_watch_ready().await;
+                let second = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "reportProgress (ProgressNote 2 (* sessionInput))",
+                )
+                .await;
+                assert_eq!(second["status"], "committed", "{second:?}");
+                let captured = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/progress_observe.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(captured["status"], "committed", "{captured:?}");
+                assert!(captured.to_string().contains("(13, 30)"), "{captured:?}");
+                assert_eq!(captured["items"][7]["output"], "40", "{captured:?}");
+                let reply =
+                    dispatch_haskell_script(child.policy.as_ref(), "respond (42 :: Int)").await;
+                assert_eq!(reply["status"], "replied", "{reply:?}");
+                let stopped = dispatch_haskell_script(root.as_ref(), "stopAgent worker").await;
+                assert_eq!(stopped["status"], "committed", "{stopped:?}");
+                let retained = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/progress_retained.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(retained["status"], "committed", "{retained:?}");
+                assert_eq!(retained["items"][1]["output"], "True", "{retained:?}");
+                assert_eq!(retained["items"][2]["output"], "15", "{retained:?}");
+                assert_eq!(retained["items"][4]["output"], "50", "{retained:?}");
+                assert_eq!(retained["items"][6]["output"], "16", "{retained:?}");
+                campaign
+                    .actor
+                    .shutdown(ActorTerminal {
+                        kind: ActorExitKind::Cancelled,
+                        summary: "progress test complete".into(),
+                        diagnostic: None,
+                    })
+                    .await
+                    .unwrap();
+                campaign.observe_hosted_completion().await.unwrap();
+            })
         })
-        .await
-        .unwrap();
-    campaign.hosted.await.unwrap();
+        .await;
 }
 
 fn durable_root(actor: ActorRef) -> exomonad_actor::DurableActorRecord {
@@ -1444,7 +1468,8 @@ fn the_root_may_build_in_its_own_worktrees_but_not_in_a_child_s() {
 /// in the supervisor's tracked inbox.
 #[tokio::test]
 async fn fresh_context_child_reaches_its_supervisor_through_parent_agent() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root_id = campaign.actor.identity();
@@ -1546,13 +1571,13 @@ async fn fresh_context_child_reaches_its_supervisor_through_parent_agent() {
         observed.to_string().contains("NotificationAccepted"),
         "{observed:?}"
     );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
 async fn notification_admission_and_poll_preserve_typed_request_bindings() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let setup = dispatch_haskell_script(
@@ -1851,8 +1876,7 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
         );
     }
     campaign.assert_no_deployment("idle admission fabricated an activation", |_| true);
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// Evidence from run 8a782b2b: while a typed request was pending for an
@@ -1864,93 +1888,102 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
 /// resolve the request while it stands.
 #[tokio::test]
 async fn held_native_delivery_preserves_typed_request_bindings() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let setup = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/notification_setup.hs"),
-    )
-    .await;
-    assert_eq!(setup["status"], "committed", "{setup:?}");
-    let child = campaign
-        .next_deployment(
-            "recipient policy",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                other => Err(other),
-            },
-        )
-        .await;
-    let activation = campaign
-        .next_deployment(
-            "original request activation",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::SessionReady { activation } => Ok(activation),
-                other => Err(other),
-            },
-        )
-        .await;
-    assert_eq!(activation.id.actor(), child.actor.identity());
-    let directory = tempfile::tempdir().unwrap();
-    let inbox = ActorInbox::open(
-        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
-        "rows-tree/deep/rows",
-        "checkpoint-tree/deep/cursor",
-    )
-    .unwrap();
-    let inbox_key = "held-delivery-inbox";
-    let policy = root.clone();
-    let send = tokio::spawn(async move {
-        dispatch_haskell_script(
-            policy.as_ref(),
-            "Right receipt <- sendMessage worker \"one-way notice\"",
-        )
-        .await
-    });
-    let command = campaign
-        .next_deployment(
-            "notification send",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::NotificationSend(command) => Ok(command),
-                other => Err(other),
-            },
-        )
-        .await;
-    assert_eq!(command.target(), child.actor.identity());
-    // Admit the row but never advance it past `Accepted` — no poll, no
-    // `begin_tracked_delivery`, no `submitted()`/`presented()`. The row sits
-    // exactly where a stuck native submission would leave it.
-    admit_notification(&command, inbox_key.into(), &inbox);
-    let sent = send.await.unwrap();
-    assert_eq!(sent["status"], "committed", "{sent:?}");
-    campaign.assert_no_deployment(
-        "a held delivery must not itself create an assignment/wake obligation",
-        |_| true,
-    );
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let output_store =
+                    display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let setup = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/notification_setup.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(setup["status"], "committed", "{setup:?}");
+                let child = campaign
+                    .next_deployment("recipient policy", Duration::from_secs(120), |event| {
+                        match event {
+                            LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                            other => Err(other),
+                        }
+                    })
+                    .await;
+                let activation = campaign
+                    .next_deployment(
+                        "original request activation",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::SessionReady { activation } => Ok(activation),
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                assert_eq!(activation.id.actor(), child.actor.identity());
+                let directory = tempfile::tempdir().unwrap();
+                let inbox = ActorInbox::open(
+                    &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path())
+                        .unwrap(),
+                    "rows-tree/deep/rows",
+                    "checkpoint-tree/deep/cursor",
+                )
+                .unwrap();
+                let inbox_key = "held-delivery-inbox";
+                let policy = root.clone();
+                let send = tokio::spawn(async move {
+                    dispatch_haskell_script(
+                        policy.as_ref(),
+                        "Right receipt <- sendMessage worker \"one-way notice\"",
+                    )
+                    .await
+                });
+                let command = campaign
+                    .next_deployment("notification send", Duration::from_secs(120), |event| {
+                        match event {
+                            LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                            other => Err(other),
+                        }
+                    })
+                    .await;
+                assert_eq!(command.target(), child.actor.identity());
+                // Admit the row but never advance it past `Accepted` — no poll, no
+                // `begin_tracked_delivery`, no `submitted()`/`presented()`. The row sits
+                // exactly where a stuck native submission would leave it.
+                admit_notification(&command, inbox_key.into(), &inbox);
+                let sent = send.await.unwrap();
+                assert_eq!(sent["status"], "committed", "{sent:?}");
+                campaign.assert_no_deployment(
+                    "a held delivery must not itself create an assignment/wake obligation",
+                    |_| true,
+                );
 
-    // The typed request `child` is holding ("original assignment") is
-    // untouched by the held delivery: `respond` still resolves it.
-    let reply =
-        dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
-    assert_eq!(reply["status"], "replied", "{reply:?}");
-    let answer = campaign
-        .drive_actor_output(
-            &output_store,
-            dispatch_haskell_script(root.as_ref(), "_ <- pollResponse answer >>= display . show"),
-        )
+                // The typed request `child` is holding ("original assignment") is
+                // untouched by the held delivery: `respond` still resolves it.
+                let reply = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "respond (sessionInput :: Text)",
+                )
+                .await;
+                assert_eq!(reply["status"], "replied", "{reply:?}");
+                let answer = campaign
+                    .drive_actor_output(
+                        &output_store,
+                        dispatch_haskell_script(
+                            root.as_ref(),
+                            "_ <- pollResponse answer >>= display . show",
+                        ),
+                    )
+                    .await;
+                assert_eq!(answer["status"], "committed", "{answer:?}");
+                assert!(
+                    answer.to_string().contains("original assignment"),
+                    "{answer:?}"
+                );
+            })
+        })
         .await;
-    assert_eq!(answer["status"], "committed", "{answer:?}");
-    assert!(
-        answer.to_string().contains("original assignment"),
-        "{answer:?}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
 }
 
 /// Companion to [`held_native_delivery_preserves_typed_request_bindings`]:
@@ -1961,78 +1994,84 @@ async fn held_native_delivery_preserves_typed_request_bindings() {
 /// `getInfo` alone cannot see its top level.
 #[tokio::test]
 async fn lookup_during_held_native_delivery_returns_respond_signature() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/notification_setup.hs"),
-    )
-    .await;
-    assert_eq!(setup["status"], "committed", "{setup:?}");
-    let child = campaign
-        .next_deployment(
-            "recipient policy",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                other => Err(other),
-            },
-        )
-        .await;
+    let campaign = test_campaign::TestCampaign::start().await;
     campaign
-        .next_deployment(
-            "original request activation",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::SessionReady { activation } => Ok(activation),
-                other => Err(other),
-            },
-        )
-        .await;
-    let directory = tempfile::tempdir().unwrap();
-    let inbox = ActorInbox::open(
-        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
-        "rows-tree/deep/rows",
-        "checkpoint-tree/deep/cursor",
-    )
-    .unwrap();
-    let inbox_key = "lookup-held-delivery-inbox";
-    let policy = root.clone();
-    let send = tokio::spawn(async move {
-        dispatch_haskell_script(
-            policy.as_ref(),
-            "Right receipt <- sendMessage worker \"one-way notice\"",
-        )
-        .await
-    });
-    let command = campaign
-        .next_deployment(
-            "notification send",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::NotificationSend(command) => Ok(command),
-                other => Err(other),
-            },
-        )
-        .await;
-    admit_notification(&command, inbox_key.into(), &inbox);
-    let sent = send.await.unwrap();
-    assert_eq!(sent["status"], "committed", "{sent:?}");
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let setup = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/notification_setup.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(setup["status"], "committed", "{setup:?}");
+                let child = campaign
+                    .next_deployment("recipient policy", Duration::from_secs(120), |event| {
+                        match event {
+                            LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                            other => Err(other),
+                        }
+                    })
+                    .await;
+                campaign
+                    .next_deployment(
+                        "original request activation",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::SessionReady { activation } => Ok(activation),
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                let directory = tempfile::tempdir().unwrap();
+                let inbox = ActorInbox::open(
+                    &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path())
+                        .unwrap(),
+                    "rows-tree/deep/rows",
+                    "checkpoint-tree/deep/cursor",
+                )
+                .unwrap();
+                let inbox_key = "lookup-held-delivery-inbox";
+                let policy = root.clone();
+                let send = tokio::spawn(async move {
+                    dispatch_haskell_script(
+                        policy.as_ref(),
+                        "Right receipt <- sendMessage worker \"one-way notice\"",
+                    )
+                    .await
+                });
+                let command = campaign
+                    .next_deployment("notification send", Duration::from_secs(120), |event| {
+                        match event {
+                            LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                            other => Err(other),
+                        }
+                    })
+                    .await;
+                admit_notification(&command, inbox_key.into(), &inbox);
+                let sent = send.await.unwrap();
+                assert_eq!(sent["status"], "committed", "{sent:?}");
 
-    for name in ["respond", "sessionReply", "sessionInput"] {
-        let found = dispatch_lookup(child.policy.as_ref(), &[name]).await;
-        assert!(
-            !found.to_string().to_lowercase().contains("no match"),
-            "expected {name} to resolve while the request is pending: {found:?}"
-        );
-    }
+                for name in ["respond", "sessionReply", "sessionInput"] {
+                    let found = dispatch_lookup(child.policy.as_ref(), &[name]).await;
+                    assert!(
+                        !found.to_string().to_lowercase().contains("no match"),
+                        "expected {name} to resolve while the request is pending: {found:?}"
+                    );
+                }
 
-    // Settle the request so the campaign shuts down cleanly.
-    let reply =
-        dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput :: Text)").await;
-    assert_eq!(reply["status"], "replied", "{reply:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                // Settle the request so the campaign shuts down cleanly.
+                let reply = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "respond (sessionInput :: Text)",
+                )
+                .await;
+                assert_eq!(reply["status"], "replied", "{reply:?}");
+            })
+        })
+        .await;
 }
 
 /// A structured reply within the notice budget arrives whole: the notice is
@@ -2040,7 +2079,8 @@ async fn lookup_during_held_native_delivery_returns_respond_signature() {
 /// the child's result without asking for it again.
 #[tokio::test]
 async fn settlement_notice_carries_a_structured_reply_whole_within_budget() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
@@ -2091,114 +2131,139 @@ async fn settlement_notice_carries_a_structured_reply_whole_within_budget() {
             },
         )
         .await;
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
 async fn record_actor_dispatches_typed_routes_and_commits_state() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let result = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/record_actor.hs"),
-    )
-    .await;
-    assert_eq!(result["status"], "committed", "{result:?}");
-    for item in result["items"].as_array().unwrap() {
-        assert_eq!(item["status"], "committed", "{result:?}");
-    }
-    assert!(result.to_string().contains("True"), "{result:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let result = dispatch_haskell_script(
+                    campaign.root_installation.policy.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/record_actor.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(result["status"], "committed", "{result:?}");
+                for item in result["items"].as_array().unwrap() {
+                    assert_eq!(item["status"], "committed", "{result:?}");
+                }
+                assert!(result.to_string().contains("True"), "{result:?}");
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn record_try_send_reports_mailbox_admission_without_waiting_for_handler() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        dispatch_haskell_script(
-            campaign.root_installation.policy.as_ref(),
-            &tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host/record_actor_try_send.hs",
-            ),
-        ),
-    )
-    .await
-    .expect("self admission must not wait on the receiver's handler");
-    assert_eq!(result["status"], "committed", "{result:?}");
-    assert_eq!(
-        result["items"].as_array().unwrap().last().unwrap()["output"],
-        "True",
-        "{result:?}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(120),
+                    dispatch_haskell_script(
+                        campaign.root_installation.policy.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/record_actor_try_send.hs",
+                        ),
+                    ),
+                )
+                .await
+                .expect("self admission must not wait on the receiver's handler");
+                assert_eq!(result["status"], "committed", "{result:?}");
+                assert_eq!(
+                    result["items"].as_array().unwrap().last().unwrap()["output"],
+                    "True",
+                    "{result:?}"
+                );
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn record_actor_sleep_keeps_mailbox_handlers_sequential() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let result = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/record_actor_sleep.hs"),
-    )
-    .await;
-    assert_eq!(result["status"], "committed", "{result:?}");
-    for item in result["items"].as_array().unwrap() {
-        assert_eq!(item["status"], "committed", "{result:?}");
-    }
-    assert!(result.to_string().contains("True"), "{result:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let result = dispatch_haskell_script(
+                    campaign.root_installation.policy.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/record_actor_sleep.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(result["status"], "committed", "{result:?}");
+                for item in result["items"].as_array().unwrap() {
+                    assert_eq!(item["status"], "committed", "{result:?}");
+                }
+                assert!(result.to_string().contains("True"), "{result:?}");
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn record_actor_nested_failure_reaches_interactive_owner_once() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/record_actor_nested_failure.hs",
-        ),
-    )
-    .await;
-    assert_eq!(setup["status"], "committed", "{setup:?}");
-    let notice = campaign
-        .next_deployment(
-            "nested-handler failure notice",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::NotificationSend(command) => Ok(command),
-                other => Err(other),
-            },
-        )
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let setup = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/record_actor_nested_failure.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(setup["status"], "committed", "{setup:?}");
+                let notice = campaign
+                    .next_deployment(
+                        "nested-handler failure notice",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::NotificationSend(command) => Ok(command),
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                assert_eq!(notice.target(), campaign.actor.identity());
+                assert!(notice.message().contains("nested-handler-probe"));
+                let available = dispatch_haskell_script(
+                    root.as_ref(),
+                    "R.call (managerValue (R.client manager)) ()",
+                )
+                .await;
+                assert_eq!(available["status"], "committed", "{available:?}");
+                assert_eq!(available["items"][0]["output"], "7", "{available:?}");
+                campaign.assert_no_deployment("duplicate failure notice", |_| true);
+            })
+        })
         .await;
-    assert_eq!(notice.target(), campaign.actor.identity());
-    assert!(notice.message().contains("nested-handler-probe"));
-    let available =
-        dispatch_haskell_script(root.as_ref(), "R.call (managerValue (R.client manager)) ()").await;
-    assert_eq!(available["status"], "committed", "{available:?}");
-    assert_eq!(available["items"][0]["output"], "7", "{available:?}");
-    campaign.assert_no_deployment("duplicate failure notice", |_| true);
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
 }
 
 #[tokio::test]
 async fn record_actor_explains_invalid_state_shapes() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/record_actor_invalid_shapes.hs",
-        ),
-    )
-    .await;
-    assert_eq!(setup["status"], "committed", "{setup:?}");
-    for source in [
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let setup = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/record_actor_invalid_shapes.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(setup["status"], "committed", "{setup:?}");
+                for source in [
         "invalid <- R.start (R.definition \"no-state\" Actor.ReadOnly (NoState (\\() -> pure ())))",
         "invalid <- R.start (R.definition \"two-states\" Actor.ReadOnly (TwoStates 0 False))",
     ] {
@@ -2212,34 +2277,42 @@ async fn record_actor_explains_invalid_state_shapes() {
             "{diagnostic}"
         );
     }
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn stateful_actor_drains_accepted_messages_into_its_retained_exit() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let result = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/stateful_drain.hs"),
-    )
-    .await;
-    assert_eq!(result["status"], "committed", "{result:?}");
-    for item in result["items"].as_array().unwrap() {
-        assert_eq!(item["status"], "committed", "{result:?}");
-    }
-    assert!(result.to_string().contains("True"), "{result:?}");
-    assert!(
-        !result.to_string().contains("preview unavailable"),
-        "{result:?}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let result = dispatch_haskell_script(
+                    campaign.root_installation.policy.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/stateful_drain.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(result["status"], "committed", "{result:?}");
+                for item in result["items"].as_array().unwrap() {
+                    assert_eq!(item["status"], "committed", "{result:?}");
+                }
+                assert!(result.to_string().contains("True"), "{result:?}");
+                assert!(
+                    !result.to_string().contains("preview unavailable"),
+                    "{result:?}"
+                );
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn stateful_handler_failure_after_effect_pauses_without_replay_or_closing_mailbox() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
@@ -2304,23 +2377,26 @@ async fn stateful_handler_failure_after_effect_pauses_without_replay_or_closing_
         assert_eq!(item["status"], "committed", "{repaired:?}");
     }
     assert!(!repaired.to_string().contains("False"), "{repaired:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
 async fn lifecycle_sources_follow_replacement_and_capture_retained_exit() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    for (stage, source) in
-        tidepool_testing::fixture_source("bridge/facade/src/actor_host/lifecycle_source.hs")
-            .split("-- STAGE --\n")
-            .enumerate()
-    {
-        eprintln!("lifecycle fixture stage {stage} starting");
-        let root = campaign.root_installation.policy.clone();
-        let run = dispatch_haskell_script(root.as_ref(), source);
-        tokio::pin!(run);
-        let result = tokio::time::timeout(Duration::from_secs(180), async {
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                for (stage, source) in tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/lifecycle_source.hs",
+                )
+                .split("-- STAGE --\n")
+                .enumerate()
+                {
+                    eprintln!("lifecycle fixture stage {stage} starting");
+                    let root = campaign.root_installation.policy.clone();
+                    let run = dispatch_haskell_script(root.as_ref(), source);
+                    tokio::pin!(run);
+                    let result = tokio::time::timeout(Duration::from_secs(180), async {
             tokio::select! {
                 result = &mut run => result,
                 command = campaign.next_deployment(
@@ -2337,23 +2413,25 @@ async fn lifecycle_sources_follow_replacement_and_capture_retained_exit() {
         })
         .await
         .expect("lifecycle fixture stage did not settle");
-        assert_eq!(result["status"], "committed", "stage {stage}: {result:?}");
-        for item in result["items"].as_array().unwrap() {
-            assert_eq!(item["status"], "committed", "stage {stage}: {result:?}");
-        }
-        assert!(
-            !result.to_string().contains("False"),
-            "stage {stage}: {result:?}"
-        );
-        eprintln!("lifecycle fixture stage {stage} completed");
-    }
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                    assert_eq!(result["status"], "committed", "stage {stage}: {result:?}");
+                    for item in result["items"].as_array().unwrap() {
+                        assert_eq!(item["status"], "committed", "stage {stage}: {result:?}");
+                    }
+                    assert!(
+                        !result.to_string().contains("False"),
+                        "stage {stage}: {result:?}"
+                    );
+                    eprintln!("lifecycle fixture stage {stage} completed");
+                }
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn stateful_replacement_rejects_changed_state_and_protocol_types() {
     let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let imports =
         dispatch_haskell_script(root.as_ref(), "import Tidepool.Actor hiding (Source)").await;
@@ -2382,48 +2460,58 @@ async fn stateful_replacement_rejects_changed_state_and_protocol_types() {
             "{diagnostic}"
         );
     }
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
 async fn stateful_replacement_preserves_owned_children() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let ownership = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/stateful_replacement_tree.hs",
-        ),
-    )
-    .await;
-    assert_eq!(ownership["status"], "committed", "{ownership:?}");
-    for item in ownership["items"].as_array().unwrap() {
-        assert_eq!(item["status"], "committed", "{ownership:?}");
-    }
-    assert!(
-        ownership.to_string().contains("True") && !ownership.to_string().contains("False"),
-        "{ownership:?}"
-    );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let ownership = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/stateful_replacement_tree.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(ownership["status"], "committed", "{ownership:?}");
+                for item in ownership["items"].as_array().unwrap() {
+                    assert_eq!(item["status"], "committed", "{ownership:?}");
+                }
+                assert!(
+                    ownership.to_string().contains("True")
+                        && !ownership.to_string().contains("False"),
+                    "{ownership:?}"
+                );
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn haskell_mailbox_preserves_state_and_opaque_replies_across_calls() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let result = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/mailbox_state.hs"),
-    )
-    .await;
-    assert_eq!(result["status"], "committed", "{result:?}");
-    for item in result["items"].as_array().unwrap() {
-        assert_eq!(item["status"], "committed", "{result:?}");
-    }
-    assert!(result.to_string().contains("True"), "{result:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let result = dispatch_haskell_script(
+                    campaign.root_installation.policy.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/mailbox_state.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(result["status"], "committed", "{result:?}");
+                for item in result["items"].as_array().unwrap() {
+                    assert_eq!(item["status"], "committed", "{result:?}");
+                }
+                assert!(result.to_string().contains("True"), "{result:?}");
+            })
+        })
+        .await;
 }
 
 #[test]
@@ -2476,309 +2564,337 @@ fn delivery_phase(inbox: &ActorInbox, sequence: u64) -> exomonad_node::DeliveryP
 #[tokio::test]
 async fn composition_root_child_session_factory_runs_a_cell() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let child_session_id = tidepool_runtime::session::fresh_session_id();
-    let mut child_machine = (campaign.child_session_factory)(child_session_id, &[])
-        .expect("the composition root's factory builds a fresh session");
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let child_session_id = tidepool_runtime::session::fresh_session_id();
+                let mut child_machine = (campaign.child_session_factory)(child_session_id, &[])
+                    .expect("the composition root's factory builds a fresh session");
 
-    child_machine.set_effect_execution(
-        EffectRunPolicy::HandleOrSuspend,
-        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-    );
-    let lexical_scope = child_machine.mint_isolated_scope();
-    child_machine
-        .set_actor_execution(
-            tidepool_runtime::session::SessionRunContext {
-                lexical_scope,
-                resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
-                ..tidepool_runtime::session::SessionRunContext::ROOT
-            },
-            EffectRunPolicy::HandleOrSuspend,
-            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        )
-        .expect("a freshly bootstrapped machine accepts actor execution context");
-    let outcome = child_machine
+                child_machine.set_effect_execution(
+                    EffectRunPolicy::HandleOrSuspend,
+                    LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                );
+                let lexical_scope = child_machine.mint_isolated_scope();
+                child_machine
+                    .set_actor_execution(
+                        tidepool_runtime::session::SessionRunContext {
+                            lexical_scope,
+                            resource_scope: tidepool_codegen::suspension::RealmId::fresh(),
+                            ..tidepool_runtime::session::SessionRunContext::ROOT
+                        },
+                        EffectRunPolicy::HandleOrSuspend,
+                        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                    )
+                    .expect("a freshly bootstrapped machine accepts actor execution context");
+                let outcome = child_machine
         .run_with_sites("exomonad_root_driver", campaign.program.code())
         .expect("the driver cell the root itself bootstraps with also runs on a child machine");
-    assert!(
+                assert!(
         matches!(
             outcome,
             tidepool_runtime::session::ResidentOutcome::Suspended { .. }
         ),
         "expected the driver cell to suspend attaching its permanent application, got {outcome:?}"
     );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
     // Two fork levels: the child can launch one further generation, which
     // then has no descendant budget left.
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let root_id = campaign.actor.identity();
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let root_id = campaign.actor.identity();
 
-    let root_for_setup = root.clone();
-    let setup = tokio::spawn(async move {
-        dispatch_haskell_script(
-            root_for_setup.as_ref(),
-            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/descendants_setup.hs"),
-        )
-        .await
-    });
-    let child_installation = campaign
-        .next_deployment(
-            "descendants child policy installation",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
-                other => Err(other),
-            },
-        )
-        .await;
-    let child_id = child_installation.actor.identity();
-    campaign.authority.install_grant(
-        child_id.into(),
-        ActorWorktreeGrant::Bound {
-            enumerate: false,
-            allocate: true,
-            integrate: true,
-        },
-    );
-    campaign.acknowledge_native_spawn(&child_installation);
-    let setup = setup.await.unwrap();
-    assert_eq!(setup["status"], "committed", "{setup:?}");
+                let root_for_setup = root.clone();
+                let setup = tokio::spawn(async move {
+                    dispatch_haskell_script(
+                        root_for_setup.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/descendants_setup.hs",
+                        ),
+                    )
+                    .await
+                });
+                let child_installation = campaign
+                    .next_deployment(
+                        "descendants child policy installation",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::PolicyInstalled(installation) => {
+                                Ok(installation)
+                            }
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                let child_id = child_installation.actor.identity();
+                campaign.authority.install_grant(
+                    child_id.into(),
+                    ActorWorktreeGrant::Bound {
+                        enumerate: false,
+                        allocate: true,
+                        integrate: true,
+                    },
+                );
+                campaign.acknowledge_native_spawn(&child_installation);
+                let setup = setup.await.unwrap();
+                assert_eq!(setup["status"], "committed", "{setup:?}");
 
-    let child_policy = child_installation.policy.clone();
-    let child_spawn = tokio::spawn(async move {
-        dispatch_haskell_script(
-            child_policy.as_ref(),
-            &tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host/descendants_child_spawn.hs",
-            ),
-        )
-        .await
-    });
-    let grandchild_installation = campaign
-        .next_deployment(
-            "descendants grandchild policy installation",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
-                other => Err(other),
-            },
-        )
-        .await;
-    campaign.authority.install_grant(
-        grandchild_installation.actor.identity().into(),
-        ActorWorktreeGrant::Bound {
-            enumerate: false,
-            allocate: true,
-            integrate: true,
-        },
-    );
-    campaign.acknowledge_native_spawn(&grandchild_installation);
-    let child_spawn = child_spawn.await.unwrap();
-    assert_eq!(child_spawn["status"], "committed", "{child_spawn:?}");
+                let child_policy = child_installation.policy.clone();
+                let child_spawn = tokio::spawn(async move {
+                    dispatch_haskell_script(
+                        child_policy.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/descendants_child_spawn.hs",
+                        ),
+                    )
+                    .await
+                });
+                let grandchild_installation = campaign
+                    .next_deployment(
+                        "descendants grandchild policy installation",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::PolicyInstalled(installation) => {
+                                Ok(installation)
+                            }
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                campaign.authority.install_grant(
+                    grandchild_installation.actor.identity().into(),
+                    ActorWorktreeGrant::Bound {
+                        enumerate: false,
+                        allocate: true,
+                        integrate: true,
+                    },
+                );
+                campaign.acknowledge_native_spawn(&grandchild_installation);
+                let child_spawn = child_spawn.await.unwrap();
+                assert_eq!(child_spawn["status"], "committed", "{child_spawn:?}");
 
-    let observed = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/descendants_observe.hs"),
-    )
-    .await;
-    assert_eq!(observed["status"], "committed", "{observed:?}");
-    let rendered = observed.to_string();
-    assert!(
+                let observed = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/descendants_observe.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(observed["status"], "committed", "{observed:?}");
+                let rendered = observed.to_string();
+                assert!(
         rendered.contains("descendants-child") && rendered.contains("descendants-grandchild"),
         "expected both the child and the grandchild in the root's descendants: {rendered}"
     );
-    assert!(
+                assert!(
         rendered.contains(&format!("rosterCreatorId = Just {}", child_id.id.0)),
         "expected the grandchild's roster entry to name the child as its creator: {rendered}"
     );
-    assert!(
-        rendered.contains(&format!("rosterCreatorId = Just {}", root_id.id.0)),
-        "expected the child's roster entry to name the root as its creator: {rendered}"
-    );
+                assert!(
+                    rendered.contains(&format!("rosterCreatorId = Just {}", root_id.id.0)),
+                    "expected the child's roster entry to name the root as its creator: {rendered}"
+                );
 
-    let stopped = dispatch_haskell_script(
-        child_installation.policy.as_ref(),
-        "stopAgent (responseActor grandchildResponse)",
-    )
-    .await;
-    assert_eq!(stopped["status"], "committed", "{stopped:?}");
+                let stopped = dispatch_haskell_script(
+                    child_installation.policy.as_ref(),
+                    "stopAgent (responseActor grandchildResponse)",
+                )
+                .await;
+                assert_eq!(stopped["status"], "committed", "{stopped:?}");
 
-    let after_retirement = dispatch_haskell_script(
-        root.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/descendants_observe.hs"),
-    )
-    .await;
-    assert_eq!(
-        after_retirement["status"], "committed",
-        "{after_retirement:?}"
-    );
-    let rendered_after = after_retirement.to_string();
-    assert!(
-        rendered_after.contains("descendants-child"),
-        "the live child must remain: {rendered_after}"
-    );
-    assert!(
+                let after_retirement = dispatch_haskell_script(
+                    root.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/descendants_observe.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    after_retirement["status"], "committed",
+                    "{after_retirement:?}"
+                );
+                let rendered_after = after_retirement.to_string();
+                assert!(
+                    rendered_after.contains("descendants-child"),
+                    "the live child must remain: {rendered_after}"
+                );
+                assert!(
         !rendered_after.contains("descendants-grandchild"),
         "the retired grandchild must drop out of the caller's live descendants: {rendered_after}"
     );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn forest_operator_survives_model_root_recovery() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    let operator = campaign
-        .forest
-        .new_workbench(
-            "operator".into(),
-            exomonad_actor::ActorCapabilities::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        campaign
-            .forest
-            .inspect_graph(campaign.actor.identity())
-            .unwrap()
-            .len(),
-        1,
-        "ordinary roots cannot inspect other trees"
-    );
-    assert_eq!(
-        campaign
-            .forest
-            .inspect_graph(operator.identity())
-            .unwrap()
-            .len(),
-        2
-    );
-    async fn submit(
-        actor: &LocalActorRef,
-        source: &str,
-    ) -> tidepool_runtime::session::WorkbenchResponse {
-        let (reply, receive) = tokio::sync::oneshot::channel();
-        actor
-            .address()
-            .send_message(exomonad_actor::KernelMessage::Workbench {
-                invocation: exomonad_actor::ActorWorkbenchInvocation::unbound(
-                    tidepool_runtime::session::WorkbenchRequest::from_cell_input(source),
-                ),
-                control: None,
-                reply: reply.into(),
-            })
-            .unwrap();
-        receive.await.unwrap().unwrap()
-    }
-    let bound = submit(&operator, "let retainedOperatorValue = 123").await;
-    assert_eq!(
-        bound.status,
-        tidepool_runtime::session::WorkbenchRunStatus::Committed
-    );
-    let requested = submit(
-        &operator,
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/operator_request.hs"),
-    )
-    .await;
-    assert_eq!(
-        requested.status,
-        tidepool_runtime::session::WorkbenchRunStatus::Committed,
-        "{requested:?}"
-    );
-    let child = campaign
-        .next_deployment(
-            "operator child admission",
-            Duration::from_secs(30),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                other => Err(other),
-            },
-        )
-        .await;
-    assert_eq!(child.supervisor_parent, Some(operator.identity()));
-    assert_eq!(child.context_parent, None);
-    assert_eq!(
-        campaign
-            .forest
-            .inspect_graph(child.actor.identity())
-            .unwrap()
-            .len(),
-        1,
-        "operator forest grant must not propagate to descendants"
-    );
-    let replied =
-        dispatch_haskell_script(child.policy.as_ref(), "respond (sessionInput + 1 :: Int)").await;
-    assert_eq!(replied["status"], "replied", "{replied:?}");
-    let response = submit(&operator, "inspectFull <$> pollResponse answer").await;
-    assert!(
-        response.items.iter().any(|item| item.output.contains("42")),
-        "{response:?}"
-    );
+    let campaign = test_campaign::TestCampaign::start().await;
     campaign
-        .actor
-        .shutdown(ActorTerminal {
-            kind: ActorExitKind::Failed,
-            summary: "recovery test".into(),
-            diagnostic: None,
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let operator = campaign
+                    .forest
+                    .new_workbench(
+                        "operator".into(),
+                        exomonad_actor::ActorCapabilities::default(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    campaign
+                        .forest
+                        .inspect_graph(campaign.actor.identity())
+                        .unwrap()
+                        .len(),
+                    1,
+                    "ordinary roots cannot inspect other trees"
+                );
+                assert_eq!(
+                    campaign
+                        .forest
+                        .inspect_graph(operator.identity())
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                async fn submit(
+                    actor: &LocalActorRef,
+                    source: &str,
+                ) -> tidepool_runtime::session::WorkbenchResponse {
+                    let (reply, receive) = tokio::sync::oneshot::channel();
+                    actor
+                        .address()
+                        .send_message(exomonad_actor::KernelMessage::Workbench {
+                            invocation: exomonad_actor::ActorWorkbenchInvocation::unbound(
+                                tidepool_runtime::session::WorkbenchRequest::from_cell_input(
+                                    source,
+                                ),
+                            ),
+                            control: None,
+                            reply: reply.into(),
+                        })
+                        .unwrap();
+                    receive.await.unwrap().unwrap()
+                }
+                let bound = submit(&operator, "let retainedOperatorValue = 123").await;
+                assert_eq!(
+                    bound.status,
+                    tidepool_runtime::session::WorkbenchRunStatus::Committed
+                );
+                let requested = submit(
+                    &operator,
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/operator_request.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    requested.status,
+                    tidepool_runtime::session::WorkbenchRunStatus::Committed,
+                    "{requested:?}"
+                );
+                let child = campaign
+                    .next_deployment(
+                        "operator child admission",
+                        Duration::from_secs(30),
+                        |event| match event {
+                            LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                assert_eq!(child.supervisor_parent, Some(operator.identity()));
+                assert_eq!(child.context_parent, None);
+                assert_eq!(
+                    campaign
+                        .forest
+                        .inspect_graph(child.actor.identity())
+                        .unwrap()
+                        .len(),
+                    1,
+                    "operator forest grant must not propagate to descendants"
+                );
+                let replied = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "respond (sessionInput + 1 :: Int)",
+                )
+                .await;
+                assert_eq!(replied["status"], "replied", "{replied:?}");
+                let response = submit(&operator, "inspectFull <$> pollResponse answer").await;
+                assert!(
+                    response.items.iter().any(|item| item.output.contains("42")),
+                    "{response:?}"
+                );
+                campaign
+                    .actor
+                    .shutdown(ActorTerminal {
+                        kind: ActorExitKind::Failed,
+                        summary: "recovery test".into(),
+                        diagnostic: None,
+                    })
+                    .await
+                    .unwrap();
+                campaign.observe_hosted_completion().await.unwrap();
+                assert_eq!(
+                    campaign.forest.resident_session_state(),
+                    tidepool_runtime::session::ResidentSessionState::Reusable,
+                    "actor failure must not imply that the resident machine is safe to replace"
+                );
+                let (replacement, task) = campaign
+                    .forest
+                    .recover_program_root(
+                        campaign.actor.identity(),
+                        "replacement".into(),
+                        exomonad_actor::ActorCapabilities::default(),
+                        campaign.program.clone(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    campaign.forest.resident_session_state(),
+                    tidepool_runtime::session::ResidentSessionState::Reusable
+                );
+                assert_ne!(replacement.identity(), campaign.actor.identity());
+                assert_eq!(
+                    submit(&operator, "retainedOperatorValue").await.items[0].output,
+                    "123"
+                );
+                assert_eq!(
+                    campaign
+                        .forest
+                        .inspect_graph(replacement.identity())
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert!(campaign
+                    .forest
+                    .inspect_graph(operator.identity())
+                    .unwrap()
+                    .iter()
+                    .any(|node| node.actor == replacement.identity()));
+                campaign.observe_forest_shutdown().await;
+                task.await.unwrap();
+                assert!(operator.terminal().get().is_some());
+            })
         })
-        .await
-        .unwrap();
-    campaign.hosted.await.unwrap();
-    assert_eq!(
-        campaign.forest.resident_session_state(),
-        tidepool_runtime::session::ResidentSessionState::Reusable,
-        "actor failure must not imply that the resident machine is safe to replace"
-    );
-    let (replacement, task) = campaign
-        .forest
-        .recover_program_root(
-            campaign.actor.identity(),
-            "replacement".into(),
-            exomonad_actor::ActorCapabilities::default(),
-            campaign.program.clone(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        campaign.forest.resident_session_state(),
-        tidepool_runtime::session::ResidentSessionState::Reusable
-    );
-    assert_ne!(replacement.identity(), campaign.actor.identity());
-    assert_eq!(
-        submit(&operator, "retainedOperatorValue").await.items[0].output,
-        "123"
-    );
-    assert_eq!(
-        campaign
-            .forest
-            .inspect_graph(replacement.identity())
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(
-        campaign
-            .forest
-            .inspect_graph(operator.identity())
-            .unwrap()
-            .iter()
-            .any(|node| node.actor == replacement.identity())
-    );
-    campaign.forest.shutdown().await;
-    task.await.unwrap();
-    assert!(operator.terminal().get().is_some());
+        .await;
 }
 
 #[tokio::test]
 async fn request_update_keeps_original_request_and_fences_terminal_delivery() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
@@ -2940,12 +3056,15 @@ async fn request_update_keeps_original_request_and_fences_terminal_delivery() {
         })
         .await
         .unwrap();
-    campaign.hosted.await.unwrap();
+    campaign.observe_hosted_completion().await.unwrap();
+
+    })).await;
 }
 
 #[tokio::test]
 async fn settlement_notice_carries_a_readable_reply_preview() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
@@ -3005,13 +3124,13 @@ async fn settlement_notice_carries_a_readable_reply_preview() {
             },
         )
         .await;
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
 async fn settlement_notice_carries_a_readable_reply_preview_for_text() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
@@ -3071,58 +3190,69 @@ async fn settlement_notice_carries_a_readable_reply_preview_for_text() {
             },
         )
         .await;
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
 async fn root_journal_effect_appends_a_typed_record() {
     let campaign = test_campaign::TestCampaign::start().await;
-    let result = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/journal_record.hs"),
-    )
-    .await;
-    assert_eq!(result["status"], "committed", "{result:?}");
-    let run_id = campaign
-        .session_root
-        .path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("model-free run root has a UTF-8 test id");
-    let journal_path = crate::exomonad::exomonad_journal_path(campaign._repository.path(), run_id);
-    let lines: Vec<serde_json::Value> = std::fs::read_to_string(&journal_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", journal_path.display()))
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("journal line is JSON"))
-        .collect();
-    assert_eq!(
-        lines.len(),
-        2,
-        "one version header and one record: {lines:?}"
-    );
-    assert!(lines[0].get("version").is_some(), "header: {lines:?}");
-    assert_eq!(lines[1]["kind"], "test-kind");
-    assert_eq!(lines[1]["key"], "test-key");
-    assert_eq!(lines[1]["payload"], "payload");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let result = dispatch_haskell_script(
+                    campaign.root_installation.policy.as_ref(),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/journal_record.hs",
+                    ),
+                )
+                .await;
+                assert_eq!(result["status"], "committed", "{result:?}");
+                let run_id = campaign
+                    .session_root
+                    .path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("model-free run root has a UTF-8 test id");
+                let journal_path =
+                    crate::exomonad::exomonad_journal_path(campaign._repository.path(), run_id);
+                let lines: Vec<serde_json::Value> = std::fs::read_to_string(&journal_path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", journal_path.display()))
+                    .lines()
+                    .map(|line| serde_json::from_str(line).expect("journal line is JSON"))
+                    .collect();
+                assert_eq!(
+                    lines.len(),
+                    2,
+                    "one version header and one record: {lines:?}"
+                );
+                assert!(lines[0].get("version").is_some(), "header: {lines:?}");
+                assert_eq!(lines[1]["kind"], "test-kind");
+                assert_eq!(lines[1]["key"], "test-key");
+                assert_eq!(lines[1]["payload"], "payload");
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn haskell_actor_sends_normal_steering_without_a_native_session() {
-    let mut campaign = test_campaign::TestCampaign::start().await;
-    let root = campaign.root_installation.policy.clone();
-    let policy = root.clone();
-    let mut run = tokio::spawn(async move {
-        dispatch_haskell_script(
-            policy.as_ref(),
-            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/message_actor.hs"),
-        )
-        .await
-    });
-    let mut launched = None;
-    let command = tokio::time::timeout(Duration::from_secs(120), async {
+    let campaign = test_campaign::TestCampaign::start().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let policy = root.clone();
+                let mut run = tokio::spawn(async move {
+                    dispatch_haskell_script(
+                        policy.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/message_actor.hs",
+                        ),
+                    )
+                    .await
+                });
+                let mut launched = None;
+                let command = tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             tokio::select! {
                 result = &mut run, if launched.is_none() => {
@@ -3149,31 +3279,33 @@ async fn haskell_actor_sends_normal_steering_without_a_native_session() {
     })
     .await
     .unwrap();
-    assert_ne!(command.owner(), campaign.actor.identity());
-    assert_eq!(command.target(), campaign.actor.identity());
-    assert_eq!(command.message(), "e434: retain candidate; check digest");
-    let directory = tempfile::tempdir().unwrap();
-    let inbox = ActorInbox::open(
-        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
-        "rows",
-        "cursor",
-    )
-    .unwrap();
-    admit_notification(&command, "actor-message-inbox".into(), &inbox);
-    let launched = match launched {
-        Some(result) => result,
-        None => run.await.unwrap(),
-    };
-    assert_eq!(launched["status"], "committed", "{launched:?}");
-    let finished = dispatch_haskell_script(
+                assert_ne!(command.owner(), campaign.actor.identity());
+                assert_eq!(command.target(), campaign.actor.identity());
+                assert_eq!(command.message(), "e434: retain candidate; check digest");
+                let directory = tempfile::tempdir().unwrap();
+                let inbox = ActorInbox::open(
+                    &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path())
+                        .unwrap(),
+                    "rows",
+                    "cursor",
+                )
+                .unwrap();
+                admit_notification(&command, "actor-message-inbox".into(), &inbox);
+                let launched = match launched {
+                    Some(result) => result,
+                    None => run.await.unwrap(),
+                };
+                assert_eq!(launched["status"], "committed", "{launched:?}");
+                let finished = dispatch_haskell_script(
         root.as_ref(),
         "finished <- awaitExit relay\ncase finished of { Completed (Right _) -> True; _ -> False }",
     )
     .await;
-    assert_eq!(finished["status"], "committed", "{finished:?}");
-    assert!(finished.to_string().contains("True"), "{finished:?}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                assert_eq!(finished["status"], "committed", "{finished:?}");
+                assert!(finished.to_string().contains("True"), "{finished:?}");
+            })
+        })
+        .await;
 }
 
 #[test]

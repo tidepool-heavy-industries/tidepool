@@ -11,6 +11,7 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
         },
     )
     .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.as_ref();
 
     let setup = dispatch_haskell_script(
@@ -82,7 +83,5 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
             && !type_output.contains("error:"),
         "the hosted type-search query must return matches through the captured compiler Id: {type_output}"
     );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }

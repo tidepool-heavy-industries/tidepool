@@ -348,6 +348,7 @@ async fn lookup_campaign() -> (TestCampaign, Arc<LookupScoreJev>) {
 #[tokio::test]
 async fn template_lookup_raw_namespace_and_selection_policy_contracts() {
     let (campaign, backend) = lookup_campaign().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.as_ref();
     let helpers = dispatch_haskell_script(
         policy,
@@ -376,107 +377,110 @@ async fn template_lookup_raw_namespace_and_selection_policy_contracts() {
         backend.requests.lock().is_empty(),
         "raw and empty paths must bypass Jev"
     );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
 async fn template_lookup_batches_related_declarations_and_recovers_from_jev_failure() {
     let (campaign, backend) = lookup_campaign().await;
-    let policy = campaign.root_installation.policy.as_ref();
-    let output = dispatch_structured_tool(
-        policy,
-        "lookup",
-        serde_json::json!({
-            "queries": ["LookupFixture.relatedRoot", "LookupFixture.alternativeRoot"]
-        }),
-    )
-    .await
-    .to_string();
-    assert!(output.contains("relatedRoot"), "{output}");
-    assert!(output.contains("Related declarations"), "{output}");
-    assert_eq!(
-        output.matches("related to:").count(),
-        4,
-        "four-declaration cap: {output}"
-    );
-    let scoring = backend.scoring_requests();
-    assert_eq!(
-        scoring.len(),
-        1,
-        "one scoring batch; no recursive expansion"
-    );
-    let request = scoring[0].clone();
-    assert!(
-        request["questions"]
-            .as_object()
-            .unwrap()
-            .values()
-            .all(|question| !question["instructions"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("\nLookupFixture.HiddenSecondDegree\nFor queries:")),
-        "second-degree reference was scored as a candidate: {request}"
-    );
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.as_ref();
+                let output = dispatch_structured_tool(
+                    policy,
+                    "lookup",
+                    serde_json::json!({
+                        "queries": ["LookupFixture.relatedRoot", "LookupFixture.alternativeRoot"]
+                    }),
+                )
+                .await
+                .to_string();
+                assert!(output.contains("relatedRoot"), "{output}");
+                assert!(output.contains("Related declarations"), "{output}");
+                assert_eq!(
+                    output.matches("related to:").count(),
+                    4,
+                    "four-declaration cap: {output}"
+                );
+                let scoring = backend.scoring_requests();
+                assert_eq!(
+                    scoring.len(),
+                    1,
+                    "one scoring batch; no recursive expansion"
+                );
+                let request = scoring[0].clone();
+                assert!(
+                    request["questions"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .all(|question| !question["instructions"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("\nLookupFixture.HiddenSecondDegree\nFor queries:")),
+                    "second-degree reference was scored as a candidate: {request}"
+                );
 
-    backend.requests.lock().clear();
-    let missing = dispatch_structured_tool(
-        policy,
-        "lookup",
-        serde_json::json!({
-            "queries": ["LookupFixture.alternativeRoo"]
-        }),
-    )
-    .await
-    .to_string();
-    assert!(
-        missing.contains("alternativeRoo") && missing.contains("no match:"),
-        "original miss must remain: {missing}"
-    );
-    assert!(missing.contains("Related declarations"), "{missing}");
-    assert!(
-        missing.contains("alternativeRoot"),
-        "qualified-module alternative missing: {missing}"
-    );
-    assert_eq!(backend.scoring_requests().len(), 1);
+                backend.requests.lock().clear();
+                let missing = dispatch_structured_tool(
+                    policy,
+                    "lookup",
+                    serde_json::json!({
+                        "queries": ["LookupFixture.alternativeRoo"]
+                    }),
+                )
+                .await
+                .to_string();
+                assert!(
+                    missing.contains("alternativeRoo") && missing.contains("no match:"),
+                    "original miss must remain: {missing}"
+                );
+                assert!(missing.contains("Related declarations"), "{missing}");
+                assert!(
+                    missing.contains("alternativeRoot"),
+                    "qualified-module alternative missing: {missing}"
+                );
+                assert_eq!(backend.scoring_requests().len(), 1);
 
-    *backend.score.lock() = 0;
-    backend.requests.lock().clear();
-    let irrelevant = dispatch_structured_tool(
-        policy,
-        "lookup",
-        serde_json::json!({
-            "queries": ["LookupFixture.relatedRoot"]
-        }),
-    )
-    .await
-    .to_string();
-    assert!(irrelevant.contains("relatedRoot"), "{irrelevant}");
-    assert!(
-        !irrelevant.contains("Related declarations"),
-        "irrelevant additions: {irrelevant}"
-    );
-    assert_eq!(backend.scoring_requests().len(), 1);
+                *backend.score.lock() = 0;
+                backend.requests.lock().clear();
+                let irrelevant = dispatch_structured_tool(
+                    policy,
+                    "lookup",
+                    serde_json::json!({
+                        "queries": ["LookupFixture.relatedRoot"]
+                    }),
+                )
+                .await
+                .to_string();
+                assert!(irrelevant.contains("relatedRoot"), "{irrelevant}");
+                assert!(
+                    !irrelevant.contains("Related declarations"),
+                    "irrelevant additions: {irrelevant}"
+                );
+                assert_eq!(backend.scoring_requests().len(), 1);
 
-    *backend.fail.lock() = true;
-    backend.requests.lock().clear();
-    let fallback = dispatch_structured_tool(
-        policy,
-        "lookup",
-        serde_json::json!({
-            "queries": ["LookupFixture.relatedRoot"]
-        }),
-    )
-    .await
-    .to_string();
-    assert!(
-        fallback.contains("relatedRoot"),
-        "ordinary result lost on Jev failure: {fallback}"
-    );
-    assert!(!fallback.contains("Related declarations"), "{fallback}");
-    assert_eq!(backend.scoring_requests().len(), 1);
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                *backend.fail.lock() = true;
+                backend.requests.lock().clear();
+                let fallback = dispatch_structured_tool(
+                    policy,
+                    "lookup",
+                    serde_json::json!({
+                        "queries": ["LookupFixture.relatedRoot"]
+                    }),
+                )
+                .await
+                .to_string();
+                assert!(
+                    fallback.contains("relatedRoot"),
+                    "ordinary result lost on Jev failure: {fallback}"
+                );
+                assert!(!fallback.contains("Related declarations"), "{fallback}");
+                assert_eq!(backend.scoring_requests().len(), 1);
+            })
+        })
+        .await;
 }
 
 pub(super) use super::test_campaign::pinned_jev_workspace;
@@ -526,7 +530,7 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
     let backend = Arc::new(SectionScoreJev {
         requests: Mutex::new(Vec::new()),
     });
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -534,7 +538,8 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         },
     )
     .await;
-    let policy = Arc::clone(&campaign.root_installation.policy);
+    campaign.run_scenario(|campaign| Box::pin(async move {
+    let policy = Arc::clone(campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let command = format!(
         "for i in $(seq 1 900); do echo background-$i; done; echo ESSENTIAL-diagnostic; # {}COMMAND-TAIL",
@@ -568,7 +573,7 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         .collect::<String>();
     let commands = TestCommands::completed_streams(&command_output, "ESSENTIAL-diagnostic\n");
     let request = tokio::select! {
-        request = backend_request(&mut campaign) => request,
+        request = backend_request(campaign) => request,
         result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
     };
     request.supply(Ok(commands.clone()));
@@ -640,8 +645,7 @@ async fn template_bash_scores_before_display_and_keeps_recovery() {
         short_page["status"], "committed",
         "a short section reread must report snapshot loss: {short_page}"
     );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// Without `focus`, output that fits `max_output_bytes` is shown as-is, with
@@ -652,7 +656,7 @@ async fn template_bash_shows_any_length_output_raw_without_focus() {
     let backend = Arc::new(SectionScoreJev {
         requests: Mutex::new(Vec::new()),
     });
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -660,7 +664,8 @@ async fn template_bash_shows_any_length_output_raw_without_focus() {
         },
     )
     .await;
-    let policy = Arc::clone(&campaign.root_installation.policy);
+    campaign.run_scenario(|campaign| Box::pin(async move {
+    let policy = Arc::clone(campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
@@ -685,7 +690,7 @@ async fn template_bash_shows_any_length_output_raw_without_focus() {
         .collect::<String>();
     let commands = TestCommands::completed_streams(&command_output, "");
     let request = tokio::select! {
-        request = backend_request(&mut campaign) => request,
+        request = backend_request(campaign) => request,
         result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
     };
     request.supply(Ok(commands));
@@ -706,8 +711,7 @@ async fn template_bash_shows_any_length_output_raw_without_focus() {
         "output without focus must never invoke Jev to score sections, for any length: {output}\nrequests: {:?}",
         backend.requests.lock()
     );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// Without `focus`, output over `max_output_bytes` is truncated to a head
@@ -718,7 +722,7 @@ async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
     let backend = Arc::new(SectionScoreJev {
         requests: Mutex::new(Vec::new()),
     });
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -726,7 +730,8 @@ async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
         },
     )
     .await;
-    let policy = Arc::clone(&campaign.root_installation.policy);
+    campaign.run_scenario(|campaign| Box::pin(async move {
+    let policy = Arc::clone(campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
@@ -754,7 +759,7 @@ async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
         .collect::<String>();
     let commands = TestCommands::completed_streams(&command_output, &command_stderr);
     let request = tokio::select! {
-        request = backend_request(&mut campaign) => request,
+        request = backend_request(campaign) => request,
         result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
     };
     request.supply(Ok(commands.clone()));
@@ -831,8 +836,7 @@ async fn template_bash_over_budget_without_focus_shows_head_tail_and_marker() {
         "the requested text pages must fit within the tool output budget: {slices:?}"
     );
     drop(slices);
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// With `focus`, output that already fits a generous `max_output_bytes` is
@@ -844,7 +848,7 @@ async fn template_bash_focus_with_large_budget_shows_everything() {
     let backend = Arc::new(SectionScoreJev {
         requests: Mutex::new(Vec::new()),
     });
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -852,7 +856,8 @@ async fn template_bash_focus_with_large_budget_shows_everything() {
         },
     )
     .await;
-    let policy = Arc::clone(&campaign.root_installation.policy);
+    campaign.run_scenario(|campaign| Box::pin(async move {
+    let policy = Arc::clone(campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
@@ -878,7 +883,7 @@ async fn template_bash_focus_with_large_budget_shows_everything() {
         .collect::<String>();
     let commands = TestCommands::completed_streams(&command_output, "");
     let request = tokio::select! {
-        request = backend_request(&mut campaign) => request,
+        request = backend_request(campaign) => request,
         result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
     };
     request.supply(Ok(commands));
@@ -895,8 +900,7 @@ async fn template_bash_focus_with_large_budget_shows_everything() {
         "text that already fits the budget must not be scored, even with focus set: {:?}",
         backend.requests.lock()
     );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// Requests carrying a `Project.Sift` section-relevance question, as
@@ -918,7 +922,7 @@ async fn template_bash_accepts_undersized_max_output_bytes() {
     let backend = Arc::new(SectionScoreJev {
         requests: Mutex::new(Vec::new()),
     });
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -926,7 +930,8 @@ async fn template_bash_accepts_undersized_max_output_bytes() {
         },
     )
     .await;
-    let policy = Arc::clone(&campaign.root_installation.policy);
+    campaign.run_scenario(|campaign| Box::pin(async move {
+    let policy = Arc::clone(campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
@@ -948,7 +953,7 @@ async fn template_bash_accepts_undersized_max_output_bytes() {
     });
     let commands = TestCommands::completed_streams("ok\n", "");
     let request = tokio::select! {
-        request = backend_request(&mut campaign) => request,
+        request = backend_request(campaign) => request,
         result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
     };
     request.supply(Ok(commands));
@@ -960,8 +965,7 @@ async fn template_bash_accepts_undersized_max_output_bytes() {
         "an undersized max_output_bytes must be clamped, not rejected: {output}"
     );
     assert!(output.contains("ok"), "{output}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// No `LANGUAGE` pragma: `OverloadedLabels` is in the cell dialect
@@ -990,17 +994,22 @@ async fn jev_choice_round_trips_through_the_host_backend() {
         .to_string()),
     });
     let campaign = campaign_with(Arc::clone(&backend)).await;
-    let result = dispatch_haskell_script(campaign.root_installation.policy.as_ref(), CELL).await;
-    assert_eq!(result["status"], "committed", "{result}");
-    {
-        let requests = backend.requests.lock();
-        assert_eq!(requests.len(), 1);
-        let request = &requests[0];
-        assert_eq!(request["model"], "jev-latest", "{request}");
-        assert_eq!(request["questions"]["value"]["type"], "choice", "{request}");
-    }
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let result =
+                    dispatch_haskell_script(campaign.root_installation.policy.as_ref(), CELL).await;
+                assert_eq!(result["status"], "committed", "{result}");
+                {
+                    let requests = backend.requests.lock();
+                    assert_eq!(requests.len(), 1);
+                    let request = &requests[0];
+                    assert_eq!(request["model"], "jev-latest", "{request}");
+                    assert_eq!(request["questions"]["value"]["type"], "choice", "{request}");
+                }
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -1010,6 +1019,7 @@ async fn score_then_choice_packets_with_alternatives_install_on_one_machine() {
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let campaign = campaign_with(Arc::clone(&backend)).await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
 
     let score = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
@@ -1044,9 +1054,7 @@ _ <- if either (const 0) (\response -> J.handle (J.answers response) (#first id 
             "{requests:?}"
         );
     }
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
@@ -1056,6 +1064,7 @@ async fn jev_call_failure_is_a_typed_left() {
         answer: Err(JevCallFailure::JevUnconfigured),
     });
     let campaign = campaign_with(backend).await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let (question_cell, _) = CELL
         .rsplit_once("\n_ <-")
         .expect("the fixture ends with its result assertion");
@@ -1065,8 +1074,7 @@ async fn jev_call_failure_is_a_typed_left() {
     let result =
         dispatch_haskell_script(campaign.root_installation.policy.as_ref(), &failure_cell).await;
     assert_eq!(result["status"], "committed", "{result}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// Offers and packets bound in one statement are retained for later ones,
@@ -1087,6 +1095,7 @@ async fn retained_packet_bindings_reach_a_later_statement() {
         .to_string()),
     });
     let campaign = campaign_with(Arc::clone(&backend)).await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
         // No `LANGUAGE` pragma. This is the load-bearing case: the packet
@@ -1103,8 +1112,7 @@ _ <- if either (const 0) (\r -> J.handle (J.answers r).place (#line_4 id J..| #l
     .await;
     assert_eq!(result["status"], "committed", "{result}");
     assert_eq!(backend.requests.lock().len(), 1);
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// A Jev-dense cell judges every file of a bound preview list in one packet,
@@ -1118,6 +1126,7 @@ async fn a_per_row_battery_sends_one_request_with_one_question_per_row() {
         answer: Err(JevCallFailure::JevUnconfigured),
     });
     let campaign = campaign_with(Arc::clone(&backend)).await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
         r##"let previews = [("README.md", "# jev-dsl\ntyped packets"), ("LICENSE", "MIT")] :: [(Text, Text)]
@@ -1146,8 +1155,7 @@ _ <- case answer of
             .count();
         assert_eq!(per_file, 2, "one question per previewed file: {questions}");
     }
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// Haskell cell -> host effect -> live TypeSafe API -> typed answer. Opt-in:
@@ -1167,6 +1175,7 @@ async fn live_jev_from_a_haskell_cell() {
         },
     )
     .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
         r#"answer <- J.ask1 (J.rawState (String "A cat is sitting on a warm windowsill in the sun."))
@@ -1178,8 +1187,7 @@ _ <- if either (const 0) (\response -> J.handle (J.answers response) (#windowsil
     )
     .await;
     assert_eq!(result["status"], "committed", "{result}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,53 +1401,57 @@ async fn a_tool_body_and_a_slot_can_both_ask_jev() {
     )
     .await
     .expect("campaign did not start within 120s");
-    let policy = campaign.root_installation.policy.clone();
-    let policy = policy.as_ref();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let policy = policy.as_ref();
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        probe_topic(policy, "the retry loop"),
-    )
-    .await
-    .expect("probe did not answer within 120s");
+                let result = tokio::time::timeout(
+                    Duration::from_secs(120),
+                    probe_topic(policy, "the retry loop"),
+                )
+                .await
+                .expect("probe did not answer within 120s");
 
-    // (1) The tool body's own Jev branch, in the tool's own output.
-    assert!(
-        result.contains("tool-body branch: yes, investigate the retry loop"),
-        "{result}"
-    );
-    // (2) The after-tool slot's own Jev branch, delivered as derived context
-    // beside — not instead of — the tool's output.
-    assert!(result.contains("[after-tool]"), "{result}");
-    assert!(
-        result.contains("Derived context, not part of the tool's output"),
-        "{result}"
-    );
-    assert!(result.contains("ordinal=1 handle=toolResult1"), "{result}");
-    assert!(result.contains("after-tool branch: complete"), "{result}");
+                // (1) The tool body's own Jev branch, in the tool's own output.
+                assert!(
+                    result.contains("tool-body branch: yes, investigate the retry loop"),
+                    "{result}"
+                );
+                // (2) The after-tool slot's own Jev branch, delivered as derived context
+                // beside — not instead of — the tool's output.
+                assert!(result.contains("[after-tool]"), "{result}");
+                assert!(
+                    result.contains("Derived context, not part of the tool's output"),
+                    "{result}"
+                );
+                assert!(result.contains("ordinal=1 handle=toolResult1"), "{result}");
+                assert!(result.contains("after-tool branch: complete"), "{result}");
 
-    // (3) The fake backend saw two independent Jev requests: one from the
-    // tool body, one from the slot.
-    assert_eq!(
-        backend.requests.lock().len(),
-        2,
-        "one request from the tool body and one from the after-tool slot"
-    );
+                // (3) The fake backend saw two independent Jev requests: one from the
+                // tool body, one from the slot.
+                assert_eq!(
+                    backend.requests.lock().len(),
+                    2,
+                    "one request from the tool body and one from the after-tool slot"
+                );
 
-    // (4) `status` shows exactly one after-tool row, annotated.
-    let status = tokio::time::timeout(Duration::from_secs(120), detailed_status(policy))
-        .await
-        .expect("status did not answer within 120s");
-    assert_eq!(
-        status.matches("after-tool#").count(),
-        1,
-        "one call, one invocation: {status}"
-    );
-    assert!(status.contains("after-tool#1"), "{status}");
-    assert!(status.contains("annotated"), "{status}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                // (4) `status` shows exactly one after-tool row, annotated.
+                let status =
+                    tokio::time::timeout(Duration::from_secs(120), detailed_status(policy))
+                        .await
+                        .expect("status did not answer within 120s");
+                assert_eq!(
+                    status.matches("after-tool#").count(),
+                    1,
+                    "one call, one invocation: {status}"
+                );
+                assert!(status.contains("after-tool#1"), "{status}");
+                assert!(status.contains("annotated"), "{status}");
+            })
+        })
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,7 +1687,7 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
         requests: Mutex::new(Vec::new()),
         likelihood: 0.9,
     });
-    let mut campaign = tokio::time::timeout(
+    let campaign = tokio::time::timeout(
         Duration::from_secs(120),
         TestCampaign::start_with_config(
             |admission| admission,
@@ -1687,157 +1699,165 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
     )
     .await
     .expect("campaign did not start within 120s");
-    let root = campaign.root_installation.policy.clone();
-    let root_identity = campaign.actor.identity();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let root_identity = campaign.actor.identity();
 
-    // Launch the escalation child and the nudge child from the root.
-    let launch_escalate = {
-        let root = root.clone();
-        let script = watchdog_child_script("escalate-child");
-        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), &script).await })
-    };
-    let escalate_child = next_watchdog_child(&mut campaign).await;
-    assert_eq!(launch_escalate.await.unwrap()["status"], "committed");
+                // Launch the escalation child and the nudge child from the root.
+                let launch_escalate = {
+                    let root = root.clone();
+                    let script = watchdog_child_script("escalate-child");
+                    tokio::spawn(
+                        async move { dispatch_haskell_script(root.as_ref(), &script).await },
+                    )
+                };
+                let escalate_child = next_watchdog_child(campaign).await;
+                assert_eq!(launch_escalate.await.unwrap()["status"], "committed");
 
-    let launch_nudge = {
-        let root = root.clone();
-        let script = watchdog_child_script("nudge-child");
-        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), &script).await })
-    };
-    let nudge_child = next_watchdog_child(&mut campaign).await;
-    assert_eq!(launch_nudge.await.unwrap()["status"], "committed");
+                let launch_nudge = {
+                    let root = root.clone();
+                    let script = watchdog_child_script("nudge-child");
+                    tokio::spawn(
+                        async move { dispatch_haskell_script(root.as_ref(), &script).await },
+                    )
+                };
+                let nudge_child = next_watchdog_child(campaign).await;
+                assert_eq!(launch_nudge.await.unwrap()["status"], "committed");
 
-    // (a)+(b): an escalation heuristic trips on the labelled child. Its own
-    // result carries the short escalation record, and the PARENT (the root)
-    // actually receives a native message naming the reason and the child's
-    // actor address — observed the same way `sendMessage` is proven to reach
-    // its target elsewhere in this suite (see
-    // `notification_admission_and_poll_preserve_typed_request_bindings`).
-    // A judgment otherwise leaves almost no trace: capture what the child's
-    // slot and its Jev call actually wrote to the trace, over the same
-    // `#[tokio::test]` current-thread runtime the escalation itself runs on
-    // (`tracing::subscriber::set_default`'s thread-local scope covers every
-    // task polled on this thread for as long as the guard is held).
-    let trace_log = tempfile::NamedTempFile::new().unwrap();
-    let trace_subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
-        .with_writer(std::sync::Mutex::new(trace_log.reopen().unwrap()))
-        .finish();
-    let trace_guard = tracing::subscriber::set_default(trace_subscriber);
+                // (a)+(b): an escalation heuristic trips on the labelled child. Its own
+                // result carries the short escalation record, and the PARENT (the root)
+                // actually receives a native message naming the reason and the child's
+                // actor address — observed the same way `sendMessage` is proven to reach
+                // its target elsewhere in this suite (see
+                // `notification_admission_and_poll_preserve_typed_request_bindings`).
+                // A judgment otherwise leaves almost no trace: capture what the child's
+                // slot and its Jev call actually wrote to the trace, over the same
+                // `#[tokio::test]` current-thread runtime the escalation itself runs on
+                // (`tracing::subscriber::set_default`'s thread-local scope covers every
+                // task polled on this thread for as long as the guard is held).
+                let trace_log = tempfile::NamedTempFile::new().unwrap();
+                let trace_subscriber = tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::DEBUG)
+                    .with_writer(std::sync::Mutex::new(trace_log.reopen().unwrap()))
+                    .finish();
+                let trace_guard = tracing::subscriber::set_default(trace_subscriber);
 
-    let escalate_policy = escalate_child.policy.clone();
-    let escalate_call = tokio::spawn(async move {
-        tokio::time::timeout(
-            Duration::from_secs(120),
-            watchdog_probe(escalate_policy.as_ref(), "anything"),
-        )
-        .await
-        .expect("escalating probe did not answer within 120s")
-    });
-    let command = next_notification_send(&mut campaign, Duration::from_secs(120))
-        .await
-        .expect("the watchdog's escalation reaches the deployment channel");
-    assert_eq!(command.owner(), escalate_child.actor.identity());
-    assert_eq!(command.target(), root_identity);
-    assert!(
-        command.message().contains("out_of_scope"),
-        "{}",
-        command.message()
-    );
-    assert!(
-        command
-            .message()
-            .contains(&escalate_child.actor.identity().id.0.to_string()),
-        "the child's own actor id is in the note: {}",
-        command.message()
-    );
-    let directory = tempfile::tempdir().unwrap();
-    let inbox = ActorInbox::open(
-        &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
-        "rows",
-        "cursor",
-    )
-    .unwrap();
-    admit_notification(&command, "watchdog-inbox".into(), &inbox);
-    let escalated_result = escalate_call.await.unwrap();
-    assert!(
-        escalated_result.contains("[after-tool]"),
-        "{escalated_result}"
-    );
-    assert!(
-        escalated_result.contains("escalated to your parent"),
-        "{escalated_result}"
-    );
+                let escalate_policy = escalate_child.policy.clone();
+                let escalate_call = tokio::spawn(async move {
+                    tokio::time::timeout(
+                        Duration::from_secs(120),
+                        watchdog_probe(escalate_policy.as_ref(), "anything"),
+                    )
+                    .await
+                    .expect("escalating probe did not answer within 120s")
+                });
+                let command = next_notification_send(campaign, Duration::from_secs(120))
+                    .await
+                    .expect("the watchdog's escalation reaches the deployment channel");
+                assert_eq!(command.owner(), escalate_child.actor.identity());
+                assert_eq!(command.target(), root_identity);
+                assert!(
+                    command.message().contains("out_of_scope"),
+                    "{}",
+                    command.message()
+                );
+                assert!(
+                    command
+                        .message()
+                        .contains(&escalate_child.actor.identity().id.0.to_string()),
+                    "the child's own actor id is in the note: {}",
+                    command.message()
+                );
+                let directory = tempfile::tempdir().unwrap();
+                let inbox = ActorInbox::open(
+                    &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path())
+                        .unwrap(),
+                    "rows",
+                    "cursor",
+                )
+                .unwrap();
+                admit_notification(&command, "watchdog-inbox".into(), &inbox);
+                let escalated_result = escalate_call.await.unwrap();
+                assert!(
+                    escalated_result.contains("[after-tool]"),
+                    "{escalated_result}"
+                );
+                assert!(
+                    escalated_result.contains("escalated to your parent"),
+                    "{escalated_result}"
+                );
 
-    drop(trace_guard);
-    let traced = std::fs::read_to_string(trace_log.path()).unwrap();
-    // The Jev call the slot made: a compact `info` line, packet and answer
-    // bodies only at `debug`.
-    assert!(traced.contains("jev call packet"), "{traced}");
-    assert!(traced.contains("jev call answer"), "{traced}");
-    assert!(traced.contains("jev call answered"), "{traced}");
-    // The slot invocation itself, with the outcome's reason text — the
-    // likelihood-bearing judgment a live run could not previously answer for.
-    assert!(traced.contains("after-tool slot invoked"), "{traced}");
-    assert!(traced.contains("after_tool_slot"), "{traced}");
-    assert!(traced.contains("out_of_scope"), "{traced}");
-    assert!(traced.contains("escalated to your parent"), "{traced}");
-    // The escalation itself: which child, and who it told.
-    assert!(traced.contains("actor notification sent"), "{traced}");
-    assert!(traced.contains("from_slot=true"), "{traced}");
-    assert!(
-        traced.contains(&escalate_child.actor.identity().id.0.to_string()),
-        "the child's own actor id is traced: {traced}"
-    );
-    // The generic baseline: every effect the slot's body made (not only the
-    // Jev call) gets a settlement line, real time, because a slot
-    // invocation has no later cell receipt to batch one into.
-    assert!(
-        traced.matches("effect settled").count() >= 2,
-        "actorContext and notify effects settle too, not only jev: {traced}"
-    );
+                drop(trace_guard);
+                let traced = std::fs::read_to_string(trace_log.path()).unwrap();
+                // The Jev call the slot made: a compact `info` line, packet and answer
+                // bodies only at `debug`.
+                assert!(traced.contains("jev call packet"), "{traced}");
+                assert!(traced.contains("jev call answer"), "{traced}");
+                assert!(traced.contains("jev call answered"), "{traced}");
+                // The slot invocation itself, with the outcome's reason text — the
+                // likelihood-bearing judgment a live run could not previously answer for.
+                assert!(traced.contains("after-tool slot invoked"), "{traced}");
+                assert!(traced.contains("after_tool_slot"), "{traced}");
+                assert!(traced.contains("out_of_scope"), "{traced}");
+                assert!(traced.contains("escalated to your parent"), "{traced}");
+                // The escalation itself: which child, and who it told.
+                assert!(traced.contains("actor notification sent"), "{traced}");
+                assert!(traced.contains("from_slot=true"), "{traced}");
+                assert!(
+                    traced.contains(&escalate_child.actor.identity().id.0.to_string()),
+                    "the child's own actor id is traced: {traced}"
+                );
+                // The generic baseline: every effect the slot's body made (not only the
+                // Jev call) gets a settlement line, real time, because a slot
+                // invocation has no later cell receipt to batch one into.
+                assert!(
+                    traced.matches("effect settled").count() >= 2,
+                    "actorContext and notify effects settle too, not only jev: {traced}"
+                );
 
-    // (c) a nudge heuristic trips on the OTHER labelled child: its own result
-    // carries the advice, and the parent receives NOTHING — no
-    // `NotificationSend` reaches the deployment channel at all.
-    let nudged_result = tokio::time::timeout(
-        Duration::from_secs(120),
-        watchdog_probe(nudge_child.policy.as_ref(), "anything"),
-    )
-    .await
-    .expect("nudged probe did not answer within 120s");
-    assert!(nudged_result.contains("[after-tool]"), "{nudged_result}");
-    assert!(
-        nudged_result.contains("Read the earlier failure"),
-        "{nudged_result}"
-    );
-    assert!(
-        next_notification_send(&mut campaign, Duration::from_millis(500))
-            .await
-            .is_err(),
-        "a nudge alone must never reach the parent"
-    );
+                // (c) a nudge heuristic trips on the OTHER labelled child: its own result
+                // carries the advice, and the parent receives NOTHING — no
+                // `NotificationSend` reaches the deployment channel at all.
+                let nudged_result = tokio::time::timeout(
+                    Duration::from_secs(120),
+                    watchdog_probe(nudge_child.policy.as_ref(), "anything"),
+                )
+                .await
+                .expect("nudged probe did not answer within 120s");
+                assert!(nudged_result.contains("[after-tool]"), "{nudged_result}");
+                assert!(
+                    nudged_result.contains("Read the earlier failure"),
+                    "{nudged_result}"
+                );
+                assert!(
+                    next_notification_send(campaign, Duration::from_millis(500))
+                        .await
+                        .is_err(),
+                    "a nudge alone must never reach the parent"
+                );
 
-    // (d) the ROOT's own probe, same scripted answer: `monitorsFor` gives the
-    // root no heuristics at all (its own path matches neither label), so the
-    // slot abstains before ever asking Jev, and nothing is sent.
-    let root_result = tokio::time::timeout(
-        Duration::from_secs(120),
-        watchdog_probe(root.as_ref(), "anything"),
-    )
-    .await
-    .expect("root probe did not answer within 120s");
-    assert!(!root_result.contains("[after-tool]"), "{root_result}");
-    assert!(
-        next_notification_send(&mut campaign, Duration::from_millis(500))
-            .await
-            .is_err(),
-        "the root must never message a parent it does not have"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                // (d) the ROOT's own probe, same scripted answer: `monitorsFor` gives the
+                // root no heuristics at all (its own path matches neither label), so the
+                // slot abstains before ever asking Jev, and nothing is sent.
+                let root_result = tokio::time::timeout(
+                    Duration::from_secs(120),
+                    watchdog_probe(root.as_ref(), "anything"),
+                )
+                .await
+                .expect("root probe did not answer within 120s");
+                assert!(!root_result.contains("[after-tool]"), "{root_result}");
+                assert!(
+                    next_notification_send(campaign, Duration::from_millis(500))
+                        .await
+                        .is_err(),
+                    "the root must never message a parent it does not have"
+                );
+            })
+        })
+        .await;
 }
 
 /// `Project.Watchdog.trivialCall`: a short, successful, plainly non-destructive
@@ -1852,7 +1872,8 @@ async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks()
         requests: Mutex::new(Vec::new()),
         likelihood: 0.0,
     });
-    let mut campaign = campaign_with(Arc::clone(&backend)).await;
+    let campaign = campaign_with(Arc::clone(&backend)).await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
 
     async fn run_bash(
@@ -1892,7 +1913,7 @@ async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks()
         response
     }
 
-    run_bash(&mut campaign, &policy, "ls", "file-a\nfile-b\n").await;
+    run_bash(campaign, &policy, "ls", "file-a\nfile-b\n").await;
     assert!(
         backend.requests.lock().is_empty(),
         "a short, successful, non-destructive bash call must never ask Jev: {:?}",
@@ -1911,7 +1932,7 @@ async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks()
         .map(|line| format!("line{line}"))
         .collect::<Vec<_>>()
         .join("\n");
-    run_bash(&mut campaign, &policy, "ls -la", &boundary_output).await;
+    run_bash(campaign, &policy, "ls -la", &boundary_output).await;
     assert!(
         backend.requests.lock().is_empty(),
         "a bash call whose output is exactly rawLineThreshold lines must still abstain: {:?}",
@@ -1919,7 +1940,7 @@ async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks()
     );
 
     run_bash(
-        &mut campaign,
+        campaign,
         &policy,
         "rm -rf ./trivial-call-test-nonexistent",
         "",
@@ -1938,9 +1959,7 @@ async fn trivial_bash_call_abstains_before_jev_but_destructive_text_still_asks()
             "expected a destructive_command heuristic question among the requests: {requests:?}"
         );
     }
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// `Project.Watchdog` classifies the invoked tool before its payload text. A
@@ -1956,6 +1975,7 @@ async fn watchdog_judges_the_tool_before_message_text_and_skips_host_refusals() 
         likelihood: 0.9,
     });
     let campaign = campaign_with(Arc::clone(&backend)).await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
     let judged = dispatch_haskell_script(
         policy.as_ref(),
@@ -2028,9 +2048,7 @@ _ <- if {check} then pure () else error "watchdog escalation evidence contract f
     )
     .await;
     assert_eq!(cut["status"], "committed", "{cut}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// `Project.Watchdog.watchBy` forwards a finished call's own displayed text
@@ -2056,7 +2074,8 @@ async fn a_watchdogs_own_jev_ask_survives_a_result_past_the_observation_budget()
         requests: Mutex::new(Vec::new()),
         likelihood: 0.0,
     });
-    let mut campaign = campaign_with(Arc::clone(&backend)).await;
+    let campaign = campaign_with(Arc::clone(&backend)).await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
     let invoked_policy = Arc::clone(&policy);
 
@@ -2084,7 +2103,7 @@ async fn a_watchdogs_own_jev_ask_survives_a_result_past_the_observation_budget()
     });
     let commands = TestCommands::completed(&command_output);
     let request = tokio::select! {
-        request = backend_request(&mut campaign) => request,
+        request = backend_request(campaign) => request,
         result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
     };
     request.supply(Ok(commands));
@@ -2124,7 +2143,5 @@ async fn a_watchdogs_own_jev_ask_survives_a_result_past_the_observation_budget()
         !status.contains("observation budget"),
         "the slot must never fail on a result too large to relay: {status}"
     );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }

@@ -5,7 +5,7 @@ use exomonad_tool::{HostedTool, ToolArguments, ToolInvocation};
 
 #[tokio::test]
 async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindings() {
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             let directory = config.workspace.join(".exomonad");
@@ -40,6 +40,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         },
     )
     .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
     let typed =
         dispatch_haskell_script(policy.as_ref(), "ToolDispatchFixture.dispatchChecks").await;
@@ -151,7 +152,7 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
         ToolArguments::Structured(serde_json::json!({"cmd":"custom", "yield_time_ms":30000})),
     ));
     let backend = super::command_test_support::TestCommands::completed("custom-handler-output");
-    super::command_jobs_tests::backend_request(&mut campaign)
+    super::command_jobs_tests::backend_request(campaign)
         .await
         .supply(Ok(backend));
     let launched = running.await.unwrap().unwrap();
@@ -190,6 +191,5 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
     );
     let haskell = dispatch_haskell_script(policy.as_ref(), "40 + 2 :: Int").await;
     assert_eq!(haskell["items"][0]["output"], "42");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }

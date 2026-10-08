@@ -148,7 +148,8 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
 /// declarations, and releases its distinct machine on retirement.
 #[tokio::test]
 async fn fresh_context_child_owns_and_retires_its_machine() {
-    let mut campaign = TestCampaign::start_with_child_sessions().await;
+    let campaign = TestCampaign::start_with_child_sessions().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let root_session = campaign
         .forest
@@ -361,7 +362,5 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         tidepool_runtime::session::ResidentSessionState::Gone,
         "the dedicated child session must be released once its actor retires"
     );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }

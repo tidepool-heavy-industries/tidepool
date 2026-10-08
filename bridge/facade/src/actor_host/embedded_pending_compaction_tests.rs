@@ -255,209 +255,212 @@ fn message_turn(response_id: &str, text: &str) -> ResponsesTurn {
 #[tokio::test]
 async fn engine_component_carries_raw_and_typed_pending_calls_through_compaction_and_late_output() {
     let campaign = TestCampaign::start().await;
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
-    let (raw_release_tx, raw_release_rx) = oneshot::channel();
-    let (typed_release_tx, typed_release_rx) = oneshot::channel();
-    let (cancel_release_tx, cancel_release_rx) = oneshot::channel();
-    let endpoint = GatedEndpoint {
-        tools: vec![
-            HostedTool::Custom(CustomToolDeclaration {
-                name: "raw_hold".into(),
-                description: "Hold a raw call until the test releases it.".into(),
-                schedule: exomonad_tool::ToolScheduling::default(),
-                implementation: exomonad_tool::ToolImplementation::default(),
-                effect_keys: Vec::new(),
-            }),
-            HostedTool::Function(ToolDeclaration {
-                name: "typed_hold".into(),
-                description: "Hold a typed call until the test releases it.".into(),
-                input_schema: json!({
-                    "type":"object",
-                    "properties":{"value":{"type":"integer"}},
-                    "required":["value"],
-                    "additionalProperties":false
-                }),
-                output_schema: None,
-                kind: ToolKind::Call,
-                schedule: exomonad_tool::ToolScheduling::default(),
-                implementation: exomonad_tool::ToolImplementation::default(),
-                effect_keys: Vec::new(),
-            }),
-        ],
-        releases: Arc::new(Mutex::new(HashMap::from([
-            ("raw-pending-call".into(), raw_release_rx),
-            ("typed-pending-call".into(), typed_release_rx),
-            ("cancel-pending-call".into(), cancel_release_rx),
-        ]))),
-        started: started_tx,
-        settled: settled_tx,
-    };
-    let actor = campaign.actor.identity();
-    let mut installation = campaign.root_installation.clone();
-    installation.policy = Arc::new(endpoint);
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+                let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+                let (raw_release_tx, raw_release_rx) = oneshot::channel();
+                let (typed_release_tx, typed_release_rx) = oneshot::channel();
+                let (cancel_release_tx, cancel_release_rx) = oneshot::channel();
+                let endpoint = GatedEndpoint {
+                    tools: vec![
+                        HostedTool::Custom(CustomToolDeclaration {
+                            name: "raw_hold".into(),
+                            description: "Hold a raw call until the test releases it.".into(),
+                            schedule: exomonad_tool::ToolScheduling::default(),
+                            implementation: exomonad_tool::ToolImplementation::default(),
+                            effect_keys: Vec::new(),
+                        }),
+                        HostedTool::Function(ToolDeclaration {
+                            name: "typed_hold".into(),
+                            description: "Hold a typed call until the test releases it.".into(),
+                            input_schema: json!({
+                                "type":"object",
+                                "properties":{"value":{"type":"integer"}},
+                                "required":["value"],
+                                "additionalProperties":false
+                            }),
+                            output_schema: None,
+                            kind: ToolKind::Call,
+                            schedule: exomonad_tool::ToolScheduling::default(),
+                            implementation: exomonad_tool::ToolImplementation::default(),
+                            effect_keys: Vec::new(),
+                        }),
+                    ],
+                    releases: Arc::new(Mutex::new(HashMap::from([
+                        ("raw-pending-call".into(), raw_release_rx),
+                        ("typed-pending-call".into(), typed_release_rx),
+                        ("cancel-pending-call".into(), cancel_release_rx),
+                    ]))),
+                    started: started_tx,
+                    settled: settled_tx,
+                };
+                let actor = campaign.actor.identity();
+                let mut installation = campaign.root_installation.clone();
+                installation.policy = Arc::new(endpoint);
 
-    let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
-    let session_secret_file = files.path().join("session-secret");
-    std::fs::write(
-        &session_secret_file,
-        "embedded-compaction-secret-is-long-enough",
-    )
-    .unwrap();
-    let credential_file = files.path().join("codex-auth.json");
-    std::fs::write(&credential_file, "{}").unwrap();
-    let settings = crate::exomonad::EmbeddedLaunchConfig {
-        listen: "127.0.0.1:0".parse().unwrap(),
-        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
-        public_origin: None,
-        asset_root: assets,
-        browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
-        session_secret_file: Some(session_secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
-        credential_file,
-        context_capacity_tokens: 200_000,
-        concurrent_jobs: 2,
-    };
-    let mut service = campaign
-        .prepare_engine_component_service(&settings)
-        .await
-        .unwrap();
-    let embedded = attach_actor(
-        &service,
-        campaign.session_root.path(),
-        AgentPath("/root".into()),
-        None,
-        installation,
-        Some("exercise pending-call compaction".into()),
-    )
-    .await
-    .unwrap();
-    let (lifecycle, _lifecycle_rx) =
-        watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
-    let (successor_tx, mut successor_rx) = mpsc::unbounded_channel();
-    let (late_output_tx, mut late_output_rx) = mpsc::unbounded_channel();
-    let transport = CompactionTransport {
-        model_requests: Arc::new(Mutex::new(Vec::new())),
-        successor_seen: successor_tx,
-        late_output_seen: late_output_tx,
-        compactions: Arc::new(AtomicU64::new(0)),
-    };
-    let settings_for_engine = settings.clone();
-    let runtime = Arc::clone(&service.runtime);
-    let engine_transport = transport.clone();
-    let conversation = Arc::clone(&embedded.conversation);
-    let stop_driver = embedded.cancellation.clone();
-    let mut running = tokio::spawn(async move {
-        drive_conversation_with_transport::<Offline, _>(
-            embedded.driver,
-            runtime,
-            &settings_for_engine,
-            "offline-compaction".into(),
-            Effort::Medium,
-            "production pending-call test".into(),
-            embedded.cancellation_rx,
-            lifecycle,
-            actor,
-            engine_transport,
-        )
-        .await
-    });
+                let files = tempfile::tempdir().unwrap();
+                let assets = files.path().join("assets");
+                std::fs::create_dir_all(&assets).unwrap();
+                std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+                let session_secret_file = files.path().join("session-secret");
+                std::fs::write(
+                    &session_secret_file,
+                    "embedded-compaction-secret-is-long-enough",
+                )
+                .unwrap();
+                let credential_file = files.path().join("codex-auth.json");
+                std::fs::write(&credential_file, "{}").unwrap();
+                let settings = crate::exomonad::EmbeddedLaunchConfig {
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                    public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+                    public_origin: None,
+                    asset_root: assets,
+                    browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
+                    session_secret_file: Some(session_secret_file),
+                    provider: crate::exomonad::EmbeddedModelProvider::Codex,
+                    credential_file,
+                    context_capacity_tokens: 200_000,
+                    concurrent_jobs: 2,
+                };
+                let mut service = campaign
+                    .prepare_engine_component_service(&settings)
+                    .await
+                    .unwrap();
+                let embedded = attach_actor(
+                    &service,
+                    campaign.session_root.path(),
+                    AgentPath("/root".into()),
+                    None,
+                    installation,
+                    Some("exercise pending-call compaction".into()),
+                )
+                .await
+                .unwrap();
+                let (lifecycle, _lifecycle_rx) =
+                    watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
+                let (successor_tx, mut successor_rx) = mpsc::unbounded_channel();
+                let (late_output_tx, mut late_output_rx) = mpsc::unbounded_channel();
+                let transport = CompactionTransport {
+                    model_requests: Arc::new(Mutex::new(Vec::new())),
+                    successor_seen: successor_tx,
+                    late_output_seen: late_output_tx,
+                    compactions: Arc::new(AtomicU64::new(0)),
+                };
+                let settings_for_engine = settings.clone();
+                let runtime = Arc::clone(&service.runtime);
+                let engine_transport = transport.clone();
+                let conversation = Arc::clone(&embedded.conversation);
+                let stop_driver = embedded.cancellation.clone();
+                let mut running = tokio::spawn(async move {
+                    drive_conversation_with_transport::<Offline, _>(
+                        embedded.driver,
+                        runtime,
+                        &settings_for_engine,
+                        "offline-compaction".into(),
+                        Effort::Medium,
+                        "production pending-call test".into(),
+                        embedded.cancellation_rx,
+                        lifecycle,
+                        actor,
+                        engine_transport,
+                    )
+                    .await
+                });
 
-    let first = tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
-        .await
-        .expect("raw call did not start")
-        .unwrap();
-    let second = tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
-        .await
-        .expect("typed call did not start")
-        .unwrap();
-    assert_eq!(
-        [first.as_str(), second.as_str()]
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>(),
-        ["raw-pending-call", "typed-pending-call"]
-            .into_iter()
-            .collect()
-    );
-    tokio::time::timeout(Duration::from_secs(10), successor_rx.recv())
-        .await
-        .expect("compacted successor request did not include pending calls")
-        .expect("transport dropped successor signal");
-    raw_release_tx.send(()).unwrap();
-    typed_release_tx.send(()).unwrap();
-    for _ in 0..2 {
-        tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
-            .await
-            .expect("released operations did not settle")
-            .expect("test endpoint dropped settlement observer");
-    }
-    conversation
-        .input(
-            "release-follow-up",
-            "operator",
-            "Continue after both held operations settle.",
-        )
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), late_output_rx.recv())
-        .await
-        .expect("Engine did not make a request after both late outputs settled")
-        .expect("transport dropped late-output request signal");
-    conversation
-        .input(
-            "begin-pending-cancel",
-            "operator",
-            "Start a held operation so the Engine can cancel it.",
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
-            .await
-            .expect("cancellable operation did not start")
-            .expect("test endpoint dropped start observer"),
-        "cancel-pending-call"
-    );
-    stop_driver.send_replace(true);
-    tokio::time::timeout(Duration::from_secs(10), &mut running)
-        .await
-        .expect("pending Engine cancellation did not finish")
-        .unwrap()
-        .expect("cancelling a pending Engine must confirm cleanup");
-    cancel_release_tx.send(()).unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
-            .await
-            .expect("cancelled test future did not exit after release")
-            .expect("test endpoint dropped settlement observer"),
-        "cancel-pending-call"
-    );
-    let requests = transport.model_requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
-    for (call_id, output) in [
-        ("raw-pending-call", "raw late output"),
-        ("typed-pending-call", "typed late output"),
-    ] {
-        assert!(requests[2]
-            .input
-            .iter()
-            .any(|item| { item.0["call_id"] == call_id && item.0.to_string().contains(output) }));
-    }
-    drop(requests);
-    assert_eq!(transport.compactions.load(Ordering::Relaxed), 1);
-    let cancellation_claim = service
-        .runtime
-        .store()
-        .claims(&CallId("cancel-pending-call".into()))
-        .unwrap();
-    assert_eq!(cancellation_claim.len(), 1);
-    assert_eq!(cancellation_claim[0].state, ClaimState::Settled);
-    service.shutdown().await.unwrap();
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                let first = tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
+                    .await
+                    .expect("raw call did not start")
+                    .unwrap();
+                let second = tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
+                    .await
+                    .expect("typed call did not start")
+                    .unwrap();
+                assert_eq!(
+                    [first.as_str(), second.as_str()]
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>(),
+                    ["raw-pending-call", "typed-pending-call"]
+                        .into_iter()
+                        .collect()
+                );
+                tokio::time::timeout(Duration::from_secs(10), successor_rx.recv())
+                    .await
+                    .expect("compacted successor request did not include pending calls")
+                    .expect("transport dropped successor signal");
+                raw_release_tx.send(()).unwrap();
+                typed_release_tx.send(()).unwrap();
+                for _ in 0..2 {
+                    tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
+                        .await
+                        .expect("released operations did not settle")
+                        .expect("test endpoint dropped settlement observer");
+                }
+                conversation
+                    .input(
+                        "release-follow-up",
+                        "operator",
+                        "Continue after both held operations settle.",
+                    )
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), late_output_rx.recv())
+                    .await
+                    .expect("Engine did not make a request after both late outputs settled")
+                    .expect("transport dropped late-output request signal");
+                conversation
+                    .input(
+                        "begin-pending-cancel",
+                        "operator",
+                        "Start a held operation so the Engine can cancel it.",
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
+                        .await
+                        .expect("cancellable operation did not start")
+                        .expect("test endpoint dropped start observer"),
+                    "cancel-pending-call"
+                );
+                stop_driver.send_replace(true);
+                tokio::time::timeout(Duration::from_secs(10), &mut running)
+                    .await
+                    .expect("pending Engine cancellation did not finish")
+                    .unwrap()
+                    .expect("cancelling a pending Engine must confirm cleanup");
+                cancel_release_tx.send(()).unwrap();
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
+                        .await
+                        .expect("cancelled test future did not exit after release")
+                        .expect("test endpoint dropped settlement observer"),
+                    "cancel-pending-call"
+                );
+                let requests = transport.model_requests.lock().unwrap();
+                assert_eq!(requests.len(), 4);
+                for (call_id, output) in [
+                    ("raw-pending-call", "raw late output"),
+                    ("typed-pending-call", "typed late output"),
+                ] {
+                    assert!(requests[2].input.iter().any(|item| {
+                        item.0["call_id"] == call_id && item.0.to_string().contains(output)
+                    }));
+                }
+                drop(requests);
+                assert_eq!(transport.compactions.load(Ordering::Relaxed), 1);
+                let cancellation_claim = service
+                    .runtime
+                    .store()
+                    .claims(&CallId("cancel-pending-call".into()))
+                    .unwrap();
+                assert_eq!(cancellation_claim.len(), 1);
+                assert_eq!(cancellation_claim[0].state, ClaimState::Settled);
+                service.shutdown().await.unwrap();
+            })
+        })
+        .await;
 }
 
 #[derive(Clone)]
@@ -506,145 +509,150 @@ impl ResponsesTransport for FailedCompactionTransport {
 #[tokio::test]
 async fn engine_component_compaction_failure_continues_once_then_cleans_pending_call_on_cancel() {
     let campaign = TestCampaign::start().await;
-    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
-    let (release_tx, release_rx) = oneshot::channel();
-    let endpoint = GatedEndpoint {
-        tools: vec![HostedTool::Custom(CustomToolDeclaration {
-            name: "raw_hold".into(),
-            description: "Hold a raw call until the test releases it.".into(),
-            schedule: exomonad_tool::ToolScheduling::default(),
-            implementation: exomonad_tool::ToolImplementation::default(),
-            effect_keys: Vec::new(),
-        })],
-        releases: Arc::new(Mutex::new(HashMap::from([(
-            "cleanup-after-failed-compaction".into(),
-            release_rx,
-        )]))),
-        started: started_tx,
-        settled: settled_tx,
-    };
-    let actor = campaign.actor.identity();
-    let mut installation = campaign.root_installation.clone();
-    installation.policy = Arc::new(endpoint);
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+                let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+                let (release_tx, release_rx) = oneshot::channel();
+                let endpoint = GatedEndpoint {
+                    tools: vec![HostedTool::Custom(CustomToolDeclaration {
+                        name: "raw_hold".into(),
+                        description: "Hold a raw call until the test releases it.".into(),
+                        schedule: exomonad_tool::ToolScheduling::default(),
+                        implementation: exomonad_tool::ToolImplementation::default(),
+                        effect_keys: Vec::new(),
+                    })],
+                    releases: Arc::new(Mutex::new(HashMap::from([(
+                        "cleanup-after-failed-compaction".into(),
+                        release_rx,
+                    )]))),
+                    started: started_tx,
+                    settled: settled_tx,
+                };
+                let actor = campaign.actor.identity();
+                let mut installation = campaign.root_installation.clone();
+                installation.policy = Arc::new(endpoint);
 
-    let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
-    let session_secret_file = files.path().join("session-secret");
-    std::fs::write(
-        &session_secret_file,
-        "embedded-compaction-secret-is-long-enough",
-    )
-    .unwrap();
-    let credential_file = files.path().join("codex-auth.json");
-    std::fs::write(&credential_file, "{}").unwrap();
-    let settings = crate::exomonad::EmbeddedLaunchConfig {
-        listen: "127.0.0.1:0".parse().unwrap(),
-        public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
-        public_origin: None,
-        asset_root: assets,
-        browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
-        session_secret_file: Some(session_secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
-        credential_file,
-        context_capacity_tokens: 200_000,
-        concurrent_jobs: 2,
-    };
-    let mut service = campaign
-        .prepare_engine_component_service(&settings)
-        .await
-        .unwrap();
-    let embedded = attach_actor(
-        &service,
-        campaign.session_root.path(),
-        AgentPath("/root".into()),
-        None,
-        installation,
-        Some("exercise failed compaction cleanup".into()),
-    )
-    .await
-    .unwrap();
-    let (lifecycle, _lifecycle_rx) =
-        watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
-    let (compaction_tx, mut compaction_rx) = mpsc::unbounded_channel();
-    let (resumed_tx, mut resumed_rx) = mpsc::unbounded_channel();
-    let transport = FailedCompactionTransport {
-        normal_requests: Arc::new(AtomicU64::new(0)),
-        compaction_seen: compaction_tx,
-        resumed_after_failure: resumed_tx,
-    };
-    let runtime = Arc::clone(&service.runtime);
-    let engine_transport = transport.clone();
-    let stop_driver = embedded.cancellation.clone();
-    let mut running = tokio::spawn(async move {
-        drive_conversation_with_transport::<Offline, _>(
-            embedded.driver,
-            runtime,
-            &settings,
-            "offline-compaction-failure".into(),
-            Effort::Medium,
-            "production compaction failure test".into(),
-            embedded.cancellation_rx,
-            lifecycle,
-            actor,
-            engine_transport,
-        )
-        .await
-    });
+                let files = tempfile::tempdir().unwrap();
+                let assets = files.path().join("assets");
+                std::fs::create_dir_all(&assets).unwrap();
+                std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+                let session_secret_file = files.path().join("session-secret");
+                std::fs::write(
+                    &session_secret_file,
+                    "embedded-compaction-secret-is-long-enough",
+                )
+                .unwrap();
+                let credential_file = files.path().join("codex-auth.json");
+                std::fs::write(&credential_file, "{}").unwrap();
+                let settings = crate::exomonad::EmbeddedLaunchConfig {
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                    public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Https,
+                    public_origin: None,
+                    asset_root: assets,
+                    browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
+                    session_secret_file: Some(session_secret_file),
+                    provider: crate::exomonad::EmbeddedModelProvider::Codex,
+                    credential_file,
+                    context_capacity_tokens: 200_000,
+                    concurrent_jobs: 2,
+                };
+                let mut service = campaign
+                    .prepare_engine_component_service(&settings)
+                    .await
+                    .unwrap();
+                let embedded = attach_actor(
+                    &service,
+                    campaign.session_root.path(),
+                    AgentPath("/root".into()),
+                    None,
+                    installation,
+                    Some("exercise failed compaction cleanup".into()),
+                )
+                .await
+                .unwrap();
+                let (lifecycle, _lifecycle_rx) =
+                    watch::channel((Some(actor), harness::server::HostActorLifecycle::Waiting));
+                let (compaction_tx, mut compaction_rx) = mpsc::unbounded_channel();
+                let (resumed_tx, mut resumed_rx) = mpsc::unbounded_channel();
+                let transport = FailedCompactionTransport {
+                    normal_requests: Arc::new(AtomicU64::new(0)),
+                    compaction_seen: compaction_tx,
+                    resumed_after_failure: resumed_tx,
+                };
+                let runtime = Arc::clone(&service.runtime);
+                let engine_transport = transport.clone();
+                let stop_driver = embedded.cancellation.clone();
+                let mut running = tokio::spawn(async move {
+                    drive_conversation_with_transport::<Offline, _>(
+                        embedded.driver,
+                        runtime,
+                        &settings,
+                        "offline-compaction-failure".into(),
+                        Effort::Medium,
+                        "production compaction failure test".into(),
+                        embedded.cancellation_rx,
+                        lifecycle,
+                        actor,
+                        engine_transport,
+                    )
+                    .await
+                });
 
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
-            .await
-            .expect("pending operation did not start")
-            .unwrap(),
-        "cleanup-after-failed-compaction"
-    );
-    tokio::time::timeout(Duration::from_secs(10), compaction_rx.recv())
-        .await
-        .expect("failed compaction was not attempted")
-        .expect("transport dropped compaction signal");
-    tokio::time::timeout(Duration::from_secs(10), resumed_rx.recv())
-        .await
-        .expect("Engine did not continue on the original window")
-        .expect("transport dropped post-failure signal");
-    assert_eq!(transport.normal_requests.load(Ordering::Relaxed), 2);
-    stop_driver.send_replace(true);
-    tokio::time::timeout(Duration::from_secs(10), &mut running)
-        .await
-        .expect("Engine cancellation did not clean the pending call")
-        .unwrap()
-        .expect("cancelling the pending Engine must confirm cleanup");
-    release_tx.send(()).unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
-            .await
-            .expect("cancelled test future did not exit after release")
-            .expect("test endpoint dropped settlement observer"),
-        "cleanup-after-failed-compaction"
-    );
-    let attempts = service
-        .runtime
-        .store()
-        .events(None)
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.kind == "compaction_attempt")
-        .collect::<Vec<_>>();
-    assert_eq!(attempts.len(), 1);
-    let attempt: serde_json::Value = serde_json::from_str(&attempts[0].payload).unwrap();
-    assert_eq!(attempt["outcome"], "failed");
-    let claim = service
-        .runtime
-        .store()
-        .claims(&CallId("cleanup-after-failed-compaction".into()))
-        .unwrap();
-    assert_eq!(claim.len(), 1);
-    assert_eq!(claim[0].state, ClaimState::Settled);
-    service.shutdown().await.unwrap();
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(10), started_rx.recv())
+                        .await
+                        .expect("pending operation did not start")
+                        .unwrap(),
+                    "cleanup-after-failed-compaction"
+                );
+                tokio::time::timeout(Duration::from_secs(10), compaction_rx.recv())
+                    .await
+                    .expect("failed compaction was not attempted")
+                    .expect("transport dropped compaction signal");
+                tokio::time::timeout(Duration::from_secs(10), resumed_rx.recv())
+                    .await
+                    .expect("Engine did not continue on the original window")
+                    .expect("transport dropped post-failure signal");
+                assert_eq!(transport.normal_requests.load(Ordering::Relaxed), 2);
+                stop_driver.send_replace(true);
+                tokio::time::timeout(Duration::from_secs(10), &mut running)
+                    .await
+                    .expect("Engine cancellation did not clean the pending call")
+                    .unwrap()
+                    .expect("cancelling the pending Engine must confirm cleanup");
+                release_tx.send(()).unwrap();
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), settled_rx.recv())
+                        .await
+                        .expect("cancelled test future did not exit after release")
+                        .expect("test endpoint dropped settlement observer"),
+                    "cleanup-after-failed-compaction"
+                );
+                let attempts = service
+                    .runtime
+                    .store()
+                    .events(None)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|event| event.kind == "compaction_attempt")
+                    .collect::<Vec<_>>();
+                assert_eq!(attempts.len(), 1);
+                let attempt: serde_json::Value =
+                    serde_json::from_str(&attempts[0].payload).unwrap();
+                assert_eq!(attempt["outcome"], "failed");
+                let claim = service
+                    .runtime
+                    .store()
+                    .claims(&CallId("cleanup-after-failed-compaction".into()))
+                    .unwrap();
+                assert_eq!(claim.len(), 1);
+                assert_eq!(claim[0].state, ClaimState::Settled);
+                service.shutdown().await.unwrap();
+            })
+        })
+        .await;
 }
 
 #[tokio::test]

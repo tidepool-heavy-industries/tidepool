@@ -192,13 +192,69 @@ pub(super) struct TestCampaign {
     pub program: Arc<tidepool_runtime::session::CompiledTurn>,
     pub child_session_factory:
         exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
-    pub hosted: tokio::task::JoinHandle<()>,
+    hosted: Option<tokio::task::JoinHandle<()>>,
+    hosted_join: Option<CampaignHostedJoin>,
+    shutdown_observations: Vec<exomonad_actor::ForestRootShutdown>,
+    settled: bool,
     deployments: tokio::sync::mpsc::Receiver<LocalResidentDeployment>,
     /// Deployments scanned by [`Self::next_deployment`] that did not match
     /// what the caller was awaiting. Parked here, in arrival order, rather
     /// than dropped, so a later call can still find them.
     pending: std::collections::VecDeque<LocalResidentDeployment>,
     pub root_installation: exomonad_actor::LocalResidentInstallation,
+}
+
+/// Executor completion and resource cleanup are independent observations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum CampaignHostedJoin {
+    Joined,
+    Failed(String),
+    TimedOut,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum CampaignRootRetirement {
+    Settled(exomonad_actor::ResidentShutdown),
+    Unconfirmed {
+        actor: exomonad_actor::ActorRef,
+        terminal: Option<exomonad_actor::ActorTerminal>,
+    },
+}
+
+/// Every forest outcome remains visible, including failed earlier observations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CampaignShutdown {
+    pub forest: Vec<exomonad_actor::ForestRootShutdown>,
+    pub hosted: CampaignHostedJoin,
+    pub root: CampaignRootRetirement,
+}
+
+impl CampaignShutdown {
+    pub fn is_confirmed(&self) -> bool {
+        self.forest.iter().rev().find_map(|outcome| match outcome {
+            exomonad_actor::ForestRootShutdown::RunResources(outcome) => Some(outcome),
+            _ => None,
+        }) == Some(&exomonad_actor::CleanupComponentOutcome::Confirmed)
+            && self
+                .forest
+                .iter()
+                .filter(|outcome| {
+                    !matches!(outcome, exomonad_actor::ForestRootShutdown::RunResources(_))
+                })
+                .all(exomonad_actor::ForestRootShutdown::is_confirmed)
+            && self.hosted == CampaignHostedJoin::Joined
+            && matches!(&self.root, CampaignRootRetirement::Settled(shutdown) if shutdown.cleanup.is_confirmed())
+    }
+}
+
+impl Drop for TestCampaign {
+    fn drop(&mut self) {
+        // Drop cannot acknowledge asynchronous resource cleanup. On assertion
+        // unwinding preserve the original panic; run_scenario owns settlement.
+        if !self.settled && !std::thread::panicking() {
+            panic!("TestCampaign left scope without consuming shutdown or run_scenario");
+        }
+    }
 }
 
 enum CampaignRoot {
@@ -211,6 +267,139 @@ enum CampaignRoot {
 }
 
 impl TestCampaign {
+    /// Observe a deliberate earlier retirement without giving up campaign
+    /// ownership. Recovery scenarios can keep using the forest afterwards.
+    pub async fn observe_hosted_completion(&mut self) -> Result<(), CampaignHostedJoin> {
+        if self.hosted_join.is_none() {
+            let mut task = self.hosted.take().expect("campaign owns its executor");
+            let observation = match tokio::time::timeout(Duration::from_secs(30), &mut task).await {
+                Ok(Ok(())) => CampaignHostedJoin::Joined,
+                Ok(Err(error)) => CampaignHostedJoin::Failed(error.to_string()),
+                Err(_) => {
+                    task.abort();
+                    let _ = tokio::time::timeout(Duration::from_secs(5), &mut task).await;
+                    CampaignHostedJoin::TimedOut
+                }
+            };
+            self.hosted_join = Some(observation);
+        }
+        match self.hosted_join.as_ref().unwrap() {
+            CampaignHostedJoin::Joined => Ok(()),
+            other => Err(other.clone()),
+        }
+    }
+
+    /// Retain the actual forest owner's outcomes when a scenario must inspect
+    /// retirement effects before its final consuming shutdown.
+    pub async fn observe_forest_shutdown(&mut self) -> Vec<exomonad_actor::ForestRootShutdown> {
+        let outcomes = self.forest.shutdown().await;
+        self.shutdown_observations.extend(outcomes.iter().cloned());
+        outcomes
+    }
+
+    pub async fn observe_shutdown(&mut self) -> Result<CampaignShutdown, CampaignShutdown> {
+        self.observe_forest_shutdown().await;
+        let _ = self.observe_hosted_completion().await;
+        let terminal = self.actor.terminal();
+        let root = match (terminal.get(), terminal.cleanup()) {
+            (Some(terminal), Some(cleanup)) => {
+                CampaignRootRetirement::Settled(exomonad_actor::ResidentShutdown {
+                    terminal,
+                    cleanup,
+                })
+            }
+            (terminal, _) => CampaignRootRetirement::Unconfirmed {
+                actor: self.actor.identity(),
+                terminal,
+            },
+        };
+        let observation = CampaignShutdown {
+            forest: self.shutdown_observations.clone(),
+            hosted: self.hosted_join.clone().unwrap(),
+            root,
+        };
+        if observation.is_confirmed() {
+            Ok(observation)
+        } else {
+            Err(observation)
+        }
+    }
+
+    /// The consuming owner is the only path that acknowledges final teardown.
+    pub async fn shutdown(mut self) -> Result<CampaignShutdown, CampaignShutdown> {
+        let observation = self.observe_shutdown().await;
+        self.settled = true;
+        observation
+    }
+
+    /// Settle assertions and cleanup through the same owner as hosted tests.
+    pub async fn run_scenario<R>(
+        self,
+        scenario: impl for<'a> FnOnce(&'a mut Self) -> futures_util::future::LocalBoxFuture<'a, R>,
+    ) -> R {
+        self.run_scenario_with_cleanup(scenario, |observation| {
+            observation.expect("model-free campaign cleanup is confirmed");
+        })
+        .await
+    }
+
+    /// A refusal scenario still consumes teardown, then checks the exact typed
+    /// failure. Successful cleanup cannot silently satisfy a negative case.
+    pub async fn run_scenario_expecting_cleanup_failure<R>(
+        self,
+        scenario: impl for<'a> FnOnce(&'a mut Self) -> futures_util::future::LocalBoxFuture<'a, R>,
+        check_failure: impl FnOnce(&CampaignShutdown),
+    ) -> R {
+        self.run_scenario_with_cleanup(scenario, |observation| {
+            check_failure(&observation.expect_err("scenario must leave cleanup unconfirmed"));
+        })
+        .await
+    }
+
+    async fn run_scenario_with_cleanup<R>(
+        self,
+        scenario: impl for<'a> FnOnce(&'a mut Self) -> futures_util::future::LocalBoxFuture<'a, R>,
+        check_cleanup: impl FnOnce(Result<CampaignShutdown, CampaignShutdown>),
+    ) -> R {
+        let campaign = tokio::sync::Mutex::new(Some(self));
+        let observation = std::cell::RefCell::new(None);
+        let (scenario, cleanup, report_errors) = super::hosted_test_context::settle_scenario(
+            async {
+                let mut owner = campaign.lock().await;
+                scenario(owner.as_mut().expect("scenario owns its campaign")).await
+            },
+            async {
+                let owner = campaign
+                    .lock()
+                    .await
+                    .take()
+                    .expect("cleanup consumes its campaign");
+                let result = owner.shutdown().await;
+                let settled = result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|failure| format!("{failure:?}"));
+                observation.replace(Some(result));
+                settled
+            },
+            |_, _| Ok(()),
+        )
+        .await;
+        if let Err(error) = &cleanup {
+            eprintln!("model-free campaign cleanup failed: {error}");
+        }
+        let result = match scenario {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        };
+        let observation = observation
+            .into_inner()
+            .unwrap_or_else(|| panic!("model-free campaign cleanup did not settle: {cleanup:?}"));
+        check_cleanup(observation);
+        assert!(report_errors.is_empty(), "{report_errors:?}");
+        result
+    }
+
     /// Drive the production durable output sink without creating a provider turn.
     /// Other deployments remain available to the campaign's existing consumers.
     pub async fn drive_actor_output<F: std::future::Future>(
@@ -595,7 +784,10 @@ impl TestCampaign {
             forest,
             program,
             child_session_factory,
-            hosted,
+            hosted: Some(hosted),
+            hosted_join: None,
+            shutdown_observations: Vec::new(),
+            settled: false,
             deployments,
             pending: std::collections::VecDeque::new(),
             root_installation,

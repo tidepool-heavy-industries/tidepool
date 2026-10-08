@@ -6,7 +6,8 @@ use super::*;
 
 #[tokio::test]
 async fn record_service_survives_tool_return_and_runs_commands_in_its_handler() {
-    let mut campaign = TestCampaign::start().await;
+    let campaign = TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
@@ -51,7 +52,7 @@ async fn record_service_survives_tool_return_and_runs_commands_in_its_handler() 
         )
         .await
     });
-    let request = backend_request(&mut campaign).await;
+    let request = backend_request(campaign).await;
     assert_eq!(
         request.owner, record,
         "the record actor owns handler commands"
@@ -68,8 +69,7 @@ async fn record_service_survives_tool_return_and_runs_commands_in_its_handler() 
     )
     .await;
     assert_eq!(finished["items"][1]["output"], "True", "{finished}");
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 struct AfterToolDeadline(Option<std::ffi::OsString>);
@@ -96,7 +96,7 @@ impl Drop for AfterToolDeadline {
 
 #[tokio::test]
 async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_uncertainty() {
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             let authored = config.workspace.join(".exomonad");
@@ -123,123 +123,143 @@ async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_un
         },
     )
     .await;
-    campaign.forest.track_resource_release();
-    let root = campaign.root_installation.policy.clone();
-    // The root spec is already compiled. The parked command prevents a
-    // successful slot answer, independently of command execution timing.
-    let deadline = AfterToolDeadline::install(10_000);
-    let policy = root.clone();
-    let called = tokio::spawn(async move {
-        dispatch_structured_tool(policy.as_ref(), "lifetimeProbe", serde_json::Value::Null).await
-    });
-    let child = campaign
-        .next_deployment(
-            "invocation worker policy publication before slot expiry",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(child)
-                    if child.label == "invocation-deadline-child" =>
-                {
-                    Ok(child)
-                }
-                other => Err(other),
-            },
-        )
-        .await;
-    let exact = child.actor.identity();
-    assert_eq!(child.creator, Some(campaign.actor.identity()));
-    assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
-    assert!(child.actor.terminal().get().is_none());
-    let request = backend_request(&mut campaign).await;
-    assert_eq!(request.owner, campaign.actor.identity());
-    let backend = TestCommands::new();
-    request.supply(Ok(backend.clone()));
-    let release = campaign
-        .next_deployment(
-            "host cleanup for the exact invocation-owned worker",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::ReleaseAwait(release) => Ok(release),
-                other => Err(other),
-            },
-        )
-        .await;
-    assert_eq!(release.actor, exact);
-    let terminal = child
-        .actor
-        .terminal()
-        .get()
-        .expect("worker stopped before host release");
-    assert_eq!(terminal.kind, ActorExitKind::Cancelled);
-    assert!(child.actor.terminal().cleanup().unwrap().is_confirmed());
-    assert!(
-        !called.is_finished(),
-        "scope exit still owes external cleanup evidence"
-    );
-    const RETAINED: &str = "scripted provider installation remains published";
-    assert!(release.answer(exomonad_actor::ResourceRelease::Retained(RETAINED.into())));
-    let response = tokio::time::timeout(Duration::from_secs(30), called)
-        .await
-        .expect("retained host cleanup must settle the tool response")
-        .unwrap();
-    drop(deadline);
-    assert_eq!(response["status"], "committed", "{response}");
-    let rendered = response.to_string();
-    assert!(rendered.contains("original-result"), "{response}");
-    assert!(rendered.contains("no answer within 10s"), "{response}");
-    assert!(!rendered.contains("slot-finished"), "{response}");
-    assert!(
-        rendered.contains("Invocation cleanup remains unconfirmed"),
-        "{response}"
-    );
-    assert!(rendered.contains(RETAINED), "{response}");
-    assert!(rendered.contains(&format!("{exact:?}")), "{response}");
-    assert_eq!(backend.executions(), 1);
-    assert_eq!(
-        backend.control_count(),
-        1,
-        "unfinished slot command cancelled once"
-    );
-    let retired = campaign
-        .next_deployment(
-            "exact worker's retained retirement",
-            Duration::from_secs(30),
-            |event| match event {
-                LocalResidentDeployment::Retired { actor, terminal } if actor == exact => {
-                    Ok(terminal)
-                }
-                other => Err(other),
-            },
-        )
-        .await;
-    assert_eq!(retired, terminal);
-    let status =
-        dispatch_structured_tool(root.as_ref(), "status", serde_json::json!({"view":"live"})).await;
-    assert!(status.to_string().contains(RETAINED), "{status}");
-    assert!(
-        status
-            .to_string()
-            .contains("invocation cleanup unconfirmed"),
-        "{status}"
-    );
-    let available = dispatch_haskell_script(root.as_ref(), "40 + 2 :: Int").await;
-    assert_eq!(available["items"][0]["output"], "42", "{available}");
-
-    // Retirement retries the same retained invocation's cleanup. An external
-    // owner still retaining resources must keep root cleanup unconfirmed.
-    campaign.drain_ready();
-    let mut deployments = campaign.take_deployments();
-    let releases = tokio::spawn(async move {
-        while let Some(event) = deployments.recv().await {
-            if let LocalResidentDeployment::ReleaseAwait(release) = event {
+    campaign
+        .run_scenario_expecting_cleanup_failure(|campaign| {
+            Box::pin(async move {
+                campaign.forest.track_resource_release();
+                let root = campaign.root_installation.policy.clone();
+                // The root spec is already compiled. The parked command prevents a
+                // successful slot answer, independently of command execution timing.
+                let deadline = AfterToolDeadline::install(10_000);
+                let policy = root.clone();
+                let called = tokio::spawn(async move {
+                    dispatch_structured_tool(
+                        policy.as_ref(),
+                        "lifetimeProbe",
+                        serde_json::Value::Null,
+                    )
+                    .await
+                });
+                let child = campaign
+                    .next_deployment(
+                        "invocation worker policy publication before slot expiry",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::PolicyInstalled(child)
+                                if child.label == "invocation-deadline-child" =>
+                            {
+                                Ok(child)
+                            }
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                let exact = child.actor.identity();
+                assert_eq!(child.creator, Some(campaign.actor.identity()));
+                assert_eq!(child.supervisor_parent, Some(campaign.actor.identity()));
+                assert!(child.actor.terminal().get().is_none());
+                let request = backend_request(campaign).await;
+                assert_eq!(request.owner, campaign.actor.identity());
+                let backend = TestCommands::new();
+                request.supply(Ok(backend.clone()));
+                let release = campaign
+                    .next_deployment(
+                        "host cleanup for the exact invocation-owned worker",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::ReleaseAwait(release) => Ok(release),
+                            other => Err(other),
+                        },
+                    )
+                    .await;
                 assert_eq!(release.actor, exact);
-                release.answer(exomonad_actor::ResourceRelease::Retained(RETAINED.into()));
-            }
-        }
-    });
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-    releases.abort();
-    assert!(releases.await.unwrap_err().is_cancelled());
-    assert!(!campaign.actor.terminal().cleanup().unwrap().is_confirmed());
+                let terminal = child
+                    .actor
+                    .terminal()
+                    .get()
+                    .expect("worker stopped before host release");
+                assert_eq!(terminal.kind, ActorExitKind::Cancelled);
+                assert!(child.actor.terminal().cleanup().unwrap().is_confirmed());
+                assert!(
+                    !called.is_finished(),
+                    "scope exit still owes external cleanup evidence"
+                );
+                const RETAINED: &str = "scripted provider installation remains published";
+                assert!(release.answer(exomonad_actor::ResourceRelease::Retained(RETAINED.into())));
+                let response = tokio::time::timeout(Duration::from_secs(30), called)
+                    .await
+                    .expect("retained host cleanup must settle the tool response")
+                    .unwrap();
+                drop(deadline);
+                assert_eq!(response["status"], "committed", "{response}");
+                let rendered = response.to_string();
+                assert!(rendered.contains("original-result"), "{response}");
+                assert!(rendered.contains("no answer within 10s"), "{response}");
+                assert!(!rendered.contains("slot-finished"), "{response}");
+                assert!(
+                    rendered.contains("Invocation cleanup remains unconfirmed"),
+                    "{response}"
+                );
+                assert!(rendered.contains(RETAINED), "{response}");
+                assert!(rendered.contains(&format!("{exact:?}")), "{response}");
+                assert_eq!(backend.executions(), 1);
+                assert_eq!(
+                    backend.control_count(),
+                    1,
+                    "unfinished slot command cancelled once"
+                );
+                let retired = campaign
+                    .next_deployment(
+                        "exact worker's retained retirement",
+                        Duration::from_secs(30),
+                        |event| match event {
+                            LocalResidentDeployment::Retired { actor, terminal }
+                                if actor == exact =>
+                            {
+                                Ok(terminal)
+                            }
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                assert_eq!(retired, terminal);
+                let status = dispatch_structured_tool(
+                    root.as_ref(),
+                    "status",
+                    serde_json::json!({"view":"live"}),
+                )
+                .await;
+                assert!(status.to_string().contains(RETAINED), "{status}");
+                assert!(
+                    status
+                        .to_string()
+                        .contains("invocation cleanup unconfirmed"),
+                    "{status}"
+                );
+                let available = dispatch_haskell_script(root.as_ref(), "40 + 2 :: Int").await;
+                assert_eq!(available["items"][0]["output"], "42", "{available}");
+
+                // Retirement retries the same retained invocation's cleanup. An external
+                // owner still retaining resources must keep root cleanup unconfirmed.
+                campaign.drain_ready();
+                let mut deployments = campaign.take_deployments();
+                let releases = tokio::spawn(async move {
+                    while let Some(event) = deployments.recv().await {
+                        if let LocalResidentDeployment::ReleaseAwait(release) = event {
+                            assert_eq!(release.actor, exact);
+                            release
+                                .answer(exomonad_actor::ResourceRelease::Retained(RETAINED.into()));
+                        }
+                    }
+                });
+                campaign.observe_shutdown().await.expect_err("retained external owner keeps cleanup unconfirmed");
+                releases.abort();
+                assert!(releases.await.unwrap_err().is_cancelled());
+                assert!(!campaign.actor.terminal().cleanup().unwrap().is_confirmed());
+            })
+        }, |failure| {
+            assert_eq!(failure.hosted, super::test_campaign::CampaignHostedJoin::Joined);
+            assert!(matches!(&failure.root, super::test_campaign::CampaignRootRetirement::Settled(shutdown) if !shutdown.cleanup.is_confirmed()));
+        })
+        .await;
 }

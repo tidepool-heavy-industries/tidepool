@@ -100,94 +100,97 @@ fn embedded_settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchCon
 #[tokio::test]
 async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_inclusion() {
     let campaign = TestCampaign::start().await;
-    let actor = campaign.actor.identity();
-    let run_root = campaign.session_root.path();
-    let runtime = embedded_harness::EmbeddedHarnessRuntime::open(run_root, 1).unwrap();
-    let identity = harness::embedding::HostIdentity {
-        run: runtime_namespace(run_root),
-        actor: harness::model::AgentPath("/root".into()),
-        incarnation: actor.incarnation.0.to_string(),
-    };
-    let embedded = runtime
-        .attach(
-            identity,
-            campaign.actor.clone(),
-            Arc::new(
-                embedded_policy::EmbeddedPolicyInstallation::from_installation(
-                    &campaign.root_installation,
-                ),
-            ),
-            None,
-        )
-        .unwrap();
-    let conversation = Arc::clone(&embedded.conversation);
-    let binding = open_embedded_actor_binding(
-        &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root).unwrap(),
-        actor,
-        harness::model::AgentPath("/root".into()),
-        Some(conversation.clone()),
-    )
-    .unwrap();
-    let context = DeliveryProvenance::Notification {
-        sender: actor,
-        target: actor,
-    };
-    let row = binding
-        .inbox
-        .publish_tracked(
-            DurableActorEvent::Text("replay-safe embedded notification".into()),
-            context.clone(),
-        )
-        .unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let actor = campaign.actor.identity();
+                let run_root = campaign.session_root.path();
+                let runtime = embedded_harness::EmbeddedHarnessRuntime::open(run_root, 1).unwrap();
+                let identity = harness::embedding::HostIdentity {
+                    run: runtime_namespace(run_root),
+                    actor: harness::model::AgentPath("/root".into()),
+                    incarnation: actor.incarnation.0.to_string(),
+                };
+                let embedded = runtime
+                    .attach(
+                        identity,
+                        campaign.actor.clone(),
+                        Arc::new(
+                            embedded_policy::EmbeddedPolicyInstallation::from_installation(
+                                campaign.root_installation,
+                            ),
+                        ),
+                        None,
+                    )
+                    .unwrap();
+                let conversation = Arc::clone(&embedded.conversation);
+                let binding = open_embedded_actor_binding(
+                    &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root).unwrap(),
+                    actor,
+                    harness::model::AgentPath("/root".into()),
+                    Some(conversation.clone()),
+                )
+                .unwrap();
+                let context = DeliveryProvenance::Notification {
+                    sender: actor,
+                    target: actor,
+                };
+                let row = binding
+                    .inbox
+                    .publish_tracked(
+                        DurableActorEvent::Text("replay-safe embedded notification".into()),
+                        context.clone(),
+                    )
+                    .unwrap();
 
-    deliver_embedded_notifications(actor, binding.clone())
-        .await
-        .unwrap();
-    let first = binding.inbox.observe_receipt(row.sequence).unwrap();
-    assert!(matches!(
-        first,
-        ReceiptLookup::Retained(ref evidence)
-            if evidence.context == context && evidence.phase == DeliveryPhase::Submitted
-    ));
-    let unread = runtime.store().unread("/root").unwrap();
-    assert_eq!(unread.len(), 1);
-    let item = runtime
-        .store()
-        .get_item(&unread[0].item_hash)
-        .unwrap()
-        .unwrap();
-    assert_eq!(item.0["content"], "replay-safe embedded notification");
-    assert!(matches!(
-        conversation.input_observation(unread[0].id).unwrap(),
-        harness::embedding::InputObservation::Admitted
-    ));
+                deliver_embedded_notifications(actor, binding.clone())
+                    .await
+                    .unwrap();
+                let first = binding.inbox.observe_receipt(row.sequence).unwrap();
+                assert!(matches!(
+                    first,
+                    ReceiptLookup::Retained(ref evidence)
+                        if evidence.context == context && evidence.phase == DeliveryPhase::Submitted
+                ));
+                let unread = runtime.store().unread("/root").unwrap();
+                assert_eq!(unread.len(), 1);
+                let item = runtime
+                    .store()
+                    .get_item(&unread[0].item_hash)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(item.0["content"], "replay-safe embedded notification");
+                assert!(matches!(
+                    conversation.input_observation(unread[0].id).unwrap(),
+                    harness::embedding::InputObservation::Admitted
+                ));
 
-    drop(binding);
-    let reloaded = open_embedded_actor_binding(
-        &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root).unwrap(),
-        actor,
-        harness::model::AgentPath("/root".into()),
-        Some(conversation.clone()),
-    )
-    .unwrap();
-    deliver_embedded_notifications(actor, reloaded.clone())
-        .await
-        .unwrap();
-    let after_retry = runtime.store().unread("/root").unwrap();
-    assert_eq!(
-        after_retry.len(),
-        1,
-        "stable operation id deduplicates the retry"
-    );
-    assert_eq!(after_retry[0].item_hash, unread[0].item_hash);
-    assert!(matches!(
-        reloaded.inbox.observe_receipt(row.sequence).unwrap(),
-        ReceiptLookup::Retained(ref evidence)
-            if evidence.context == context && evidence.phase == DeliveryPhase::Submitted
-    ));
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                drop(binding);
+                let reloaded = open_embedded_actor_binding(
+                    &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root).unwrap(),
+                    actor,
+                    harness::model::AgentPath("/root".into()),
+                    Some(conversation.clone()),
+                )
+                .unwrap();
+                deliver_embedded_notifications(actor, reloaded.clone())
+                    .await
+                    .unwrap();
+                let after_retry = runtime.store().unread("/root").unwrap();
+                assert_eq!(
+                    after_retry.len(),
+                    1,
+                    "stable operation id deduplicates the retry"
+                );
+                assert_eq!(after_retry[0].item_hash, unread[0].item_hash);
+                assert!(matches!(
+                    reloaded.inbox.observe_receipt(row.sequence).unwrap(),
+                    ReceiptLookup::Retained(ref evidence)
+                        if evidence.context == context && evidence.phase == DeliveryPhase::Submitted
+                ));
+            })
+        })
+        .await;
 }
 
 #[tokio::test]

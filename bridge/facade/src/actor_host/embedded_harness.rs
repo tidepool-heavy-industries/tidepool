@@ -2171,75 +2171,79 @@ mod tests {
     #[tokio::test]
     async fn request_snapshot_rejects_closed_actor_before_installation_clears() {
         let campaign = TestCampaign::start().await;
-        let actor = campaign.actor.identity();
-        let installation = Arc::new(EmbeddedPolicyInstallation::from_installation(
-            &campaign.root_installation,
-        ));
-        let identity = HostIdentity {
-            run: super::super::runtime_namespace(campaign.session_root.path()),
-            actor: AgentPath("/root".into()),
-            incarnation: actor.incarnation.0.to_string(),
-        };
-        let scratch_runtime =
-            EmbeddedHarnessRuntime::open(campaign.session_root.path(), 1).unwrap();
-        for foreign in [
-            HostIdentity {
-                incarnation: "wrong-incarnation".into(),
-                ..identity.clone()
-            },
-            HostIdentity {
-                run: "another-run".into(),
-                ..identity.clone()
-            },
-        ] {
-            assert!(scratch_runtime
-                .attach(foreign, campaign.actor.clone(), installation.clone(), None)
-                .is_err());
-        }
-        let (wakes, _incoming) = mpsc::unbounded_channel();
-        let scratch = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(scratch.path().join("store.sqlite")).unwrap());
-        let host = EmbeddedHostActor::new(
-            identity,
-            campaign.actor.clone(),
-            installation.clone(),
-            store,
-            wakes,
-            Arc::new(EmbeddedRoundControl::default()),
-        )
-        .unwrap();
-        let held_store_transaction = campaign.actor.admit_transaction().unwrap();
-        let retiring_actor = campaign.actor.clone();
-        let retiring = tokio::spawn(async move {
-            retiring_actor
-                .shutdown(ActorTerminal {
-                    kind: ActorExitKind::Cancelled,
-                    summary: "request snapshot retirement race".into(),
-                    diagnostic: None,
+        campaign
+            .run_scenario(|campaign| {
+                Box::pin(async move {
+                    let actor = campaign.actor.identity();
+                    let installation = Arc::new(EmbeddedPolicyInstallation::from_installation(
+                        campaign.root_installation,
+                    ));
+                    let identity = HostIdentity {
+                        run: super::super::runtime_namespace(campaign.session_root.path()),
+                        actor: AgentPath("/root".into()),
+                        incarnation: actor.incarnation.0.to_string(),
+                    };
+                    let scratch_runtime =
+                        EmbeddedHarnessRuntime::open(campaign.session_root.path(), 1).unwrap();
+                    for foreign in [
+                        HostIdentity {
+                            incarnation: "wrong-incarnation".into(),
+                            ..identity.clone()
+                        },
+                        HostIdentity {
+                            run: "another-run".into(),
+                            ..identity.clone()
+                        },
+                    ] {
+                        assert!(scratch_runtime
+                            .attach(foreign, campaign.actor.clone(), installation.clone(), None)
+                            .is_err());
+                    }
+                    let (wakes, _incoming) = mpsc::unbounded_channel();
+                    let scratch = tempfile::tempdir().unwrap();
+                    let store = Arc::new(Store::open(scratch.path().join("store.sqlite")).unwrap());
+                    let host = EmbeddedHostActor::new(
+                        identity,
+                        campaign.actor.clone(),
+                        installation.clone(),
+                        store,
+                        wakes,
+                        Arc::new(EmbeddedRoundControl::default()),
+                    )
+                    .unwrap();
+                    let held_store_transaction = campaign.actor.admit_transaction().unwrap();
+                    let retiring_actor = campaign.actor.clone();
+                    let retiring = tokio::spawn(async move {
+                        retiring_actor
+                            .shutdown(ActorTerminal {
+                                kind: ActorExitKind::Cancelled,
+                                summary: "request snapshot retirement race".into(),
+                                diagnostic: None,
+                            })
+                            .await
+                    });
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        loop {
+                            if campaign.actor.admit_transaction().is_err() {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(
+                        installation.request_snapshot().is_ok(),
+                        "the old installation remains published"
+                    );
+                    assert!(
+                        host.tool_surface().is_err(),
+                        "closed admission must reject a new request"
+                    );
+                    drop(held_store_transaction);
+                    retiring.await.unwrap().unwrap();
                 })
-                .await
-        });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if campaign.actor.admit_transaction().is_err() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(
-            installation.request_snapshot().is_ok(),
-            "the old installation remains published"
-        );
-        assert!(
-            host.tool_surface().is_err(),
-            "closed admission must reject a new request"
-        );
-        drop(held_store_transaction);
-        retiring.await.unwrap().unwrap();
-        campaign.forest.shutdown().await;
-        campaign.hosted.await.unwrap();
+            })
+            .await;
     }
 }

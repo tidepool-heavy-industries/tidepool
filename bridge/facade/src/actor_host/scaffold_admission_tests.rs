@@ -140,19 +140,20 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
 /// claim a provider attachment or production host shutdown.
 #[tokio::test(flavor = "multi_thread")]
 async fn pinned_shell_component_refuses_expired_retained_output_without_rerun() {
-    let mut campaign = TestCampaign::start_with_config(
-        |admission| admission,
-        scaffold,
-    )
-    .await;
-    let checked = std::panic::AssertUnwindSafe(assert_pinned_shell_recovery(&mut campaign))
-        .catch_unwind()
+    let campaign = TestCampaign::start_with_config(|admission| admission, scaffold).await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let checked = std::panic::AssertUnwindSafe(assert_pinned_shell_recovery(campaign))
+                    .catch_unwind()
+                    .await;
+                campaign.observe_shutdown().await.unwrap();
+                if let Err(panic) = checked {
+                    std::panic::resume_unwind(panic);
+                }
+            })
+        })
         .await;
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
-    if let Err(panic) = checked {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 fn retained_snapshot(output: &str, stdout_bytes: usize, stderr_bytes: usize) -> &str {

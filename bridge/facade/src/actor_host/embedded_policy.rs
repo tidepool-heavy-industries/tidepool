@@ -483,78 +483,84 @@ mod tests {
     #[tokio::test]
     async fn installed_builtin_tools_project_strict_schemas_and_preserve_host_omission_defaults() {
         let campaign = super::super::test_campaign::TestCampaign::start_with_shell().await;
-        // Take the real installed declarations, rather than fixtures that copy
-        // the three actor-local schemas and can drift from their owners.
-        let tools = campaign.root_installation.policy.tools().to_vec();
-        let snapshot = EmbeddedPolicyInstallation::new(
-            campaign.actor.identity(),
-            policy_with_tools("builtin-projection", tools),
-        )
-        .request_snapshot()
-        .unwrap();
-        for (name, field) in [
-            ("status", "view"),
-            ("reload_agent_spec", "also_check"),
-            ("reload_helpers", "also_check"),
-        ] {
-            let declaration = snapshot
-                .tools()
-                .iter()
-                .find(|tool| tool["name"] == name)
-                .unwrap();
-            assert_eq!(declaration["strict"], true);
-            assert_eq!(declaration["parameters"]["required"], json!([field]));
-            assert_eq!(declaration["parameters"]["additionalProperties"], false);
-            assert_eq!(
-                declaration["parameters"]["properties"][field]["anyOf"][1],
-                json!({"type":"null"})
-            );
-            let result = snapshot
-                .dispatch(
-                    name.into(),
-                    ToolArguments::Structured(json!({(field):null})),
-                    context(),
-                    None,
-                    None,
-                )
-                .await
-                .unwrap();
-            assert_eq!(result["arguments"]["structured"], json!({}));
-        }
-        let bash = snapshot
-            .tools()
-            .iter()
-            .find(|tool| tool["name"] == "bash")
-            .expect("the installed shell spec exposes bash");
-        assert_eq!(bash["strict"], true);
-        let environment = &bash["parameters"]["properties"]["environment"];
-        let entries = &environment["anyOf"][0];
-        assert_eq!(entries["type"], "array");
-        assert_eq!(entries["items"]["type"], "object");
-        assert_eq!(entries["items"]["required"], json!(["name", "value"]));
-        assert_eq!(entries["items"]["additionalProperties"], false);
-        assert_eq!(entries["items"]["properties"]["name"]["type"], "string");
-        assert_eq!(entries["items"]["properties"]["value"]["type"], "string");
-        let request = harness::transport::ResponsesRequest {
-            input: vec![],
-            instructions: String::new(),
-            tools: snapshot.manifest.tools().clone(),
-            tools_allowed: None,
-            model: "test-model".into(),
-            pinned_effort: harness::model::Effort::Low,
-            session_id: "builtin-contract".into(),
-        };
-        harness::transport::client::request_body(&request).unwrap();
         campaign
-            .actor
-            .shutdown(exomonad_actor::ActorTerminal {
-                kind: exomonad_actor::ActorExitKind::Completed,
-                summary: "builtin schema contract checked".into(),
-                diagnostic: None,
+            .run_scenario(|campaign| {
+                Box::pin(async move {
+                    // Take the real installed declarations, rather than fixtures that copy
+                    // the three actor-local schemas and can drift from their owners.
+                    let tools = campaign.root_installation.policy.tools().to_vec();
+                    let snapshot = EmbeddedPolicyInstallation::new(
+                        campaign.actor.identity(),
+                        policy_with_tools("builtin-projection", tools),
+                    )
+                    .request_snapshot()
+                    .unwrap();
+                    for (name, field) in [
+                        ("status", "view"),
+                        ("reload_agent_spec", "also_check"),
+                        ("reload_helpers", "also_check"),
+                    ] {
+                        let declaration = snapshot
+                            .tools()
+                            .iter()
+                            .find(|tool| tool["name"] == name)
+                            .unwrap();
+                        assert_eq!(declaration["strict"], true);
+                        assert_eq!(declaration["parameters"]["required"], json!([field]));
+                        assert_eq!(declaration["parameters"]["additionalProperties"], false);
+                        assert_eq!(
+                            declaration["parameters"]["properties"][field]["anyOf"][1],
+                            json!({"type":"null"})
+                        );
+                        let result = snapshot
+                            .dispatch(
+                                name.into(),
+                                ToolArguments::Structured(json!({(field):null})),
+                                context(),
+                                None,
+                                None,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(result["arguments"]["structured"], json!({}));
+                    }
+                    let bash = snapshot
+                        .tools()
+                        .iter()
+                        .find(|tool| tool["name"] == "bash")
+                        .expect("the installed shell spec exposes bash");
+                    assert_eq!(bash["strict"], true);
+                    let environment = &bash["parameters"]["properties"]["environment"];
+                    let entries = &environment["anyOf"][0];
+                    assert_eq!(entries["type"], "array");
+                    assert_eq!(entries["items"]["type"], "object");
+                    assert_eq!(entries["items"]["required"], json!(["name", "value"]));
+                    assert_eq!(entries["items"]["additionalProperties"], false);
+                    assert_eq!(entries["items"]["properties"]["name"]["type"], "string");
+                    assert_eq!(entries["items"]["properties"]["value"]["type"], "string");
+                    let request = harness::transport::ResponsesRequest {
+                        input: vec![],
+                        instructions: String::new(),
+                        tools: snapshot.manifest.tools().clone(),
+                        tools_allowed: None,
+                        model: "test-model".into(),
+                        pinned_effort: harness::model::Effort::Low,
+                        session_id: "builtin-contract".into(),
+                    };
+                    harness::transport::client::request_body(&request).unwrap();
+                    campaign
+                        .actor
+                        .shutdown(exomonad_actor::ActorTerminal {
+                            kind: exomonad_actor::ActorExitKind::Completed,
+                            summary: "builtin schema contract checked".into(),
+                            diagnostic: None,
+                        })
+                        .await
+                        .unwrap();
+                    campaign.observe_hosted_completion().await.unwrap();
+                })
             })
-            .await
-            .unwrap();
-        campaign.hosted.await.unwrap();
+            .await;
     }
 
     #[test]

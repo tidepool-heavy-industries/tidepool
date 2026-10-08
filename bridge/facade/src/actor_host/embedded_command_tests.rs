@@ -609,7 +609,8 @@ use exomonad_tool::{ToolArguments, ToolInvocation};
 #[tokio::test]
 #[ignore = "requires delegated cgroups and bubblewrap"]
 async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
-    let mut campaign = TestCampaign::start_with_shell().await;
+    let campaign = TestCampaign::start_with_shell().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
 
     let owner = exomonad_node::command_resources::CommandResources::delegated(
         exomonad_node::command_resources::CommandResourcePolicy {
@@ -647,9 +648,9 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         let actor = request.owner;
         supply_resident_command_backend(
             request,
-            &campaign.config,
-            &campaign.authority,
-            &campaign.worktrees,
+            campaign.config,
+            campaign.authority,
+            campaign.worktrees,
             actor,
             Some(resources.clone()),
         );
@@ -689,7 +690,7 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
     }
     assert_ne!(bindings[0], bindings[1]);
     let recovered = super::command_jobs_tests::committed(
-        &campaign,
+        campaign,
         &format!(
             "retainedFirst <- Cmd.readStdout {}\nretainedSecond <- Cmd.readStdout {}\ndisplay (retainedFirst == Right \"embedded-host-command\" && retainedSecond == Right \"second-embedded-command\" && {} /= {})",
             bindings[0], bindings[1], bindings[0], bindings[1],
@@ -706,6 +707,5 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         b"xx",
         "recovering the two jobs must not rerun either command"
     );
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }

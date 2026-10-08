@@ -166,7 +166,7 @@ impl StartupEvidence {
 
 type HostOutcome =
     futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<(), String>>>;
-type ScenarioResult = Result<(), Box<dyn std::any::Any + Send>>;
+type ScenarioResult<R = ()> = Result<R, Box<dyn std::any::Any + Send>>;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum HostBarrierFailure {
@@ -274,7 +274,7 @@ impl HostTermination {
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
-enum ScenarioOutcome {
+pub(super) enum ScenarioOutcome {
     Unknown,
     Passed,
     Failed {
@@ -285,7 +285,7 @@ enum ScenarioOutcome {
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum ScenarioPhase {
+pub(super) enum ScenarioPhase {
     Startup,
     Scenario,
 }
@@ -342,18 +342,18 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// Reporting failure must never skip the production cleanup owner, or replace
 /// an assertion's original panic payload.
-async fn settle_scenario<S, C>(
+pub(super) async fn settle_scenario<S, C, R>(
     scenario: S,
     cleanup: C,
     mut report: impl FnMut(&ScenarioOutcome, &CleanupOutcome) -> Result<(), String>,
-) -> (ScenarioResult, Result<(), String>, Vec<String>)
+) -> (ScenarioResult<R>, Result<(), String>, Vec<String>)
 where
-    S: std::future::Future<Output = ()>,
+    S: std::future::Future<Output = R>,
     C: std::future::Future<Output = Result<(), String>>,
 {
     let scenario = std::panic::AssertUnwindSafe(scenario).catch_unwind().await;
     let scenario_outcome = match &scenario {
-        Ok(()) => ScenarioOutcome::Passed,
+        Ok(_) => ScenarioOutcome::Passed,
         Err(payload) => ScenarioOutcome::Failed {
             phase: ScenarioPhase::Scenario,
             message: panic_message(payload.as_ref()),
@@ -922,11 +922,11 @@ impl HostedTestRuntime {
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: impl FnOnce(
-            &Arc<embedded_harness::EmbeddedHarnessRuntime>,
-            &ActorHostConfig,
-        ) -> Arc<dyn harness::engine::ResponsesTransport>
-        + Send
-        + 'static,
+                &Arc<embedded_harness::EmbeddedHarnessRuntime>,
+                &ActorHostConfig,
+            ) -> Arc<dyn harness::engine::ResponsesTransport>
+            + Send
+            + 'static,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
             settings,

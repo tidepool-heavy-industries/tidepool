@@ -40,105 +40,109 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
 
 #[tokio::test]
 async fn bash_call_logs_one_call_timing_summary_line() {
-    let mut campaign = TestCampaign::start_with_shell().await;
-    let policy = campaign.root_installation.policy.clone();
+    let campaign = TestCampaign::start_with_shell().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
 
-    let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .json()
-        .with_writer(log.clone())
-        .with_max_level(tracing::Level::INFO)
-        .finish();
-    // A scoped, thread-local default: these tests run on `#[tokio::test]`'s
-    // default current-thread runtime, so the spawned dispatch below still
-    // polls on this same thread and stays under this guard.
-    let _guard = tracing::subscriber::set_default(subscriber);
+                let log = CapturedLog(Arc::new(std::sync::Mutex::new(Vec::new())));
+                let subscriber = tracing_subscriber::fmt()
+                    .json()
+                    .with_writer(log.clone())
+                    .with_max_level(tracing::Level::INFO)
+                    .finish();
+                // A scoped, thread-local default: these tests run on `#[tokio::test]`'s
+                // default current-thread runtime, so the spawned dispatch below still
+                // polls on this same thread and stays under this guard.
+                let _guard = tracing::subscriber::set_default(subscriber);
 
-    let invocation = ToolInvocation {
-        name: "bash".into(),
-        arguments: ToolArguments::Structured(serde_json::json!({"cmd": "echo hi"})),
-        context: Some(ToolInvocationContext::external(
-            "call-timing-thread".into(),
-            "call-timing-turn".into(),
-            "call-timing-once".into(),
-            Some("call-timing-once".into()),
-            None,
-        )),
-    };
-    let dispatch = tokio::spawn(policy.dispatch_json_boxed(invocation));
-    // The command settles only after a real ~50ms delay, so the effect
-    // boundary that awaits it (`Cmd.observe`'s `CommandAwaitWith`) spends
-    // measurable wall time — proving `exec_ms` reports the command's own
-    // execution, not just the near-instant `Cmd.start` dispatch.
-    let backend = TestCommands::completed_after(std::time::Duration::from_millis(50), "hi\n");
-    backend_request(&mut campaign)
-        .await
-        .supply(Ok(backend.clone()));
-    let receipt = dispatch.await.unwrap().unwrap();
-    assert_eq!(receipt["status"], "committed", "{receipt}");
+                let invocation = ToolInvocation {
+                    name: "bash".into(),
+                    arguments: ToolArguments::Structured(serde_json::json!({"cmd": "echo hi"})),
+                    context: Some(ToolInvocationContext::external(
+                        "call-timing-thread".into(),
+                        "call-timing-turn".into(),
+                        "call-timing-once".into(),
+                        Some("call-timing-once".into()),
+                        None,
+                    )),
+                };
+                let dispatch = tokio::spawn(policy.dispatch_json_boxed(invocation));
+                // The command settles only after a real ~50ms delay, so the effect
+                // boundary that awaits it (`Cmd.observe`'s `CommandAwaitWith`) spends
+                // measurable wall time — proving `exec_ms` reports the command's own
+                // execution, not just the near-instant `Cmd.start` dispatch.
+                let backend =
+                    TestCommands::completed_after(std::time::Duration::from_millis(50), "hi\n");
+                backend_request(campaign).await.supply(Ok(backend.clone()));
+                let receipt = dispatch.await.unwrap().unwrap();
+                assert_eq!(receipt["status"], "committed", "{receipt}");
 
-    drop(_guard);
-    let log_text = String::from_utf8(
-        log.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone(),
-    )
-    .expect("captured log is UTF-8");
+                drop(_guard);
+                let log_text = String::from_utf8(
+                    log.0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                )
+                .expect("captured log is UTF-8");
 
-    let summary = log_text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|value| {
-            value
-                .get("fields")
-                .and_then(|fields| fields.get("message"))
-                .and_then(|message| message.as_str())
-                == Some("call timing")
+                let summary = log_text
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .find(|value| {
+                        value
+                            .get("fields")
+                            .and_then(|fields| fields.get("message"))
+                            .and_then(|message| message.as_str())
+                            == Some("call timing")
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("no \"call timing\" summary line in captured log: {log_text}")
+                    });
+
+                let fields = summary
+                    .get("fields")
+                    .unwrap_or_else(|| panic!("\"call timing\" line has no fields: {summary}"));
+                assert_eq!(fields["tool"], "bash", "{fields}");
+                for field in [
+                    "actor",
+                    "incarnation",
+                    "total_ms",
+                    "checkout_wait_ms",
+                    "checkout_hold_ms",
+                    "compile_ms",
+                    "compile_count",
+                    "jev_ms",
+                    "jev_count",
+                    "exec_ms",
+                    "outcome",
+                ] {
+                    assert!(fields.get(field).is_some(), "missing {field}: {fields}");
+                }
+                // The dispatched command's Cmd.start/Cmd.status/Cmd.output round trips
+                // installed and drove a job binding, so this call compiled at least
+                // once and spent time in the command effect handler.
+                let compile_count = fields["compile_count"]
+                    .as_u64()
+                    .or_else(|| fields["compile_count"].as_str()?.parse().ok())
+                    .expect("compile_count is a number");
+                assert!(compile_count >= 1, "{fields}");
+                let exec_ms = fields["exec_ms"]
+                    .as_u64()
+                    .or_else(|| fields["exec_ms"].as_str()?.parse().ok())
+                    .expect("exec_ms is a number");
+                // The backend settled only after a real ~50ms delay while this call's
+                // Cmd.observe awaited it, so the command-effect total must reflect that
+                // wait, not the near-instant Cmd.start dispatch alone.
+                assert!(
+                    exec_ms > 0,
+                    "exec_ms did not capture the command's own execution: {fields}"
+                );
+            })
         })
-        .unwrap_or_else(|| panic!("no \"call timing\" summary line in captured log: {log_text}"));
-
-    let fields = summary
-        .get("fields")
-        .unwrap_or_else(|| panic!("\"call timing\" line has no fields: {summary}"));
-    assert_eq!(fields["tool"], "bash", "{fields}");
-    for field in [
-        "actor",
-        "incarnation",
-        "total_ms",
-        "checkout_wait_ms",
-        "checkout_hold_ms",
-        "compile_ms",
-        "compile_count",
-        "jev_ms",
-        "jev_count",
-        "exec_ms",
-        "outcome",
-    ] {
-        assert!(fields.get(field).is_some(), "missing {field}: {fields}");
-    }
-    // The dispatched command's Cmd.start/Cmd.status/Cmd.output round trips
-    // installed and drove a job binding, so this call compiled at least
-    // once and spent time in the command effect handler.
-    let compile_count = fields["compile_count"]
-        .as_u64()
-        .or_else(|| fields["compile_count"].as_str()?.parse().ok())
-        .expect("compile_count is a number");
-    assert!(compile_count >= 1, "{fields}");
-    let exec_ms = fields["exec_ms"]
-        .as_u64()
-        .or_else(|| fields["exec_ms"].as_str()?.parse().ok())
-        .expect("exec_ms is a number");
-    // The backend settled only after a real ~50ms delay while this call's
-    // Cmd.observe awaited it, so the command-effect total must reflect that
-    // wait, not the near-instant Cmd.start dispatch alone.
-    assert!(
-        exec_ms > 0,
-        "exec_ms did not capture the command's own execution: {fields}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+        .await;
 }
 
 /// A resident session's first cell bootstraps its machine (nothing exists
@@ -170,51 +174,56 @@ async fn second_cell_install_compiles_off_checkout() {
         .expect("first global subscriber in this test process");
 
     let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.clone();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
 
-    // First cell: bootstraps the session's machine.
-    super::tests::dispatch_haskell_script(policy.as_ref(), "let x = (1 :: Int)\nx\n").await;
-    // Second cell: a machine already exists to snapshot against.
-    super::tests::dispatch_haskell_script(policy.as_ref(), "let y = (2 :: Int)\ny\n").await;
+                // First cell: bootstraps the session's machine.
+                super::tests::dispatch_haskell_script(policy.as_ref(), "let x = (1 :: Int)\nx\n")
+                    .await;
+                // Second cell: a machine already exists to snapshot against.
+                super::tests::dispatch_haskell_script(policy.as_ref(), "let y = (2 :: Int)\ny\n")
+                    .await;
 
-    let log_text = String::from_utf8(
-        log.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone(),
-    )
-    .expect("captured log is UTF-8");
+                let log_text = String::from_utf8(
+                    log.0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                )
+                .expect("captured log is UTF-8");
 
-    let installs: Vec<serde_json::Value> = log_text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|value| {
-            value.get("target").and_then(|t| t.as_str())
-                == Some("tidepool_runtime::prepared_install")
-        })
-        .collect();
-    assert!(
-        !installs.is_empty(),
-        "no tidepool_runtime::prepared_install log lines captured: {log_text}"
-    );
-    let off_checkout = installs.iter().any(|line| {
-        line.get("fields")
-            .and_then(|fields| fields.get("compiled_off_checkout"))
-            .and_then(|value| {
-                value
-                    .as_bool()
-                    .or_else(|| value.as_str().map(|s| s == "true"))
-            })
-            == Some(true)
-    });
-    assert!(
-        off_checkout,
-        "expected at least one prepared install with compiled_off_checkout=true \
+                let installs: Vec<serde_json::Value> = log_text
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .filter(|value| {
+                        value.get("target").and_then(|t| t.as_str())
+                            == Some("tidepool_runtime::prepared_install")
+                    })
+                    .collect();
+                assert!(
+                    !installs.is_empty(),
+                    "no tidepool_runtime::prepared_install log lines captured: {log_text}"
+                );
+                let off_checkout = installs.iter().any(|line| {
+                    line.get("fields")
+                        .and_then(|fields| fields.get("compiled_off_checkout"))
+                        .and_then(|value| {
+                            value
+                                .as_bool()
+                                .or_else(|| value.as_str().map(|s| s == "true"))
+                        })
+                        == Some(true)
+                });
+                assert!(
+                    off_checkout,
+                    "expected at least one prepared install with compiled_off_checkout=true \
          (the second cell's split install) among: {installs:?}"
-    );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                );
+            })
+        })
+        .await;
 }
 
 /// A six-unit cell (three binds, three expressions) run after a warm-up
@@ -238,70 +247,77 @@ async fn six_unit_cell_compiles_every_unit_off_checkout() {
         .expect("first global subscriber in this test process");
 
     let campaign = TestCampaign::start().await;
-    let policy = campaign.root_installation.policy.clone();
-    let log_len = || {
-        log.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
-    };
-    let log_since = |start: usize| {
-        let bytes = log
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)[start..]
-            .to_vec();
-        String::from_utf8(bytes)
-            .expect("captured log is UTF-8")
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .collect::<Vec<_>>()
-    };
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let log_len = || {
+                    log.0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .len()
+                };
+                let log_since = |start: usize| {
+                    let bytes = log
+                        .0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)[start..]
+                        .to_vec();
+                    String::from_utf8(bytes)
+                        .expect("captured log is UTF-8")
+                        .lines()
+                        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                        .collect::<Vec<_>>()
+                };
 
-    // Warm-up: bootstraps the machine and the display renderer.
-    super::tests::dispatch_haskell_script(policy.as_ref(), "let x = (1 :: Int)\nx\n").await;
+                // Warm-up: bootstraps the machine and the display renderer.
+                super::tests::dispatch_haskell_script(policy.as_ref(), "let x = (1 :: Int)\nx\n")
+                    .await;
 
-    let mut failures = Vec::new();
-    for (round, names) in [("a", ["hA", "hB", "hC"]), ("b", ["kA", "kB", "kC"])] {
-        let [a, b, c] = names;
-        let script = format!(
-            "{a} <- pure (1 :: Int)\n{a} + 1\n{b} <- pure ({a} * 2)\n{b} + {a}\n\
+                let mut failures = Vec::new();
+                for (round, names) in [("a", ["hA", "hB", "hC"]), ("b", ["kA", "kB", "kC"])] {
+                    let [a, b, c] = names;
+                    let script = format!(
+                        "{a} <- pure (1 :: Int)\n{a} + 1\n{b} <- pure ({a} * 2)\n{b} + {a}\n\
              {c} <- pure [{a}, {b}]\nlength {c}\n"
-        );
-        let start = log_len();
-        let receipt = super::tests::dispatch_haskell_script(policy.as_ref(), &script).await;
-        assert_eq!(receipt["status"], "committed", "{receipt}");
-        let lines = log_since(start);
-        let timing = lines
-            .iter()
-            .find(|value| {
-                value["fields"]["message"].as_str() == Some("call timing")
-                    && value["fields"]["tool"].as_str() == Some("cell")
-            })
-            .unwrap_or_else(|| panic!("no cell \"call timing\" line: {lines:?}"));
-        eprintln!("six-unit cell round {round}: {}", timing["fields"]);
-        let installs = lines
-            .iter()
-            .filter(|value| value["target"].as_str() == Some("tidepool_runtime::prepared_install"))
-            .collect::<Vec<_>>();
-        assert!(!installs.is_empty(), "no prepared installs: {lines:?}");
-        let under_checkout = installs
-            .iter()
-            .filter(|line| {
-                let value = &line["fields"]["compiled_off_checkout"];
-                value.as_bool() != Some(true) && value.as_str() != Some("true")
-            })
-            .collect::<Vec<_>>();
-        if !under_checkout.is_empty() {
-            failures.push(format!(
+                    );
+                    let start = log_len();
+                    let receipt =
+                        super::tests::dispatch_haskell_script(policy.as_ref(), &script).await;
+                    assert_eq!(receipt["status"], "committed", "{receipt}");
+                    let lines = log_since(start);
+                    let timing = lines
+                        .iter()
+                        .find(|value| {
+                            value["fields"]["message"].as_str() == Some("call timing")
+                                && value["fields"]["tool"].as_str() == Some("cell")
+                        })
+                        .unwrap_or_else(|| panic!("no cell \"call timing\" line: {lines:?}"));
+                    eprintln!("six-unit cell round {round}: {}", timing["fields"]);
+                    let installs = lines
+                        .iter()
+                        .filter(|value| {
+                            value["target"].as_str() == Some("tidepool_runtime::prepared_install")
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(!installs.is_empty(), "no prepared installs: {lines:?}");
+                    let under_checkout = installs
+                        .iter()
+                        .filter(|line| {
+                            let value = &line["fields"]["compiled_off_checkout"];
+                            value.as_bool() != Some(true) && value.as_str() != Some("true")
+                        })
+                        .collect::<Vec<_>>();
+                    if !under_checkout.is_empty() {
+                        failures.push(format!(
                 "round {round}: {} of {} installs compiled under the checkout: {under_checkout:?}",
                 under_checkout.len(),
                 installs.len()
             ));
-        }
-    }
-    assert!(failures.is_empty(), "{failures:#?}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                    }
+                }
+                assert!(failures.is_empty(), "{failures:#?}");
+            })
+        })
+        .await;
 }

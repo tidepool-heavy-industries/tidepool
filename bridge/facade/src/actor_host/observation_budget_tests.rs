@@ -42,7 +42,8 @@ fn bulky_turn(index: usize) -> exomonad_actor::ConversationTurn {
 
 #[tokio::test]
 async fn an_effectful_result_past_the_observation_budget_still_binds() {
-    let mut campaign = TestCampaign::start().await;
+    let campaign = TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
     // One unit: a committed command job whose output is the oversized
     // payload. This is the live cell's shape — read sources, keep them in the
@@ -54,7 +55,7 @@ async fn an_effectful_result_past_the_observation_budget_still_binds() {
         tokio::spawn(async move { dispatch_haskell_script(policy.as_ref(), CELL).await });
     let backend = TestCommands::completed(&"x".repeat(OVERSIZED_BYTES));
     tokio::select! {
-        request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
+        request = backend_request(campaign) => request.supply(Ok(backend.clone())),
         result = &mut running => panic!("the cell ended before requesting a command backend: {result:?}"),
     }
     let bound = running.await.unwrap();
@@ -75,14 +76,13 @@ async fn an_effectful_result_past_the_observation_budget_still_binds() {
         1,
         "recovering the value must not re-run the command that produced it"
     );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
 async fn an_oversized_bare_expression_retains_the_whole_value_without_presentation() {
-    let mut campaign = TestCampaign::start().await;
+    let campaign = TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
     // Capture a bare expression after its producing command has committed.
     const CELL: &str = "transcript <- do\n  \
@@ -92,7 +92,7 @@ async fn an_oversized_bare_expression_retains_the_whole_value_without_presentati
         tokio::spawn(async move { dispatch_haskell_script(policy.as_ref(), CELL).await });
     let backend = TestCommands::completed(&"x".repeat(OVERSIZED_BYTES));
     tokio::select! {
-        request = backend_request(&mut campaign) => request.supply(Ok(backend.clone())),
+        request = backend_request(campaign) => request.supply(Ok(backend.clone())),
         result = &mut running => panic!("the cell ended before requesting a command backend: {result:?}"),
     }
     assert_eq!(running.await.unwrap()["status"], "committed");
@@ -128,9 +128,7 @@ async fn an_oversized_bare_expression_retains_the_whole_value_without_presentati
         1,
         "displaying a committed result must not replay the effect that produced it"
     );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
@@ -140,12 +138,9 @@ async fn reflect_binds_history_larger_than_the_observation_budget() {
         let turns = turns.clone();
         Box::pin(async move { Ok(turns.into_iter().take(count).collect()) })
     });
-    let campaign = TestCampaign::start_with_conversation(
-        |admission| admission,
-        |_| {},
-        Some(reader),
-    )
-    .await;
+    let campaign =
+        TestCampaign::start_with_conversation(|admission| admission, |_| {}, Some(reader)).await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
 
     let bound = dispatch_haskell_script(policy.as_ref(), "editorialContext <- reflect 3").await;
@@ -160,9 +155,7 @@ async fn reflect_binds_history_larger_than_the_observation_budget() {
     // counts as zero turns so it fails the assertion below rather than this one.
     let used = dispatch_haskell_script(policy.as_ref(), "if either (const 0) length editorialContext == 3 then pure () else error \"reflect lost requested turns\"").await;
     assert_eq!(used["status"], "committed", "{used}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
@@ -188,12 +181,13 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
         };
         Box::pin(async move { Ok(turns.into_iter().take(count).collect()) })
     });
-    let mut campaign = TestCampaign::start_with_conversation(
+    let campaign = TestCampaign::start_with_conversation(
         |admission| admission,
         super::test_campaign::configure_shell_workspace,
         Some(reader),
     )
     .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
     let bash = {
         let policy = policy.clone();
@@ -210,7 +204,7 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
         })
     };
     let backend = TestCommands::new();
-    backend_request(&mut campaign)
+    backend_request(campaign)
         .await
         .supply(Ok(backend.clone()));
     let started = bash.await.unwrap().unwrap();
@@ -289,9 +283,7 @@ async fn accepted_stdin_is_acknowledged_even_when_presentation_would_exhaust_obs
         "no implicit observation may request an unbounded initial page"
     );
     assert_eq!(backend.control_count(), 1, "polling must not resend input");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// A focused command retains its output even when the typed Jev section-scoring
@@ -302,7 +294,7 @@ async fn a_focused_bash_calls_jev_request_exceeding_the_budget_still_commits() {
     let backend = Arc::new(SectionScoreJev {
         requests: Mutex::new(Vec::new()),
     });
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             config.jev = Some(Arc::clone(&backend) as exomonad_actor::JevBackendHandle);
@@ -310,7 +302,8 @@ async fn a_focused_bash_calls_jev_request_exceeding_the_budget_still_commits() {
         },
     )
     .await;
-    let policy = Arc::clone(&campaign.root_installation.policy);
+    campaign.run_scenario(|campaign| Box::pin(async move {
+    let policy = Arc::clone(campaign.root_installation.policy);
     let invoked_policy = Arc::clone(&policy);
     let mut invoked = tokio::spawn(async move {
         dispatch_structured_tool(
@@ -342,7 +335,7 @@ async fn a_focused_bash_calls_jev_request_exceeding_the_budget_still_commits() {
     let command_output = "e".repeat(OVERSIZED_BYTES);
     let commands = TestCommands::completed_streams(&command_output, "");
     let request = tokio::select! {
-        request = backend_request(&mut campaign) => request,
+        request = backend_request(campaign) => request,
         result = &mut invoked => panic!("bash completed before requesting its command backend: {result:?}"),
     };
     request.supply(Ok(commands.clone()));
@@ -357,7 +350,5 @@ async fn a_focused_bash_calls_jev_request_exceeding_the_budget_still_commits() {
         1,
         "recovering from an oversized scoring request must not replay the command"
     );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }

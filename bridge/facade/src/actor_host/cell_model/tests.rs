@@ -1,4 +1,4 @@
-use super::super::test_campaign::{TestCampaign, commit_workspace, dispatch_haskell_script};
+use super::super::test_campaign::{commit_workspace, dispatch_haskell_script, TestCampaign};
 use super::*;
 use harness::{
     item::Item,
@@ -6,8 +6,8 @@ use harness::{
 };
 use serde_json::json;
 use std::sync::{
-    Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
+    Mutex,
 };
 use tokio::sync::Notify;
 
@@ -144,177 +144,184 @@ async fn campaign() -> (TestCampaign, Arc<Store>, Arc<ScriptState>, HeldBinding)
     .await;
     (campaign, store, script, retained)
 }
-async fn stop(campaign: TestCampaign) {
-    campaign.forest.shutdown().await;
-    tokio::time::timeout(std::time::Duration::from_secs(30), campaign.hosted)
-        .await
-        .unwrap()
-        .unwrap();
-}
 #[tokio::test]
 async fn resident_model_callback_and_hook_keep_caller_effects_and_retained_result() {
     let (campaign, store, script, _) = campaign().await;
-    let capability = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        "pure ModelFixture.modelCapabilityKeys",
-    )
-    .await;
-    assert_eq!(
-        capability["items"][0]["output"].as_str().unwrap().trim(),
-        "[EffectModelCall]"
-    );
-    let result = dispatch_haskell_script(
-        campaign.root_installation.policy.as_ref(),
-        "ModelFixture.callbackCell",
-    )
-    .await;
-    let output = result["items"][0]["output"].as_str().unwrap();
-    assert!(output.contains("Right \"done\""), "{result}");
-    assert!(
-        output.contains("model callback") && output.contains("model hook"),
-        "{result}"
-    );
-    let requests = script.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.model == "test-model" && request.pinned_effort == Effort::Low)
-    );
-    drop(requests);
-    let events = store.events(None).unwrap();
-    let retained = events
-        .iter()
-        .filter(|event| event.kind == "model_tool_result")
-        .collect::<Vec<_>>();
-    assert_eq!(retained.len(), 1);
-    let payload: serde_json::Value = serde_json::from_str(&retained[0].payload).unwrap();
-    assert_eq!(payload["output"]["type"], "function_call_output");
-    assert!(
-        payload["output"]["output"]
-            .as_str()
-            .unwrap()
-            .contains("hello")
-    );
-    stop(campaign).await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let capability = dispatch_haskell_script(
+                    campaign.root_installation.policy.as_ref(),
+                    "pure ModelFixture.modelCapabilityKeys",
+                )
+                .await;
+                assert_eq!(
+                    capability["items"][0]["output"].as_str().unwrap().trim(),
+                    "[EffectModelCall]"
+                );
+                let result = dispatch_haskell_script(
+                    campaign.root_installation.policy.as_ref(),
+                    "ModelFixture.callbackCell",
+                )
+                .await;
+                let output = result["items"][0]["output"].as_str().unwrap();
+                assert!(output.contains("Right \"done\""), "{result}");
+                assert!(
+                    output.contains("model callback") && output.contains("model hook"),
+                    "{result}"
+                );
+                let requests = script.requests.lock().unwrap();
+                assert_eq!(requests.len(), 2);
+                assert!(requests
+                    .iter()
+                    .all(|request| request.model == "test-model"
+                        && request.pinned_effort == Effort::Low));
+                drop(requests);
+                let events = store.events(None).unwrap();
+                let retained = events
+                    .iter()
+                    .filter(|event| event.kind == "model_tool_result")
+                    .collect::<Vec<_>>();
+                assert_eq!(retained.len(), 1);
+                let payload: serde_json::Value =
+                    serde_json::from_str(&retained[0].payload).unwrap();
+                assert_eq!(payload["output"]["type"], "function_call_output");
+                assert!(payload["output"]["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("hello"));
+            })
+        })
+        .await;
 }
 #[tokio::test]
 async fn resident_nested_model_and_separate_cell_budget_use_original_execution_owner() {
     let (campaign, _, script, _) = campaign().await;
-    let endpoint = campaign.root_installation.policy.as_ref();
-    let nested = dispatch_haskell_script(endpoint, "ModelFixture.nestedCell").await;
-    assert!(
-        nested["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("Right \"done\""),
-        "{nested}"
-    );
-    assert_eq!(script.requests.lock().unwrap().len(), 3);
-    let limited = dispatch_haskell_script(endpoint, "ModelFixture.nestedBudgetCell").await;
-    assert!(
-        limited["items"][0]["output"]
-            .as_str()
-            .unwrap()
-            .contains("ModelBudgetExceeded ProviderRequests"),
-        "{limited}"
-    );
-    assert_eq!(
-        script.requests.lock().unwrap().len(),
-        5,
-        "outer invocation exhaustion latches the shared cell allowance"
-    );
-    for _ in 0..2 {
-        let receipt = dispatch_haskell_script(endpoint, "ModelFixture.budgetCell").await;
-        let output = receipt["items"][0]["output"].as_str().unwrap();
-        assert!(
-            output.contains("(16,") && output.contains("ModelBudgetExceeded ProviderRequests"),
-            "{receipt}"
-        );
-    }
-    assert_eq!(
-        script.requests.lock().unwrap().len(),
-        37,
-        "second cell receives its own sixteen-request host allowance"
-    );
-    stop(campaign).await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let endpoint = campaign.root_installation.policy.as_ref();
+                let nested = dispatch_haskell_script(endpoint, "ModelFixture.nestedCell").await;
+                assert!(
+                    nested["items"][0]["output"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Right \"done\""),
+                    "{nested}"
+                );
+                assert_eq!(script.requests.lock().unwrap().len(), 3);
+                let limited =
+                    dispatch_haskell_script(endpoint, "ModelFixture.nestedBudgetCell").await;
+                assert!(
+                    limited["items"][0]["output"]
+                        .as_str()
+                        .unwrap()
+                        .contains("ModelBudgetExceeded ProviderRequests"),
+                    "{limited}"
+                );
+                assert_eq!(
+                    script.requests.lock().unwrap().len(),
+                    5,
+                    "outer invocation exhaustion latches the shared cell allowance"
+                );
+                for _ in 0..2 {
+                    let receipt =
+                        dispatch_haskell_script(endpoint, "ModelFixture.budgetCell").await;
+                    let output = receipt["items"][0]["output"].as_str().unwrap();
+                    assert!(
+                        output.contains("(16,")
+                            && output.contains("ModelBudgetExceeded ProviderRequests"),
+                        "{receipt}"
+                    );
+                }
+                assert_eq!(
+                    script.requests.lock().unwrap().len(),
+                    37,
+                    "second cell receives its own sixteen-request host allowance"
+                );
+            })
+        })
+        .await;
 }
 #[tokio::test]
 async fn resident_parked_model_allows_another_cell_and_cancels_without_late_provider_work() {
     use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
     let (campaign, store, script, retained) = campaign().await;
-    script.hold_nested.store(true, Ordering::Release);
-    let endpoint = campaign.root_installation.policy.clone();
-    let context = ToolInvocationContext::external(
-        "model-test".into(),
-        "parked-turn".into(),
-        "parked-call".into(),
-        Some("parked-operation".into()),
-        Some("haskell".into()),
-    );
-    let task = tokio::spawn(endpoint.dispatch_boxed(ToolInvocation {
-        name: exomonad_actor::HASKELL_TOOL.into(),
-        arguments: ToolArguments::Raw("ModelFixture.nestedCell".into()),
-        context: Some(context.clone()),
-    }));
-    tokio::time::timeout(
-        std::time::Duration::from_secs(180),
-        script.parked.notified(),
-    )
-    .await
-    .unwrap();
-    let receipt = tokio::time::timeout(
-        std::time::Duration::from_secs(180),
-        dispatch_haskell_script(endpoint.as_ref(), "pure (42 :: Int)"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(receipt["items"][0]["output"].as_str().unwrap().trim(), "42");
-    let cancelled = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        endpoint.cancel_workbench_boxed(context),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(
-        matches!(
-            cancelled,
-            exomonad_actor::WorkbenchCancellationOutcome::Cancelled { .. }
-        ),
-        "{cancelled:?}"
-    );
-    let held = retained
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("original binding retained");
-    assert!(Arc::strong_count(&held) >= 2);
-    let receipts = store
-        .events(None)
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.kind == "model_invocation_receipt")
-        .map(|event| serde_json::from_str::<serde_json::Value>(&event.payload).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        receipts.len(),
-        2,
-        "outer callback and nested model must settle before cancellation reply"
-    );
-    assert!(
-        receipts
-            .iter()
-            .all(|receipt| receipt["outcome"]["kind"] == "cancelled")
-    );
-    let _actual = tokio::time::timeout(std::time::Duration::from_secs(30), task)
-        .await
-        .unwrap()
-        .unwrap();
-    script.release.notify_waiters();
-    assert_eq!(script.requests.lock().unwrap().len(), 2);
-    assert_eq!(script.dropped.load(Ordering::SeqCst), 1);
-    stop(campaign).await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                script.hold_nested.store(true, Ordering::Release);
+                let endpoint = campaign.root_installation.policy.clone();
+                let context = ToolInvocationContext::external(
+                    "model-test".into(),
+                    "parked-turn".into(),
+                    "parked-call".into(),
+                    Some("parked-operation".into()),
+                    Some("haskell".into()),
+                );
+                let task = tokio::spawn(endpoint.dispatch_boxed(ToolInvocation {
+                    name: exomonad_actor::HASKELL_TOOL.into(),
+                    arguments: ToolArguments::Raw("ModelFixture.nestedCell".into()),
+                    context: Some(context.clone()),
+                }));
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(180),
+                    script.parked.notified(),
+                )
+                .await
+                .unwrap();
+                let receipt = tokio::time::timeout(
+                    std::time::Duration::from_secs(180),
+                    dispatch_haskell_script(endpoint.as_ref(), "pure (42 :: Int)"),
+                )
+                .await
+                .unwrap();
+                assert_eq!(receipt["items"][0]["output"].as_str().unwrap().trim(), "42");
+                let cancelled = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    endpoint.cancel_workbench_boxed(context),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(
+                    matches!(
+                        cancelled,
+                        exomonad_actor::WorkbenchCancellationOutcome::Cancelled { .. }
+                    ),
+                    "{cancelled:?}"
+                );
+                let held = retained
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("original binding retained");
+                assert!(Arc::strong_count(&held) >= 2);
+                let receipts = store
+                    .events(None)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|event| event.kind == "model_invocation_receipt")
+                    .map(|event| serde_json::from_str::<serde_json::Value>(&event.payload).unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    receipts.len(),
+                    2,
+                    "outer callback and nested model must settle before cancellation reply"
+                );
+                assert!(receipts
+                    .iter()
+                    .all(|receipt| receipt["outcome"]["kind"] == "cancelled"));
+                let _actual = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                script.release.notify_waiters();
+                assert_eq!(script.requests.lock().unwrap().len(), 2);
+                assert_eq!(script.dropped.load(Ordering::SeqCst), 1);
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -397,9 +404,7 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
         ),
         (16, 64, 128_000, 300)
     );
-    assert!(
-        factory
-            .policy(&descriptor.with_model(Some(Model::Alias("not-admitted".into()))))
-            .is_err()
-    );
+    assert!(factory
+        .policy(&descriptor.with_model(Some(Model::Alias("not-admitted".into()))))
+        .is_err());
 }

@@ -73,7 +73,7 @@ fn commit_workspace(workspace: &Path) {
 
 #[tokio::test]
 async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_revision() {
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, 1);
@@ -95,98 +95,121 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
         },
     )
     .await;
-    let helper_root = campaign
-        .worktrees
-        .managed_root()
-        .join(".resources")
-        .join(runtime_namespace(campaign.session_root.path()))
-        .join("helpers");
-    let draft = helper_root.join("drafts/run/SessionHelpers.hs");
-    let active = helper_root.join("layers/run/active");
-    let root = campaign.root_installation.policy.clone();
-    assert!(std::fs::read_to_string(&draft)
-        .unwrap()
-        .contains("helperAnswer = 41"));
-    let initial = std::fs::read_link(&active).unwrap();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let helper_root = campaign
+                    .worktrees
+                    .managed_root()
+                    .join(".resources")
+                    .join(runtime_namespace(campaign.session_root.path()))
+                    .join("helpers");
+                let draft = helper_root.join("drafts/run/SessionHelpers.hs");
+                let active = helper_root.join("layers/run/active");
+                let root = campaign.root_installation.policy.clone();
+                assert!(std::fs::read_to_string(&draft)
+                    .unwrap()
+                    .contains("helperAnswer = 41"));
+                let initial = std::fs::read_link(&active).unwrap();
 
-    let published =
-        dispatch_structured_tool(root.as_ref(), "reload_helpers", serde_json::json!({})).await;
-    assert!(
-        published.to_string().contains("outcome: published"),
-        "{published}"
-    );
-    let first = std::fs::read_link(&active).unwrap();
-    assert_ne!(first, initial);
-    assert!(published
-        .to_string()
-        .contains(first.file_name().unwrap().to_str().unwrap()));
-    committed(root.as_ref(), "import SessionHelpers").await;
-    let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
-    assert_eq!(answer["items"][0]["output"], "41", "{answer}");
+                let published = dispatch_structured_tool(
+                    root.as_ref(),
+                    "reload_helpers",
+                    serde_json::json!({}),
+                )
+                .await;
+                assert!(
+                    published.to_string().contains("outcome: published"),
+                    "{published}"
+                );
+                let first = std::fs::read_link(&active).unwrap();
+                assert_ne!(first, initial);
+                assert!(published
+                    .to_string()
+                    .contains(first.file_name().unwrap().to_str().unwrap()));
+                committed(root.as_ref(), "import SessionHelpers").await;
+                let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
+                assert_eq!(answer["items"][0]["output"], "41", "{answer}");
 
-    let invalid = "module SessionHelpers where\nhelperAnswer = (\n";
-    std::fs::write(&draft, invalid).unwrap();
-    let rejected =
-        dispatch_structured_tool(root.as_ref(), "reload_helpers", serde_json::json!({})).await;
-    assert!(
-        rejected.to_string().contains("outcome: rejected"),
-        "{rejected}"
-    );
-    assert!(rejected
-        .to_string()
-        .contains(first.file_name().unwrap().to_str().unwrap()));
-    assert_eq!(std::fs::read_link(&active).unwrap(), first);
-    assert_eq!(std::fs::read_to_string(&draft).unwrap(), invalid);
-    let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
-    assert_eq!(answer["items"][0]["output"], "41", "{answer}");
+                let invalid = "module SessionHelpers where\nhelperAnswer = (\n";
+                std::fs::write(&draft, invalid).unwrap();
+                let rejected = dispatch_structured_tool(
+                    root.as_ref(),
+                    "reload_helpers",
+                    serde_json::json!({}),
+                )
+                .await;
+                assert!(
+                    rejected.to_string().contains("outcome: rejected"),
+                    "{rejected}"
+                );
+                assert!(rejected
+                    .to_string()
+                    .contains(first.file_name().unwrap().to_str().unwrap()));
+                assert_eq!(std::fs::read_link(&active).unwrap(), first);
+                assert_eq!(std::fs::read_to_string(&draft).unwrap(), invalid);
+                let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
+                assert_eq!(answer["items"][0]["output"], "41", "{answer}");
 
-    std::fs::write(
-        &draft,
-        "module SessionHelpers where\nhelperAnswer :: Int\nhelperAnswer = 42\n",
-    )
-    .unwrap();
-    let published =
-        dispatch_structured_tool(root.as_ref(), "reload_helpers", serde_json::json!({})).await;
-    assert!(
-        published.to_string().contains("outcome: published"),
-        "{published}"
-    );
-    let second = std::fs::read_link(&active).unwrap();
-    assert_ne!(second, first);
-    assert!(published
-        .to_string()
-        .contains(second.file_name().unwrap().to_str().unwrap()));
-    let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
-    assert_eq!(answer["items"][0]["output"], "42", "{answer}");
+                std::fs::write(
+                    &draft,
+                    "module SessionHelpers where\nhelperAnswer :: Int\nhelperAnswer = 42\n",
+                )
+                .unwrap();
+                let published = dispatch_structured_tool(
+                    root.as_ref(),
+                    "reload_helpers",
+                    serde_json::json!({}),
+                )
+                .await;
+                assert!(
+                    published.to_string().contains("outcome: published"),
+                    "{published}"
+                );
+                let second = std::fs::read_link(&active).unwrap();
+                assert_ne!(second, first);
+                assert!(published
+                    .to_string()
+                    .contains(second.file_name().unwrap().to_str().unwrap()));
+                let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
+                assert_eq!(answer["items"][0]["output"], "42", "{answer}");
 
-    let launch = {
-        let root = root.clone();
-        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), CODING_CHILD).await })
-    };
-    let child = next_child(&mut campaign).await;
-    assert_eq!(launch.await.unwrap()["status"], "committed");
-    committed(child.policy.as_ref(), "import SessionHelpers").await;
-    let child_answer = committed(child.policy.as_ref(), "inspectFull helperAnswer").await;
-    assert_eq!(child_answer["items"][0]["output"], "42", "{child_answer}");
+                let launch = {
+                    let root = root.clone();
+                    tokio::spawn(async move {
+                        dispatch_haskell_script(root.as_ref(), CODING_CHILD).await
+                    })
+                };
+                let child = next_child(campaign).await;
+                assert_eq!(launch.await.unwrap()["status"], "committed");
+                committed(child.policy.as_ref(), "import SessionHelpers").await;
+                let child_answer =
+                    committed(child.policy.as_ref(), "inspectFull helperAnswer").await;
+                assert_eq!(child_answer["items"][0]["output"], "42", "{child_answer}");
 
-    std::fs::write(
-        &draft,
-        "module SessionHelpers where\nhelperAnswer :: Int\nhelperAnswer = 43\n",
-    )
-    .unwrap();
-    let published =
-        dispatch_structured_tool(root.as_ref(), "reload_helpers", serde_json::json!({})).await;
-    assert!(
-        published.to_string().contains("outcome: published"),
-        "{published}"
-    );
-    let parent_answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
-    assert_eq!(parent_answer["items"][0]["output"], "43", "{parent_answer}");
-    let child_answer = committed(child.policy.as_ref(), "inspectFull helperAnswer").await;
-    assert_eq!(child_answer["items"][0]["output"], "42", "{child_answer}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+                std::fs::write(
+                    &draft,
+                    "module SessionHelpers where\nhelperAnswer :: Int\nhelperAnswer = 43\n",
+                )
+                .unwrap();
+                let published = dispatch_structured_tool(
+                    root.as_ref(),
+                    "reload_helpers",
+                    serde_json::json!({}),
+                )
+                .await;
+                assert!(
+                    published.to_string().contains("outcome: published"),
+                    "{published}"
+                );
+                let parent_answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
+                assert_eq!(parent_answer["items"][0]["output"], "43", "{parent_answer}");
+                let child_answer =
+                    committed(child.policy.as_ref(), "inspectFull helperAnswer").await;
+                assert_eq!(child_answer["items"][0]["output"], "42", "{child_answer}");
+            })
+        })
+        .await;
 }
 
 /// Keep the authored package out of the repository entirely, so a checkout cut
@@ -222,7 +245,11 @@ async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResiden
         .await;
     campaign.authority.install_grant(
         child.actor.identity().into(),
-        ActorWorktreeGrant::Bound { enumerate: false, allocate: true, integrate: true },
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
     );
     campaign.acknowledge_native_spawn(&child);
     child
@@ -243,7 +270,7 @@ const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
 /// run's current graph and cannot publish checkout edits into that graph.
 #[tokio::test]
 async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             write_workspace(&config.workspace, 1);
@@ -258,15 +285,16 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
         },
     )
     .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
 
     let launch = {
         let root = root.clone();
         tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), CODING_CHILD).await })
     };
-    let child = next_child(&mut campaign).await;
+    let child = next_child(campaign).await;
     assert_eq!(launch.await.unwrap()["status"], "committed");
-    let published_before = run_layer_target(&campaign);
+    let published_before = run_layer_target(campaign);
 
     // The checkout carries a historical copy of the authored package.
     let checkout = campaign
@@ -292,7 +320,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     )
     .await;
     assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
-    assert_eq!(run_layer_target(&campaign), published_before);
+    assert_eq!(run_layer_target(campaign), published_before);
     let root_answer = committed(root.as_ref(), "inspectFull answer").await;
     assert_eq!(root_answer["items"][0]["output"], "1", "{root_answer}");
 
@@ -309,9 +337,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     )
     .await;
     assert_eq!(root_status["items"][1]["output"], "1", "{root_status}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// A child with no source of its own cannot publish into the run's layer.
@@ -320,7 +346,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
 /// never given a layer to publish into, so there is nothing for it to name.
 #[tokio::test]
 async fn a_child_without_its_own_source_cannot_republish_the_run() {
-    let mut campaign = TestCampaign::start_with_config(
+    let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
             // Authored but never committed: the run reads it from the working
@@ -337,15 +363,16 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
         },
     )
     .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
 
     let launch = {
         let root = root.clone();
         tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), CODING_CHILD).await })
     };
-    let child = next_child(&mut campaign).await;
+    let child = next_child(campaign).await;
     assert_eq!(launch.await.unwrap()["status"], "committed");
-    let published_before = run_layer_target(&campaign);
+    let published_before = run_layer_target(campaign);
 
     let checkout = campaign
         .worktrees
@@ -383,12 +410,10 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     )
     .await;
     assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
-    assert_eq!(run_layer_target(&campaign), published_before);
+    assert_eq!(run_layer_target(campaign), published_before);
     let root_answer = committed(root.as_ref(), "inspectFull answer").await;
     assert_eq!(root_answer["items"][0]["output"], "1", "{root_answer}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 /// The whole point, end to end: write a module, reload, and the next cell has
@@ -415,6 +440,7 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
         },
     )
     .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let workspace = campaign._repository.path().to_path_buf();
     let policy = campaign.root_installation.policy.clone();
     let policy = policy.as_ref();
@@ -461,9 +487,7 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     .await;
     assert_eq!(after["items"][1]["output"], "2", "{after}");
     assert_eq!(after["items"][2]["output"], "True", "{after}");
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }
 
 #[tokio::test]
@@ -482,9 +506,10 @@ async fn reload_rejects_a_new_unconfigured_module_with_restart_guidance() {
         },
     )
     .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let workspace = campaign._repository.path().to_path_buf();
     let policy = campaign.root_installation.policy.clone();
-    let published_before = run_layer_target(&campaign);
+    let published_before = run_layer_target(campaign);
     let new_module = workspace.join(".exomonad/Project/Vibe.hs");
     std::fs::write(
         &new_module,
@@ -503,10 +528,8 @@ async fn reload_rejects_a_new_unconfigured_module_with_restart_guidance() {
         new_module.is_file(),
         "a refused reload leaves the edit in place"
     );
-    assert_eq!(run_layer_target(&campaign), published_before);
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+    assert_eq!(run_layer_target(campaign), published_before);
+})).await;
 }
 
 /// A reload whose affected set does not typecheck is an ordinary result a
@@ -534,6 +557,7 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
         },
     )
     .await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
     let workspace = campaign._repository.path().to_path_buf();
     let policy = campaign.root_installation.policy.clone();
     let policy = policy.as_ref();
@@ -564,7 +588,5 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
         std::fs::read_to_string(workspace.join(".exomonad/Project/Work.hs")).unwrap(),
         broken
     );
-
-    campaign.forest.shutdown().await;
-    campaign.hosted.await.unwrap();
+})).await;
 }

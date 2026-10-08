@@ -96,42 +96,46 @@ async fn cell_compile_cost_measurement() {
     let started = Instant::now();
     let before = tidepool_extract_cmd::extract_spawn_count();
     let campaign = super::test_campaign::TestCampaign::start().await;
-    report(&campaign, "activation", None, None, before, started);
-    let policy = campaign.root_installation.policy.clone();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                report(campaign, "activation", None, None, before, started);
+                let policy = campaign.root_installation.policy.clone();
 
-    // Report the first cell separately because it pays the cold compile.
-    let started = Instant::now();
-    let before = tidepool_extract_cmd::extract_spawn_count();
-    super::tests::dispatch_haskell_script(policy.as_ref(), ONE_STATEMENT_CELL).await;
-    report(&campaign, "firstCell", None, Some(1), before, started);
+                // Report the first cell separately because it pays the cold compile.
+                let started = Instant::now();
+                let before = tidepool_extract_cmd::extract_spawn_count();
+                super::tests::dispatch_haskell_script(policy.as_ref(), ONE_STATEMENT_CELL).await;
+                report(campaign, "firstCell", None, Some(1), before, started);
 
-    for round in 0..2 {
-        for (statements, cell) in [(1, ONE_STATEMENT_CELL), (6, SIX_STATEMENT_CELL)] {
-            let before = tidepool_extract_cmd::extract_spawn_count();
-            let started = Instant::now();
-            super::tests::dispatch_haskell_script(policy.as_ref(), cell).await;
-            report(
-                &campaign,
-                "recurringCell",
-                Some(round),
-                Some(statements),
-                before,
-                started,
-            );
-        }
-    }
+                for round in 0..2 {
+                    for (statements, cell) in [(1, ONE_STATEMENT_CELL), (6, SIX_STATEMENT_CELL)] {
+                        let before = tidepool_extract_cmd::extract_spawn_count();
+                        let started = Instant::now();
+                        super::tests::dispatch_haskell_script(policy.as_ref(), cell).await;
+                        report(
+                            campaign,
+                            "recurringCell",
+                            Some(round),
+                            Some(statements),
+                            before,
+                            started,
+                        );
+                    }
+                }
 
-    // `lookup` and the after-tool slot are separate request sources; report
-    // what a bare lookup adds on its own.
-    let before = tidepool_extract_cmd::extract_spawn_count();
-    let started = Instant::now();
-    let _ = super::tests::dispatch_structured_tool(
-        policy.as_ref(),
-        "lookup",
-        serde_json::json!({"queries": ["map"]}),
-    )
-    .await;
-    report(&campaign, "lookup", None, None, before, started);
-
-    campaign.hosted.abort();
+                // `lookup` and the after-tool slot are separate request sources; report
+                // what a bare lookup adds on its own.
+                let before = tidepool_extract_cmd::extract_spawn_count();
+                let started = Instant::now();
+                let _ = super::tests::dispatch_structured_tool(
+                    policy.as_ref(),
+                    "lookup",
+                    serde_json::json!({"queries": ["map"]}),
+                )
+                .await;
+                report(campaign, "lookup", None, None, before, started);
+            })
+        })
+        .await;
 }
