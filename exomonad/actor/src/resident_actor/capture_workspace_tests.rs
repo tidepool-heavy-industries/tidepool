@@ -95,12 +95,10 @@ fn assert_committed(reply: &serde_json::Value) {
 }
 
 fn reader_source(token: &str, label: &str, lifetime: &str) -> String {
-    &tidepool_testing::fixture_source(
-        "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
-    )
-    .replace("CHECKPOINT_TOKEN", token)
-    .replace("CHILD_LABEL", label)
-    .replace("CHILD_LIFETIME", lifetime)
+    tidepool_testing::fixture_source("exomonad/actor/src/resident_actor/capture_workspace_child.hs")
+        .replace("CHECKPOINT_TOKEN", token)
+        .replace("CHILD_LABEL", label)
+        .replace("CHILD_LIFETIME", lifetime)
 }
 
 fn reader_steps(token: &str, children: &[(&str, &str)]) -> String {
@@ -196,7 +194,7 @@ impl CaptureFixture {
             .await
             .expect("capture fixture parent");
         assert_committed(
-            &run_cell(
+            &run_host_cell(
                 parent.clone(),
                 include_str!("capture_workspace_declarations.hs").into(),
             )
@@ -210,7 +208,9 @@ impl CaptureFixture {
         issuer: &LocalActorRef,
         source: crate::CheckpointSourceLayer,
     ) -> (String, tidepool_codegen::scope::ScopeId) {
-        assert_committed(&run_cell(issuer.clone(), "let capturedValue = 41 :: Int".into()).await);
+        assert_committed(
+            &run_host_cell(issuer.clone(), "let capturedValue = 41 :: Int".into()).await,
+        );
         let context = self
             .forest
             .directory
@@ -413,10 +413,12 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
         .await;
     let launcher = fixture.parent("shared-launcher").await;
     // This binding belongs to the launcher and must not replace the issuer snapshot.
-    assert_committed(&run_cell(launcher.clone(), "let capturedValue = 900 :: Int".into()).await);
+    assert_committed(
+        &run_host_cell(launcher.clone(), "let capturedValue = 900 :: Int".into()).await,
+    );
     let mut calls = FuturesUnordered::new();
     for label in ["first", "second"] {
-        calls.push(tokio::spawn(run_cell_with_context(
+        calls.push(tokio::spawn(run_host_cell_with_context(
             launcher.clone(),
             reader_source(&token, label, "Core.ActorOwned"),
             Some(exomonad_tool::ToolInvocationContext::external(
@@ -432,7 +434,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
     let second_workspace = fixture.workspace_wait().await;
     assert_ne!(first_workspace, second_workspace);
     assert!(calls.iter().all(|call| !call.is_finished()));
-    assert_committed(&run_cell(launcher.clone(), "pure (42 :: Int)".into()).await);
+    assert_committed(&run_host_cell(launcher.clone(), "pure (42 :: Int)".into()).await);
     assert!(calls.iter().all(|call| !call.is_finished()));
     fixture.release_checkpoint(&token, scope).await;
     let stopped = issuer
@@ -551,7 +553,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .reject
         .store(false, std::sync::atomic::Ordering::SeqCst);
     fixture.workspaces.release.add_permits(1);
-    let reuse = tokio::spawn(run_cell(
+    let reuse = tokio::spawn(run_host_cell(
         parent.clone(),
         reader_source(&token, "reused", "Core.ActorOwned"),
     ));
@@ -576,7 +578,7 @@ async fn partial_idle_spawn_failure_cleans_invocation_child_and_preserves_captur
     let (token, scope) = fixture
         .checkpoint(&parent, crate::CheckpointSourceLayer::default())
         .await;
-    let launch = tokio::spawn(run_cell(
+    let launch = tokio::spawn(run_host_cell(
         parent.clone(),
         reader_source(&token, "survivor", "Core.ActorOwned"),
     ));
@@ -652,7 +654,7 @@ async fn partial_idle_spawn_failure_cleans_invocation_child_and_preserves_captur
         .reject
         .store(false, std::sync::atomic::Ordering::SeqCst);
     fixture.workspaces.release.add_permits(1);
-    let reuse = tokio::spawn(run_cell(
+    let reuse = tokio::spawn(run_host_cell(
         parent.clone(),
         reader_source(&token, "fresh-reader", "Core.ActorOwned"),
     ));
