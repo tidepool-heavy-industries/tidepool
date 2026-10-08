@@ -15352,6 +15352,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn dictionary_decoding_admits_typed_facts_without_encoding_storage() {
+        let global = dictionary_test_global();
+        let full = value_array([
+            value_text("TPCERT"),
+            Value::Integer(7.into()),
+            value_array([]),
+            value_array([]),
+            value_array([]),
+            value_array([value_global(&global)]),
+            Value::Null,
+            Value::Null,
+        ]);
+        let compact = compact_receipt_coordinates(&full);
+        let header = array(&compact).unwrap();
+        let mut coordinates = OwnerCoordinates::decode(&header[8]).unwrap();
+        // A single small typed fact fits this finite budget; reconstructing
+        // several Value trees solely for equality exhausts it.
+        let operation = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 1024,
+            ..InventoryDecodeLimits::default()
+        });
+        let decoded =
+            GlobalDictionary::decode_with_operation(&header[5], &mut coordinates, &operation)
+                .unwrap();
+        assert_eq!(decoded.rows.len(), 1);
+        assert_eq!(decoded.rows[0].0, global);
+    }
+
+    #[test]
     fn dictionary_copy_accounting_tracks_owned_payloads() {
         let identity = SymbolIdentity {
             unit: "u".into(),
