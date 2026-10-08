@@ -340,7 +340,7 @@ impl ArtifactView {
         roots: &[NativeRequirementRoot],
     ) -> Result<TargetNativeSelection, CompileError> {
         let state = self.0.inventory.0.lock().expect("inventory lock");
-        let owned = admitted_closure(&state, self.roots().into_iter());
+        let owned = &self.read_projection(&state).nodes;
         let mut selected = BTreeSet::new();
         for root in roots {
             let (artifact, ordinals) = match root {
