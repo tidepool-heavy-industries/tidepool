@@ -1035,7 +1035,8 @@ mod tests {
     #[test]
     fn authored_closure_reuses_owned_witnesses_and_preserves_legacy_validation() {
         use crate::certified_products::{
-            tests::{original_witness_fixture, recovered_witness_fixtures},
+            fixture_finalized_product,
+            tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
             PendingImportOwner, ORIGINAL_PRODUCT_DECODES,
         };
         use tidepool_repr::execution_schema::testing;
@@ -1045,15 +1046,38 @@ mod tests {
             owner,
             original_ordinal: 7,
         };
-        let retained = PendingImportOwner::Retained {
-            identity: testing::identity("Value", "live"),
-            generation: 11,
-        };
         let packages = BTreeMap::new();
-        let b = original_witness_fixture("B", Some(retained.clone()), 7, &packages);
-        let a = original_witness_fixture("A", Some(source(b.owner().clone())), 7, &packages);
+        let b = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "B",
+                vec![(7, vec![])],
+                7,
+                &packages,
+                vec![0x42],
+            ),
+            [1; 32],
+        );
+        let a = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "A",
+                vec![(7, vec![source(b.owner().clone())])],
+                7,
+                &packages,
+                vec![0x41],
+            ),
+            [1; 32],
+        );
         let legacy = vec![a, b];
+        assert!(legacy
+            .iter()
+            .all(|product| product.module_interface().is_some()
+                && product.original_native().is_none()));
+        let cold_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
         let recovered = recovered_witness_fixtures(&legacy);
+        assert!(
+            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get) > cold_before,
+            "cold recovery authenticates the uncaptured original bytes"
+        );
         let products = recovered
             .iter()
             .map(|row| row.product.clone())
@@ -1119,20 +1143,35 @@ mod tests {
             products.len(),
             "repeated custody cannot issue duplicate compiler roles"
         );
-        let wrong_version = original_witness_fixture("B", Some(retained), 8, &packages);
+        let wrong_version = fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "B",
+                vec![(7, vec![])],
+                8,
+                &packages,
+                vec![0x42],
+            ),
+            [1; 32],
+        );
+        let wrong_version = recovered_witness_fixtures(&[wrong_version])
+            .remove(0)
+            .product;
+        assert_eq!(
+            wrong_version.module_interface(),
+            products[1].module_interface()
+        );
         assert!(admit(&[products[0].clone(), wrong_version]).is_err());
-        let legacy_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
-        admit(&legacy).unwrap();
         assert!(
-            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get) > legacy_before,
-            "uncaptured originals still use the full byte validator"
+            issued_originals(&legacy).is_err(),
+            "uncaptured originals require native certification before compiler selection"
         );
     }
 
     #[test]
     fn authored_closure_refuses_package_drift_and_zero_group_home_downgrade() {
         use crate::certified_products::{
-            tests::{original_witness_fixture, recovered_witness_fixtures},
+            fixture_finalized_product,
+            tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
             PackageInterfaceWitness, PendingImportOwner,
         };
         use tidepool_repr::execution_schema::testing;
@@ -1148,19 +1187,32 @@ mod tests {
                 sha256: digest,
             },
         )]);
-        let consumer = original_witness_fixture(
+        let consumer = original_groups_fixture_with_interface(
             "Consumer",
-            Some(PendingImportOwner::Package {
-                unit: "fixture".into(),
-                module: "External".into(),
-                binder: testing::identity("External", "entry"),
-                interface_digest: digest,
-            }),
+            vec![(
+                7,
+                vec![PendingImportOwner::Package {
+                    unit: "fixture".into(),
+                    module: "External".into(),
+                    binder: testing::identity("External", "entry"),
+                    interface_digest: digest,
+                }],
+            )],
             7,
             &packages,
+            vec![0x42],
         );
-        let empty = original_witness_fixture("External", None, 7, &BTreeMap::new());
-        let recovered = recovered_witness_fixtures(&[consumer, empty]);
+        let empty = original_groups_fixture_with_interface(
+            "External",
+            vec![],
+            7,
+            &BTreeMap::new(),
+            vec![0x45],
+        );
+        let recovered = recovered_witness_fixtures(&[
+            fixture_finalized_product(consumer, [1; 32]),
+            fixture_finalized_product(empty, [1; 32]),
+        ]);
         let products = recovered
             .iter()
             .map(|row| row.product.clone())
@@ -1198,9 +1250,20 @@ mod tests {
             admit(&products).is_err(),
             "zero-group home cannot be treated as a package"
         );
+        let originals = issued_originals(&products[..1]).unwrap();
         std::fs::write(&package_path, [0x44]).unwrap();
         assert!(
-            admit(&products[..1]).is_err(),
+            admit_authored_artifact_closure(
+                &originals,
+                &owner,
+                [1; 32],
+                &evidence,
+                None,
+                None,
+                &[],
+                &[root.path().to_path_buf()],
+            )
+            .is_err(),
             "a later admission must reread live package bytes"
         );
     }
