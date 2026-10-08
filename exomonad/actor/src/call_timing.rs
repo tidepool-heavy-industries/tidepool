@@ -119,8 +119,8 @@ pub struct CallScope {
 pub(crate) struct CallTimingRegistration(Arc<Totals>);
 
 impl CallTimingRegistration {
-    pub(crate) async fn scope<F: Future>(&self, body: F) -> F::Output {
-        CURRENT.scope(Arc::clone(&self.0), body).await
+    pub(crate) fn scope<F: Future>(&self, body: F) -> impl Future<Output = F::Output> {
+        CURRENT.scope(Arc::clone(&self.0), body)
     }
 
     pub(crate) fn sync_scope<T>(&self, body: impl FnOnce() -> T) -> T {
@@ -189,8 +189,8 @@ impl CallScope {
     /// nested `add_*`/`timed_compile` call it makes (directly, or through
     /// any function it awaits — task-locals cross `.await` points within one
     /// task, though not into a separate `spawn`/`spawn_blocking` task).
-    pub async fn run<F: Future>(&self, body: F) -> F::Output {
-        CURRENT.scope(Arc::clone(&self.totals), body).await
+    pub fn run<F: Future>(&self, body: F) -> impl Future<Output = F::Output> {
+        CURRENT.scope(Arc::clone(&self.totals), body)
     }
 
     /// The open scope's compile-round-trip count so far — one `timed_compile`

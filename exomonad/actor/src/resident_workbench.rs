@@ -87,8 +87,11 @@ impl CompilerCloseOwner {
         }
     }
 
-    pub(crate) async fn scope<T>(&self, operation: impl std::future::Future<Output = T>) -> T {
-        COMPILER_CLOSE_OWNER.scope(self.clone(), operation).await
+    pub(crate) fn scope<T>(
+        &self,
+        operation: impl std::future::Future<Output = T>,
+    ) -> impl std::future::Future<Output = T> {
+        COMPILER_CLOSE_OWNER.scope(self.clone(), operation)
     }
 }
 
@@ -176,21 +179,19 @@ async fn with_test_compiler_owner<T>(operation: impl std::future::Future<Output 
         .await
 }
 
-pub(crate) async fn with_invocation_cancellation<T>(
+pub(crate) fn with_invocation_cancellation<T>(
     cancel: Arc<std::sync::atomic::AtomicBool>,
     operation: impl std::future::Future<Output = T>,
-) -> T {
-    INVOCATION_CANCEL.scope(cancel, operation).await
+) -> impl std::future::Future<Output = T> {
+    INVOCATION_CANCEL.scope(cancel, operation)
 }
 
-pub(crate) async fn with_execution_control<T>(
+pub(crate) fn with_execution_control<T>(
     control: Arc<crate::WorkbenchExecutionControl>,
     operation: impl std::future::Future<Output = T>,
-) -> T {
+) -> impl std::future::Future<Output = T> {
     let cancel = control.native_cancel();
-    EXECUTION_CONTROL
-        .scope(control, with_invocation_cancellation(cancel, operation))
-        .await
+    EXECUTION_CONTROL.scope(control, with_invocation_cancellation(cancel, operation))
 }
 
 pub(crate) fn execution_control() -> Option<Arc<crate::WorkbenchExecutionControl>> {
@@ -1754,12 +1755,17 @@ impl ParkedHoleAbortRegistration {
         }
     }
 
-    pub(crate) async fn scope<F: std::future::Future>(&self, operation: F) -> F::Output {
+    pub(crate) fn scope<F: std::future::Future>(
+        &self,
+        operation: F,
+    ) -> impl std::future::Future<Output = F::Output> {
         let compiler_owner = self.0.compiler_owner.get().cloned();
         let scoped = SLOT_CONTINUATION_OWNER.scope(self.clone(), operation);
         match compiler_owner {
-            Some(owner) => owner.scope(scoped).await,
-            None => scoped.await,
+            Some(owner) => {
+                futures_util::future::Either::Left(COMPILER_CLOSE_OWNER.scope(owner, scoped))
+            }
+            None => futures_util::future::Either::Right(scoped),
         }
     }
 
