@@ -3481,6 +3481,7 @@ dependencies = [
  "glob",
  "harness",
  "parking_lot",
+ "proptest",
  "reqwest 0.13.4",
  "rusqlite",
  "rustix",

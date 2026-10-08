@@ -735,9 +735,11 @@ def declare_haskell_components():
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
+        "QuickCheck",
         "bytestring",
         "cborg",
         "containers",
+        "cryptohash-sha256",
         "directory",
         "filepath",
         "ghc",
@@ -745,6 +747,7 @@ def declare_haskell_components():
         "syb",
         "tasty",
         "tasty-hunit",
+        "tasty-quickcheck",
         "text",
         "unix"
     ], [
@@ -754,6 +757,7 @@ def declare_haskell_components():
         "-rtsopts"
     ]),
         linker_flags = haskell_component_link_flags([
+        "QuickCheck",
         "bytestring",
         "cborg",
         "containers",
@@ -772,6 +776,7 @@ def declare_haskell_components():
         "syb",
         "tasty",
         "tasty-hunit",
+        "tasty-quickcheck",
         "template-haskell",
         "text",
         "time",
@@ -1026,6 +1031,7 @@ def declare_haskell_components():
         "test-cell-splitter/fixtures/typed-segment-native/zero-let-strict.hs": "test-cell-splitter/fixtures/typed-segment-native/zero-let-strict.hs",
         "test-cell-splitter/fixtures/typed-segment-oracle/TypedSegmentOracleSupport.hs": "test-cell-splitter/fixtures/typed-segment-oracle/TypedSegmentOracleSupport.hs",
         "test-cell-splitter/fixtures/typed-session/TypedSessionCaptures.hs": "test-cell-splitter/fixtures/typed-session/TypedSessionCaptures.hs",
+        "test-cell-splitter/fixtures/typed-session/TypedSessionDelayedCapture.hs": "test-cell-splitter/fixtures/typed-session/TypedSessionDelayedCapture.hs",
         "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTime.hs": "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTime.hs",
         "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs": "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
@@ -1361,6 +1367,7 @@ def declare_haskell_components():
         "test-cell-splitter/fixtures/typed-segment-native/zero-let-strict.hs": "test-cell-splitter/fixtures/typed-segment-native/zero-let-strict.hs",
         "test-cell-splitter/fixtures/typed-segment-oracle/TypedSegmentOracleSupport.hs": "test-cell-splitter/fixtures/typed-segment-oracle/TypedSegmentOracleSupport.hs",
         "test-cell-splitter/fixtures/typed-session/TypedSessionCaptures.hs": "test-cell-splitter/fixtures/typed-session/TypedSessionCaptures.hs",
+        "test-cell-splitter/fixtures/typed-session/TypedSessionDelayedCapture.hs": "test-cell-splitter/fixtures/typed-session/TypedSessionDelayedCapture.hs",
         "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTime.hs": "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTime.hs",
         "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs": "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
@@ -1692,6 +1699,7 @@ def declare_haskell_components():
         "test-cell-splitter/fixtures/typed-segment-native/zero-let-strict.hs": "test-cell-splitter/fixtures/typed-segment-native/zero-let-strict.hs",
         "test-cell-splitter/fixtures/typed-segment-oracle/TypedSegmentOracleSupport.hs": "test-cell-splitter/fixtures/typed-segment-oracle/TypedSegmentOracleSupport.hs",
         "test-cell-splitter/fixtures/typed-session/TypedSessionCaptures.hs": "test-cell-splitter/fixtures/typed-session/TypedSessionCaptures.hs",
+        "test-cell-splitter/fixtures/typed-session/TypedSessionDelayedCapture.hs": "test-cell-splitter/fixtures/typed-session/TypedSessionDelayedCapture.hs",
         "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTime.hs": "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTime.hs",
         "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs": "test-cell-splitter/fixtures/unreachable-compile-time/UnusedCompileTimeTarget.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
