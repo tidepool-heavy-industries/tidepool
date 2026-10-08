@@ -24,7 +24,7 @@ forms append as the cell continues.
 `F.note` posts non-blocking narration through `Console`; `F.askUser` suspends
 on `AskUser` until its mounted form is submitted, dismissed, or unavailable.
 
-```haskell
+```haskell source=human-forms
 import qualified Tidepool.Form as F
 import qualified Tidepool.View as V
 
@@ -136,7 +136,7 @@ input and request options. `request @Text agent rawInput defaultRequestOptions`
 returns an `Either RequestError (Request Text)`; `requestWithProgress` also
 returns an independent typed progress handle.
 
-```haskell
+```haskell source=request
 Right worker <- spawnSubagent (FreshCtx prompt) SameDir (defaultSpawnOptions spec)
 Right pending <- request @Text worker input defaultRequestOptions
 Right answer <- await (result pending)
@@ -214,7 +214,7 @@ Run a shell string with `Cmd.run (Cmd.bashCommand "git status --short")`;
 `[bash|...|]` is a literal Bash quotation that constructs the same `Command`.
 Use `Cmd.withArguments` to pass dynamic values as positional arguments.
 
-```haskell
+```haskell source=command
 result <- Cmd.run (Cmd.bashCommand "git status --short")
 display (Cmd.stdout result)
 ```
@@ -249,7 +249,7 @@ supplies it. When the admitted notebook lists `Lookup`, use
 `Prelude.lookup` performs ordinary list lookup. `doc topics` lists guides and
 skills; load an installed skill from `.agents/skills/<name>/SKILL.md` first.
 
-```haskell
+```haskell source=lookup
 topics <- LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])
 display (show topics)
 ```

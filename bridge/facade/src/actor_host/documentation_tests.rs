@@ -7,15 +7,84 @@ use super::test_campaign::{
 use super::*;
 use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
 
-fn example(document: &str) -> &str {
-    examples(document).next().unwrap()
+/// Authored notebook sources used by both the published fences and resident tests.
+#[derive(Clone, Copy)]
+enum PublishedExample {
+    HumanForms,
+    Request,
+    Command,
+    Lookup,
+    Reflect,
 }
 
-fn examples(document: &str) -> impl Iterator<Item = &str> {
-    document
-        .split("```haskell\n")
-        .skip(1)
-        .map(|block| block.split_once("```").unwrap().0)
+impl PublishedExample {
+    fn identity(self) -> &'static str {
+        match self {
+            Self::HumanForms => "human-forms",
+            Self::Request => "request",
+            Self::Command => "command",
+            Self::Lookup => "lookup",
+            Self::Reflect => "reflect",
+        }
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Self::HumanForms => include_str!("fixtures/api-guide/human-forms.hs"),
+            Self::Request => include_str!("fixtures/api-guide/request.hs"),
+            Self::Command => include_str!("fixtures/api-guide/command.hs"),
+            Self::Lookup => include_str!("fixtures/api-guide/lookup.hs"),
+            Self::Reflect => include_str!("fixtures/api-guide/reflect.hs"),
+        }
+    }
+}
+
+fn assert_published_sources(document: &str, expected: &[PublishedExample]) {
+    let mut published = std::collections::BTreeMap::new();
+    for fence in document.split("```").skip(1).step_by(2) {
+        let (info, source) = fence.split_once('\n').expect("fence has a body");
+        if info == "haskell signatures" {
+            continue;
+        }
+        if info.starts_with("haskell") {
+            let identity = info
+                .strip_prefix("haskell source=")
+                .expect("executable Haskell fence needs an authored source identity");
+            assert!(
+                published.insert(identity, source).is_none(),
+                "duplicate source {identity}"
+            );
+        }
+    }
+    for example in expected {
+        assert_eq!(
+            published.remove(example.identity()),
+            Some(example.source()),
+            "published source {} differs from its compiled fixture",
+            example.identity()
+        );
+    }
+    assert!(
+        published.is_empty(),
+        "unknown executable sources: {published:?}"
+    );
+}
+
+#[test]
+fn published_notebook_sources_match_authored_fixtures() {
+    assert_published_sources(
+        include_str!("../../../../exomonad/prompts/api-guide.md"),
+        &[
+            PublishedExample::HumanForms,
+            PublishedExample::Request,
+            PublishedExample::Command,
+            PublishedExample::Lookup,
+        ],
+    );
+    assert_published_sources(
+        include_str!("../../../../exomonad/prompts/docs/reflect.md"),
+        &[PublishedExample::Reflect],
+    );
 }
 
 #[tokio::test]
@@ -754,210 +823,215 @@ launcher <- R.start (R.withWorkspace launcherWorkspace launchDefinition)"#,
 }
 
 #[tokio::test]
-async fn shared_api_guide_example_handles_success_and_unavailable() {
-    // The guide's command/judgment example reads `J`, which a run gets from the
-    // Jev library its workspace pins, so this campaign selects that workspace.
-    let mut campaign = TestCampaign::start_with_config(
-        |admission| admission,
-        super::test_campaign::pinned_jev_workspace,
+async fn published_request_example_retains_success_and_target_cancellation() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    committed(
+        root.as_ref(),
+        include_str!("fixtures/api-guide/request-setup.hs"),
     )
     .await;
-    let root = campaign.root_installation.policy.clone();
-    let guide = include_str!("../../../../exomonad/prompts/api-guide.md");
-    let mut guide_examples = examples(guide);
-    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
-    let child = campaign
-        .next_deployment(
-            "guide example child policy installation",
+    let mut running = tokio::spawn({
+        let root = root.clone();
+        async move { committed(root.as_ref(), PublishedExample::Request.source()).await }
+    });
+    let child = tokio::select! {
+        child = campaign.next_deployment(
+            "published request child installation",
             Duration::from_secs(120),
             |event| match event {
-                LocalResidentDeployment::PolicyInstalled(installation) => Ok(installation),
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
                 other => Err(other),
             },
-        )
-        .await;
+        ) => child,
+        result = &mut running => panic!("request example ended before child installation: {result:?}"),
+    };
     let _binding = open_test_workspace(&campaign, &child);
     campaign
         .next_deployment(
-            "guide example session readiness",
+            "published typed request activates its child",
             Duration::from_secs(120),
             |event| match event {
-                LocalResidentDeployment::SessionReady { activation } => {
-                    assert!(!activation.message.is_empty());
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == child.actor.identity() =>
+                {
                     Ok(())
                 }
                 other => Err(other),
             },
         )
         .await;
-    let pending = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "state <- pollWatch ready\ndisplay (inspectFull state)",
-    )
-    .await;
-    let rendered = explicit_display_output(&pending)["text"].as_str().unwrap();
-    // A pending watch observation is itself the registered wake: its
-    // `PendingProgress` carries the dependency's lifecycle/provider evidence
-    // and `pendingWatched = True`, so `inspectFull` shows there is nothing a
-    // re-poll would add.
-    assert!(rendered.contains("WatchPending"), "{rendered}");
-    assert!(rendered.contains("PendingProgress"), "{rendered}");
-    assert!(rendered.contains("pendingActorState"), "{rendered}");
-    assert!(rendered.contains("pendingProviderHealth"), "{rendered}");
-    assert!(rendered.contains("pendingWatched = True"), "{rendered}");
     let reply = dispatch_haskell_script(child.policy.as_ref(), "respond sessionInput").await;
     assert_eq!(reply["status"], "replied", "{reply}");
-    campaign.await_watch_ready().await;
-    let success = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "state <- pollWatch ready\ndisplay (inspectFull state)",
-    )
-    .await;
-    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
-    displayed(&mut campaign, root.as_ref(), guide_examples.next().unwrap()).await;
-    let command_example = guide_examples.next().unwrap();
-    let lookup_example = guide_examples.next().unwrap();
-    assert!(guide_examples.next().is_none(), "untested guide example");
-    displayed(&mut campaign, root.as_ref(), lookup_example).await;
-    let topics_found = displayed(
-        &mut campaign,
-        root.as_ref(),
-        include_str!("lookup_topics_found.hs"),
-    )
-    .await;
-    assert_eq!(
-        explicit_display_output(&topics_found)["text"],
-        "True",
-        "{topics_found}"
-    );
-    displayed(
-        &mut campaign,
-        root.as_ref(),
-        example(include_str!(
-            "../../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md"
-        )),
-    )
-    .await;
-    // Exercise the canonical command/Jev composition and workbench examples.
-    // The host requests a backend for each command in a cell.
-    let command_examples = [
-        "inspectRecentChanges \"inspect changed documentation\" >>= display",
-        command_example,
-        examples(include_str!(
-            "../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"
-        ))
-        .nth(2)
-        .unwrap(),
-        examples(include_str!(
-            "../../../../exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md"
-        ))
-        .nth(4)
-        .unwrap(),
-        example(include_str!(
-            "../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"
-        )),
-    ];
-    let output_store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let output_run = super::runtime_namespace(campaign.session_root.path());
-    for (index, source) in command_examples.into_iter().enumerate() {
-        let mut running = tokio::spawn({
-            let root = root.clone();
-            async move { dispatch_haskell_script(root.as_ref(), source).await }
-        });
-        let result = loop {
-            tokio::select! {
-                result = &mut running => break result.unwrap(),
-                // Compile and reload the Haskell cell before its command
-                // backend deployment arrives; this campaign can exceed the
-                // generic 30-second command-only helper timeout.
-                request = campaign.next_deployment(
-                    "guide example command backend",
-                    Duration::from_secs(180),
-                    |event| match event {
-                        LocalResidentDeployment::CommandBackend(_) | LocalResidentDeployment::DisplayPublished(_) => Ok(event),
-                        other => Err(other),
-                    },
-                ) => {
-                    let request = match request {
-                        LocalResidentDeployment::CommandBackend(request) => request,
-                        LocalResidentDeployment::DisplayPublished(request) => {
-                            super::display_output::publish(&campaign.forest, &output_store, &output_run, None, None, &request);
-                            continue;
-                        }
-                        _ => unreachable!(),
-                    };
-                    if request.purpose
-                        == exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe
-                    {
-                        request.supply(Ok(super::command_test_support::TestCommands::completed(
-                            "/work/tree\n0123456789abcdef0123456789abcdef01234567\nclean\n",
-                        )));
-                        continue;
-                    }
-                    request.supply(Ok(super::command_test_support::TestCommands::completed("README.md")));
-                }
-            }
-        };
-        assert_eq!(result["status"], "committed", "{source}: {result}");
-        if index == 0 {
-            assert!(result.to_string().contains("Jev unavailable:"), "{result}");
-        }
-    }
-    let layout = displayed(
-        &mut campaign,
-        root.as_ref(),
-        include_str!("notebook_let_layout.hs"),
-    )
-    .await;
-    assert_eq!(explicit_display_output(&layout)["text"], "42", "{layout}");
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let completed = campaign.drive_actor_output(&store, running).await.unwrap();
+    assert_eq!(completed["status"], "committed", "{completed}");
+    let success = displayed(&mut campaign, root.as_ref(), "display (answer == input)").await;
     assert_eq!(
         explicit_display_output(&success)["text"],
-        "WatchReady (Right \"Remove the stale path and report the focused check.\")"
+        "True",
+        "{success}"
     );
 
-    displayed(
+    committed(
+        root.as_ref(),
+        "Right interrupted <- request @Text worker input defaultRequestOptions",
+    )
+    .await;
+    campaign
+        .next_deployment(
+            "second typed request activates its child",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == child.actor.identity() =>
+                {
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    let failure = displayed(
         &mut campaign,
         root.as_ref(),
         include_str!("shared_api_guide_unavailable.hs"),
     )
     .await;
-    campaign.await_watch_ready().await;
+    assert_eq!(
+        explicit_display_output(&failure)["text"],
+        "(True, True, True)",
+        "{failure}"
+    );
+    campaign
+        .next_deployment(
+            "published request child retirement",
+            Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::Retired { actor, .. }
+                    if actor == child.actor.identity() =>
+                {
+                    Ok(())
+                }
+                other => Err(other),
+            },
+        )
+        .await;
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
+
+#[tokio::test]
+async fn published_human_form_example_handles_unbound_host() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    displayed(
+        &mut campaign,
+        root.as_ref(),
+        PublishedExample::HumanForms.source(),
+    )
+    .await;
     let unavailable = displayed(
         &mut campaign,
         root.as_ref(),
-        "state <- pollWatch retainedFailureReady\ndisplay (inspectFull state)",
+        "display (case scopeAnswer of { F.FormUnavailable _ -> True; _ -> False })",
     )
     .await;
     assert_eq!(
         explicit_display_output(&unavailable)["text"],
-        "WatchReady True"
+        "True",
+        "{unavailable}"
     );
-    let outer_unavailable = displayed(
-        &mut campaign,
-        root.as_ref(),
-        "state <- pollWatch outerFailureReady\ndisplay (inspectFull (guideIsUnavailable state))",
-    )
-    .await;
-    assert_eq!(explicit_display_output(&outer_unavailable)["text"], "True");
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
 
-    // The guide's companion `doc reflect` example, on this same campaign so it
-    // needs no compile of its own. This root has no conversation reader, which
-    // is the unbound case the example is written to survive: it continues with
-    // no history rather than being handed somebody else's.
-    let reflect = displayed(
-        &mut campaign,
-        root.as_ref(),
-        example(include_str!("../../../../exomonad/prompts/docs/reflect.md")),
-    )
-    .await;
-    assert_eq!(explicit_display_output(&reflect)["text"], "[]", "{reflect}");
+#[tokio::test]
+async fn published_command_example_reuses_completed_stdout() {
+    use super::command_test_support::TestCommands;
+
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    let mut running = tokio::spawn({
+        let root = root.clone();
+        async move { committed(root.as_ref(), PublishedExample::Command.source()).await }
+    });
+    let backend = TestCommands::completed("README.md");
+    tokio::select! {
+        request = campaign.next_deployment(
+            "published command backend",
+            Duration::from_secs(180),
+            |event| match event {
+                LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                other => Err(other),
+            },
+        ) => request.supply(Ok(backend.clone())),
+        result = &mut running => panic!("command example ended before backend admission: {result:?}"),
+    }
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let completed = campaign.drive_actor_output(&store, running).await.unwrap();
+    assert_eq!(completed["status"], "committed", "{completed}");
+    for _ in 0..2 {
+        let retained = displayed(
+            &mut campaign,
+            root.as_ref(),
+            "display (Cmd.stdout result == Right \"README.md\")",
+        )
+        .await;
+        assert_eq!(
+            explicit_display_output(&retained)["text"],
+            "True",
+            "{retained}"
+        );
+    }
     assert_eq!(
-        reflect["items"][1]["operations"][0]["effect"], "reflect",
-        "{reflect}"
+        backend.executions(),
+        1,
+        "reading stdout must not repeat the command"
     );
+    campaign.forest.shutdown().await;
+    campaign.hosted.await.unwrap();
+}
 
+#[tokio::test]
+async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
+    let mut campaign = TestCampaign::start().await;
+    let root = campaign.root_installation.policy.clone();
+    displayed(
+        &mut campaign,
+        root.as_ref(),
+        PublishedExample::Lookup.source(),
+    )
+    .await;
+    let found = displayed(
+        &mut campaign,
+        root.as_ref(),
+        include_str!("lookup_topics_found.hs"),
+    )
+    .await;
+    assert_eq!(explicit_display_output(&found)["text"], "True", "{found}");
+    let reflected = displayed(
+        &mut campaign,
+        root.as_ref(),
+        PublishedExample::Reflect.source(),
+    )
+    .await;
+    assert_eq!(
+        explicit_display_output(&reflected)["text"],
+        "[]",
+        "{reflected}"
+    );
+    let unbound = displayed(
+        &mut campaign,
+        root.as_ref(),
+        "seen <- reflect 5\ndisplay (case seen of { Left ReflectUnbound -> True; _ -> False })",
+    )
+    .await;
+    assert_eq!(
+        explicit_display_output(&unbound)["text"],
+        "True",
+        "{unbound}"
+    );
     campaign.forest.shutdown().await;
     campaign.hosted.await.unwrap();
 }

@@ -58,8 +58,23 @@ This file guides contributors; it is not part of the shipped model prompt.
 - Keep `haskell-tool-instructions.md` within its provider size limit. Prompt
   edits must remain compatible with the host's catalog and actual tool surface.
 
-`../../bridge/facade/src/actor_host/documentation_tests.rs` executes the guide examples
-and checks its signature fences. Run its focused
-`shared_api_guide_example_handles_success_and_unavailable` test and the prompt
-catalog tests when changing shipped guide/composition behavior. Update examples
-and owning tests together; unavailable results must not look like success.
+Executable guide and reflection fences use `haskell source=<identity>`. Their
+authored notebook sources live in
+`../../bridge/facade/src/actor_host/fixtures/api-guide/`; `PublishedExample` in
+`../../bridge/facade/src/actor_host/documentation_tests.rs` binds each identity to
+the source executed by the resident consumer tests. Change the authored source
+and published fence together. The source equality gate tolerates reordered
+fences and prose edits, and rejects missing, duplicate, or unknown identities.
+
+Run `actor_host::documentation_tests::published_notebook_sources_match_authored_fixtures`,
+the affected `published_*` resident consumer tests, and the prompt catalog tests
+when changing those examples or prompt composition. Request success, retained
+target cancellation, unavailable forms, complete command stdout without replay,
+lookup discovery, and unbound reflection have separate consumer assertions.
+The canonical `Examples.JevPreparedWorkflow` and `Examples.JevFormWorkflow`
+modules own Jev/form composition; their host tests (`JevPreparedTest`,
+`FormLifecycleTest`, `FormJevDialogueTest`) and native
+`resident_actor::jev_form_runtime_tests` own its success, refusal, and cleanup
+coverage. Do not recover examples by fence position or assert tutorial prose
+as runtime behavior. Compilation and actual nonzero execution remain separate
+qualification obligations.
