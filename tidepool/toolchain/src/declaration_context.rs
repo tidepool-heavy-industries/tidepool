@@ -7584,7 +7584,14 @@ mod tests {
             .collect::<Vec<_>>();
         let mut type_only = context.as_ref().clone();
         type_only.inventory = context.inventory.interface_projection(&owners).unwrap();
-        type_only.normalize().unwrap();
+        assert!(type_only.normalize().is_err());
+        let type_only = type_only
+            .with_compiler_input_projection(context.compiler_input_projection().interface_only())
+            .unwrap();
+        assert!(type_only
+            .compiler_input_roles()
+            .iter()
+            .all(|role| role.original().is_none()));
         assert_eq!(type_only.interface_owners(), context.interface_owners());
         assert_eq!(type_only.lexical, context.lexical);
         assert!(type_only.recovery_products().is_empty());
