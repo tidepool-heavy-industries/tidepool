@@ -56,7 +56,11 @@ import GHC.Core.Type
   ( Type, splitTyConApp_maybe, splitFunTy_maybe, getTyVar_maybe, tyConsOfType, tyCoVarsOfType, mkVisFunTyMany, mkTyVarTy )
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Core.TyCon (TyCon, tyConName)
+import GHC.Core.TyCon (TyCon, tyConName, isAlgTyCon, tyConDataCons)
+import GHC.Core.DataCon (dataConFieldLabels)
+import GHC.Core.PatSyn (patSynFieldLabels, patSynMatcher, patSynBuilder)
+import GHC.Types.FieldLabel (flSelector)
+import GHC.Types.Name.Set (mkNameSet, elemNameSet)
 import GHC.Data.FastString (fsLit)
 import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_dflags)
 import GHC.Driver.Env.Types (hsc_unit_env)
@@ -429,7 +433,7 @@ closeTypedSegment environment globals pending = do
           applyInputs ordinal (substExpr substitution body) rest
     applyInputs ordinal _ _ = throwIO (UnprovedItemParameters ordinal)
 
--- Only the actual item roots survive into the executable target interface.
+-- Only the actual item roots become lexical exports of the executable target.
 -- The private checker classes served inference and confer no published type.
 installTypedSegmentRoots :: HscEnv -> PendingTypedSegment -> ModGuts -> IO (TypedSegment,ModGuts)
 installTypedSegmentRoots environment pending guts = do
@@ -442,10 +446,23 @@ installTypedSegmentRoots environment pending guts = do
       privateTypes = filter synthetic (mg_tcs guts)
       mentionsPrivate ty = any (`elementOfUniqSet` tyConsOfType ty) privateTypes
       roots = typedSegmentRoots segment
+      recordFields = [field
+        | constructor <- mg_tcs guts, isAlgTyCon constructor
+        , dataConstructor <- tyConDataCons constructor
+        , field <- dataConFieldLabels dataConstructor]
+        ++ concatMap patSynFieldLabels (mg_patsyns guts)
+      selectorNames = mkNameSet (map flSelector recordFields)
       metadataIds = map instanceDFunId (mg_insts guts)
+        ++ concatMap (\patternSynonym -> fst (patSynMatcher patternSynonym)
+            : maybe [] (pure . fst) (patSynBuilder patternSynonym)) (mg_patsyns guts)
+        ++ [identifier | binding <- mg_binds guts, identifier <- bindersOf binding
+            , idName identifier `elemNameSet` selectorNames]
       metadataRoots = foldl' extendVarSet emptyVarSet metadataIds
-      -- Tidy resolves every retained instance through an external final Id.
-      -- These actual metadata roots are retained without adding source exports.
+      -- Retained instances, records and pattern synonyms reference explicit
+      -- local Ids in the finalized interface. Keep those metadata dependencies
+      -- through tidy without adding lexical exports. Constructors and class
+      -- operations are implicit interface binders; selectors and pattern
+      -- synonym matchers/builders are not.
       retain identifier
         | identifier `elemVarSet` metadataRoots = setIdExported identifier
         | otherwise = setIdNotExported identifier
@@ -482,7 +499,7 @@ installTypedSegmentRoots environment pending guts = do
           (nonDetEltsUniqSet (foldl' unionVarSet (bindFreeVars binding)
             (map varTypeTyCoVars (bindersOf binding))) ++ rest)
   -- Keep the whole compiler graph, including support SCCs. Only issued roots
-  -- and metadata-mandated dfuns remain externally retained. Ordinary GHC DCE
+  -- and metadata-mandated Ids remain externally retained. Ordinary GHC DCE
   -- owns unused inference scaffolding; mg_exports names only the issued roots.
   support <- foldM (\selected binding -> do
     let ordinal = case [plannedItemOrdinal (typedItemPlan item)
