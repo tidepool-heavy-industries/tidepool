@@ -5583,6 +5583,20 @@ where
             let original_execution =
                 original_execution.ok_or(ResidentError::UnsupportedCheckedTurn)?;
             let original_execution = OriginalExecutionContext::capture(original_execution);
+            // Site observations include available originals. Only this target
+            // and its certified native closure select execution authority.
+            let selected_sites = code
+                .prepared
+                .sites()
+                .iter()
+                .chain(
+                    certification
+                        .into_iter()
+                        .flat_map(|certification| certification.groups.iter())
+                        .flat_map(|group| group.group().definitions().sites()),
+                )
+                .map(|site| site.site)
+                .collect::<std::collections::BTreeSet<_>>();
             let descriptors = original_interfaces.artifact_view().descriptors();
             let home_units = descriptors
                 .iter()
@@ -5593,7 +5607,8 @@ where
                 .map(|descriptor| (&descriptor.owner, descriptor.id))
                 .collect::<BTreeMap<_, _>>();
             for site in provenance.sites.values().filter(|site| {
-                site.input_type_witnesses.len() == site.inputs.len()
+                selected_sites.contains(&site.site)
+                    && site.input_type_witnesses.len() == site.inputs.len()
                     && site.input_type_witnesses.iter().any(Option::is_some)
             }) {
                 let Some(signatures) = &site.request_type_signatures else {
