@@ -6945,7 +6945,8 @@ mod tests {
         let before = context.inventory.inventory().metrics();
         context.validate_artifacts(&artifacts).unwrap();
         let after = context.inventory.inventory().metrics();
-        assert_eq!(after.graph_visits - before.graph_visits, 6);
+        // Materialization already warmed this immutable view projection.
+        assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
         assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 10);
         assert!(context.validate_artifacts(&artifacts[..3]).is_err());
@@ -7015,7 +7016,8 @@ mod tests {
             })
             .unwrap();
         let after = context.inventory.inventory().metrics();
-        assert_eq!(after.graph_visits - before.graph_visits, 6);
+        // The expected identity query already warmed this immutable view projection.
+        assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
         assert_eq!(request.semantic_sha256, expected);
         let value: Value =
@@ -7546,7 +7548,8 @@ mod tests {
         let before = context.inventory.inventory().metrics();
         assert_eq!(context.semantic_sha256(), expected);
         let after = context.inventory.inventory().metrics();
-        assert_eq!(after.graph_visits - before.graph_visits, 6);
+        // The first identity query already warmed this immutable view projection.
+        assert_eq!(after.graph_visits - before.graph_visits, 0);
         assert_eq!(after.view_queries - before.view_queries, 1);
         for _ in 0..2 {
             let directory = tempfile::tempdir().unwrap();
