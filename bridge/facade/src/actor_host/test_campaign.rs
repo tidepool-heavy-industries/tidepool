@@ -1401,7 +1401,7 @@ mod tests {
         backend: Arc<super::super::command_test_support::TestCommands>,
         started: tokio::sync::Semaphore,
         cleanup_probes: std::sync::atomic::AtomicUsize,
-        unknown: bool,
+        unknown: std::sync::atomic::AtomicBool,
     }
 
     impl ShutdownCommands {
@@ -1410,12 +1410,12 @@ mod tests {
                 backend: super::super::command_test_support::TestCommands::new(),
                 started: tokio::sync::Semaphore::new(0),
                 cleanup_probes: 0.into(),
-                unknown,
+                unknown: unknown.into(),
             })
         }
 
         fn cleanup_outcome(&self) -> tidepool_bridge_effects::CommandCleanup {
-            if self.unknown {
+            if self.unknown.load(std::sync::atomic::Ordering::Acquire) {
                 tidepool_bridge_effects::CommandCleanup::CommandCleanupUnknown(
                     "command stopped but external cleanup remains unknown".into(),
                 )
@@ -1484,10 +1484,26 @@ mod tests {
         }
     }
 
-    async fn admit_shutdown_command(campaign: &mut TestCampaign, backend: Arc<ShutdownCommands>) {
+    #[derive(Clone, Copy)]
+    enum CommandLifetime {
+        Actor,
+        Run,
+    }
+
+    async fn admit_shutdown_command(
+        campaign: &mut TestCampaign,
+        backend: Arc<ShutdownCommands>,
+        lifetime: CommandLifetime,
+    ) {
+        let source = match lifetime {
+            CommandLifetime::Actor => "job <- Cmd.start [bash|sleep 3600|]\nCmd.detach job",
+            CommandLifetime::Run => {
+                "job <- Cmd.tryStartWith RunOwned [bash|sleep 3600|] >>= liftEither"
+            }
+        };
         let response = super::super::tests::dispatch_haskell_script(
             campaign.root_installation.policy.as_ref(),
-            "job <- Cmd.start [bash|sleep 3600|]\nCmd.detach job",
+            source,
         )
         .await;
         assert_eq!(response["status"], "committed", "{response}");
@@ -1515,7 +1531,7 @@ mod tests {
         campaign
             .run_scenario(|campaign| {
                 Box::pin(async move {
-                    admit_shutdown_command(campaign, backend).await;
+                    admit_shutdown_command(campaign, backend, CommandLifetime::Actor).await;
                 })
             })
             .await;
@@ -1535,7 +1551,18 @@ mod tests {
             .run_scenario_expecting_cleanup_failure(
                 |campaign| {
                     Box::pin(async move {
-                        admit_shutdown_command(campaign, backend).await;
+                        admit_shutdown_command(campaign, backend.clone(), CommandLifetime::Actor)
+                            .await;
+                        let first = campaign
+                            .observe_shutdown()
+                            .await
+                            .expect_err("external cleanup is initially unknown");
+                        assert_eq!(first.hosted, CampaignHostedJoin::Joined);
+                        // The external probe can later clear. The actor's already
+                        // published first terminal cleanup remains authoritative.
+                        backend
+                            .unknown
+                            .store(false, std::sync::atomic::Ordering::Release);
                     })
                 },
                 |failure| {
@@ -1652,5 +1679,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn run_resource_cleanup_retry_preserves_history_and_can_confirm_consuming_shutdown() {
+        let campaign = TestCampaign::start().await;
+        let backend = ShutdownCommands::new(true);
+        let observed = backend.clone();
+        campaign.run_scenario(|campaign| Box::pin(async move {
+            admit_shutdown_command(campaign, backend.clone(), CommandLifetime::Run).await;
+            let first = campaign.observe_shutdown().await.expect_err("run-owned cleanup initially refuses confirmation");
+            assert_eq!(first.hosted, CampaignHostedJoin::Joined);
+            assert!(matches!(&first.root, CampaignRootRetirement::Settled(root) if root.cleanup.is_confirmed()));
+            assert!(first.forest.iter().any(|outcome| matches!(outcome,
+                exomonad_actor::ForestRootShutdown::RunResources(exomonad_actor::CleanupComponentOutcome::Unconfirmed(_)))));
+            backend.unknown.store(false, std::sync::atomic::Ordering::Release);
+            let retried = campaign.observe_shutdown().await.expect("the actual run owner retries retained cleanup");
+            assert!(retried.forest.len() > first.forest.len(), "prior refusal observations remain visible");
+            assert!(retried.forest.starts_with(&first.forest));
+            assert!(retried.is_confirmed());
+        })).await;
+        assert_eq!(observed.backend.control_count(), 1);
+        assert!(
+            observed
+                .cleanup_probes
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0
+        );
     }
 }
