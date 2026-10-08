@@ -2777,6 +2777,7 @@ fn compile_cell_program_admitted_work_controls(
     )
 }
 
+#[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = req.cell_text.len()))]
 fn compile_cell_program_admitted_inner(
     req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
@@ -2789,6 +2790,8 @@ fn compile_cell_program_admitted_inner(
     ),
     CellCheckFailure,
 > {
+    let setup_span =
+        tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.setup").entered();
     validate_cell_admitted_request(&req, &admission)?;
     let planned = admission.plan_reservation().ok_or_else(|| {
         CompileError::ExtractFailed(
@@ -2822,7 +2825,10 @@ fn compile_cell_program_admitted_inner(
     for (identity, generation) in admission.admitted_retained_imports() {
         command.retained_generation(extract_identity(identity), *generation);
     }
-    let endpoint = bind_extract_cmd(&command)?;
+    drop(setup_span);
+    let endpoint = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.bind")
+        .in_scope(|| bind_extract_cmd(&command))?;
+    let offer_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.offer", inclusive = true).entered();
     let specification = CheckedCellSpecification {
         admission_digest: admission.digest(),
         cell_source: req.cell_text.to_owned(),
@@ -2874,9 +2880,12 @@ fn compile_cell_program_admitted_inner(
     offer.apply_to(&mut command)?;
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
     let diagnostics = CompilerDiagnosticCapture::start(scratch.path(), &command);
-    let run = endpoint.execute(&command).map_err(|error| {
+    drop(offer_span);
+    let run = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.execute", inclusive = true)
+        .in_scope(|| endpoint.execute(&command)).map_err(|error| {
         offer.retain_execution_failure(scratch.path(), &command, map_notfound(error))
     })?;
+    let admission_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.admit", inclusive = true).entered();
     diagnostics.completed(scratch.path(), &command, run.success(), &run.output.stderr);
     let report =
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
@@ -2905,8 +2914,9 @@ fn compile_cell_program_admitted_inner(
         req.compile_view_evidence,
     )?;
     checked.warnings = report.diagnostics;
-    admission
-        .prepare_declaration_projections(program.checked_cell())
+    drop(admission_span);
+    tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.declaration_projections", inclusive = true)
+        .in_scope(|| admission.prepare_declaration_projections(program.checked_cell()))
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     checked.authority = Some(program.checked_cell().clone());
     checked.admission = Some(admission);

@@ -198,13 +198,19 @@ pub(crate) struct RequestCompilerInputs {
 }
 
 impl ProtectedScaffoldRequirements {
+    #[tracing::instrument(target = "exomonad_harness::timing", name = "exact.compiler_inputs", level = "debug", skip_all, fields(inclusive = true, private = private.is_some()))]
     fn compiler_inputs(
         &self,
         context: &ExactDeclarationContext,
         private: Option<&OriginalCompilerInputs>,
     ) -> Result<RequestCompilerInputs, CompileError> {
-        let baseline = context.compiler_metadata_snapshot()?;
-        let declaration_semantic_sha256 = context.semantic_sha256_from_metadata(&baseline);
+        let baseline = tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.baseline")
+            .in_scope(|| context.compiler_metadata_snapshot())?;
+        let declaration_semantic_sha256 = tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.declaration_hash")
+            .in_scope(|| context.semantic_sha256_from_metadata(&baseline));
+        let merge_span =
+            tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.merge")
+                .entered();
         let mut projection = context.compiler_projection.merge(&self.projection)?;
         let (artifacts, metadata) = match private {
             Some(private) => {
@@ -215,7 +221,9 @@ impl ProtectedScaffoldRequirements {
             }
             None => (context.artifact_view().clone(), baseline),
         };
-        let metadata = projection.project_metadata(metadata)?;
+        drop(merge_span);
+        let metadata = tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.project")
+            .in_scope(|| projection.project_metadata(metadata))?;
         Ok(RequestCompilerInputs {
             projection,
             metadata,
@@ -2351,12 +2359,20 @@ impl ExactCompilationRequest {
         self.in_program_context_with_inputs(root, context, self.private_compiler_input.clone())
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "exact.program_context",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     fn in_program_context_with_inputs(
         &self,
         root: &Path,
         context: Arc<ExactDeclarationContext>,
         private: Option<OriginalCompilerInputs>,
     ) -> Result<Self, CompileError> {
+        let preparation_span = tracing::debug_span!(target: "exomonad_harness::timing", "exact.program_context.prepare", inclusive = true).entered();
         if context.toolchain_identity_sha256() != self.producer_sha256
             && !(context.toolchain_identity_sha256() == [0; 32]
                 && context.artifact_view().is_empty())
@@ -2425,6 +2441,7 @@ impl ExactCompilationRequest {
         if !new_entries.is_empty() {
             std::fs::create_dir_all(root)?;
         }
+        drop(preparation_span);
         let delta_start = std::time::Instant::now();
         let mut validation = PackageInterfaceValidation::default();
         let mut materializer = (*context).clone();

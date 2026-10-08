@@ -21,6 +21,27 @@ throughput as well as latency; a faster request can retain more memory or shift
 cost to the next one. Start with existing phase evidence, then collect the
 smallest additional measurement that distinguishes competing explanations.
 
+## Measure host preparation and compiler residence
+
+The `exomonad_harness::timing` debug target includes nested spans for
+`cell_program.prepare`, `products.cell_program`, `products.seal`,
+`exact.program_context`, and `exact.compiler_inputs`. Retain span NEW and CLOSE
+events along with their parent context. These spans cover early errors as well
+as successful returns. Their durations are inclusive: take interval unions or
+subtract child intervals; do not add them to the existing `turn stage` rows.
+In particular, context preparation before materialization and sealing after
+`products.target_admission` have their own spans.
+
+`compiler_transaction.scope` measures the host owner, including work before
+worker admission. Use `compiler_endpoint.bind`, `compiler_transaction.begin`,
+the existing admitted event, ordered `compile_request` spans, and
+`compiler_transaction.close` to separate acquisition, submitted requests, host
+work between requests, and END/retirement. A scope by itself does not prove a
+worker was acquired. Endpoint submissions to a daemon are not physical worker
+execution; retain the daemon's correlated events too. Bounded stderr excerpts
+can omit compiler phases, so report that coverage separately from complete host
+span capture.
+
 ## Prepare matched producers
 
 Use a separate compiler producer and fresh request cohort. Debug information

@@ -910,6 +910,13 @@ impl Drop for DirectEndpoint {
 }
 
 impl CompilerEndpoint {
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "compiler_endpoint.bind",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub(crate) fn bind(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
         if TRANSACTION_SCOPE.with(|scope| scope.borrow().is_some()) {
             let identity = ensure_scoped_transaction(cmd)?;
@@ -1069,6 +1076,13 @@ impl CompilerEndpoint {
         self.transaction_with_cancellation_timeout(workload, cancellation, DIRECT_HANDSHAKE_TIMEOUT)
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "compiler_transaction.begin",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     fn transaction_with_cancellation_timeout(
         self,
         workload: CompileWorkload,
@@ -1384,6 +1398,13 @@ struct TransactionScopeGuard<C: FnOnce(CompilerTransactionClose)> {
     close_sink: Option<C>,
 }
 
+#[tracing::instrument(
+    target = "exomonad_harness::timing",
+    name = "compiler_transaction.finish_scope",
+    level = "debug",
+    skip_all,
+    fields(abandoned, inclusive = true)
+)]
 fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
     let Some(scope) = TRANSACTION_SCOPE.with(|scope| scope.borrow_mut().take()) else {
         return CompilerTransactionClose::NotStarted;
@@ -1466,6 +1487,13 @@ pub fn with_compiler_transaction_cancellable_for_workload<T>(
     with_compiler_transaction_inner(workload, Some(cancellation), close_sink, action)
 }
 
+#[tracing::instrument(
+    target = "exomonad_harness::timing",
+    name = "compiler_transaction.scope",
+    level = "debug",
+    skip_all,
+    fields(inclusive = true)
+)]
 fn with_compiler_transaction_inner<T>(
     workload: CompileWorkload,
     cancellation: Option<CompilerTransactionCancellation>,
@@ -1592,6 +1620,13 @@ impl CompilerTransaction {
         self.close(true)
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "compiler_transaction.close",
+        level = "debug",
+        skip_all,
+        fields(abandoned, inclusive = true)
+    )]
     fn close(&mut self, abandoned: bool) -> CompilerTransactionClose {
         let Some(transport) = self.transport.take() else {
             return CompilerTransactionClose::NotStarted;

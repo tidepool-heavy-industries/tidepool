@@ -1480,6 +1480,13 @@ impl ModuleCandidateOffer {
 
     /// Admit every prepared segment and target before issuing execution data.
     /// The runtime can consume this immutable result without compiling a prefix.
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "products.cell_program",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub fn admit_cell_program(
         &self,
         root: &Path,
@@ -1723,6 +1730,7 @@ impl ModuleCandidateOffer {
         };
         let mut items = Vec::with_capacity(cell.item_count());
         for index in 0..cell.item_count() {
+            let _item_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_item", index, inclusive = true).entered();
             let item = cell.item(index)?;
             let completed = prefix.as_ref().expect("nonempty program prefix");
             if item.kind() == CheckedItemKind::Declaration {
@@ -2456,6 +2464,13 @@ fn seal_turn_outputs_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    target = "exomonad_harness::timing",
+    name = "products.seal",
+    level = "debug",
+    skip_all,
+    fields(inclusive = true)
+)]
 fn seal_turn_outputs_with_validation(
     offer: &ModuleCandidateOffer,
     output_dir: &Path,
@@ -2770,6 +2785,7 @@ fn seal_turn_outputs_with_validation(
         0,
         receipt.targets.len(),
     );
+    let post_target_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.post_target", inclusive = true).entered();
     let certified_groups: Arc<[_]> = certified.groups.into();
     let original_compile_input =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
@@ -2802,6 +2818,7 @@ fn seal_turn_outputs_with_validation(
         } else {
             None
         };
+    let original_execution_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.original_execution", inclusive = true).entered();
     let original_execution = match exact.as_ref() {
         Some(admission) => Some(admission.original_execution_context(
             &crate::declaration_context::OriginalCompilerInputs::from_selection(
@@ -2813,6 +2830,8 @@ fn seal_turn_outputs_with_validation(
             .as_ref()
             .map(|proof| proof.issued_original_execution()),
     };
+    drop(original_execution_span);
+    let checked_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_proof", inclusive = true).entered();
     let checked = if let Some(checked) = &offer.checked {
         let (context, lexical) = checked_output_context(
             offer,
@@ -2864,6 +2883,9 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
+    drop(checked_span);
+    drop(post_target_span);
+    let _publication_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.publication", inclusive = true).entered();
     if publication == OriginalOutputPublication::Transaction
         && offer
             .exact
