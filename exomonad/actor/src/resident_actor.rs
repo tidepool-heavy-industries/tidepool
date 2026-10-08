@@ -11669,6 +11669,21 @@ where
             return Ok(());
         }
         let context = self.context(kernel.identity());
+        // Validate the original provider owner even when there are no children
+        // or group obligations. Nested cells cannot release enclosing custody.
+        let provider_children = if boundary.hosted().is_some()
+            && self
+                .workbench_executions
+                .lock()
+                .at_boundary(&boundary)
+                .is_some()
+        {
+            self.workbench_executions
+                .lock()
+                .provider_children(&boundary)?
+        } else {
+            Vec::new()
+        };
         let owner = WorkbenchExecutions::boundary_abort_owner(
             &self.workbench_executions,
             &boundary,
@@ -11701,19 +11716,6 @@ where
                 .abort_unpublished_at_boundary(context.actor, &boundary);
             workbench_ledger::BoundaryAbortCleanup { children, scopes }
         });
-        let provider_children = if boundary.hosted().is_some()
-            && self
-                .workbench_executions
-                .lock()
-                .at_boundary(&boundary)
-                .is_some()
-        {
-            self.workbench_executions
-                .lock()
-                .provider_children(&boundary)?
-        } else {
-            Vec::new()
-        };
         let provider_count = provider_children.len();
         let selected = provider_children
             .into_iter()

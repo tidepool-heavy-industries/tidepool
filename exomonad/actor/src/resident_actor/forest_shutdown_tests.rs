@@ -359,3 +359,117 @@ async fn sealed_forest_refuses_provisioned_workbench_with_actual_startup_cleanup
         .is_confirmed());
     assert!(forest.shutdown().await.is_empty());
 }
+
+#[tokio::test]
+async fn provider_abort_refuses_nested_only_before_releasing_source_or_settlement() {
+    use tidepool_runtime::session::{
+        WorkbenchExecutionId, WorkbenchForkBoundary, WorkbenchRequest,
+    };
+    for nested in [true, false] {
+        let fixture = Fixture::new();
+        let kernel_fixture = crate::resident_actor::invocation_work::tests::Fixture::start().await;
+        let forest = &fixture.forest;
+        let placement = forest
+            .environment
+            .runner
+            .provision_root_scope(forest.session)
+            .await
+            .unwrap();
+        let mut behavior = fixture.behavior(ActorDescriptor::new("provider-abort", placement));
+        let boundary =
+            WorkbenchForkBoundary::external("thread".into(), "turn".into(), "call".into());
+        let invocation = crate::resident_tools::WorkbenchCallKey::from(
+            exomonad_tool::ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                if nested {
+                    "inner".into()
+                } else {
+                    "call".into()
+                },
+                Some("call".into()),
+                None,
+            ),
+        );
+        let execution = WorkbenchExecutionId::from_digest([41; 16]);
+        let request = WorkbenchRequest::from_cell_input("pure ()")
+            .with_execution_id(execution.clone())
+            .with_fork_boundary(boundary.clone());
+        let source = {
+            let machines = forest.environment.runner.machines_for_test();
+            let mut checkout = machines.checkout_run(placement.session).unwrap();
+            let source = checkout
+                .machine()
+                .retain_lexical_scope(placement.lexical_scope)
+                .unwrap();
+            let holes = checkout
+                .machine()
+                .parked_holes()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            checkout.restore_suspended(holes);
+            source
+        };
+        let retained = Arc::downgrade(&source);
+        behavior
+            .workbench_executions
+            .lock()
+            .begin(&execution, request, Some(&invocation));
+        behavior.workbench_executions.lock().retain_fork_source(
+            &execution,
+            Some(&invocation),
+            crate::resident_workbench::PublishedForkSource {
+                lexical: source,
+                session: placement.session,
+                public_scope: placement.lexical_scope,
+                public_epoch: 0,
+                machine_incarnation: None,
+            },
+        );
+        assert!(!forest
+            .environment
+            .fork_groups
+            .has_abort_work_at_boundary(kernel_fixture.actor.identity(), &boundary));
+        let result = behavior
+            .abort_provider_boundary(&kernel_fixture.kernel, boundary.clone())
+            .await;
+        if nested {
+            let error = result.expect_err("nested cell is not the enclosing operation owner");
+            assert_eq!(
+                error.detail,
+                "provider child cleanup lacks one exact original journal owner"
+            );
+            assert!(!behavior.settled_fork_boundaries.contains(&boundary));
+            assert!(
+                retained.upgrade().is_some(),
+                "refusal must retain source custody"
+            );
+            assert!(behavior
+                .abort_provider_boundary(&kernel_fixture.kernel, boundary.clone())
+                .await
+                .is_err());
+            assert!(!behavior.settled_fork_boundaries.contains(&boundary));
+            assert!(retained.upgrade().is_some());
+        } else {
+            result.unwrap();
+            assert!(behavior.settled_fork_boundaries.contains(&boundary));
+            assert!(
+                retained.upgrade().is_none(),
+                "exact empty original can release its source after real checkout"
+            );
+            behavior
+                .abort_provider_boundary(&kernel_fixture.kernel, boundary)
+                .await
+                .unwrap();
+        }
+        drop(behavior);
+        forest
+            .environment
+            .runner
+            .retire_root_placement(placement)
+            .await
+            .unwrap();
+        kernel_fixture.finish().await;
+    }
+}
