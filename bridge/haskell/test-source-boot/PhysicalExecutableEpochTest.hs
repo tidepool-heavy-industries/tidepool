@@ -163,14 +163,13 @@ exactInterfaceOwnerReuse = withTiming $ withScratch $ \work -> do
   writeFile recoveryTarget $ T.unpack $ T.replace "NativeEpochTarget" "NativeEpochTargetAfterCancellation" nativeTarget
 
   escaped <- newIORef Nothing :: IO (IORef (Maybe ExactInterfaceOperations))
-  firstProcessRef <- newIORef Nothing :: IO (IORef (Maybe (Integer, ProcessHandle)))
+  processBeforeCancellationRef <- newIORef Nothing :: IO (IORef (Maybe (Integer, ProcessHandle)))
   completed <- timeout 120000000 $ withResidentCompilerScopes [work] $ \runScope -> do
     runScope (pure ()) $ \compiler -> do
       first <- compile compiler firstTarget
       let firstEnvironment = crHscEnv first
       interp <- maybe (fail "first exact-owner splice has no interpreter") pure (hsc_interp firstEnvironment)
       firstProcess <- runningProcess interp
-      writeIORef firstProcessRef (Just firstProcess)
       requireNativeValue 41 first
       requireNativeOwner interp firstEnvironment
       requireCall marker 41 firstProcess
@@ -242,14 +241,19 @@ exactInterfaceOwnerReuse = withTiming $ withScratch $ \work -> do
       unless (fst afterInterface == fst firstProcess)
         (fail "source-free exact operations replaced the resident interpreter process")
       requireNativeOwner interp firstEnvironment
-      second <- compile compiler secondTarget
+      (second, secondDiagnostics) <- captureDiagnostics (compile compiler secondTarget)
+      hPutStr stderr secondDiagnostics
+      requireThFresh secondDiagnostics
+      requireRotation "epoch" secondDiagnostics
       requireNativeValue 41 second
       secondProcess <- runningProcess interp
-      unless (fst secondProcess == fst firstProcess)
-        (fail "the second splice did not use the resident interpreter process")
+      unless (fst secondProcess /= fst firstProcess)
+        (fail "the source-fresh second splice did not rotate its native interpreter image")
+      requireStopped firstProcess
+      writeIORef processBeforeCancellationRef (Just secondProcess)
       requireNativeOwner interp (crHscEnv second)
       requireCall marker 41 secondProcess
-      requireCallCount marker 41 secondProcess 2
+      requireCallCount marker 41 secondProcess 1
 
       withScopedExactInterfaceTransaction compiler [work] $ \operations -> do
         writeIORef escaped (Just operations)
@@ -270,7 +274,8 @@ exactInterfaceOwnerReuse = withTiming $ withScratch $ \work -> do
       recoveredInterp <- maybe (fail "post-cancellation splice has no interpreter") pure
         (hsc_interp (crHscEnv recovered))
       recoveredProcess <- runningProcess recoveredInterp
-      previous <- readIORef firstProcessRef >>= maybe (fail "missing pre-cancellation process") pure
+      previous <- readIORef processBeforeCancellationRef
+        >>= maybe (fail "missing pre-cancellation process") pure
       unless (fst recoveredProcess /= fst previous)
         (fail "cancellation did not start a fresh native interpreter process")
       requireStopped previous
@@ -301,6 +306,14 @@ requireNativeValue :: Int -> CheckedEnvironmentResult -> IO ()
 requireNativeValue expected checked = unless
   (fmap renderType (crResultType checked) == Just ("Proxy " ++ show expected)) $
   fail "native Template Haskell splice returned the wrong type-level value"
+
+requireThFresh :: String -> IO ()
+requireThFresh diagnostics = unless
+  (any (\line -> all (`isInfixOf` line)
+    ["tidepool-reuse {", "\"stage\":\"source_frontend\"", "\"decision\":\"miss\""
+    ,"\"reason\":\"th_fresh\"", "\"unit\":\"main\"", "\"module\":\"NativeEpochProvider\""]) $
+    lines diagnostics) $
+  fail "second native source frontend did not report the expected Template Haskell freshness event"
 
 requireCallCount :: FilePath -> Integer -> (Integer, ProcessHandle) -> Int -> IO ()
 requireCallCount marker expected (pid, _) count = do
