@@ -504,6 +504,24 @@ pub(crate) fn authenticates_original_native_entry(
     })
 }
 
+/// Read sites from the immutable original at its authenticated group ordinal.
+pub(crate) fn original_native_group_sites(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    original_ordinal: u32,
+) -> Option<&[tidepool_repr::execution_schema::SiteRow]> {
+    let witness = product.original_native()?;
+    if !witness.matches_original(product) {
+        return None;
+    }
+    Some(
+        witness
+            .group(original_ordinal)?
+            .group()
+            .definitions()
+            .sites(),
+    )
+}
+
 fn retain_original_native(
     product: crate::recovery_artifacts::CertifiedRecoveryProduct,
     groups: Vec<PendingCertifiedGroup>,

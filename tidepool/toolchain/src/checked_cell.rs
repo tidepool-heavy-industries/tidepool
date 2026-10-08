@@ -2448,7 +2448,13 @@ pub struct ExactCompiledItem {
     observation_name: Option<String>,
     admission: CheckedExecutionAdmission,
     settled_values: CheckedSettledValues,
-    typed_entry: Option<CheckedTypedEntry>,
+    typed_entry: Option<SealedTypedEntry>,
+}
+
+#[derive(Debug)]
+struct SealedTypedEntry {
+    entry: CheckedTypedEntry,
+    native_sites: BTreeSet<u64>,
 }
 
 /// Read-only identity of a native entry sealed against its canonical original.
@@ -2636,7 +2642,13 @@ impl CheckedTypedEntry {
 
 impl ExactCompiledItem {
     pub fn typed_entry(&self) -> Option<&CheckedTypedEntry> {
-        self.typed_entry.as_ref()
+        self.typed_entry.as_ref().map(|issued| &issued.entry)
+    }
+
+    /// Exact native-site selection sealed with this typed target. The original
+    /// execution inventory may also retain earlier entries' installed groups.
+    pub fn selected_native_sites(&self) -> Option<&BTreeSet<u64>> {
+        self.typed_entry.as_ref().map(|issued| &issued.native_sites)
     }
 
     /// Admit original type-interface custody only after validating the target,
@@ -2703,7 +2715,7 @@ impl ExactCompiledItem {
             ),
         >,
     ) -> Result<(), CompileError> {
-        if let Some(proof) = &self.typed_entry {
+        if let Some(proof) = self.typed_entry() {
             let requirements = self
                 .original_execution
                 .artifact_view()
@@ -2727,7 +2739,7 @@ impl ExactCompiledItem {
         &self,
         actual: impl IntoIterator<Item = (&'a tidepool_repr::execution_schema::SymbolIdentity, u64)>,
     ) -> Result<(), CompileError> {
-        let Some(proof) = &self.typed_entry else {
+        let Some(proof) = self.typed_entry() else {
             return Ok(());
         };
         let requirements = self
@@ -3516,6 +3528,7 @@ impl CheckedItemOffer {
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
         original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
         program_entry: Option<&CheckedTypedEntry>,
+        target_imports: &[crate::certified_products::PendingImportOwner],
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, if self.is_program { 9 } else { 8 })?;
@@ -3618,6 +3631,17 @@ impl CheckedItemOffer {
         } else {
             None
         };
+        let typed_entry = typed_entry
+            .map(|entry| {
+                let native_sites = original_execution
+                    .artifact_view()
+                    .native_site_ids_for_target(&entry, target_imports)?;
+                Ok::<_, CompileError>(SealedTypedEntry {
+                    entry,
+                    native_sites,
+                })
+            })
+            .transpose()?;
         Ok(Arc::new(ExactCompiledItem {
             original_interfaces: Arc::new(
                 crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(

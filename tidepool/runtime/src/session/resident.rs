@@ -5583,20 +5583,31 @@ where
             let original_execution =
                 original_execution.ok_or(ResidentError::UnsupportedCheckedTurn)?;
             let original_execution = OriginalExecutionContext::capture(original_execution);
-            // Site observations include available originals. Only this target
-            // and its certified native closure select execution authority.
-            let selected_sites = code
+            // Site observations and installed native custody can include
+            // earlier entries. A typed target retains its exact issued closure.
+            let issued_sites =
+                certification.and_then(|certification| match certification.purpose() {
+                    TurnPurpose::Execution { execution, .. }
+                    | TurnPurpose::HostPrototype(execution) => execution.selected_native_sites(),
+                    _ => None,
+                });
+            let mut selected_sites = code
                 .prepared
                 .sites()
                 .iter()
-                .chain(
+                .map(|site| site.site)
+                .collect::<std::collections::BTreeSet<_>>();
+            if let Some(issued_sites) = issued_sites {
+                selected_sites.extend(issued_sites.iter().copied());
+            } else {
+                selected_sites.extend(
                     certification
                         .into_iter()
                         .flat_map(|certification| certification.groups.iter())
-                        .flat_map(|group| group.group().definitions().sites()),
-                )
-                .map(|site| site.site)
-                .collect::<std::collections::BTreeSet<_>>();
+                        .flat_map(|group| group.group().definitions().sites())
+                        .map(|site| site.site),
+                );
+            }
             let descriptors = original_interfaces.artifact_view().descriptors();
             let home_units = descriptors
                 .iter()

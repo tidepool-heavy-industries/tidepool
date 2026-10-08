@@ -1847,6 +1847,11 @@ impl ModuleCandidateOffer {
                     .products
                     .as_ref()
                     .and_then(|products| products.typed_entry.as_ref()),
+                &output
+                    .products
+                    .as_ref()
+                    .expect("program output was sealed")
+                    .pending_imports,
             )?;
             let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {
@@ -2949,6 +2954,7 @@ fn seal_turn_outputs_with_validation(
                             .clone()
                             .expect("checked output has full original execution evidence"),
                         None,
+                        &pending_imports,
                     )?,
                 )
             }

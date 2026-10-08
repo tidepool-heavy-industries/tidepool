@@ -1918,6 +1918,47 @@ impl ArtifactView {
         &self,
         roots: &[NativeRequirementRoot],
     ) -> Result<NativeRequirements, CompileError> {
+        Ok(self.native_requirements_with_groups_from_roots(roots)?.0)
+    }
+
+    /// Seal one typed entry's executable sites independently of native custody
+    /// already retained by the parent view. Target imports select the wrapper's
+    /// own original dependencies in addition to its checked authored entry.
+    pub(crate) fn native_site_ids_for_target(
+        &self,
+        entry: &crate::checked_cell::CheckedTypedEntry,
+        imports: &[crate::certified_products::PendingImportOwner],
+    ) -> Result<BTreeSet<u64>, CompileError> {
+        let mut roots = certified_target_source_groups(&self.entries(), imports)?;
+        roots.insert(entry.native_group_key());
+        let roots = roots
+            .into_iter()
+            .map(|key| NativeRequirementRoot::Group {
+                artifact: key.artifact,
+                original_ordinal: key.original_ordinal,
+            })
+            .collect::<Vec<_>>();
+        let (_, groups) = self.native_requirements_with_groups_from_roots(&roots)?;
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let mut sites = BTreeSet::new();
+        for key in groups {
+            let ArtifactPayload::Original(product) = &state.payloads[&key.artifact].payload else {
+                return Err(failure("selected native group lacks original payload"));
+            };
+            let original = crate::certified_products::original_native_group_sites(
+                product,
+                key.original_ordinal,
+            )
+            .ok_or_else(|| failure("selected native group lacks authenticated sites"))?;
+            sites.extend(original.iter().map(|site| site.site));
+        }
+        Ok(sites)
+    }
+
+    fn native_requirements_with_groups_from_roots(
+        &self,
+        roots: &[NativeRequirementRoot],
+    ) -> Result<(NativeRequirements, BTreeSet<NativeGroupKey>), CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
         let mut pending = Vec::new();
@@ -2014,10 +2055,13 @@ impl ArtifactView {
                 }
             }
         }
-        Ok(NativeRequirements {
-            bindings: requirements.into_iter().collect(),
-            packages: packages.into_iter().collect(),
-        })
+        Ok((
+            NativeRequirements {
+                bindings: requirements.into_iter().collect(),
+                packages: packages.into_iter().collect(),
+            },
+            seen,
+        ))
     }
 
     fn roots(&self) -> &[InventoryNodeKey] {
