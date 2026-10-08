@@ -19,6 +19,7 @@ import Tidepool.Agent.Contract
 import Tidepool.Aeson.Value (Value (..), ToJSON (toJSON), object, (.=))
 import qualified Tidepool.Aeson.KeyMap as KM
 import Tidepool.Effects.Core (AgentTools (..), Commands, ContextReadWrite (..))
+import Tidepool.Internal.ActorProfiles (ActorEffects)
 import Tidepool.Test.Runner
 
 data Tools mode = Tools
@@ -159,6 +160,17 @@ installedToolContracts = do
   require "host without context support declares only the async notebook"
     (map (\entry -> (dtdName entry, dtdSchedule entry, dtdImplementation entry, dtdEffectKeys entry)) (declarations asyncDefault)
       == [("haskell", Asynchronous, NativeHaskellCell, Just [])])
+  actorDefault <- either (error . show) pure (compileInstalledTools
+    (specTools (defaultAsyncWorkbenchSpec :: AgentSpec (AsyncHaskellTools ActorEffects) ActorEffects)))
+  require "default actor notebook reflects form and concurrency effects without sync authority"
+    (case declarations actorDefault of
+      [entry] -> dtdName entry == "haskell" && dtdSchedule entry == Asynchronous
+        && dtdImplementation entry == NativeHaskellCell
+        && case dtdEffectKeys entry of
+          Just keys -> length (filter (== "AskUser") keys) == 1
+            && length (filter (== "Green") keys) == 1 && "ContextReadWrite" `notElem` keys
+          Nothing -> False
+      _ -> False)
   narrowCompiled <- either (error . show) pure (compileInstalledTools narrowTools)
   require "notebook profile may select a strict subset of actor effects"
     (map dtdEffectKeys (declarations narrowCompiled) == [Just []])

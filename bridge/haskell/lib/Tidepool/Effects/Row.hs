@@ -24,6 +24,8 @@ import Tidepool.Effects.Core
   , AgentControl
   , Commands
   , Console
+  , AskUser
+  , Green
   , Notifications
   , Jev
   , ModelCall
@@ -84,6 +86,8 @@ instance KnownEffect WorktreeIntegration where effectWitness = EffectWitness Eff
 instance KnownEffect Sleep where effectWitness = EffectWitness EffectSleep
 instance KnownEffect Commands where effectWitness = EffectWitness EffectCommands
 instance KnownEffect Console where effectWitness = EffectWitness EffectConsole
+instance KnownEffect AskUser where effectWitness = EffectWitness EffectAskUser
+instance KnownEffect Green where effectWitness = EffectWitness EffectGreen
 instance KnownEffect Notifications where effectWitness = EffectWitness EffectNotifications
 instance KnownEffect Jev where effectWitness = EffectWitness EffectJev
 instance KnownEffect ModelCall where effectWitness = EffectWitness EffectModelCall
