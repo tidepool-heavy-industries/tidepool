@@ -331,6 +331,13 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
     entered.notified().await;
     assert_eq!(resumes.load(Ordering::SeqCst), 1);
     check_observation(&registry, owner, request, None);
+    assert!(
+        matches!(
+            registry.observe_watch(owner, watch).unwrap(),
+            WatchObservation::Pending(_)
+        ),
+        "reply delivery cannot make its held continuation watch ready"
+    );
 
     // The operation interpreter lives outside the behavior: expected readiness
     // comes from acknowledged workflow facts, never its registry state table.
@@ -348,6 +355,13 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         )
         .await;
     }
+    assert!(
+        matches!(
+            registry.observe_watch(owner, watch).unwrap(),
+            WatchObservation::Pending(_)
+        ),
+        "observations and refused duplicates cannot settle the held watch"
+    );
     match history.completion {
         Completion::Success | Completion::Failure => {
             let successful = matches!(history.completion, Completion::Success);
