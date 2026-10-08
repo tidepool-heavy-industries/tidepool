@@ -276,21 +276,10 @@ impl CapturedHostTransport {
                         } else {
                             PENDING_CALL
                         },
-                        match self.scenario {
-                            HostedScenario::LocalActorStartup => {
-                                "seed <- R.call (readSeed (R.client seedStore)) ()\nagents <- R.call (readAgents (R.client groupStore)) ()\ndisplay (case seed of Nothing -> null agents; _ -> False)"
-                            }
-                            HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => {
-                                &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_and_await.hs")
-                            }
-                            HostedScenario::Captured(CapturedScenario::FailureAfterReplies) => {
-                                &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_await_then_fail.hs")
-                            }
-                            HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => {
-                                &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_a.hs")
-                            }
-                        },
-                        if self.scenario == HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) {
+                        &source,
+                        if self.scenario
+                            == HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin)
+                        {
                             CallMode::Asynchronous
                         } else {
                             CallMode::Blocking

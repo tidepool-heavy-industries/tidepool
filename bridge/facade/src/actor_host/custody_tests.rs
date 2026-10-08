@@ -1041,12 +1041,9 @@ async fn cancel_at_install_phase(phase: InstallPhase) {
                 .dispatch_json_boxed(exomonad_tool::ToolInvocation {
                     context: Some(invocation),
                     name: exomonad_actor::HASKELL_TOOL.into(),
-                    arguments: exomonad_tool::ToolArguments::Raw(
-                        &tidepool_testing::fixture_source(
-                            "bridge/facade/src/actor_host/custody_single.hs",
-                        )
-                        .into(),
-                    ),
+                    arguments: exomonad_tool::ToolArguments::Raw(tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/custody_single.hs",
+                    )),
                 })
                 .await
         }
