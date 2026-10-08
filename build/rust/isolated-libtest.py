@@ -558,12 +558,13 @@ def diagnostic_summaries(artifact_root):
     summaries['transactions_truncated'] = len(transactions) > 256
     def summarize_compiler(compiler):
         result = {'path': str(compiler), 'authority': False, 'issues': []}
+        if any((compiler / filename).exists() or (compiler / filename).is_symlink()
+               for filename in ('owned-compiler-outcome.json', 'lifecycle.json')):
+            result['owned_cleanup_status'] = 'unknown'
         for filename, key in (('owned-compiler-outcome.json', 'owned_compiler_outcome'),
                               ('lifecycle.json', 'owned_compiler_lifecycle')):
             path = compiler / filename
-            if path.exists():
-                if key == 'owned_compiler_outcome':
-                    result['owned_cleanup_status'] = 'unknown'
+            if path.exists() or path.is_symlink():
                 try:
                     if path.is_symlink():
                         raise ValueError('compiler diagnostic marker must not be a symlink')
@@ -683,15 +684,15 @@ def diagnostic_summaries(artifact_root):
                 break
             if candidate.is_symlink() or not candidate.is_dir():
                 continue
-            markers = [(candidate / filename).is_file() for filename in
+            markers = [(candidate / filename).exists() or (candidate / filename).is_symlink() for filename in
                        ('owned-compiler-outcome.json', 'lifecycle.json')]
-            if all(markers):
+            if any(markers):
+                if not all(markers):
+                    summaries['issues'].append(f'incomplete owned compiler markers: {candidate}')
                 if len(roots) < 8:
                     roots.append((candidate, 'native_test_control'))
                 else:
                     summaries['issues'].append('owned compiler diagnostic root bound exceeded')
-            elif any(markers):
-                summaries['issues'].append(f'incomplete owned compiler markers: {candidate}')
     summaries['owned_compiler_roots'] = []
     for compiler, role in roots:
         if compiler.is_symlink():

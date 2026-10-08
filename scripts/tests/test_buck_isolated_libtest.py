@@ -213,6 +213,33 @@ class IsolatedLibtestTests(unittest.TestCase):
                 if status != 'confirmed':
                     self.assertIn(f'owned compiler cleanup remains {status}', errors)
 
+    def test_owned_lifecycle_with_missing_or_dangling_outcome_retains_unknown_cleanup(self):
+        for nested in (False, True):
+            for marker in ('lifecycle', 'dangling_outcome', 'dangling_lifecycle'):
+                with self.subTest(nested=nested, marker=marker):
+                    root = Path(self.tmp.name) / f'missing-owned-outcome-{nested}-{marker}'
+                    record = {}
+                    def run(args, timeout, environment=None):
+                        compiler = root / ('owned-compiler-control-1/compiler' if nested else 'compiler')
+                        compiler.mkdir(parents=True)
+                        if marker == 'dangling_lifecycle':
+                            (compiler / 'lifecycle.json').symlink_to(compiler / 'absent.json')
+                        else:
+                            (compiler / 'lifecycle.json').write_text('{}')
+                        if marker == 'dangling_outcome':
+                            (compiler / 'owned-compiler-outcome.json').symlink_to(compiler / 'absent.json')
+                        return completed_process(args, 0,
+                            'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                    with patch.object(runner, 'execute', side_effect=run):
+                        passed, _, errors = runner.run_one(str(self.binary), 'suite::works', False,
+                            10, record, artifact_root=root)
+                    self.assertFalse(passed)
+                    self.assertTrue(root.exists())
+                    self.assertEqual(record['executed_test_count'], 1)
+                    self.assertEqual(record['process_cleanup_status'], 'confirmed')
+                    self.assertEqual(record['compiler_cleanup_status'], 'unknown')
+                    self.assertIn('owned compiler cleanup remains unknown', errors)
+
     def test_invalid_utf8_native_output_keeps_counts_and_cleanup_evidence(self):
         root = Path(self.tmp.name) / 'invalid-output'
         self.binary.write_text('#!' + sys.executable + '\n' +
@@ -622,7 +649,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(queue['data_status'], 'no_observed_job_queue')
         self.assertFalse(queue['complete'])
 
-    def test_owned_control_symlink_and_incomplete_markers_do_not_discover_foreign_roots(self):
+    def test_owned_control_symlink_is_refused_and_partial_local_owner_remains_unknown(self):
         root = Path(self.tmp.name) / 'safe-root'
         root.mkdir()
         foreign = Path(self.tmp.name) / 'foreign'
@@ -635,7 +662,9 @@ class IsolatedLibtestTests(unittest.TestCase):
         incomplete.mkdir(parents=True)
         (incomplete / 'owned-compiler-outcome.json').write_text('{}')
         summary = runner.diagnostic_summaries(root)
-        self.assertEqual(summary['owned_compiler_roots'], [])
+        self.assertEqual(len(summary['owned_compiler_roots']), 1)
+        self.assertEqual(summary['owned_compiler_roots'][0]['path'], str(incomplete))
+        self.assertEqual(summary['owned_compiler_roots'][0]['owned_cleanup_status'], 'unknown')
         self.assertTrue(any('unsafe' in issue for issue in summary['issues']))
         self.assertTrue(any('incomplete' in issue for issue in summary['issues']))
 
