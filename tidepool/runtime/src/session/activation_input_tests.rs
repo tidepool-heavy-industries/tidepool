@@ -1751,6 +1751,234 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
 }
 
 #[test]
+fn activation_authentication_follows_selected_native_sites_through_custody() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+
+    let (root, base) = InputFixture::source_recipe(false);
+    let home = root.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("ProvenanceSharedRequest.hs"),
+        include_str!("fixtures/ProvenanceSharedRequest.hs"),
+    )
+    .unwrap();
+    let mut include = base.include.clone();
+    include.push(home);
+    let recipe = Arc::new(InputRecipe {
+        preamble: insert_preamble_imports(
+            &base.preamble,
+            "qualified ProvenanceSharedRequest as Shared",
+        ),
+        row: base.row.clone(),
+        include,
+    });
+    let session = SessionId(1793);
+    let mut source = InputFixture::fresh_in(session, &root, &recipe);
+    let execution = Arc::new(source.begin_private_execution(ScopeId::ROOT).unwrap());
+    source
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    let checked = check_fixture_cell(
+        &mut source,
+        &recipe,
+        include_str!("fixtures/activation-selected-site-segment.hs"),
+        execution.clone(),
+        0,
+    );
+    assert_eq!(checked.checked.items.len(), 4);
+    let mut outputs = Vec::new();
+    let mut values = Vec::new();
+    for index in 0..4 {
+        let (bound, compiled, reservation) = checked.compile_binding(&mut source, index);
+        let [binder] = bound.as_slice() else {
+            panic!("each selected-site fixture item binds one value");
+        };
+        assert!(matches!(
+            source
+                .run_bind_with_sites(
+                    "selectedSiteFixture",
+                    compiled.code(),
+                    binder,
+                    reservation.generation(),
+                )
+                .unwrap(),
+            ResidentOutcome::Completed { .. }
+        ));
+        values.push(
+            source
+                .retain_binding_custody(&binder.name)
+                .unwrap()
+                .unwrap(),
+        );
+        outputs.push(compiled);
+    }
+
+    // The fixture's shared action calls one OPAQUE home function. Its actual
+    // original wire supplies the site ID; the other action owns one local site.
+    // Neither expected membership set uses the provenance admission algorithm.
+    let shared_sites = outputs[1]
+        .certification
+        .as_ref()
+        .unwrap()
+        .groups
+        .iter()
+        .filter(|group| group.owner().module == "ProvenanceSharedRequest")
+        .flat_map(|group| group.group().definitions().sites())
+        .filter(|site| !site.inputs.is_empty())
+        .map(|site| site.site)
+        .collect::<std::collections::BTreeSet<_>>();
+    let local_sites = outputs[2]
+        .prepared
+        .sites()
+        .iter()
+        .filter(|site| !site.inputs.is_empty())
+        .map(|site| site.site)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(shared_sites.len(), 1, "genuine imported native site");
+    assert_eq!(local_sites.len(), 1, "genuine target-local native site");
+    assert!(shared_sites.is_disjoint(&local_sites));
+    let expected = [
+        std::collections::BTreeSet::new(),
+        shared_sites.clone(),
+        local_sites.clone(),
+        std::collections::BTreeSet::new(),
+    ];
+    for (index, value) in values.iter().enumerate() {
+        assert_eq!(
+            value
+                .provenance
+                .authenticated_inputs
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected[index],
+            "item {index}: available originals do not select an executable site"
+        );
+        for site in shared_sites.union(&local_sites) {
+            assert!(
+                value.provenance.sites.contains_key(site),
+                "unselected site metadata remains observable on item {index}"
+            );
+        }
+    }
+
+    let mut config = Config::default();
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+    }
+    let mut config = proptest::test_runner::contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::activation_authentication_follows_selected_native_sites_through_custody"
+    ));
+    let mut runner = TestRunner::new(config);
+    runner
+        .run(&prop::collection::vec(0_usize..4, 0..48), |history| {
+            let mut composed = (*values[0].provenance).clone();
+            let mut oracle = std::collections::BTreeSet::new();
+            for index in history {
+                composed.merge(&values[index].provenance).unwrap();
+                oracle.extend(expected[index].iter().copied());
+                prop_assert_eq!(
+                    composed
+                        .authenticated_inputs
+                        .keys()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    oracle.clone()
+                );
+                for site in &oracle {
+                    let owner = if shared_sites.contains(site) { 1 } else { 2 };
+                    prop_assert_eq!(
+                        &composed.authenticated_inputs[site],
+                        &values[owner].provenance.authenticated_inputs[site]
+                    );
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let receiver_parcel = source.export_custody(values.remove(0)).unwrap();
+    let action = values.remove(0);
+    let reservation = suspended(
+        source
+            .run_rooted_entry("selectedAction", action, 1, RealmId::ROOT, None)
+            .unwrap(),
+    );
+    let submission = suspended(source.resume(reservation, 1).unwrap());
+    let payload = source
+        .live_payload_handle(submission.cont_id())
+        .unwrap()
+        .unwrap();
+    let original = Arc::clone(&payload.provenance);
+    let payload_parcel = source.export_custody(payload).unwrap();
+    let destination_root = tempfile::tempdir().unwrap();
+    let mut destination = InputFixture::fresh_in(SessionId(1794), &destination_root, &recipe);
+    let receiver = destination
+        .import_parcel(receiver_parcel, RealmId::ROOT)
+        .unwrap();
+    let payload = destination
+        .import_parcel(payload_parcel, RealmId::ROOT)
+        .unwrap();
+    assert!(receiver.provenance.authenticated_inputs.is_empty());
+    assert!(Arc::ptr_eq(&payload.provenance, &original));
+    let activation = suspended(
+        destination
+            .run_rooted_application(
+                "selectedOriginalRequest",
+                &receiver,
+                &payload,
+                RealmId::ROOT,
+                None,
+            )
+            .unwrap(),
+    );
+    let site = parked_site(&mut destination, &activation);
+    assert!(shared_sites.contains(&site));
+    let input = destination
+        .capture_activation_input(&activation, RealmId::ROOT, site)
+        .unwrap();
+    assert_eq!(
+        input.original_execution.semantic_sha256(),
+        original.authenticated_inputs[&site]
+            .execution
+            .require_unique(site)
+            .unwrap()
+            .semantic_sha256()
+    );
+    drop(input);
+    let fixture = InputFixture {
+        root,
+        session,
+        recipe,
+        producer: outputs.remove(1),
+    };
+    assert!(matches!(
+        fixture.resume_activation(&mut destination, activation),
+        ResidentOutcome::Completed { .. }
+    ));
+    assert!(matches!(
+        source.resume(submission, ()).unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+    drop(receiver);
+    drop(payload);
+    drop(values);
+    source.set_run_context(SessionRunContext::ROOT).unwrap();
+    source.retire_scope(execution.private_scope());
+    assert_eq!(source.outstanding_custody(), 0);
+    assert_eq!(destination.outstanding_custody(), 0);
+    assert!(source.parked_holes().is_empty());
+    assert!(destination.parked_holes().is_empty());
+}
+
+#[test]
 fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
     let fixture = InputFixture::compile(
         include_str!("fixtures/activation-input-function.hs"),
@@ -2529,6 +2757,23 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
     let later = resident
         .capture_activation_input(&hole, RealmId::ROOT, site)
         .unwrap();
+    let earlier_identity = earlier.original_execution.semantic_sha256();
+    let later_identity = later.original_execution.semantic_sha256();
+    assert_ne!(earlier_identity, later_identity);
+    let mut distinct = OriginalExecutionContexts::Unique(OriginalExecutionContext::capture(
+        Arc::clone(&earlier.original_execution),
+    ));
+    distinct.merge(&OriginalExecutionContexts::Unique(
+        OriginalExecutionContext::capture(Arc::clone(&later.original_execution)),
+    ));
+    let expected_contexts = std::collections::BTreeSet::from([earlier_identity, later_identity])
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        distinct.require_unique(site),
+        Err(ResidentError::AmbiguousActivationInputOriginalContext { site: rejected, contexts })
+            if rejected == site && contexts == expected_contexts
+    ));
     resident.set_run_context(SessionRunContext::ROOT).unwrap();
     let (owner, interface) = issued_captured_input(&mut resident, earlier, recipe.clone());
     assert_eq!(
