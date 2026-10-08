@@ -47,7 +47,7 @@ def root_entry_source_fixture(root, modules):
 
 
 class NativeQualificationTests(unittest.TestCase):
-    def fixture_source(self, root, relative='workspace/fixtures/sample.hs'):
+    def fixture_source(self, root, relative='workspace/fixtures/sample.hs', track_fixture=True):
         source = root / 'source'
         source.mkdir()
         subprocess.run(['git', 'init', '-q', str(source)], check=True)
@@ -63,6 +63,8 @@ class NativeQualificationTests(unittest.TestCase):
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, sort_keys=True) + '\n')
         subprocess.run(['git', '-C', str(source), 'add', qualification.TEST_FIXTURE_MANIFEST], check=True)
+        if track_fixture:
+            subprocess.run(['git', '-C', str(source), 'add', relative], check=True)
         return source, fixture, manifest, resource_root
 
     def frozen_fixture(self, root):
@@ -130,6 +132,42 @@ class NativeQualificationTests(unittest.TestCase):
                 qualification.write_json(source / qualification.TEST_FIXTURE_MANIFEST, manifest)
                 with self.assertRaisesRegex(ValueError, 'fixture'):
                     qualification.fixture_manifest(source)
+
+    def test_fixture_manifest_rejects_untracked_source_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, _, _, _ = self.fixture_source(Path(directory), track_fixture=False)
+            with self.assertRaisesRegex(ValueError, 'not tracked'):
+                qualification.fixture_manifest(source)
+
+    def test_fixture_manifest_accepts_a_tracked_file_in_initialized_source_submodule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            submodule_source = root / 'fixture-source'
+            submodule_source.mkdir()
+            subprocess.run(['git', 'init', '-q', str(submodule_source)], check=True)
+            subprocess.run(['git', '-C', str(submodule_source), 'config', 'user.name', 'fixture test'], check=True)
+            subprocess.run(['git', '-C', str(submodule_source), 'config', 'user.email', 'fixture@example.invalid'], check=True)
+            (submodule_source / 'fixtures').mkdir()
+            (submodule_source / 'fixtures/sample.hs').write_text('module Sample where\n')
+            subprocess.run(['git', '-C', str(submodule_source), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(submodule_source), 'commit', '-qm', 'fixture source'], check=True)
+
+            source = root / 'source'; source.mkdir()
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            subprocess.run(['git', '-C', str(source), 'config', 'user.name', 'fixture test'], check=True)
+            subprocess.run(['git', '-C', str(source), 'config', 'user.email', 'fixture@example.invalid'], check=True)
+            subprocess.run(['git', '-C', str(source), '-c', 'protocol.file.allow=always',
+                            'submodule', 'add', '-q', str(submodule_source), 'workspace'], check=True)
+            manifest_path = source / qualification.TEST_FIXTURE_MANIFEST
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps({'schema': 1, 'kind': 'haskell-test-fixtures',
+                                                 'files': ['workspace/fixtures/sample.hs']}, sort_keys=True) + '\n')
+            subprocess.run(['git', '-C', str(source), 'add', qualification.TEST_FIXTURE_MANIFEST], check=True)
+            subprocess.run(['git', '-C', str(source), 'commit', '-qm', 'source manifest'], check=True)
+            manifest, hashes = qualification.fixture_manifest(source)
+            self.assertEqual(manifest['files'], ['workspace/fixtures/sample.hs'])
+            self.assertEqual(hashes['workspace/fixtures/sample.hs'],
+                             qualification.sha256(source / 'workspace/fixtures/sample.hs'))
 
     def test_fixture_descriptor_must_match_native_source_contract(self):
         with tempfile.TemporaryDirectory() as directory:

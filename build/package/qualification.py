@@ -662,6 +662,12 @@ def fixture_manifest(source: Path) -> tuple[dict, dict[str, str]]:
     tracked = set(subprocess.check_output([
         "git", "-C", str(source), "ls-files", "-z", "--recurse-submodules",
     ]).decode().split("\0"))
+    submodules = []
+    for row in subprocess.check_output(["git", "-C", str(source), "submodule", "status", "--recursive"], text=True).splitlines():
+        if row[:1] != " ":
+            continue
+        revision, relative = row[1:].split()[:2]
+        submodules.append((Path(relative), revision))
     hashes = {}
     for relative in manifest["files"]:
         path = PurePosixPath(relative)
@@ -670,6 +676,20 @@ def fixture_manifest(source: Path) -> tuple[dict, dict[str, str]]:
                 or not relative.endswith(".hs")):
             raise ValueError(f"fixture is not a repository-relative Haskell source: {relative}")
         selected = source / path
+        is_tracked = relative in tracked
+        if not is_tracked:
+            owners = [(submodule, revision) for submodule, revision in submodules
+                      if path.is_relative_to(submodule)]
+            if owners:
+                submodule, _ = max(owners, key=lambda item: len(item[0].parts))
+                inner = path.relative_to(submodule).as_posix()
+                owner = source / submodule
+                submodule_tracked = set(subprocess.check_output([
+                    "git", "-C", str(owner), "ls-files", "-z",
+                ]).decode().split("\0"))
+                is_tracked = inner in submodule_tracked
+        if not is_tracked:
+            raise ValueError(f"fixture is not tracked by the recorded source or an initialized submodule: {relative}")
         component = source
         symlinked = False
         for part in path.parts:
