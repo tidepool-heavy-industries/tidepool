@@ -28,7 +28,7 @@
     };
     # Browser assets must come from the exact harness source used by Cargo.
     harnessWeb = {
-      url = "github:tidepool-heavy-industries/exomonad-harness/5f0999723e8e0a5cceb9c340960fbfbb65b57ab7";
+      url = "github:tidepool-heavy-industries/exomonad-harness/59b342b96a921f4d9b0e044fe8ef61f6fc62bc71";
       flake = false;
     };
     # Match the harness web verification shell's pinned Node 24 package.
@@ -273,7 +273,7 @@
         };
         embeddedWebAssets = harnessPkgs.buildNpmPackage {
           pname = "exomonad-harness-web";
-          version = "5f0999723e8e0a5cceb9c340960fbfbb65b57ab7";
+          version = "59b342b96a921f4d9b0e044fe8ef61f6fc62bc71";
           src = "${harnessWeb}/web";
           nodejs = harnessPkgs.nodejs_24;
           npmDeps = embeddedWebNpmCache;
@@ -283,7 +283,7 @@
             cp -R dist/. "$out/share/exomonad/web/"
             runHook postInstall
           '';
-          passthru.sourceRevision = "5f0999723e8e0a5cceb9c340960fbfbb65b57ab7";
+          passthru.sourceRevision = "59b342b96a921f4d9b0e044fe8ef61f6fc62bc71";
         };
       in
       {
