@@ -22,11 +22,11 @@ import GHC.Unit.Module (moduleUnit)
 import GHC.Unit.Types (unitIdString, unitString, GenUnit(RealUnit), Definite(Definite))
 import GHC.Builtin.Types (intTy, doubleTy)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Types.Name (getOccString, nameModule_maybe, nameUnique)
+import GHC.Types.Name (getOccString, nameModule_maybe, nameOccName)
+import GHC.Types.Name.Occurrence (OccName)
 import GHC.Types.Avail (availNames)
 import GHC.Types.TypeEnv (typeEnvIds)
-import GHC.Types.Var (varName, varUnique)
-import GHC.Types.Unique (getKey)
+import GHC.Types.Var (varName)
 import GHC.Iface.Syntax (IfaceConDecl(..), IfaceConDecls(..), IfaceDecl(..))
 import GHC.Types.FieldLabel (FieldSelectors(..), flHasFieldSelector, flSelector)
 import GHC.Unit.Module.ModDetails (md_types)
@@ -214,7 +214,6 @@ typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive 
       let prepared = preparedSegmentProducts products
           segment = preparedSegmentCaptures products
           issued = bindersOfBinds (TypedSegment.typedSegmentRoots segment)
-          issuedNames = Set.fromList (map varName issued)
       finalized <- maybe (fail (owner ++ ": actual finalized home module is absent")) pure
         (Map.lookup (mkModuleName owner) (pprFinalizedModules prepared))
       let home = finalizedHomeModInfo finalized
@@ -268,6 +267,9 @@ typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive 
               | (_, declaration@IfacePatSyn{}) <- mi_decls interface
               , field <- ifFieldLabels declaration]
           exportedNames = concatMap availNames (mi_exports interface)
+          exportedIdentities = map publishedNameIdentity exportedNames
+          issuedIdentities = map (publishedNameIdentity . varName) issued
+          finalizedIdNames = map varName (typeEnvIds (md_types details))
           expectedCounts = Map.fromListWith (+) [(selector, 1 :: Int) | selector <- selectors]
           actualCounts = Map.fromListWith (+) [(getOccString name, 1 :: Int) | name <- selectorNames]
           expectedPatternFields = case shape of
@@ -305,13 +307,20 @@ typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive 
         (fail (owner ++ ": a selector Id lost its generated module owner"))
       unless (all (\name -> notElem name exportedNames) selectorNames)
         (fail (owner ++ ": record selectors became lexical module exports"))
-      unless (Set.fromList exportedNames == issuedNames)
+      unless (all (`elem` ifaceIdNames) exportedNames)
+        (fail (owner ++ ": a finalized export lacks its exact finalized IfaceId Name"))
+      unless (all (`elem` finalizedIdNames) exportedNames)
+        (fail (owner ++ ": a finalized export lacks its exact finalized md_types Id Name"))
+      unless (Set.size (Set.fromList exportedIdentities) == length exportedIdentities
+            && Set.size (Set.fromList issuedIdentities) == length issuedIdentities
+            && length exportedIdentities == length issuedIdentities
+            && Set.fromList exportedIdentities == Set.fromList issuedIdentities)
         (fail (owner ++ ": finalized exports differ from actual issued typed-segment roots"
           ++ "\n  finalized owner: " ++ renderModuleIdentity moduleOwner
           ++ "\n  finalized exports:\n    "
-          ++ intercalate "\n    " (map renderNameIdentity (Set.toAscList (Set.fromList exportedNames)))
+          ++ intercalate "\n    " (map renderPublishedNameIdentity exportedNames)
           ++ "\n  issued root Ids:\n    "
-          ++ intercalate "\n    " (map renderIdIdentity issued)))
+          ++ intercalate "\n    " (map (renderPublishedNameIdentity . varName) issued)))
   putStrLn ("typed record metadata: " ++ show (length recordMetadataCases)
     ++ " serial generated requests; record/newtype/multi-constructor, used/unused, "
     ++ "Generic/no-Generic, NoFieldSelectors, existential fields, duplicate selector "
@@ -429,17 +438,14 @@ metadataFieldOwners index shape selectors = case shape of
 renderModuleIdentity :: Module -> String
 renderModuleIdentity owner = unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner)
 
-renderNameIdentity :: Name -> String
-renderNameIdentity name =
-  maybe "<no-module>" renderModuleIdentity (nameModule_maybe name)
-    ++ "." ++ getOccString name
-    ++ " nameUnique=" ++ show (getKey (nameUnique name))
-    ++ " ppr=" ++ showSDocUnsafe (ppr name)
+-- hscTidy reassigns binder Uniques while preserving the published module and OccName.
+publishedNameIdentity :: Name -> (Maybe Module, OccName)
+publishedNameIdentity name = (nameModule_maybe name, nameOccName name)
 
-renderIdIdentity :: Id -> String
-renderIdIdentity identifier =
-  renderNameIdentity (varName identifier)
-    ++ " varUnique=" ++ show (getKey (varUnique identifier))
+renderPublishedNameIdentity :: Name -> String
+renderPublishedNameIdentity name =
+  maybe "<no-module>" renderModuleIdentity (nameModule_maybe name)
+    ++ "." ++ showSDocUnsafe (ppr (nameOccName name))
 
 data PreparationExpected = PrepareAccepted | PrepareTypedRefusal | PrepareSourceRefusal
 
