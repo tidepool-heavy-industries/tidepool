@@ -1,5 +1,78 @@
 use super::*;
 
+#[cfg(test)]
+async fn settle_provider_child(
+    kernel: &KernelContext,
+    child: ActorRef,
+) -> Result<(), KernelBehaviorError> {
+    let child_owner = kernel.resolve(child).ok_or_else(|| {
+        KernelBehaviorError::new(format!(
+            "provider child {child:?} lacks retained cleanup ownership"
+        ))
+    })?;
+    settle_provider_child_owner(child_owner, provider_child_terminal()).await
+}
+
+fn provider_child_terminal() -> ActorTerminal {
+    ActorTerminal {
+        kind: ActorExitKind::Cancelled,
+        summary: "enclosing provider boundary released incomplete child".into(),
+        diagnostic: None,
+    }
+}
+
+pub(super) async fn settle_provider_child_owner(
+    child_owner: LocalActorRef,
+    terminal: ActorTerminal,
+) -> Result<(), KernelBehaviorError> {
+    let child = child_owner.identity();
+    let shutdown = child_owner
+        .shutdown_with_cleanup(terminal)
+        .await
+        .map_err(KernelInvocationFailure::into_behavior_error)?;
+    if !shutdown.cleanup.is_confirmed() {
+        return Err(KernelBehaviorError::new(format!(
+            "provider child {child:?} cleanup is unconfirmed"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) async fn settle_provider_children(
+    journal: &Arc<Mutex<WorkbenchExecutions>>,
+    kernel: &KernelContext,
+    boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+) -> Result<(), KernelBehaviorError> {
+    let children = journal.lock().provider_children(boundary)?;
+    let batch = provider_child_retirement_batch(kernel, children)?;
+    for (owner, terminal) in batch.into_actors() {
+        let child = owner.identity();
+        settle_provider_child_owner(owner, terminal).await?;
+        journal.lock().provider_child_released(boundary, child)?;
+    }
+    Ok(())
+}
+
+pub(super) fn provider_child_retirement_batch(
+    kernel: &KernelContext,
+    children: Vec<ActorRef>,
+) -> Result<crate::kernel::RetirementBatch, KernelBehaviorError> {
+    let owners = children
+        .into_iter()
+        .map(|child| {
+            kernel
+                .resolve(child)
+                .map(|owner| (owner, provider_child_terminal()))
+                .ok_or_else(|| {
+                    KernelBehaviorError::new(format!(
+                        "provider child {child:?} lacks retained cleanup ownership"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(crate::kernel::RetirementBatch::issue(owners))
+}
+
 #[derive(Clone)]
 struct WorkbenchExecutionRecord {
     request: WorkbenchRequest,
@@ -8,10 +81,14 @@ struct WorkbenchExecutionRecord {
     cell_terminal: Option<crate::CellExit>,
     boundary_abort: Option<BoundaryAbortCleanup>,
     display_settlements: Arc<DisplayExecutionSettlement>,
+    provider_finalization: Option<Arc<crate::resident_tools::ProviderFinalization>>,
+    provider_owner: Option<crate::HostedOperationSettlement>,
+    provider_children: Vec<ActorRef>,
 }
 
 #[derive(Clone, Default)]
 pub(super) struct BoundaryAbortCleanup {
+    pub children: Vec<ActorRef>,
     pub scopes: Vec<tidepool_codegen::scope::ScopeId>,
 }
 
@@ -239,6 +316,20 @@ impl WorkbenchExecutions {
         }
     }
 
+    pub(super) fn lookup_for_provider_control(
+        &self,
+        execution: &WorkbenchExecutionId,
+        request: &WorkbenchRequest,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+        control: Option<&Arc<crate::WorkbenchExecutionControl>>,
+    ) -> Result<Option<crate::KernelWorkbenchReply>, WorkbenchReplayFailure> {
+        let reply = self.lookup(execution, request, invocation)?;
+        if reply.is_some() {
+            self.adopt_provider_replay(execution, invocation, control);
+        }
+        Ok(reply)
+    }
+
     pub(super) fn begin(
         &mut self,
         execution: &WorkbenchExecutionId,
@@ -254,6 +345,9 @@ impl WorkbenchExecutions {
                 cell_terminal: None,
                 boundary_abort: None,
                 display_settlements: Arc::new(DisplayExecutionSettlement::new(execution.clone())),
+                provider_finalization: None,
+                provider_owner: None,
+                provider_children: Vec::new(),
             },
         );
     }
@@ -284,6 +378,19 @@ impl WorkbenchExecutions {
             .get(&key)
             .map(|record| record.display_settlements.clone())
             .unwrap_or_else(|| Arc::new(DisplayExecutionSettlement::new(execution.clone())));
+        let provider_children = self
+            .0
+            .get(&key)
+            .map(|record| record.provider_children.clone())
+            .unwrap_or_default();
+        let provider_owner = self
+            .0
+            .get(&key)
+            .and_then(|record| record.provider_owner.clone());
+        let provider_finalization = self
+            .0
+            .get(&key)
+            .and_then(|record| record.provider_finalization.clone());
         self.0.insert(
             key,
             WorkbenchExecutionRecord {
@@ -296,8 +403,177 @@ impl WorkbenchExecutions {
                 cell_terminal,
                 boundary_abort,
                 display_settlements,
+                provider_finalization,
+                provider_owner,
+                provider_children,
             },
         );
+    }
+
+    pub(super) fn bind_provider_finalization(
+        &mut self,
+        execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+        control: Option<&Arc<crate::WorkbenchExecutionControl>>,
+    ) {
+        let Some(control) = control else {
+            return;
+        };
+        // Generic serial tools have actor-local controls but no provider
+        // workbench custody. Their existing completion contract is unchanged.
+        let Some(owner) = control
+            .provider_owner
+            .get()
+            .and_then(|owner| owner.upgrade())
+        else {
+            return;
+        };
+        control.provider_finalization.admit();
+        let record = self
+            .0
+            .get_mut(&WorkbenchReplayKey::new(execution, invocation))
+            .expect("provider finalization follows native admission");
+        record.provider_finalization = Some(control.provider_finalization.clone());
+        record.provider_owner = Some(owner);
+    }
+
+    /// Called only after this journal's exact-input lookup returned a terminal
+    /// reply. Physical redispatch shares the original owner, not a new outcome.
+    fn adopt_provider_replay(
+        &self,
+        execution: &WorkbenchExecutionId,
+        invocation: Option<&crate::resident_tools::WorkbenchCallKey>,
+        control: Option<&Arc<crate::WorkbenchExecutionControl>>,
+    ) {
+        if let (Some(record), Some(control)) = (
+            self.0.get(&WorkbenchReplayKey::new(execution, invocation)),
+            control,
+        ) {
+            if let Some(owner) = &record.provider_owner {
+                if control.invocation.as_ref() == Some(owner.key()) {
+                    let _ = control.provider_replay.set(owner.clone());
+                }
+            }
+        }
+    }
+
+    fn provider_cleanup_record(
+        &mut self,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> Result<&mut WorkbenchExecutionRecord, KernelBehaviorError> {
+        let keys = self
+            .0
+            .iter()
+            .filter(|(_, record)| record.request.checkpoint_boundary() == Some(boundary))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let exact = match keys.as_slice() {
+            [WorkbenchReplayKey::Hosted(invocation)] => invocation.is_original_invocation(),
+            [WorkbenchReplayKey::Execution(_)] => boundary.hosted().is_none(),
+            _ => false,
+        };
+        if !exact {
+            return Err(KernelBehaviorError::new(
+                "provider child cleanup lacks one exact original journal owner",
+            ));
+        }
+        Ok(self
+            .0
+            .get_mut(&keys[0])
+            .expect("retained original journal owner"))
+    }
+
+    pub(super) fn provider_invocation_work(
+        &mut self,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> Result<Option<Arc<InvocationWork>>, KernelBehaviorError> {
+        Ok(self
+            .provider_cleanup_record(boundary)?
+            .invocation_work
+            .clone())
+    }
+
+    #[cfg(test)]
+    pub(super) fn retain_provider_children(
+        &mut self,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        children: Vec<ActorRef>,
+    ) -> Result<(), KernelBehaviorError> {
+        if children.is_empty() {
+            return Ok(());
+        }
+        let record = self.provider_cleanup_record(boundary)?;
+        for child in children {
+            if !record.provider_children.contains(&child) {
+                record.provider_children.push(child);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn provider_children(
+        &mut self,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> Result<Vec<ActorRef>, KernelBehaviorError> {
+        Ok(self
+            .provider_cleanup_record(boundary)?
+            .provider_children
+            .clone())
+    }
+
+    pub(super) fn provider_child_released(
+        &mut self,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        child: ActorRef,
+    ) -> Result<(), KernelBehaviorError> {
+        self.provider_cleanup_record(boundary)?
+            .provider_children
+            .retain(|pending| *pending != child);
+        Ok(())
+    }
+
+    pub(super) fn finalize_provider_boundary(
+        &self,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+        result: Result<crate::ProviderFinalizationKind, String>,
+    ) {
+        let records = self
+            .0
+            .iter()
+            .filter(|(key, _)| {
+                matches!(key,
+            WorkbenchReplayKey::Hosted(invocation) if invocation.matches_boundary(boundary))
+            })
+            .collect::<Vec<_>>();
+        let exact = matches!(records.as_slice(), [(WorkbenchReplayKey::Hosted(invocation), _)] if invocation.is_original_invocation());
+        for (_, record) in records {
+            if let Some(owner) = &record.provider_finalization {
+                owner.finish(if !exact {
+                    Err("nested or multiple native cells do not prove the original provider boundary".into())
+                } else if result.is_ok() && !record.provider_children.is_empty() {
+                    Err("provider child cleanup remains unconfirmed".into())
+                } else { result.clone() });
+            }
+        }
+    }
+
+    pub(super) fn pending_provider_boundaries(
+        &self,
+    ) -> Vec<tidepool_runtime::session::ContextCheckpointBoundary> {
+        let mut boundaries = Vec::new();
+        for record in self.0.values().filter(|record| {
+            record
+                .provider_finalization
+                .as_ref()
+                .is_some_and(|owner| !owner.successfully_settled())
+        }) {
+            if let Some(boundary) = record.request.checkpoint_boundary() {
+                if !boundaries.contains(boundary) {
+                    boundaries.push(boundary.clone());
+                }
+            }
+        }
+        boundaries
     }
 
     pub(super) fn boundary_abort_owner(
@@ -453,6 +729,461 @@ impl WorkbenchExecutions {
 mod tests {
     use super::*;
 
+    use futures_util::future::BoxFuture;
+    use serde_json::Value;
+    struct CleanupProbe {
+        context: Arc<std::sync::OnceLock<KernelContext>>,
+        fail_cleanup: bool,
+    }
+    impl KernelBehavior for CleanupProbe {
+        fn start<'a>(
+            &'a mut self,
+            context: &'a KernelContext,
+        ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+            let _ = self.context.set(context.clone());
+            Box::pin(async { Ok(KernelStep::Continue(())) })
+        }
+        fn cast<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: ActorRef,
+            _: MailboxValue,
+        ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+            panic!("no mailbox effects admitted")
+        }
+        fn call<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: ActorRef,
+            _: crate::CallAncestry,
+            _: MailboxValue,
+        ) -> BoxFuture<'a, Result<KernelStep<MailboxValue>, KernelBehaviorError>> {
+            panic!("no mailbox effects admitted")
+        }
+        fn tool<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: exomonad_tool::ToolInvocation,
+            _: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+        ) -> BoxFuture<'a, Result<KernelStep<Value>, KernelInvocationFailure>> {
+            panic!("no native tool admitted")
+        }
+        fn workbench<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: crate::ActorWorkbenchInvocation,
+            _: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<
+            'a,
+            Result<
+                KernelStep<tidepool_runtime::session::WorkbenchResponse>,
+                KernelInvocationFailure,
+            >,
+        > {
+            panic!("no native workbench admitted")
+        }
+        fn external_application_failed<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: crate::ExternalApplicationFailure,
+        ) -> BoxFuture<'a, crate::ExternalFailureDisposition> {
+            panic!("no external application admitted")
+        }
+        fn shutdown<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: &'a ActorTerminal,
+        ) -> BoxFuture<'a, Result<(), KernelBehaviorError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn shutdown_components<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: &'a ActorTerminal,
+            _: tokio::time::Instant,
+        ) -> BoxFuture<
+            'a,
+            (
+                crate::CleanupComponentOutcome,
+                crate::CleanupComponentOutcome,
+            ),
+        > {
+            let fail = self.fail_cleanup;
+            Box::pin(async move {
+                (
+                    crate::CleanupComponentOutcome::Confirmed,
+                    if fail {
+                        crate::CleanupComponentOutcome::Unconfirmed(
+                            "injected child cleanup failure".into(),
+                        )
+                    } else {
+                        crate::CleanupComponentOutcome::Confirmed
+                    },
+                )
+            })
+        }
+        fn stopped<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: &'a ActorTerminal,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async {})
+        }
+        fn child_exited(&mut self, _: crate::ChildExitNotice) {}
+    }
+
+    #[tokio::test]
+    async fn real_child_cleanup_preserves_partial_obligations_and_refuses_false_completion() {
+        let context = Arc::new(std::sync::OnceLock::new());
+        let (parent, task) = crate::spawn_local_actor(
+            None,
+            CleanupProbe {
+                context: context.clone(),
+                fail_cleanup: false,
+            },
+        )
+        .await
+        .unwrap();
+        let kernel = context.get().unwrap().clone();
+        let good = kernel
+            .spawn_child(
+                None,
+                CleanupProbe {
+                    context: Arc::default(),
+                    fail_cleanup: false,
+                },
+            )
+            .await
+            .unwrap();
+        let bad = kernel
+            .spawn_child(
+                None,
+                CleanupProbe {
+                    context: Arc::default(),
+                    fail_cleanup: true,
+                },
+            )
+            .await
+            .unwrap();
+        let invocation = exomonad_tool::ToolInvocationContext::external(
+            "thread".into(),
+            "turn".into(),
+            "call".into(),
+            Some("call".into()),
+            None,
+        );
+        let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
+        let key = control.invocation.as_ref().unwrap();
+        let execution = control.execution_id(parent.identity());
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+            "thread".into(),
+            "turn".into(),
+            "call".into(),
+        );
+        let request = WorkbenchRequest::from_cell_input("current operation")
+            .with_execution_id(execution.clone())
+            .with_checkpoint_boundary(boundary.clone());
+        let publications = crate::kernel::HostedCellPublications::default();
+        publications.publish_provider_transport(parent.identity(), control.clone());
+        publications.accept(&control);
+        let journal = Arc::new(Mutex::new(WorkbenchExecutions::default()));
+        journal.lock().begin(&execution, request, Some(key));
+        journal
+            .lock()
+            .bind_provider_finalization(&execution, Some(key), Some(&control));
+        journal
+            .lock()
+            .retain_provider_children(&boundary, vec![good.identity(), bad.identity()])
+            .unwrap();
+        let result = settle_provider_children(&journal, &kernel, &boundary).await;
+        assert!(result.is_err());
+        assert!(good.terminal().cleanup().unwrap().is_confirmed());
+        assert!(!bad.terminal().cleanup().unwrap().is_confirmed());
+        assert_eq!(
+            journal.lock().provider_children(&boundary).unwrap(),
+            vec![bad.identity()]
+        );
+        assert!(
+            settle_provider_children(&journal, &kernel, &boundary)
+                .await
+                .is_err(),
+            "repeat uses the same unconfirmed child owner"
+        );
+        assert_eq!(
+            journal.lock().provider_children(&boundary).unwrap(),
+            vec![bad.identity()]
+        );
+        assert!(kernel.forget_terminal_actor(bad.identity()));
+        assert!(kernel.resolve(bad.identity()).is_none());
+        assert!(settle_provider_child(&kernel, bad.identity())
+            .await
+            .is_err());
+        assert!(settle_provider_children(&journal, &kernel, &boundary)
+            .await
+            .is_err());
+        assert_eq!(
+            journal.lock().provider_children(&boundary).unwrap(),
+            vec![bad.identity()]
+        );
+        let abort_owner = WorkbenchExecutions::boundary_abort_owner(&journal, &boundary, || false)
+            .unwrap()
+            .unwrap();
+        let abort_cleanup = abort_owner.collect_cleanup(|| BoundaryAbortCleanup {
+            children: vec![bad.identity()],
+            scopes: Vec::new(),
+        });
+        assert!(settle_provider_child(&kernel, abort_cleanup.children[0])
+            .await
+            .is_err());
+        assert_eq!(
+            abort_owner
+                .collect_cleanup(|| panic!("lost child remains owned"))
+                .children,
+            vec![bad.identity()]
+        );
+        // The finalization owner itself prevents a caller from asserting
+        // Completed while its actual child cleanup obligation remains retained.
+        journal
+            .lock()
+            .finalize_provider_boundary(&boundary, Ok(crate::ProviderFinalizationKind::Completed));
+        assert!(matches!(
+            publications
+                .retained_boundary(&boundary)
+                .unwrap()
+                .finalization(),
+            crate::HostedOperationFinalization::Settled(Err(_))
+        ));
+        assert!(!journal.lock().pending_provider_boundaries().is_empty());
+        let other = tidepool_runtime::session::ContextCheckpointBoundary::external(
+            "thread".into(),
+            "turn".into(),
+            "other".into(),
+        );
+        assert!(settle_provider_children(&journal, &kernel, &other)
+            .await
+            .is_err());
+        parent
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "cleanup history complete".into(),
+                diagnostic: None,
+            })
+            .await
+            .unwrap();
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn generic_tool_control_does_not_acquire_workbench_provider_custody() {
+        let actor = crate::ActorRef::first(crate::ActorId(7));
+        let invocation = exomonad_tool::ToolInvocationContext::external(
+            "thread".into(),
+            "turn".into(),
+            "generic".into(),
+            None,
+            None,
+        );
+        let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
+        let key = control.invocation.as_ref().unwrap();
+        let execution = control.execution_id(actor);
+        let request = WorkbenchRequest::from_cell_input("genericHandler")
+            .with_execution_id(execution.clone());
+        let slot = crate::kernel::HostedCellPublications::default();
+        slot.claim(&control);
+        let mut journal = WorkbenchExecutions::default();
+        journal.begin(&execution, request, Some(key));
+        journal.bind_provider_finalization(&execution, Some(key), Some(&control));
+        assert!(journal.pending_provider_boundaries().is_empty());
+        assert!(control.provider_owner.get().is_none());
+        slot.complete(&control);
+        assert!(slot.retained_operation(key).unwrap().is_none());
+        assert!(slot.find(|_| true).is_none());
+    }
+
+    #[tokio::test]
+    async fn exact_native_replay_shares_provider_settlement_after_retirement() {
+        use crate::{
+            HostedOperationFinalization, HostedOperationTerminal, ProviderFinalizationKind,
+        };
+        let actor = crate::ActorRef::first(crate::ActorId(7));
+        let invocation = exomonad_tool::ToolInvocationContext::external(
+            "thread".into(),
+            "turn".into(),
+            "call".into(),
+            Some("call".into()),
+            None,
+        );
+        let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation.clone()));
+        let key = control.invocation.as_ref().unwrap();
+        let execution = control.execution_id(actor);
+        let boundary = tidepool_runtime::session::ContextCheckpointBoundary::external(
+            "thread".into(),
+            "turn".into(),
+            "call".into(),
+        );
+        let request = WorkbenchRequest::from_cell_input("respond value")
+            .with_execution_id(execution.clone())
+            .with_checkpoint_boundary(boundary.clone());
+        let slot = crate::kernel::HostedCellPublications::default();
+        slot.publish_provider_transport(actor, control.clone());
+        slot.accept(&control);
+        let mut journal = WorkbenchExecutions::default();
+        journal.begin(&execution, request.clone(), Some(key));
+        journal.bind_provider_finalization(&execution, Some(key), Some(&control));
+        let pending_retry =
+            crate::WorkbenchExecutionControl::from_invocation(Some(invocation.clone()));
+        slot.publish_provider_transport(actor, pending_retry.clone());
+        slot.accept(&pending_retry);
+        assert_eq!(
+            journal.lookup_for_provider_control(
+                &execution,
+                &request,
+                Some(key),
+                Some(&pending_retry)
+            ),
+            Err(WorkbenchReplayFailure::Unconfirmed)
+        );
+        pending_retry.settle_not_admitted(Err(KernelInvocationFailure::Rejected {
+            actor,
+            receipts: Vec::new(),
+            detail: "original pending".into(),
+            diagnostic: None,
+        }));
+        slot.complete(&pending_retry);
+        let pending_original = slot.retained_boundary(&boundary).unwrap();
+        assert!(matches!(
+            pending_original.terminal(),
+            HostedOperationTerminal::Pending
+        ));
+        assert!(matches!(
+            pending_original.finalization(),
+            HostedOperationFinalization::Pending
+        ));
+        let reply = Ok(WorkbenchResponse {
+            status: WorkbenchRunStatus::Completed,
+            summary: None,
+            items: Vec::new(),
+            next_index: 0,
+            total: 0,
+            publication: None,
+        });
+        control.request_cancellation();
+        control.finish_cell(
+            execution.clone(),
+            &Ok(KernelStep::Continue(reply.clone().unwrap())),
+            true,
+        );
+        control.settle(reply.clone());
+        slot.complete(&control);
+        let cancellation = control.cancellation_outcome(execution.clone(), reply.clone());
+        journal.record(
+            execution.clone(),
+            request.clone(),
+            reply.clone(),
+            cancellation,
+            Some(key),
+        );
+        journal
+            .finalize_provider_boundary(&boundary, Ok(ProviderFinalizationKind::RetirementAborted));
+        let original = slot.retained_boundary(&boundary).unwrap();
+        assert!(matches!(
+            original.terminal(),
+            HostedOperationTerminal::Settled(crate::WorkbenchCancellationOutcome::Cancelled { .. })
+        ));
+        assert_eq!(
+            original.finalization(),
+            HostedOperationFinalization::Settled(Ok(ProviderFinalizationKind::RetirementAborted))
+        );
+
+        let retry = crate::WorkbenchExecutionControl::from_invocation(Some(invocation.clone()));
+        slot.publish_provider_transport(actor, retry.clone());
+        slot.accept(&retry);
+        assert!(slot
+            .retained_operation(key)
+            .unwrap()
+            .unwrap()
+            .same_owner(&original));
+        let wrong = WorkbenchRequest::from_cell_input("different effects")
+            .with_execution_id(execution.clone())
+            .with_checkpoint_boundary(boundary.clone());
+        assert_eq!(
+            journal.lookup_for_provider_control(&execution, &wrong, Some(key), Some(&retry)),
+            Err(WorkbenchReplayFailure::DifferentInput)
+        );
+        assert!(retry.provider_replay.get().is_none());
+        retry.settle_not_admitted(Err(KernelInvocationFailure::Rejected {
+            actor,
+            receipts: Vec::new(),
+            detail: "different input".into(),
+            diagnostic: None,
+        }));
+        slot.complete(&retry);
+        assert!(
+            slot.retained_boundary(&boundary)
+                .unwrap()
+                .same_owner(&original),
+            "fully rejected physical attempt cannot poison original settlement"
+        );
+        assert!(matches!(
+            original.finalization(),
+            HostedOperationFinalization::Settled(Ok(ProviderFinalizationKind::RetirementAborted))
+        ));
+        let retry = crate::WorkbenchExecutionControl::from_invocation(Some(invocation.clone()));
+        slot.publish_provider_transport(actor, retry.clone());
+        slot.accept(&retry);
+        assert_eq!(
+            journal.lookup_for_provider_control(&execution, &request, Some(key), Some(&retry)),
+            Ok(Some(reply.clone()))
+        );
+        retry.settle(reply.clone());
+        slot.complete(&retry);
+        let recovered = slot.retained_boundary(&boundary).unwrap();
+        assert!(original.same_owner(&recovered));
+        assert!(
+            slot.find(|_| true).is_none(),
+            "finished provider custody is not native work"
+        );
+        assert_eq!(
+            recovered.acknowledge().await.unwrap(),
+            ProviderFinalizationKind::RetirementAborted
+        );
+        assert_eq!(
+            original.acknowledge().await.unwrap(),
+            ProviderFinalizationKind::RetirementAborted
+        );
+        assert!(
+            original.control().is_none(),
+            "ack releases large native custody"
+        );
+        assert!(matches!(
+            recovered.terminal(),
+            HostedOperationTerminal::Settled(crate::WorkbenchCancellationOutcome::Cancelled { .. })
+        ));
+        // A fresh physical delivery after ack still resolves through the same
+        // exact journal and immutable compact evidence, never a new admission.
+        let late = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
+        slot.publish_provider_transport(actor, late.clone());
+        slot.accept(&late);
+        assert_eq!(
+            journal.lookup_for_provider_control(&execution, &request, Some(key), Some(&late)),
+            Ok(Some(reply.clone()))
+        );
+        late.settle(reply);
+        slot.complete(&late);
+        assert!(slot
+            .retained_boundary(&boundary)
+            .unwrap()
+            .same_owner(&original));
+        assert_eq!(
+            slot.retained_boundary(&boundary)
+                .unwrap()
+                .acknowledge()
+                .await
+                .unwrap(),
+            ProviderFinalizationKind::RetirementAborted
+        );
+    }
+
     #[test]
     fn abort_owner_refuses_nested_and_foreign_operations_before_checkpoint_extraction() {
         use tidepool_codegen::scope::ScopeId;
@@ -568,6 +1299,7 @@ mod tests {
                 "checkpoint extraction must run unlocked"
             );
             BoundaryAbortCleanup {
+                children: Vec::new(),
                 scopes: checkpoints
                     .settle_checkpoints(actor, &boundary, false)
                     .into_iter()

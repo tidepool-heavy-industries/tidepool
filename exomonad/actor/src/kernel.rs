@@ -114,6 +114,8 @@ pub enum KernelCallFailure {
     TargetExited(ActorRef),
     #[error("target actor {0} is unavailable")]
     TargetUnavailable(ActorRef),
+    #[error("idle retirement for target actor {0} is being checked")]
+    RetirementPending(ActorRef),
     #[error("target actor {0} has closed mailbox admission")]
     MailboxClosed(ActorRef),
     #[error("target actor {actor:?} failed while handling the call: {detail}")]
@@ -242,7 +244,11 @@ impl std::fmt::Display for KernelWorkbenchFailure {
             tidepool_runtime::session::WorkbenchFailurePoint::Publication {
                 completed_input_units,
             } => match self.publication.as_ref() {
-                Some(tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed { .. }) => write!(
+                Some(
+                    tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+                        ..
+                    },
+                ) => write!(
                     formatter,
                     "actor {} workbench publication durability remains unconfirmed after {} completed input units: {}",
                     self.actor, completed_input_units, self.detail
@@ -591,15 +597,16 @@ pub struct LocalActorRef {
 pub(crate) struct MailboxAdmission(std::sync::Arc<AdmissionOwner>, HostedCellSlot);
 
 /// One incarnation's published hosted calls, from transport queuing through
-/// actor-owned completion. Multiple callers may be queued behind one active
-/// notebook; dropping one waiter must not erase another call's control.
+/// native completion and provider acknowledgement. Multiple callers may queue
+/// behind one active notebook; dropping one waiter cannot erase another call.
 pub(crate) type HostedCellSlot = std::sync::Arc<HostedCellPublications>;
 
 #[derive(Default)]
 pub(crate) struct HostedCellPublications(parking_lot::Mutex<Vec<HostedCellEntry>>);
 
 struct HostedCellEntry {
-    control: std::sync::Arc<crate::WorkbenchExecutionControl>,
+    control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+    provider: Option<crate::HostedOperationSettlement>,
     accepted: bool,
 }
 
@@ -609,31 +616,46 @@ impl HostedCellPublications {
         control: std::sync::Arc<crate::WorkbenchExecutionControl>,
     ) {
         self.0.lock().push(HostedCellEntry {
-            control,
+            control: Some(control),
+            provider: None,
             accepted: false,
         });
     }
 
     pub(crate) fn accept(&self, control: &std::sync::Arc<crate::WorkbenchExecutionControl>) {
         let mut entries = self.0.lock();
-        if let Some(entry) = entries
-            .iter_mut()
-            .find(|entry| std::sync::Arc::ptr_eq(&entry.control, control))
-        {
+        if let Some(entry) = entries.iter_mut().find(|entry| {
+            entry
+                .control
+                .as_ref()
+                .cloned()
+                .or_else(|| entry.provider.as_ref().and_then(|owner| owner.control()))
+                .is_some_and(|issued| std::sync::Arc::ptr_eq(&issued, control))
+        }) {
             entry.accepted = true;
         }
     }
 
     pub(crate) fn claim(&self, control: &std::sync::Arc<crate::WorkbenchExecutionControl>) {
         let mut entries = self.0.lock();
-        if let Some(entry) = entries
-            .iter_mut()
-            .find(|entry| std::sync::Arc::ptr_eq(&entry.control, control))
-        {
+        if let Some(entry) = entries.iter_mut().find(|entry| {
+            entry
+                .control
+                .as_ref()
+                .cloned()
+                .or_else(|| entry.provider.as_ref().and_then(|owner| owner.control()))
+                .is_some_and(|issued| std::sync::Arc::ptr_eq(&issued, control))
+        }) {
             entry.accepted = true;
+            // A sequential request may have yielded its active slot while
+            // remaining queued. Claim restores work tracking, not authority.
+            if entry.control.is_none() && control.terminal_reply().is_none() {
+                entry.control = Some(control.clone());
+            }
         } else if control.invocation.is_some() {
             entries.push(HostedCellEntry {
-                control: std::sync::Arc::clone(control),
+                control: Some(std::sync::Arc::clone(control)),
+                provider: None,
                 accepted: true,
             });
         }
@@ -643,21 +665,140 @@ impl HostedCellPublications {
         &self,
         control: &std::sync::Arc<crate::WorkbenchExecutionControl>,
     ) {
-        self.0
-            .lock()
-            .retain(|entry| entry.accepted || !std::sync::Arc::ptr_eq(&entry.control, control));
+        self.0.lock().retain(|entry| {
+            entry.accepted
+                || !entry
+                    .control
+                    .as_ref()
+                    .is_some_and(|issued| std::sync::Arc::ptr_eq(issued, control))
+        });
+    }
+
+    pub(crate) fn publish_provider_transport(
+        &self,
+        actor: crate::ActorRef,
+        control: std::sync::Arc<crate::WorkbenchExecutionControl>,
+    ) {
+        let mut entries = self.0.lock();
+        // One logical owner per operation. Native physical retries have no
+        // independent provider acknowledgement: Harness's durable claim and
+        // scheduler admit an OperationId only once. The native journal alone
+        // may alias an exact terminal replay to this existing owner.
+        let duplicate = entries
+            .iter()
+            .filter_map(|entry| entry.provider.as_ref())
+            .any(|owner| control.invocation.as_ref() == Some(owner.key()));
+        let provider = if duplicate {
+            None
+        } else {
+            Some(crate::HostedOperationSettlement::issue(
+                actor,
+                control.clone(),
+            ))
+        };
+        entries.push(HostedCellEntry {
+            control: Some(control),
+            provider,
+            accepted: false,
+        });
     }
 
     pub(crate) fn complete(&self, control: &std::sync::Arc<crate::WorkbenchExecutionControl>) {
-        self.0
-            .lock()
-            .retain(|entry| !std::sync::Arc::ptr_eq(&entry.control, control));
+        self.0.lock().retain_mut(|entry| {
+            if !entry
+                .control
+                .as_ref()
+                .is_some_and(|issued| std::sync::Arc::ptr_eq(issued, control))
+            {
+                return true;
+            }
+            if control.provider_replay.get().is_some() {
+                // The exact journal replay already names the retained logical
+                // owner. Drop this physical transport entry, not that owner.
+                return false;
+            }
+            match &entry.provider {
+                Some(provider) => {
+                    // Deferred mailbox work releases active tracking without
+                    // pretending native computation has reached its terminal.
+                    if control.terminal_reply().is_some() {
+                        provider.native_finished();
+                    }
+                    entry.control.take();
+                    true
+                }
+                None => false,
+            }
+        });
     }
 
     pub(crate) fn take_all_and_clear(
         &self,
     ) -> Vec<std::sync::Arc<crate::WorkbenchExecutionControl>> {
-        self.0.lock().drain(..).map(|entry| entry.control).collect()
+        let mut controls = Vec::new();
+        self.0.lock().retain_mut(|entry| {
+            if let Some(control) = entry.control.take() {
+                controls.push(control);
+                if let Some(provider) = &entry.provider {
+                    provider.native_finished();
+                }
+            }
+            entry.provider.is_some()
+        });
+        controls
+    }
+
+    pub(crate) fn finalization_owner_lost(&self) {
+        for provider in self
+            .0
+            .lock()
+            .iter()
+            .filter_map(|entry| entry.provider.as_ref())
+        {
+            if let Some(control) = provider.control() {
+                control.provider_finalization.finish(Err(
+                    "native actor ended without confirming this operation's finalization".into(),
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn retained_operation(
+        &self,
+        invocation: &crate::resident_tools::WorkbenchCallKey,
+    ) -> Result<Option<crate::HostedOperationSettlement>, String> {
+        let entries = self.0.lock();
+        let mut matches = entries
+            .iter()
+            .filter_map(|entry| entry.provider.as_ref())
+            .filter(|provider| provider.key() == invocation);
+        let Some(owner) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.all(|other| owner.same_owner(other)) {
+            Ok(Some(owner.clone()))
+        } else {
+            Err("one operation has contradictory native settlement owners".into())
+        }
+    }
+
+    pub(crate) fn retained_boundary(
+        &self,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> Result<crate::HostedOperationSettlement, String> {
+        let entries = self.0.lock();
+        let mut matches = entries
+            .iter()
+            .filter_map(|entry| entry.provider.as_ref())
+            .filter(|provider| provider.key().matches_boundary(boundary));
+        let Some(owner) = matches.next() else {
+            return Err("provider boundary has no issued native operation".into());
+        };
+        if owner.key().is_original_invocation() && matches.all(|other| owner.same_owner(other)) {
+            Ok(owner.clone())
+        } else {
+            Err("nested or multiple native operations cannot certify the enclosing provider boundary".into())
+        }
     }
 
     pub(crate) fn find(
@@ -667,15 +808,18 @@ impl HostedCellPublications {
         self.0
             .lock()
             .iter()
-            .find(|entry| predicate(&entry.control))
-            .map(|entry| std::sync::Arc::clone(&entry.control))
+            .filter_map(|entry| entry.control.as_ref())
+            .find(|control| predicate(control))
+            .cloned()
     }
 
     fn computing(&self) -> bool {
-        self.0
-            .lock()
-            .iter()
-            .any(|entry| entry.control.is_computing_hosted_cell())
+        self.0.lock().iter().any(|entry| {
+            entry
+                .control
+                .as_ref()
+                .is_some_and(|control| control.is_computing_hosted_cell())
+        })
     }
 }
 
@@ -698,6 +842,31 @@ enum AdmissionPhase {
     Open,
     IdleRetirementClaim,
     Closed,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AdmissionRefusal {
+    RetirementPending,
+    Closed,
+}
+
+impl AdmissionRefusal {
+    fn for_actor(self, actor: ActorRef) -> KernelCallFailure {
+        match self {
+            Self::RetirementPending => KernelCallFailure::RetirementPending(actor),
+            Self::Closed => KernelCallFailure::MailboxClosed(actor),
+        }
+    }
+}
+
+impl AdmissionPhase {
+    fn refusal(&self) -> Option<AdmissionRefusal> {
+        match self {
+            Self::Open => None,
+            Self::IdleRetirementClaim => Some(AdmissionRefusal::RetirementPending),
+            Self::Closed => Some(AdmissionRefusal::Closed),
+        }
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -759,7 +928,7 @@ impl NativeProviderAdmission {
         let mut state = self.owner.state.lock();
         match state.phase {
             AdmissionPhase::IdleRetirementClaim => {
-                return Err(NativeProviderStartError::RetirementPending)
+                return Err(NativeProviderStartError::RetirementPending);
             }
             AdmissionPhase::Closed => return Err(NativeProviderStartError::Closed),
             AdmissionPhase::Open => {}
@@ -927,13 +1096,13 @@ impl MailboxAdmission {
         self.0.released.notify_waiters();
     }
 
-    fn transaction(&self) -> Option<ActorAdmissionLease> {
+    fn transaction(&self) -> Result<ActorAdmissionLease, AdmissionRefusal> {
         let mut state = self.0.state.lock();
-        if state.phase != AdmissionPhase::Open {
-            return None;
+        if let Some(refusal) = state.phase.refusal() {
+            return Err(refusal);
         }
         state.transactions += 1;
-        Some(ActorAdmissionLease(std::sync::Arc::clone(&self.0)))
+        Ok(ActorAdmissionLease(std::sync::Arc::clone(&self.0)))
     }
 
     /// Admission must already be closed. Register the waiter before inspecting
@@ -1192,8 +1361,8 @@ impl LocalActorRef {
     /// belong to the existing Ractor mailbox even while execution is paused.
     pub(crate) fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
         let admission = self.admission.0.state.lock();
-        if admission.phase != AdmissionPhase::Open {
-            return Err(KernelCallFailure::MailboxClosed(self.identity));
+        if let Some(refusal) = admission.phase.refusal() {
+            return Err(refusal.for_actor(self.identity));
         }
         self.address
             .send_message(message)
@@ -1205,7 +1374,7 @@ impl LocalActorRef {
     pub fn admit_transaction(&self) -> Result<ActorAdmissionLease, KernelCallFailure> {
         self.admission
             .transaction()
-            .ok_or(KernelCallFailure::MailboxClosed(self.identity))
+            .map_err(|refusal| refusal.for_actor(self.identity))
     }
 
     /// Attach the durable native work probe once for this exact incarnation.
@@ -1421,7 +1590,10 @@ mod tests {
         let (admission, provider) = native_admission(|| Ok(true));
         succeed_native(&provider, "first");
         let claim = admission.claim_idle().unwrap();
-        assert!(admission.transaction().is_none());
+        assert!(matches!(
+            admission.transaction(),
+            Err(AdmissionRefusal::RetirementPending)
+        ));
         assert!(matches!(
             provider.begin_provider_turn("thread".into(), "next".into()),
             Err(NativeProviderStartError::RetirementPending)
@@ -1431,7 +1603,7 @@ mod tests {
         assert!(futures_util::poll!(&mut waiting).is_pending());
         drop(claim);
         assert!(futures_util::poll!(&mut waiting).is_ready());
-        assert!(admission.transaction().is_some());
+        assert!(admission.transaction().is_ok());
         succeed_native(&provider, "next");
     }
 
@@ -1448,7 +1620,7 @@ mod tests {
         drop(input);
         // Durable commit exists, but no wake has reached the provider.
         assert!(admission.claim_idle().is_err());
-        assert!(admission.transaction().is_some());
+        assert!(admission.transaction().is_ok());
         let round = provider
             .begin_provider_turn("thread".into(), "second".into())
             .unwrap();
@@ -1456,7 +1628,10 @@ mod tests {
         pending.store(false, std::sync::atomic::Ordering::SeqCst);
         round.succeed();
         admission.claim_idle().unwrap().commit().unwrap();
-        assert!(admission.transaction().is_none());
+        assert!(matches!(
+            admission.transaction(),
+            Err(AdmissionRefusal::Closed)
+        ));
         assert!(matches!(
             provider.begin_provider_turn("thread".into(), "third".into()),
             Err(NativeProviderStartError::Closed)
@@ -1493,7 +1668,10 @@ mod tests {
         admission.close();
         assert!(futures_util::poll!(&mut waiting).is_ready());
         assert!(claim.commit().is_err());
-        assert!(admission.transaction().is_none());
+        assert!(matches!(
+            admission.transaction(),
+            Err(AdmissionRefusal::Closed)
+        ));
         assert!(matches!(
             provider.begin_provider_turn("thread".into(), "second".into()),
             Err(NativeProviderStartError::Closed)
@@ -1505,7 +1683,7 @@ mod tests {
         let (admission, provider) = native_admission(|| Err("Store unavailable".into()));
         succeed_native(&provider, "first");
         assert!(admission.claim_idle().is_err());
-        assert!(admission.transaction().is_some());
+        assert!(admission.transaction().is_ok());
         succeed_native(&provider, "second");
     }
 
@@ -1515,7 +1693,7 @@ mod tests {
         let first = admission.transaction().unwrap();
         let second = admission.transaction().unwrap();
         admission.close();
-        assert!(admission.transaction().is_none());
+        assert!(admission.transaction().is_err());
         let waiting = admission.wait_transactions();
         tokio::pin!(waiting);
         assert!(futures_util::poll!(&mut waiting).is_pending());

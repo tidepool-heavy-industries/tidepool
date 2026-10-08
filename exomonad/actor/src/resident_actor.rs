@@ -30,9 +30,9 @@ mod green_runtime_tests;
 mod green_tool;
 mod inspection_wait;
 mod invocation_effects;
+pub(crate) mod invocation_work;
 #[cfg(test)]
 mod jev_form_runtime_tests;
-pub(crate) mod invocation_work;
 mod owned_workbench;
 #[cfg(test)]
 mod provider_owner_tests;
@@ -3835,11 +3835,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )?;
         }
         if let Some(execution) = request.execution_id() {
-            match self.workbench_executions.lock().lookup(
-                execution,
-                &request,
-                invocation_key.as_ref(),
-            ) {
+            match self
+                .workbench_executions
+                .lock()
+                .lookup_for_provider_control(
+                    execution,
+                    &request,
+                    invocation_key.as_ref(),
+                    control.as_ref(),
+                ) {
                 Err(failure) => {
                     return Err(KernelInvocationFailure::Rejected {
                         receipts: Vec::new(),
@@ -3852,7 +3856,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                         diagnostic: None,
                     });
                 }
-                Ok(Some(reply)) => return Ok(WorkbenchPreflight::Retained(reply)),
+                Ok(Some(reply)) => {
+                    return Ok(WorkbenchPreflight::Retained(reply));
+                }
                 Ok(None) => {}
             }
         }
@@ -10625,6 +10631,95 @@ where
         self.publish_watch_notifications(notifications).await;
         result
     }
+
+    // The admitted journal retains the same scope tree used by Green waits and
+    // child startup. Finalization observes its actual cleanup, including retries.
+    async fn settle_provider_resources(
+        &self,
+        kernel: &KernelContext,
+        boundary: &tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> Result<(), KernelBehaviorError> {
+        if boundary.hosted().is_none() {
+            return Ok(());
+        }
+        let children = self
+            .workbench_executions
+            .lock()
+            .provider_children(boundary)?;
+        let retirement = workbench_ledger::provider_child_retirement_batch(kernel, children)?;
+        let work = self
+            .workbench_executions
+            .lock()
+            .provider_invocation_work(boundary)?;
+        if let Some(work) = work {
+            let cleanup = work.cleanup(&self.environment, kernel).await;
+            if let Some(detail) = cleanup.uncertainty() {
+                return Err(KernelBehaviorError::new(detail));
+            }
+        }
+        for (child, terminal) in retirement.into_actors() {
+            let identity = child.identity();
+            workbench_ledger::settle_provider_child_owner(child, terminal).await?;
+            self.workbench_executions
+                .lock()
+                .provider_child_released(boundary, identity)?;
+        }
+        Ok(())
+    }
+
+    async fn abort_provider_boundary(
+        &mut self,
+        kernel: &KernelContext,
+        boundary: tidepool_runtime::session::ContextCheckpointBoundary,
+    ) -> Result<(), KernelBehaviorError> {
+        if self.settled_checkpoint_boundaries.contains(&boundary) {
+            return self.settle_provider_resources(kernel, &boundary).await;
+        }
+        self.settle_provider_resources(kernel, &boundary).await?;
+        let context = self.context(kernel.identity());
+        let owner = WorkbenchExecutions::boundary_abort_owner(
+            &self.workbench_executions,
+            &boundary,
+            || true,
+        )?;
+        let Some(owner) = owner else {
+            self.settled_checkpoint_boundaries.push(boundary);
+            return Ok(());
+        };
+        let mut cleanup = owner.collect_cleanup(|| {
+            let scopes = self
+                .environment
+                .actor_admissions
+                .settle_checkpoints(context.actor, &boundary, false)
+                .into_iter()
+                .filter_map(|(session, scope)| {
+                    (session == context.placement.session).then_some(scope)
+                })
+                .collect();
+            workbench_ledger::BoundaryAbortCleanup {
+                children: Vec::new(),
+                scopes,
+            }
+        });
+        let retirement = workbench_ledger::provider_child_retirement_batch(
+            kernel,
+            cleanup.children.iter().rev().copied().collect(),
+        )?;
+        for (child, terminal) in retirement.into_actors() {
+            workbench_ledger::settle_provider_child_owner(child, terminal).await?;
+            cleanup.children.pop();
+            owner.retain_cleanup(cleanup.clone());
+        }
+        self.environment
+            .runner
+            .retire_context_scopes(context, cleanup.scopes.clone())
+            .await
+            .map_err(Self::workbench_failure)?;
+        cleanup.scopes.clear();
+        owner.retain_cleanup(cleanup);
+        self.settled_checkpoint_boundaries.push(boundary);
+        Ok(())
+    }
 }
 
 impl<H, O> KernelBehavior for ResidentKernelBehavior<H, O>
@@ -11069,41 +11164,15 @@ where
         boundary: tidepool_runtime::session::ContextCheckpointBoundary,
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
-            if self.settled_checkpoint_boundaries.contains(&boundary) {
-                return Ok(());
-            }
-            let context = self.context(kernel.identity());
-            let owner = WorkbenchExecutions::boundary_abort_owner(
-                &self.workbench_executions,
+            let result = self.abort_provider_boundary(kernel, boundary.clone()).await;
+            self.workbench_executions.lock().finalize_provider_boundary(
                 &boundary,
-                || true,
-            )?;
-            let Some(owner) = owner else {
-                self.settled_checkpoint_boundaries.push(boundary);
-                return Ok(());
-            };
-            let mut cleanup = owner.collect_cleanup(|| {
-                let scopes = self
-                    .environment
-                    .actor_admissions
-                    .settle_checkpoints(context.actor, &boundary, false)
-                    .into_iter()
-                    .filter_map(|(session, scope)| {
-                        (session == context.placement.session).then_some(scope)
-                    })
-                    .collect();
-                workbench_ledger::BoundaryAbortCleanup { scopes }
-            });
-            self.environment
-                .runner
-                .retire_context_scopes(context.clone(), cleanup.scopes.clone())
-                .await
-                .map_err(Self::workbench_failure)?;
-            cleanup.scopes.clear();
-            owner.retain_cleanup(cleanup);
-
-            self.settled_checkpoint_boundaries.push(boundary);
-            Ok(())
+                result
+                    .as_ref()
+                    .map(|()| crate::ProviderFinalizationKind::Aborted)
+                    .map_err(ToString::to_string),
+            );
+            result
         })
     }
 
@@ -11120,14 +11189,28 @@ where
             {
                 return self.tool_aborted(kernel, boundary).await;
             }
-            let context = self.context(kernel.identity());
-            self.environment
-                .actor_admissions
-                .settle_checkpoints(context.actor, &boundary, true);
-            if !self.settled_checkpoint_boundaries.contains(&boundary) {
-                self.settled_checkpoint_boundaries.push(boundary);
+            let result = async {
+                self.settle_provider_resources(kernel, &boundary).await?;
+                let context = self.context(kernel.identity());
+                self.environment.actor_admissions.settle_checkpoints(
+                    context.actor,
+                    &boundary,
+                    true,
+                );
+                if !self.settled_checkpoint_boundaries.contains(&boundary) {
+                    self.settled_checkpoint_boundaries.push(boundary.clone());
+                }
+                Ok(())
             }
-            Ok(())
+            .await;
+            self.workbench_executions.lock().finalize_provider_boundary(
+                &boundary,
+                result
+                    .as_ref()
+                    .map(|()| crate::ProviderFinalizationKind::Completed)
+                    .map_err(ToString::to_string),
+            );
+            result
         })
     }
 
@@ -11223,7 +11306,7 @@ where
             match self
                 .workbench_executions
                 .lock()
-                .lookup(execution, request, key.as_ref())
+                .lookup_for_provider_control(execution, request, key.as_ref(), Some(&control))
             {
                 Ok(Some(reply)) => {
                     let result =
@@ -11274,6 +11357,11 @@ where
             self.workbench_executions
                 .lock()
                 .begin(execution, request.clone(), key.as_ref());
+            self.workbench_executions.lock().bind_provider_finalization(
+                execution,
+                key.as_ref(),
+                Some(&control),
+            );
         }
         let work = InvocationWork::new(
             actor,
@@ -11308,8 +11396,12 @@ where
                     .await;
                 if let Some(detail) = cleanup.uncertainty() {
                     result = Err(KernelInvocationFailure::CleanupUnconfirmed {
-                        actor, publication: None, receipts: Vec::new(),
-                        detail: format!("tool resource cleanup unconfirmed: {detail}; original outcome: {result:?}"),
+                        actor,
+                        publication: None,
+                        receipts: Vec::new(),
+                        detail: format!(
+                            "tool resource cleanup unconfirmed: {detail}; original outcome: {result:?}"
+                        ),
                     });
                 }
                 let standing_can_transfer = !control
@@ -11342,8 +11434,12 @@ where
                     Ok(()) => guard.disarm(),
                     Err(error) => {
                         result = Err(KernelInvocationFailure::CleanupUnconfirmed {
-                            actor, publication: None, receipts: Vec::new(),
-                            detail: format!("tool continuation cleanup unconfirmed: {error}; original outcome: {result:?}"),
+                            actor,
+                            publication: None,
+                            receipts: Vec::new(),
+                            detail: format!(
+                                "tool continuation cleanup unconfirmed: {error}; original outcome: {result:?}"
+                            ),
                         });
                     }
                 }
@@ -11795,6 +11891,11 @@ where
                     execution,
                     request.clone(),
                     invocation.as_ref(),
+                );
+                self.workbench_executions.lock().bind_provider_finalization(
+                    execution,
+                    invocation.as_ref(),
+                    control.as_ref(),
                 );
             }
             let local_execution_id = execution.clone().unwrap_or_else(|| {
@@ -12334,6 +12435,33 @@ where
                 },
             ))
             .await;
+            let mut provider_cleanup_errors = Vec::new();
+            let provider_boundaries = self
+                .workbench_executions
+                .lock()
+                .pending_provider_boundaries();
+            for boundary in provider_boundaries {
+                let result = tokio::time::timeout_at(
+                    deadline,
+                    self.abort_provider_boundary(kernel, boundary.clone()),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(KernelBehaviorError::new(
+                        "provider boundary cleanup remains pending at actor retirement",
+                    ))
+                });
+                self.workbench_executions.lock().finalize_provider_boundary(
+                    &boundary,
+                    result
+                        .as_ref()
+                        .map(|()| crate::ProviderFinalizationKind::RetirementAborted)
+                        .map_err(ToString::to_string),
+                );
+                if let Err(error) = result {
+                    provider_cleanup_errors.push(error.to_string());
+                }
+            }
             let staged_replacement = self.replacement_staged();
             let staged_placement = self.boot.is_some();
             self.source_connections.take();
@@ -12377,6 +12505,7 @@ where
             self.boot = None;
             self.sources.clear();
             let mut retained_errors = invocation_cleanup.into_iter().flatten().collect::<Vec<_>>();
+            retained_errors.extend(provider_cleanup_errors);
             self.pending_program.take();
             if let Some(suspended) = self.suspended_cast.take() {
                 if let Err(error) = self

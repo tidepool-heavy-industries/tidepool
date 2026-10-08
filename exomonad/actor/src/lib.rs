@@ -152,9 +152,11 @@ pub use resident_actor::{
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{
     HostedCheckpointAttachment, HostedCheckpointCapture, HostedCheckpointCaptureError,
-    HostedCheckpointContext, ResidentToolDispatchFuture, ResidentToolEndpoint, ResidentToolError,
-    ResidentToolFuture, ResidentToolPolicy, ResidentToolResponse, WorkbenchBoundaryReconciliation,
-    WorkbenchCancellationOutcome, WorkbenchExecutionControl,
+    HostedCheckpointContext, HostedOperationFinalization, HostedOperationSettlement,
+    HostedOperationTerminal, ProviderFinalizationKind, ResidentToolDispatchFuture,
+    ResidentToolEndpoint, ResidentToolError, ResidentToolFuture, ResidentToolPolicy,
+    ResidentToolResponse, WorkbenchBoundaryReconciliation, WorkbenchCancellationOutcome,
+    WorkbenchExecutionControl,
 };
 pub use resident_workbench::{
     ActivationCompileStage, ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory,
