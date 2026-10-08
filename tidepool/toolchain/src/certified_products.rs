@@ -2358,7 +2358,27 @@ impl SourceGroupMap {
         versions: &BTreeMap<CachedHomeOwner, ModuleVersion>,
         sharing: &ValidatedPromotionSharing,
     ) -> CertResult<()> {
-        let staged = std::mem::take(&mut self.groups);
+        // Unchanged selected rows may also exist in immutable availability.
+        // They keep their overlay provenance and need no new uniqueness check.
+        let changed = self
+            .groups
+            .keys()
+            .filter(|(owner, _, _)| {
+                versions
+                    .get(owner)
+                    .is_some_and(|version| version != &owner.module_version)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        // Remove every changing key before inserting destinations, so a move
+        // into another changing key is independent of source-key order.
+        let staged = changed
+            .into_iter()
+            .map(|key| {
+                let value = self.groups.remove(&key).expect("changing source group");
+                (key, value)
+            })
+            .collect::<Vec<_>>();
         for ((mut key_owner, ordinal, binder), (mut owner, origin)) in staged {
             if let Some(version) = versions.get(&key_owner) {
                 owner.module_version = version.clone();
@@ -8995,6 +9015,201 @@ pub(crate) mod tests {
         config
     }
 
+    #[derive(Clone, Debug)]
+    enum SourcePromotionStep {
+        Empty,
+        Identity,
+        Rekey(u8),
+        Recover,
+    }
+
+    fn check_authenticated_source_promotion_history(
+        sparse: &[(u32, bool)],
+        history: &[SourcePromotionStep],
+    ) {
+        let cached = full_native_fixture(
+            "PromotionCached",
+            sparse
+                .iter()
+                .map(|(ordinal, _)| (*ordinal, vec![]))
+                .collect(),
+            7,
+        );
+        let fresh = full_native_fixture("PromotionFresh", vec![(3, vec![])], 9);
+        let retained = full_native_fixture("PromotionRetained", vec![(3, vec![])], 0);
+        let products = [cached];
+        let selected = products[0]
+            .original_native()
+            .unwrap()
+            .groups
+            .iter()
+            .filter(|group| {
+                sparse.iter().any(|(ordinal, selected)| {
+                    *selected && *ordinal == group.group.original_ordinal()
+                })
+            })
+            .map(AuthenticatedOriginalGroup::admitted)
+            .collect::<Vec<_>>();
+        let rows = |group: &PendingCertifiedGroup| {
+            group
+                .group
+                .binders()
+                .iter()
+                .map(|binder| {
+                    (
+                        (
+                            group.owner.clone(),
+                            group.group.original_ordinal(),
+                            binder.clone(),
+                        ),
+                        (group.owner.clone(), group.origin),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let base = products[0]
+            .original_native()
+            .unwrap()
+            .groups
+            .iter()
+            .flat_map(|group| rows(&group.admitted()))
+            .collect::<Vec<_>>();
+        let mut current = selected.iter().flat_map(rows).collect::<Vec<_>>();
+        let mut fresh_group = fresh.original_native().unwrap().groups[0].admitted();
+        fresh_group.origin = ProductOrigin::Fresh;
+        current.extend(rows(&fresh_group));
+        let mut retained_group = retained.original_native().unwrap().groups[0].admitted();
+        retained_group.origin = ProductOrigin::RetainedCore;
+        current.extend(rows(&retained_group));
+        let operation = InventoryOperation::new(Default::default());
+        let original = AvailableOriginalSources::authenticate(&products, &operation).unwrap();
+        let mut sources = original.overlay(&selected, &operation).unwrap();
+        for (key, value) in current
+            .iter()
+            .filter(|(_, (_, origin))| *origin != ProductOrigin::Cached)
+        {
+            sources.insert(key.clone(), value.clone());
+        }
+        let check =
+            |sources: &SourceGroupMap,
+             current: &[(SourceGroupKey, (CachedHomeOwner, ProductOrigin))]| {
+                // Recompute from immutable witnesses and current rows, independently
+                // of the source map's incremental reindexing and fallback lookup.
+                let expected = base
+                    .iter()
+                    .chain(current)
+                    .cloned()
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(
+                    sources
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect::<BTreeMap<_, _>>(),
+                    expected,
+                    "history={history:?}"
+                );
+                assert_eq!(
+                    sources.groups,
+                    current.iter().cloned().collect::<BTreeMap<_, _>>(),
+                    "selected/current overlay must keep its exact provenance; history={history:?}"
+                );
+                assert_eq!(
+                    sources.original.as_ref().unwrap().sources.groups,
+                    base.iter().cloned().collect::<BTreeMap<_, _>>(),
+                    "promotion must not change authenticated availability; history={history:?}"
+                );
+                for (key, value) in &expected {
+                    assert_eq!(sources.get(key), Some(value));
+                    assert!(sources.contains_module(&key.0.unit, &key.0.module));
+                }
+            };
+        check(&sources, &current);
+        let mut counts = [0; 4];
+        for step in history {
+            let versions = match step {
+                SourcePromotionStep::Empty => {
+                    counts[0] += 1;
+                    BTreeMap::new()
+                }
+                SourcePromotionStep::Identity => {
+                    counts[1] += 1;
+                    current
+                        .iter()
+                        .map(|(key, _)| (key.0.clone(), key.0.module_version.clone()))
+                        .collect()
+                }
+                SourcePromotionStep::Rekey(version) => {
+                    counts[2] += 1;
+                    let old = current
+                        .iter()
+                        .find(|(_, (_, origin))| *origin == ProductOrigin::RetainedCore)
+                        .map(|(key, _)| key.0.clone())
+                        .expect("retained source row");
+                    let version = ModuleVersion([*version; 32]);
+                    let versions = BTreeMap::from([(old, version.clone())]);
+                    for (key, (owner, origin)) in &mut current {
+                        if *origin == ProductOrigin::RetainedCore {
+                            key.0.module_version = version.clone();
+                            owner.module_version = version.clone();
+                        }
+                    }
+                    versions
+                }
+                SourcePromotionStep::Recover => {
+                    counts[3] += 1;
+                    let recovered = recovered_witness_fixtures(&products)
+                        .into_iter()
+                        .map(|row| row.product)
+                        .collect::<Vec<_>>();
+                    let recovered_original =
+                        AvailableOriginalSources::authenticate(&recovered, &operation).unwrap();
+                    sources = recovered_original.overlay(&selected, &operation).unwrap();
+                    for (key, value) in current
+                        .iter()
+                        .filter(|(_, (_, origin))| *origin != ProductOrigin::Cached)
+                    {
+                        sources.insert(key.clone(), value.clone());
+                    }
+                    BTreeMap::new()
+                }
+            };
+            sources
+                .promote(&versions, &ValidatedPromotionSharing::default())
+                .unwrap();
+            check(&sources, &current);
+        }
+        eprintln!("source_promotion_history sparse_groups={} selected={} empty={} identity={} rekey={} recovery={}",
+            sparse.len(), selected.len(), counts[0], counts[1], counts[2], counts[3]);
+    }
+
+    #[test]
+    fn authenticated_selected_overlay_preserves_empty_and_identity_promotion_after_recovery() {
+        check_authenticated_source_promotion_history(
+            &[(0, true), (29, false), (u32::MAX, true)],
+            &[
+                SourcePromotionStep::Empty,
+                SourcePromotionStep::Identity,
+                SourcePromotionStep::Recover,
+                SourcePromotionStep::Identity,
+            ],
+        );
+    }
+
+    #[test]
+    fn authenticated_sparse_overlay_promotes_retained_and_preserves_cached_and_fresh_rows() {
+        check_authenticated_source_promotion_history(
+            &[(0, false), (3, true), (11, false), (u32::MAX, true)],
+            &[
+                SourcePromotionStep::Rekey(5),
+                SourcePromotionStep::Empty,
+                SourcePromotionStep::Rekey(5),
+                SourcePromotionStep::Recover,
+                SourcePromotionStep::Rekey(2),
+                SourcePromotionStep::Identity,
+            ],
+        );
+    }
+
     proptest::proptest! {
         #![proptest_config(original_native_index_property_config())]
         #[test]
@@ -9006,6 +9221,23 @@ pub(crate) mod tests {
             let mut seen = BTreeSet::new();
             let groups = groups.into_iter().filter(|(ordinal, _, _)| seen.insert(*ordinal)).collect::<Vec<_>>();
             check_original_native_index_against_linear_scan(&groups, query);
+        }
+        #[test]
+        fn authenticated_source_promotion_histories_match_recomputed_membership(
+            sparse in proptest::collection::vec((proptest::prelude::any::<u32>(), proptest::prelude::any::<bool>()), 1..24),
+            history in proptest::collection::vec((0u8..4, 1u8..6), 0..32),
+        ) {
+            let mut seen = BTreeSet::new();
+            let sparse = sparse.into_iter().filter(|(ordinal, _)| seen.insert(*ordinal)).collect::<Vec<_>>();
+            let mut steps = vec![SourcePromotionStep::Empty, SourcePromotionStep::Rekey(1),
+                SourcePromotionStep::Identity, SourcePromotionStep::Recover];
+            steps.extend(history.into_iter().map(|(operation, version)| match operation {
+                0 => SourcePromotionStep::Empty,
+                1 => SourcePromotionStep::Identity,
+                2 => SourcePromotionStep::Rekey(version),
+                _ => SourcePromotionStep::Recover,
+            }));
+            check_authenticated_source_promotion_history(&sparse, &steps);
         }
         #[test]
         fn retained_original_membership_matches_raw_prefix_overlays(
@@ -9954,6 +10186,105 @@ pub(crate) mod tests {
             (ProductOrigin::Cached, ProductOrigin::RetainedCore)
                 | (ProductOrigin::RetainedCore, ProductOrigin::Cached)
         ));
+    }
+
+    #[test]
+    fn authenticated_promotion_convergence_requires_exact_sharing_proof() {
+        let original =
+            full_native_fixture("PromotedAuthenticated", vec![(3, vec![]), (11, vec![])], 7);
+        let native = original.original_native().unwrap();
+        let selected = [native.groups[0].admitted()];
+        let operation = InventoryOperation::new(Default::default());
+        let membership =
+            AvailableOriginalSources::authenticate(std::slice::from_ref(&original), &operation)
+                .unwrap();
+        let mut sources = membership.overlay(&selected, &operation).unwrap();
+        let mut staged = original.owner().clone();
+        staged.module_version = ModuleVersion([0; 32]);
+        let binder = native.groups[0].group.binders()[0].clone();
+        sources.insert(
+            (staged.clone(), 3, binder.clone()),
+            (staged.clone(), ProductOrigin::RetainedCore),
+        );
+        let failure = sources.promote(
+            &BTreeMap::from([(staged, original.owner().module_version.clone())]),
+            &ValidatedPromotionSharing::default(),
+        );
+        let Err(CertificationError::DuplicateSourceBinder(conflict)) = failure else {
+            panic!("authenticated convergence cannot infer sharing from equal owner stamps");
+        };
+        assert_eq!(conflict.phase, SourceBinderPhase::NativePromotion);
+        assert_eq!(conflict.owner, *original.owner());
+        assert_eq!(conflict.original_ordinal, 3);
+        assert_eq!(conflict.binder, binder.clone());
+        assert_eq!(conflict.existing_origin, ProductOrigin::Cached);
+        assert_eq!(conflict.incoming_origin, ProductOrigin::RetainedCore);
+        assert_eq!(
+            sources.get(&(original.owner().clone(), 3, binder.clone())),
+            Some(&(original.owner().clone(), ProductOrigin::Cached))
+        );
+        assert_eq!(membership.sources.groups.len(), 2);
+
+        // A matching module name and version with a different exact byte stamp
+        // remains a distinct membership, rather than gaining sharing authority.
+        let mut different = original.owner().clone();
+        different.product_sha256[0] ^= 1;
+        different.module_version = ModuleVersion([0; 32]);
+        let mut distinct = membership.overlay(&selected, &operation).unwrap();
+        distinct.insert(
+            (different.clone(), 3, binder.clone()),
+            (different.clone(), ProductOrigin::RetainedCore),
+        );
+        distinct
+            .promote(
+                &BTreeMap::from([(different.clone(), original.owner().module_version.clone())]),
+                &ValidatedPromotionSharing::default(),
+            )
+            .unwrap();
+        different.module_version = original.owner().module_version.clone();
+        assert_eq!(
+            distinct.get(&(different.clone(), 3, binder.clone())),
+            Some(&(different, ProductOrigin::RetainedCore))
+        );
+        assert_eq!(
+            distinct.get(&(original.owner().clone(), 3, binder)),
+            Some(&(original.owner().clone(), ProductOrigin::Cached))
+        );
+    }
+
+    #[test]
+    fn source_promotion_removes_all_changed_keys_before_inserting_destinations() {
+        let first = inherited_owner("PromotionOrder");
+        let mut second = first.clone();
+        second.module_version.0[0] ^= 1;
+        let binder = testing::identity("PromotionOrder", "entry");
+        let mut sources = SourceGroupMap::new();
+        sources.insert(
+            (first.clone(), 3, binder.clone()),
+            (first.clone(), ProductOrigin::Fresh),
+        );
+        sources.insert(
+            (second.clone(), 3, binder.clone()),
+            (second.clone(), ProductOrigin::RetainedCore),
+        );
+        sources
+            .promote(
+                &BTreeMap::from([
+                    (first.clone(), second.module_version.clone()),
+                    (second.clone(), first.module_version.clone()),
+                ]),
+                &ValidatedPromotionSharing::default(),
+            )
+            .unwrap();
+        assert_eq!(sources.groups.len(), 2);
+        assert_eq!(
+            sources.get(&(first.clone(), 3, binder.clone())),
+            Some(&(first, ProductOrigin::RetainedCore))
+        );
+        assert_eq!(
+            sources.get(&(second.clone(), 3, binder)),
+            Some(&(second, ProductOrigin::Fresh))
+        );
     }
 
     #[test]
