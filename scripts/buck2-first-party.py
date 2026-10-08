@@ -55,6 +55,38 @@ GENERATED_BIN_NAMES = {
     "tidepool-protocol-gen": "tidepool_protocol_gen",
     "tidepool-effects-gen": "tidepool_effects_gen",
 }
+TOOLCHAIN_COMPILER_FREE_TESTS = [
+    "certified_products::tests::original_native_index_preserves_sparse_order_and_selected_identity",
+    "certified_products::tests::original_native_index_issuer_rejects_duplicate_ordinals_and_wrong_owners",
+    "certified_products::tests::original_native_index_matches_linear_scan_for_generated_sparse_groups",
+    "certified_products::tests::original_native_witness_reuses_nonempty_cycle_and_checks_selected_closure",
+    "certified_products::tests::original_native_witness_checks_package_drift_and_zero_group_downgrade",
+    "certified_products::tests::repeated_retained_core_promotion_preserves_exact_original_membership",
+    "certified_products::tests::nonempty_exact_source_recipe_preserves_original_versions_and_selected_subsets",
+    "artifact_inventory::tests::native_requirement_index_refuses_interface_edges",
+    "artifact_inventory::tests::native_requirement_index_preserves_empty_sparse_and_overlapping_edges",
+    "artifact_inventory::tests::native_requirement_planning_visits_only_selected_group_edges",
+    "artifact_inventory::native_history_properties::native_requirement_index_matches_flat_edge_oracle",
+    "artifact_inventory::native_history_properties::staged_native_histories_match_raw_fact_model",
+    "artifact_inventory::native_history_properties::recovery_selection_cannot_borrow_unrecorded_global_dependency",
+    "artifact_inventory::tests::native_requirement_cannot_select_an_ambient_exact_native_key",
+    "artifact_inventory::tests::recovery_restores_interface_edges_and_keeps_certified_native_facts",
+    "certified_products::tests::artifact_view_group_index_properties::artifact_view_group_indexes_preserve_order_and_refusal_precedence",
+    "certified_products::tests::artifact_view_group_index_properties::artifact_view_group_indexes_match_linear_wrapper_for_generated_selections",
+    "artifact_inventory::view_read_properties::cached_read_projection_matches_exhaustive_graph_after_view_histories",
+    "artifact_inventory::view_read_properties::warmed_read_getters_do_not_visit_graph_nodes",
+    "artifact_inventory::view_read_properties::first_read_and_inventory_extension_settle_without_lock_recursion",
+    "artifact_inventory::tests::retained_views_reclaim_after_last_reader_without_copying_payloads",
+    "artifact_inventory::tests::reclamation_metrics_follow_last_reader_and_selected_closure",
+    "artifact_inventory::tests::empty_admission_and_parent_only_release_do_not_scan_history",
+    "artifact_inventory::tests::reused_graph_targets_must_match_the_selected_sealed_dependencies",
+    "artifact_inventory::tests::independent_views_retain_existing_nodes_without_sibling_visibility",
+    "artifact_inventory::tests::selected_root_keeps_hidden_requirements_and_reclaims_unselected_history",
+    "artifact_inventory::tests::reclamation_preserves_incoming_cycles_and_does_not_visit_unrelated_history",
+    "artifact_inventory::view_read_properties::zero_mask_empty_selection_boundary_releases_valid_fixture_views",
+    "artifact_inventory::tests::metadata_snapshot_preserves_canonical_typed_edges_in_one_closure",
+    "artifact_inventory::view_read_properties::linear_view_history_reports_retained_read_projection_cost",
+]
 unsupported = selected - SUPPORTED_PACKAGES
 if unsupported:
     raise SystemExit(
@@ -860,6 +892,26 @@ def compile_fail_cases(package, library):
     return "\n".join(rules)
 
 
+def toolchain_compiler_free_test_cases(binary):
+    # These cases use synthetic artifact state, not the package-wide compiler worker.
+    lines = [
+        "tidepool_rust_test_cases(",
+        '    name = "toolchain_compiler_free_index_view_tests",',
+        f"    binary = {json.dumps(binary)},",
+        "    exact_tests = [",
+        *(f"        {json.dumps(test)}," for test in TOOLCHAIN_COMPILER_FREE_TESTS),
+        "    ],",
+        f"    expected_count = {len(TOOLCHAIN_COMPILER_FREE_TESTS)},",
+        "    jobs = 1,",
+        "    timeout = 600,",
+        "    test_rule_timeout_ms = 660000,",
+        '    visibility = ["PUBLIC"],',
+        ")",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def actor_observation_test_cases(binary):
     groups = [
         ("actor_forest_shutdown_tests", "", (
@@ -1345,6 +1397,7 @@ tidepool_buildscript_run(
                 runtime_arguments(env, resources, worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
+            rules.append(toolchain_compiler_free_test_cases(":" + unit_target["name"] + "_binary"))
             rules.append('''runtime_executable(
     name = "candidate_fixture_issuer",
     executable = ":tidepool_toolchain_unit_tests_binary",
