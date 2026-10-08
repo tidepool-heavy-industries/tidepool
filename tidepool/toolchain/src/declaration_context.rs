@@ -2155,10 +2155,12 @@ impl ExactCompilationRequest {
         context: Arc<ExactDeclarationContext>,
         input: &OriginalCompilerInputs,
     ) -> Result<Self, CompileError> {
+        let private_span = tracing::debug_span!(target: "exomonad_harness::timing", "exact.program_context.private_input", inclusive = true).entered();
         let private = match &self.private_compiler_input {
             Some(previous) => previous.merge(input)?,
             None => input.clone(),
         };
+        drop(private_span);
         self.in_program_context_with_inputs(root, context, Some(private))
     }
 
