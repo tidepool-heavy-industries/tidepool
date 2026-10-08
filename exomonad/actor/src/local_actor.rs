@@ -3722,6 +3722,248 @@ mod reply_settlement_history;
 
 #[cfg(test)]
 mod tests {
+    mod startup_history {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
+
+        #[derive(Clone, Debug)]
+        enum Operation {
+            Spawn { parent: usize, independent: bool },
+            DropUnpolled { parent: usize },
+            Retire { actor: usize },
+        }
+
+        struct Birth {
+            actor: LocalActorRef,
+            context: KernelContext,
+            parent: Option<usize>,
+            live: bool,
+        }
+
+        async fn replay(operations: Vec<Operation>) {
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let (root, root_task) = spawn_local_actor(None, observed_probe(&observations))
+                .await
+                .unwrap();
+            let mut births = vec![Birth {
+                actor: root,
+                context: observations.lock()[0].0.clone(),
+                parent: None,
+                live: true,
+            }];
+            for operation in operations {
+                match operation {
+                    Operation::Spawn {
+                        parent,
+                        independent,
+                    } => {
+                        let parent = parent % births.len();
+                        let before = observations.lock().len();
+                        let child = births[parent]
+                            .context
+                            .spawn_worker(
+                                None,
+                                observed_probe(&observations),
+                                if independent {
+                                    crate::WorkerLifetime::RunOwned
+                                } else {
+                                    crate::WorkerLifetime::ActorOwned
+                                },
+                            )
+                            .await;
+                        assert_eq!(child.is_ok(), births[parent].live);
+                        if let Ok(actor) = child {
+                            assert_eq!(observations.lock().len(), before + 1);
+                            let context = observations.lock().last().unwrap().0.clone();
+                            assert_eq!(context.identity(), actor.identity());
+                            births.push(Birth {
+                                actor,
+                                context,
+                                parent: (!independent).then_some(parent),
+                                live: true,
+                            });
+                        } else {
+                            assert_eq!(
+                                observations.lock().len(),
+                                before,
+                                "refused startup cannot run the behavior"
+                            );
+                        }
+                    }
+                    Operation::DropUnpolled { parent } => {
+                        let parent = parent % births.len();
+                        let before = observations.lock().len();
+                        drop(
+                            births[parent]
+                                .context
+                                .spawn_child(None, observed_probe(&observations)),
+                        );
+                        assert_eq!(observations.lock().len(), before);
+                    }
+                    Operation::Retire { actor } => {
+                        let actor = actor % births.len();
+                        if births[actor].live {
+                            births[actor]
+                                .actor
+                                .shutdown_with_cleanup(ActorTerminal {
+                                    kind: ActorExitKind::Cancelled,
+                                    summary: "history retirement".into(),
+                                    diagnostic: None,
+                                })
+                                .await
+                                .unwrap();
+                            births[actor].live = false;
+                            // The model uses only birth facts. It does not consult
+                            // the kernel's supervision or cleanup registries.
+                            for index in actor + 1..births.len() {
+                                if births[index]
+                                    .parent
+                                    .is_some_and(|parent| !births[parent].live)
+                                {
+                                    births[index].live = false;
+                                }
+                            }
+                        }
+                    }
+                }
+                for (parent, birth) in births.iter().enumerate() {
+                    for child in &births {
+                        assert_eq!(
+                            birth.context.owns_child(child.actor.identity()),
+                            child.parent == Some(parent),
+                            "retired children retain exact cleanup ownership"
+                        );
+                        let stale = ActorRef {
+                            incarnation: crate::Incarnation(
+                                child.actor.identity().incarnation.0 + 1,
+                            ),
+                            ..child.actor.identity()
+                        };
+                        assert!(!birth.context.owns_child(stale));
+                    }
+                    assert_eq!(birth.actor.terminal().get().is_none(), birth.live);
+                }
+            }
+            for birth in &births {
+                if birth.actor.terminal().get().is_none() {
+                    birth
+                        .actor
+                        .shutdown_with_cleanup(ActorTerminal {
+                            kind: ActorExitKind::Cancelled,
+                            summary: "history finished".into(),
+                            diagnostic: None,
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+            root_task.await.unwrap();
+        }
+
+        fn histories(worker: bool, name: &'static str) {
+            let mut config = Config::default();
+            if std::env::var_os("PROPTEST_CASES").is_none() {
+                config.cases = 24;
+            }
+            if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+                config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+            }
+            let mut config = proptest::test_runner::contextualize_config(config);
+            config.source_file = Some(file!());
+            config.test_name = Some(name);
+            let operations = prop_oneof![
+                (0usize..8, any::<bool>()).prop_map(|(parent, independent)| Operation::Spawn {
+                    parent,
+                    independent
+                }),
+                (0usize..8).prop_map(|parent| Operation::DropUnpolled { parent }),
+                (0usize..8).prop_map(|actor| Operation::Retire { actor }),
+            ];
+            TestRunner::new(config)
+                .run(&proptest::collection::vec(operations, 0..14), |tail| {
+                    let mut operations = vec![
+                        Operation::Spawn {
+                            parent: 0,
+                            independent: false,
+                        },
+                        Operation::Spawn {
+                            parent: 1,
+                            independent: false,
+                        },
+                        Operation::Spawn {
+                            parent: 1,
+                            independent: true,
+                        },
+                        Operation::DropUnpolled { parent: 1 },
+                        Operation::Retire { actor: 1 },
+                        Operation::Spawn {
+                            parent: 1,
+                            independent: false,
+                        },
+                    ];
+                    operations.extend(tail);
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut builder = if worker {
+                            let mut builder = tokio::runtime::Builder::new_multi_thread();
+                            builder.worker_threads(2);
+                            builder
+                        } else {
+                            tokio::runtime::Builder::new_current_thread()
+                        };
+                        let runtime = builder.enable_all().build().unwrap();
+                        runtime.block_on(async {
+                            tokio::time::timeout(Duration::from_secs(5), async {
+                                if worker {
+                                    tokio::spawn(replay(operations)).await.unwrap();
+                                } else {
+                                    replay(operations).await;
+                                }
+                            })
+                            .await
+                            .expect("bounded actor startup history");
+                        });
+                    }))
+                    .map_err(|panic| {
+                        let detail = panic
+                            .downcast_ref::<String>()
+                            .map(String::as_str)
+                            .or_else(|| panic.downcast_ref::<&str>().copied())
+                            .unwrap_or("non-string history failure");
+                        TestCaseError::fail(detail)
+                    })
+                })
+                .unwrap();
+        }
+
+        #[test]
+        fn generated_startup_histories_preserve_ownership_on_two_mib_current_thread() {
+            std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(|| {
+                    histories(
+                        false,
+                        concat!(module_path!(),
+                    "::generated_startup_histories_preserve_ownership_on_two_mib_current_thread"),
+                    );
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+
+        #[test]
+        fn generated_startup_histories_preserve_ownership_on_tokio_workers() {
+            histories(
+                true,
+                concat!(
+                    module_path!(),
+                    "::generated_startup_histories_preserve_ownership_on_tokio_workers"
+                ),
+            );
+        }
+    }
+
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
