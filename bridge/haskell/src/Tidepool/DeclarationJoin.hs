@@ -581,7 +581,7 @@ validateDeclarationJoin initial input = do
           Left diagnostic -> reject ArtifactChanged diagnostic
           Right verified -> do
             hydrated <- hydrateExactScope fresh verified
-            writeChecks <- measureJoin timing "write_delta" rnf $ forM (declarationWrites input) $ \write -> do
+            writeChecks <- measureJoin timing "write_delta" (rnf . and) $ forM (declarationWrites input) $ \write -> do
               let original = [iface | (_, iface) <- verified,
                     moduleNameString (moduleName (mi_module iface)) == snapshotModule (writeModule write)]
               case original of
