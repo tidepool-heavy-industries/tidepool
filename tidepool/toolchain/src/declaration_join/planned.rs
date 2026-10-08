@@ -39,7 +39,7 @@ pub(super) fn authored_interface_context(
 // Includes materialization, closure certification and descriptor assembly.
 // Caller inventory and final context admission remain outside this stage.
 pub(super) fn admit_authored_artifact_closure(
-    products: &[CertifiedRecoveryProduct],
+    originals: &crate::certified_products::SelectedOriginalClosure,
     selected_owner: &ExactModuleIdentity,
     toolchain_identity_sha256: [u8; 32],
     evidence: &[crate::cache::ModuleEvidence],
@@ -58,8 +58,9 @@ pub(super) fn admit_authored_artifact_closure(
     CompileError,
 > {
     let started = std::time::Instant::now();
+    let products = originals.products();
     let result = admit_authored_artifact_closure_inner(
-        products,
+        originals,
         selected_owner,
         toolchain_identity_sha256,
         evidence,
@@ -86,7 +87,7 @@ pub(super) fn admit_authored_artifact_closure(
 }
 
 fn admit_authored_artifact_closure_inner(
-    products: &[CertifiedRecoveryProduct],
+    originals: &crate::certified_products::SelectedOriginalClosure,
     selected_owner: &ExactModuleIdentity,
     toolchain_identity_sha256: [u8; 32],
     evidence: &[crate::cache::ModuleEvidence],
@@ -104,6 +105,7 @@ fn admit_authored_artifact_closure_inner(
     ),
     CompileError,
 > {
+    let products = originals.products();
     let scratch = tempfile::tempdir()?;
     let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
     let references = crate::recovery_artifacts::materialize_certified_products_with_validation(
@@ -114,14 +116,9 @@ fn admit_authored_artifact_closure_inner(
         crate::recovery_artifacts::MaterializationMode::Scratch,
     )
     .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
-    let owned = products.iter().collect::<Vec<_>>();
-    crate::certified_products::certify_owned_products_in_context_with_validation(
-        &owned,
-        &[],
-        &owned,
-        &mut validation,
-    )
-    .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
+    originals
+        .validate_with(&mut validation)
+        .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
     let mut artifacts = Vec::with_capacity(products.len());
     let mut original_imports = Vec::new();
     let mut source_lexical_imports = Vec::new();
@@ -755,7 +752,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
     )?;
     let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
         admit_authored_artifact_closure(
-            products,
+            originals,
             &original_owner,
             toolchain_identity_sha256,
             evidence,
@@ -811,6 +808,39 @@ pub(crate) fn certify_same_offer_planned_declaration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn issued_originals(
+        products: &[CertifiedRecoveryProduct],
+    ) -> Result<crate::certified_products::SelectedOriginalClosure, CompileError> {
+        let view = crate::declaration_context::certified_product_artifact_view(
+            [1; 32],
+            products,
+            &[],
+            None,
+        )?;
+        let entries = view
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.payload,
+                    crate::artifact_inventory::ArtifactPayload::Original(_)
+                )
+            })
+            .collect::<Vec<_>>();
+        let projection =
+            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&entries)?;
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &view.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .map_err(|error| contract(error.to_string()))?;
+        selection
+            .selected_original_closure(&view)
+            .map_err(|error| contract(error.to_string()))
+    }
 
     fn module(module: &str) -> ExactModuleIdentity {
         ExactModuleIdentity {
@@ -1045,8 +1075,9 @@ mod tests {
             module: "A".into(),
         };
         let admit = |selected: &[CertifiedRecoveryProduct]| {
+            let originals = issued_originals(selected)?;
             admit_authored_artifact_closure(
-                selected,
+                &originals,
                 &owner,
                 [1; 32],
                 &evidence,
@@ -1077,12 +1108,17 @@ mod tests {
             admit(&products[..1]).is_err(),
             "selected source closure must be complete"
         );
-        assert!(admit(&[
+        let repeated = issued_originals(&[
             products[0].clone(),
             products[0].clone(),
-            products[1].clone()
+            products[1].clone(),
         ])
-        .is_err());
+        .unwrap();
+        assert_eq!(
+            repeated.products().len(),
+            products.len(),
+            "repeated custody cannot issue duplicate compiler roles"
+        );
         let wrong_version = original_witness_fixture("B", Some(retained), 8, &packages);
         assert!(admit(&[products[0].clone(), wrong_version]).is_err());
         let legacy_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
@@ -1145,8 +1181,9 @@ mod tests {
             module: "Consumer".into(),
         };
         let admit = |selected: &[CertifiedRecoveryProduct]| {
+            let originals = issued_originals(selected)?;
             admit_authored_artifact_closure(
-                selected,
+                &originals,
                 &owner,
                 [1; 32],
                 &evidence,

@@ -487,6 +487,7 @@ pub struct CompiledArtifacts {
     pub module_products: Vec<RawModuleProduct>,
     pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    pub(crate) selected_originals: Option<certified_products::SelectedOriginalClosure>,
     /// Bound compiler producer identity for this exact invocation. `None`
     /// means the bundle was assembled from bytes without an endpoint.
     pub producer_identity: Option<[u8; 32]>,
@@ -2101,7 +2102,8 @@ impl ModuleCandidateOffer {
         )?
         .ok_or_else(fail)?;
         let products = sealed
-            .recovery_products
+            .selected_originals
+            .products()
             .iter()
             .filter(|product| product.owner().module == module_name)
             .collect::<Vec<_>>();
@@ -2805,6 +2807,10 @@ fn seal_turn_outputs_with_validation(
             .map_or(&[], |request| request.groups.as_ref()),
         validation,
     )?;
+    let selected_originals = certified
+        .source_selection
+        .selected_original_closure(&artifact_view)
+        .map_err(compiler_evidence_failure)?;
     let target_imports = match &target_demand {
         TargetDemand::Checked { imports, .. } | TargetDemand::Ordinary(imports) => {
             imports.as_slice()
@@ -2975,10 +2981,6 @@ fn seal_turn_outputs_with_validation(
     if publication == OriginalOutputPublication::Transaction {
         module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
     }
-    let selected_originals = certified
-        .source_selection
-        .selected_original_closure(&artifact_view)
-        .map_err(compiler_evidence_failure)?;
     Ok(Some(SealedTurnProducts {
         artifact_view,
         typed_entry,
@@ -4273,6 +4275,12 @@ fn compile_invocation_inner(
             0,
             receipt.targets.len(),
         );
+        artifacts.selected_originals = Some(
+            certified
+                .source_selection
+                .selected_original_closure(&artifacts.artifact_view)
+                .map_err(compiler_evidence_failure)?,
+        );
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
         artifacts.exact_source_admission = exact_source;
@@ -5051,6 +5059,7 @@ pub(crate) fn assemble(
         module_products: Vec::new(),
         certified_groups: Vec::new(),
         recovery_products: Vec::new(),
+        selected_originals: None,
         producer_identity: None,
         module_inventory: None,
         exact_source_admission: None,

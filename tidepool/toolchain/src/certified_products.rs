@@ -683,6 +683,8 @@ pub enum CertificationError {
     OriginalGroupConflict(Box<OriginalGroupConflict>),
     #[error("compiler product original selection conflict: {0:?}")]
     OriginalSelectionConflict(Box<OriginalSelectionConflict>),
+    #[error("selected compiler original closure rejected: {0}")]
+    OriginalClosure(#[source] Box<crate::CompileError>),
     #[error("finalized module payload capture failed: {0}")]
     CapturedModulePayload(#[source] crate::recovery_artifacts::RecoveryArtifactError),
     #[error("finalized interface {unit}:{module} requires {required_unit}:{required_module} seal {expected_sha256}; selected seal {selected_sha256:?}")]
@@ -1681,11 +1683,52 @@ pub(crate) struct CertifiedSourceSelection {
 #[derive(Clone, Debug)]
 pub(crate) struct SelectedOriginalClosure {
     products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    entries: Vec<Arc<crate::artifact_inventory::ArtifactEntry>>,
+    custody: crate::artifact_inventory::ArtifactView,
 }
 
 impl SelectedOriginalClosure {
     pub(crate) fn products(&self) -> &[crate::recovery_artifacts::CertifiedRecoveryProduct] {
         &self.products
+    }
+
+    pub(crate) fn excluding_module(&self, unit: &str, module: &str) -> Self {
+        Self {
+            products: self
+                .products
+                .iter()
+                .filter(|product| product.owner().unit != unit || product.owner().module != module)
+                .cloned()
+                .collect(),
+            entries: self
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.descriptor.owner.unit != unit || entry.descriptor.owner.module != module
+                })
+                .cloned()
+                .collect(),
+            custody: self.custody.clone(),
+        }
+    }
+
+    /// Whole original validation follows exact native edges through custody.
+    /// Historical dependency versions do not become compiler namespace roles.
+    pub(crate) fn validate_with(
+        &self,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<(), crate::CompileError> {
+        let view = self
+            .custody
+            .inventory()
+            .admit_shared(&self.custody, self.entries.clone())?;
+        crate::declaration_context::certify_artifact_view_groups_with_validation(
+            &view,
+            &[],
+            &[],
+            validation,
+        )?;
+        Ok(())
     }
 }
 
@@ -1736,7 +1779,17 @@ impl CertifiedSourceSelection {
         let selected = projection
             .entries_from_metadata(&view.metadata_snapshot())
             .map_err(|_| CertificationError::Mismatch("selected compiler original closure"))?;
-        Ok(SelectedOriginalClosure {
+        let entries = selected
+            .values()
+            .filter(|entry| {
+                matches!(
+                    &entry.payload,
+                    crate::artifact_inventory::ArtifactPayload::Original(_)
+                )
+            })
+            .cloned()
+            .collect();
+        let closure = SelectedOriginalClosure {
             products: selected
                 .values()
                 .filter_map(|entry| match &entry.payload {
@@ -1746,7 +1799,13 @@ impl CertifiedSourceSelection {
                     _ => None,
                 })
                 .collect(),
-        })
+            entries,
+            custody: view.clone(),
+        };
+        closure
+            .validate_with(&mut PackageInterfaceValidation::default())
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        Ok(closure)
     }
 
     /// Resolve already issued compiler roles against their authenticated custody.
@@ -4573,13 +4632,16 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
     let mut home_modules = BTreeSet::new();
     for (id, product) in available {
         let owner = product.owner();
-        if native_ids
+        if let Some(old) = native_ids
             .insert(owner.clone(), *id)
-            .is_some_and(|old| old != *id)
+            .filter(|old| old != id)
         {
-            return Err(CertificationError::Mismatch(
-                "ambiguous exact original native identity",
-            ));
+            return Err(CertificationError::OriginalSelectionConflict(Box::new(
+                OriginalSelectionConflict {
+                    selected: owner.clone(),
+                    artifacts: vec![old, *id],
+                },
+            )));
         }
         home_modules.insert((owner.unit.clone(), owner.module.clone()));
     }
