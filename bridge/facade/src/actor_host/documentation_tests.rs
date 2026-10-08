@@ -1095,7 +1095,14 @@ async fn published_command_example_reuses_completed_stdout() {
 
 #[tokio::test]
 async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
-    let mut campaign = TestCampaign::start().await;
+    let mut campaign = TestCampaign::start_with_conversation(
+        |admission| admission,
+        |_| {},
+        Some(Arc::new(|_, _| {
+            Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+        })),
+    )
+    .await;
     let root = campaign.root_installation.policy.clone();
     displayed(
         &mut campaign,

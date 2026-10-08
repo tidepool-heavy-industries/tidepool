@@ -14,3 +14,6 @@ compile changed consumers.
 Rich views and human forms share `FormHost`, installed before actor admission.
 A form-unavailable campaign that still publishes views needs the production
 display delegate and an explicit typed refusal at form opening.
+Optional notebook effects derive from installed services at admission. For an
+unbound-conversation case, install a reader that returns the typed unbound result
+through the existing conversation seam so the root admits `Reflect`.

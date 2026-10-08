@@ -474,8 +474,8 @@ impl TestCampaign {
         Self::start_with_conversation(transform, configure, None).await
     }
 
-    /// A campaign whose root can read its own conversation, so `reflect`
-    /// returns the supplied turns instead of reporting the context unbound.
+    /// Install the conversation reader before admission so the root admits
+    /// Reflect. The reader may return turns or a typed unavailable result.
     pub async fn start_with_conversation(
         transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
         configure: impl FnOnce(&mut ActorHostConfig),
