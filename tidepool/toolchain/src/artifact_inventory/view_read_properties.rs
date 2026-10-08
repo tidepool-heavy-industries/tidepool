@@ -308,14 +308,27 @@ proptest! {
         // keep the graph alive or carry native selection into an interface view.
         let snapshot = extended.metadata_snapshot();
         prop_assert!(!extended.selected_native_groups().is_empty());
-        let interface_owner = catalog.owner(0);
-        let interface = extended.interface_projection(&[interface_owner]).unwrap();
+        let interface_owner = catalog.owner(OWNERS);
+        let extended_entries = extended.entries();
+        prop_assert!(extended_entries.iter().any(|entry| {
+            entry.is_native() && entry.descriptor.owner == interface_owner
+        }));
+        prop_assert!(extended_entries.iter().any(|entry| {
+            !entry.is_native() && entry.descriptor.owner == interface_owner
+        }));
+        let interface = extended
+            .interface_projection(&[interface_owner.clone()])
+            .unwrap();
         prop_assert!(interface.selected_native_groups().is_empty());
         prop_assert!(interface.metadata_snapshot().selected_native_groups.is_empty());
         prop_assert!(interface.0.parents.is_empty());
         prop_assert!(interface.0.materialization_parents.is_empty());
         prop_assert!(interface.0.materialization.lock().unwrap().is_empty());
-        prop_assert!(interface.entries().iter().all(|entry| !entry.is_native()));
+        let projected_entries = interface.entries();
+        prop_assert!(projected_entries.iter().all(|entry| !entry.is_native()));
+        prop_assert!(projected_entries.iter().any(|entry| {
+            entry.descriptor.owner == interface_owner
+        }));
         let initial_indices = left
             .0
             .lock()
