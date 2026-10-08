@@ -24,6 +24,8 @@ export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md"
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md", src = ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md", visibility = ["PUBLIC"])
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md", src = ".exomonad/workspace/skills/exomonad-workbench/SKILL.md", visibility = ["PUBLIC"])
 
+export_file(name = "test_fixture_manifest", src = "build/test-fixtures.json", visibility = ["PUBLIC"])
+
 export_file(name = "workspace_clippy", src = ".clippy.toml", visibility = ["PUBLIC"])
 filegroup(
     name = "native_profile_test_sources",
@@ -35,7 +37,7 @@ filegroup(
     name = "qualification_inputs",
     srcs = {source: source for source in glob([
         "BUCK", "Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", ".buckconfig", ".gitmodules", ".clippy.toml",
-        "build/native_profile.bzl", "build/native-targets.json", "build/native-workspace-gitlink.json",
+        "build/test-fixtures.json", "build/native_profile.bzl", "build/native-targets.json", "build/native-workspace-gitlink.json",
         ".exomonad/workspace/**/*.hs", ".exomonad/workspace/**/*.md", ".exomonad/workspace/**/*.toml", ".exomonad/workspace/**/*.nix",
     ])},
     visibility = ["PUBLIC"],

@@ -31,6 +31,8 @@ def cargo_dependency_key(dependency):
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 HASKELL_RUST_INPUTS = set()
+HASKELL_TEST_FIXTURES = {}
+HASKELL_RUNTIME_FIXTURE_READS = set()
 arguments = argparse.ArgumentParser(description=__doc__)
 arguments.add_argument("--package", action="append", required=True, help="Cargo package to generate (repeatable)")
 arguments.add_argument(
@@ -44,7 +46,7 @@ arguments.add_argument(
 arguments.add_argument("--check", action="store_true", help="check generated BUCK files without rewriting them")
 options = arguments.parse_args()
 selected = set(options.package)
-if selected & {"tidepool", "tidepool-runtime"}:
+if selected & {"tidepool", "tidepool-runtime", "exomonad-actor"}:
     selected.add("tidepool-testing")
 SUPPORTED_PACKAGES = NATIVE_PACKAGES
 # Every executable suite uses the existing counted, process-isolated runner.
@@ -349,6 +351,123 @@ def generated_producer_rules(package_name):
     ])
 
 
+def register_test_fixture(included, external_labels):
+    """Keep authored test bytes in runtime resources with their owning labels."""
+    relative = included.relative_to(ROOT).as_posix()
+    if not included.is_file() or not included.resolve().is_relative_to(ROOT):
+        raise SystemExit(f"missing or outside-repository Haskell test fixture: {relative}")
+    native_owners = sorted(
+        (package_dir(package) for package in local.values()
+         if package["name"] in SUPPORTED_PACKAGES), key=len, reverse=True,
+    )
+    owner = next((directory for directory in native_owners
+                  if relative.startswith(directory + "/")), None)
+    if owner:
+        source = relative.removeprefix(owner + "/")
+        # Hex encoding is injective even when filenames differ only by punctuation.
+        name = "haskell_test_fixture_" + source.encode().hex()
+        label = "//" + owner + ":" + name
+    elif relative.startswith("exomonad/examples/workspace/.exomonad/"):
+        source = relative.removeprefix("exomonad/examples/workspace/.exomonad/")
+        label = "//exomonad/examples/workspace:authored_haskell_" + source.replace("/", "_").replace(".", "_").replace("-", "_")
+    elif relative in external_labels:
+        label = external_labels[relative]
+    elif relative.startswith("bridge/haskell/"):
+        source = relative.removeprefix("bridge/haskell/")
+        HASKELL_RUST_INPUTS.add(source)
+        label = "//bridge/haskell:rust_input_" + source.replace("/", "_").replace(".", "_").replace("-", "_")
+    else:
+        raise SystemExit(f"no owning Buck export for Haskell test fixture: {relative}")
+    HASKELL_TEST_FIXTURES[relative] = label
+
+
+def testing_fixture_test_cases(binary):
+    tests = ["fixtures::tests::" + name for name in (
+        "existing_binary_reads_changed_fixture_bytes",
+        "missing_and_non_utf8_fixtures_fail_explicitly",
+        "fixture_names_refuse_absolute_and_parent_components",
+    )]
+    return "\n".join([
+        "tidepool_rust_test_cases(", '    name = "testing_fixture_resource_tests",',
+        f"    binary = {json.dumps(':' + binary + '_binary')},",
+        "    exact_tests = [", render_strings(tests, 8), "    ],",
+        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 30,",
+        "    test_rule_timeout_ms = 150000,", '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
+EXTERNAL_SOURCE_LABELS = {
+    "Cargo.lock": "//:workspace_cargo_lock",
+    "bridge/handlers/src/lib.rs": "//bridge/handlers:handler_library_source",
+    "bridge/atomic-write/tests/fixtures/directory_fault.c": "//bridge/atomic-write:directory_fault_fixture",
+    "exomonad/actor/src/fixtures/quoted-agent-provider.hs": "//exomonad/actor:quoted_agent_provider_fixture",
+    "tidepool/runtime/src/session/fixtures/activation-input-function.hs": "//tidepool/runtime:activation_input_function_fixture",
+    "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs": "//tidepool/runtime:activation_input_receiver_fixture",
+    "tidepool/runtime/src/session/fixtures/activation-input-resident-original.hs": "//tidepool/runtime:activation_input_resident_original_fixture",
+    "tidepool/runtime/src/session/fixtures/activation-input-resident-request.hs": "//tidepool/runtime:activation_input_resident_request_fixture",
+    "tidepool/runtime/src/session/fixtures/activation-input-resident-shadow.hs": "//tidepool/runtime:activation_input_resident_shadow_fixture",
+    "bridge/haskell/src/Tidepool/ExtractRequest.hs": "//bridge/haskell:extract_request_source",
+    "bridge/haskell/src/Tidepool/Timing.hs": "//bridge/haskell:timing_source",
+    "bridge/haskell/src/Tidepool/WorkerServer.hs": "//bridge/haskell:worker_server_source",
+    "bridge/haskell/src/Tidepool/GhcPipeline.hs": "//bridge/haskell:ghc_pipeline_source",
+    "bridge/haskell/src/Tidepool/Session.hs": "//bridge/haskell:session_source",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.cbor": "//bridge/haskell:declaration_join_v2_cbor_fixture",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.json": "//bridge/haskell:declaration_join_v2_json_fixture",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.cbor": "//bridge/haskell:declaration_inventory_v2_cbor_fixture",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.json": "//bridge/haskell:declaration_inventory_v2_json_fixture",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.cbor": "//bridge/haskell:declaration_join_v3_cbor_fixture",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.json": "//bridge/haskell:declaration_join_v3_json_fixture",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.cbor": "//bridge/haskell:declaration_join_typed_v3_cbor_fixture",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.json": "//bridge/haskell:declaration_join_typed_v3_json_fixture",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor": "//bridge/haskell:declaration_inventory_v3_cbor_fixture",
+    "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json": "//bridge/haskell:declaration_inventory_v3_json_fixture",
+    "bridge/haskell/actors/Tidepool/Actors/Role.hs": "//bridge/haskell:actor_role_source",
+    "bridge/haskell/examples/model-turns/ContextWorkflow.hs": "//bridge/haskell:context_workflow_example",
+    "exomonad/prompts/base.md": "//exomonad/prompts:base_prompt",
+    "exomonad/prompts/api-guide.md": "//exomonad/prompts:api_guide_prompt",
+    "exomonad/prompts/root.md": "//exomonad/prompts:root_prompt",
+    "exomonad/prompts/recreated-root.md": "//exomonad/prompts:recreated_root_prompt",
+    "exomonad/prompts/worktree-agent.md": "//exomonad/prompts:worktree_agent_prompt",
+    "exomonad/prompts/readonly-agent.md": "//exomonad/prompts:readonly_agent_prompt",
+    "exomonad/prompts/scaffolding-agent.md": "//exomonad/prompts:scaffolding_agent_prompt",
+    "exomonad/prompts/integration-agent.md": "//exomonad/prompts:integration_agent_prompt",
+    "exomonad/prompts/haskell-tool-instructions.md": "//exomonad/prompts:haskell_tool_instructions",
+    "exomonad/prompts/docs/actors.md": "//exomonad/prompts:doc_actors",
+    "exomonad/prompts/docs/cleanup.md": "//exomonad/prompts:doc_cleanup",
+    "exomonad/prompts/docs/deadline.md": "//exomonad/prompts:doc_deadline",
+    "exomonad/prompts/docs/jev.md": "//exomonad/prompts:doc_jev",
+    "exomonad/prompts/docs/lineage.md": "//exomonad/prompts:doc_lineage",
+    "exomonad/prompts/docs/recovery.md": "//exomonad/prompts:doc_recovery",
+    "exomonad/prompts/docs/refinement.md": "//exomonad/prompts:doc_refinement",
+    "exomonad/prompts/docs/reflect.md": "//exomonad/prompts:doc_reflect",
+    "exomonad/prompts/docs/request.md": "//exomonad/prompts:doc_request",
+    "exomonad/prompts/docs/tree.md": "//exomonad/prompts:doc_tree",
+    "exomonad/prompts/docs/unfold.md": "//exomonad/prompts:doc_unfold",
+    "exomonad/prompts/docs/watch.md": "//exomonad/prompts:doc_watch",
+    "exomonad/prompts/docs/workbench.md": "//exomonad/prompts:doc_workbench",
+    "exomonad/examples/workspace/.exomonad/AgentSpec.hs": "//exomonad/examples/workspace:facade_agent_spec",
+    "exomonad/examples/workspace/.exomonad/prompts/review.md": "//exomonad/examples/workspace:facade_review_prompt",
+    ".exomonad/workspace/Jev/Operators.hs": "//:facade_test_jev_operators",
+    ".exomonad/workspace/checks/progress-route-producer.hs": "//:facade_doc__exomonad_workspace_checks_progress_route_producer_hs",
+    ".exomonad/workspace/checks/progress-route-questions.hs": "//:facade_doc__exomonad_workspace_checks_progress_route_questions_hs",
+    ".exomonad/workspace/checks/progress-route.hs": "//:facade_doc__exomonad_workspace_checks_progress_route_hs",
+    ".exomonad/workspace/checks/project_decision_consumer.hs": "//:facade_doc__exomonad_workspace_checks_project_decision_consumer_hs",
+    ".exomonad/workspace/checks/project_decision_return.hs": "//:facade_doc__exomonad_workspace_checks_project_decision_return_hs",
+    ".exomonad/workspace/checks/project_delivery_setup.hs": "//:facade_doc__exomonad_workspace_checks_project_delivery_setup_hs",
+    ".exomonad/workspace/checks/project_design_question.hs": "//:facade_doc__exomonad_workspace_checks_project_design_question_hs",
+    ".exomonad/workspace/checks/project_plan_incorporation.hs": "//:facade_doc__exomonad_workspace_checks_project_plan_incorporation_hs",
+    ".exomonad/workspace/checks/project_review_questions.hs": "//:facade_doc__exomonad_workspace_checks_project_review_questions_hs",
+    ".exomonad/workspace/checks/project_review_repair.hs": "//:facade_doc__exomonad_workspace_checks_project_review_repair_hs",
+    ".exomonad/workspace/checks/project_review_start.hs": "//:facade_doc__exomonad_workspace_checks_project_review_start_hs",
+    ".exomonad/workspace/checks/route-reply-setup.hs": "//:facade_doc__exomonad_workspace_checks_route_reply_setup_hs",
+    ".exomonad/workspace/checks/route-reply-worker.hs": "//:facade_doc__exomonad_workspace_checks_route_reply_worker_hs",
+    ".exomonad/workspace/skills/exomonad-jev/SKILL.md": "//:facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md",
+    ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md": "//:facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md",
+    ".exomonad/workspace/skills/exomonad-workbench/SKILL.md": "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md",
+    "exomonad/examples/workspace/.exomonad/prompts/task.md": "//exomonad/examples/workspace:facade_task_prompt",
+    "exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md": "//exomonad/examples/workspace:facade_workbench_skill",
+}
+
 def source_inputs(package, target, features=(), test_target=False):
     directory = ROOT / CURRENT_DIR
     source_root = pathlib.Path(target["src_path"]).resolve()
@@ -397,85 +516,28 @@ def source_inputs(package, target, features=(), test_target=False):
             sources.add(source_root)
     includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
-    external_labels = {
-        "Cargo.lock": "//:workspace_cargo_lock",
-        "bridge/handlers/src/lib.rs": "//bridge/handlers:handler_library_source",
-        "bridge/atomic-write/tests/fixtures/directory_fault.c": "//bridge/atomic-write:directory_fault_fixture",
-        "exomonad/actor/src/fixtures/quoted-agent-provider.hs": "//exomonad/actor:quoted_agent_provider_fixture",
-        "tidepool/runtime/src/session/fixtures/activation-input-function.hs": "//tidepool/runtime:activation_input_function_fixture",
-        "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs": "//tidepool/runtime:activation_input_receiver_fixture",
-        "tidepool/runtime/src/session/fixtures/activation-input-resident-original.hs": "//tidepool/runtime:activation_input_resident_original_fixture",
-        "tidepool/runtime/src/session/fixtures/activation-input-resident-request.hs": "//tidepool/runtime:activation_input_resident_request_fixture",
-        "tidepool/runtime/src/session/fixtures/activation-input-resident-shadow.hs": "//tidepool/runtime:activation_input_resident_shadow_fixture",
-        "bridge/haskell/src/Tidepool/ExtractRequest.hs": "//bridge/haskell:extract_request_source",
-        "bridge/haskell/src/Tidepool/Timing.hs": "//bridge/haskell:timing_source",
-        "bridge/haskell/src/Tidepool/WorkerServer.hs": "//bridge/haskell:worker_server_source",
-        "bridge/haskell/src/Tidepool/GhcPipeline.hs": "//bridge/haskell:ghc_pipeline_source",
-        "bridge/haskell/src/Tidepool/Session.hs": "//bridge/haskell:session_source",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.cbor": "//bridge/haskell:declaration_join_v2_cbor_fixture",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v2.json": "//bridge/haskell:declaration_join_v2_json_fixture",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.cbor": "//bridge/haskell:declaration_inventory_v2_cbor_fixture",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v2.json": "//bridge/haskell:declaration_inventory_v2_json_fixture",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.cbor": "//bridge/haskell:declaration_join_v3_cbor_fixture",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-v3.json": "//bridge/haskell:declaration_join_v3_json_fixture",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.cbor": "//bridge/haskell:declaration_join_typed_v3_cbor_fixture",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/join-typed-v3.json": "//bridge/haskell:declaration_join_typed_v3_json_fixture",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.cbor": "//bridge/haskell:declaration_inventory_v3_cbor_fixture",
-        "bridge/haskell/test-cell-splitter/fixtures/declaration-join/inventory-v3.json": "//bridge/haskell:declaration_inventory_v3_json_fixture",
-        "bridge/haskell/actors/Tidepool/Actors/Role.hs": "//bridge/haskell:actor_role_source",
-        "bridge/haskell/examples/model-turns/ContextWorkflow.hs": "//bridge/haskell:context_workflow_example",
-        "exomonad/prompts/base.md": "//exomonad/prompts:base_prompt",
-        "exomonad/prompts/api-guide.md": "//exomonad/prompts:api_guide_prompt",
-        "exomonad/prompts/root.md": "//exomonad/prompts:root_prompt",
-        "exomonad/prompts/recreated-root.md": "//exomonad/prompts:recreated_root_prompt",
-        "exomonad/prompts/worktree-agent.md": "//exomonad/prompts:worktree_agent_prompt",
-        "exomonad/prompts/readonly-agent.md": "//exomonad/prompts:readonly_agent_prompt",
-        "exomonad/prompts/scaffolding-agent.md": "//exomonad/prompts:scaffolding_agent_prompt",
-        "exomonad/prompts/integration-agent.md": "//exomonad/prompts:integration_agent_prompt",
-        "exomonad/prompts/haskell-tool-instructions.md": "//exomonad/prompts:haskell_tool_instructions",
-        "exomonad/prompts/docs/actors.md": "//exomonad/prompts:doc_actors",
-        "exomonad/prompts/docs/cleanup.md": "//exomonad/prompts:doc_cleanup",
-        "exomonad/prompts/docs/deadline.md": "//exomonad/prompts:doc_deadline",
-        "exomonad/prompts/docs/jev.md": "//exomonad/prompts:doc_jev",
-        "exomonad/prompts/docs/lineage.md": "//exomonad/prompts:doc_lineage",
-        "exomonad/prompts/docs/recovery.md": "//exomonad/prompts:doc_recovery",
-        "exomonad/prompts/docs/refinement.md": "//exomonad/prompts:doc_refinement",
-        "exomonad/prompts/docs/reflect.md": "//exomonad/prompts:doc_reflect",
-        "exomonad/prompts/docs/request.md": "//exomonad/prompts:doc_request",
-        "exomonad/prompts/docs/tree.md": "//exomonad/prompts:doc_tree",
-        "exomonad/prompts/docs/unfold.md": "//exomonad/prompts:doc_unfold",
-        "exomonad/prompts/docs/watch.md": "//exomonad/prompts:doc_watch",
-        "exomonad/prompts/docs/workbench.md": "//exomonad/prompts:doc_workbench",
-        "exomonad/examples/workspace/.exomonad/AgentSpec.hs": "//exomonad/examples/workspace:facade_agent_spec",
-        "exomonad/examples/workspace/.exomonad/prompts/review.md": "//exomonad/examples/workspace:facade_review_prompt",
-        ".exomonad/workspace/Jev/Operators.hs": "//:facade_test_jev_operators",
-        ".exomonad/workspace/checks/progress-route-producer.hs": "//:facade_doc__exomonad_workspace_checks_progress_route_producer_hs",
-        ".exomonad/workspace/checks/progress-route-questions.hs": "//:facade_doc__exomonad_workspace_checks_progress_route_questions_hs",
-        ".exomonad/workspace/checks/progress-route.hs": "//:facade_doc__exomonad_workspace_checks_progress_route_hs",
-        ".exomonad/workspace/checks/project_decision_consumer.hs": "//:facade_doc__exomonad_workspace_checks_project_decision_consumer_hs",
-        ".exomonad/workspace/checks/project_decision_return.hs": "//:facade_doc__exomonad_workspace_checks_project_decision_return_hs",
-        ".exomonad/workspace/checks/project_delivery_setup.hs": "//:facade_doc__exomonad_workspace_checks_project_delivery_setup_hs",
-        ".exomonad/workspace/checks/project_design_question.hs": "//:facade_doc__exomonad_workspace_checks_project_design_question_hs",
-        ".exomonad/workspace/checks/project_plan_incorporation.hs": "//:facade_doc__exomonad_workspace_checks_project_plan_incorporation_hs",
-        ".exomonad/workspace/checks/project_review_questions.hs": "//:facade_doc__exomonad_workspace_checks_project_review_questions_hs",
-        ".exomonad/workspace/checks/project_review_repair.hs": "//:facade_doc__exomonad_workspace_checks_project_review_repair_hs",
-        ".exomonad/workspace/checks/project_review_start.hs": "//:facade_doc__exomonad_workspace_checks_project_review_start_hs",
-        ".exomonad/workspace/checks/route-reply-setup.hs": "//:facade_doc__exomonad_workspace_checks_route_reply_setup_hs",
-        ".exomonad/workspace/checks/route-reply-worker.hs": "//:facade_doc__exomonad_workspace_checks_route_reply_worker_hs",
-        ".exomonad/workspace/skills/exomonad-jev/SKILL.md": "//:facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md",
-        ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md": "//:facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md",
-        ".exomonad/workspace/skills/exomonad-workbench/SKILL.md": "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md",
-        "exomonad/examples/workspace/.exomonad/prompts/task.md": "//exomonad/examples/workspace:facade_task_prompt",
-        "exomonad/examples/workspace/.exomonad/skills/exomonad-workbench/SKILL.md": "//exomonad/examples/workspace:facade_workbench_skill",
-    }
+    external_labels = EXTERNAL_SOURCE_LABELS
     while pending:
         source = pending.pop()
         contents = source.read_text()
+        if test_target:
+            # fixture_source paths are repository relative, unlike include_str!.
+            for relative in re.findall(r'\bfixture_source\s*\(\s*"([^\"]+)"', contents):
+                parsed = pathlib.PurePosixPath(relative)
+                if (parsed.is_absolute() or ".." in parsed.parts or parsed.as_posix() != relative
+                        or "\\" in relative or parsed.suffix != ".hs"):
+                    raise SystemExit(f"invalid Haskell test fixture path: {relative!r}")
+                register_test_fixture(ROOT / relative, external_labels)
+                HASKELL_RUNTIME_FIXTURE_READS.add(relative)
         relatives = list(includes.findall(contents))
         for relative in relatives:
             included = pathlib.Path(os.path.abspath(source.parent / relative))
             if not included.resolve().is_relative_to(ROOT):
                 raise SystemExit(f"compile-time input outside repository {included} from {source}")
+            if test_target and package["name"] in {"tidepool", "exomonad-actor"} and included.suffix == ".hs":
+                # Transitional includes remain compiler inputs until migrated;
+                # their inventory is already retained by the runtime owner.
+                register_test_fixture(included, external_labels)
             if included.is_relative_to(ROOT) and included.relative_to(ROOT).as_posix() in test_only:
                 continue
             if (
@@ -553,6 +615,9 @@ PREPARED_FIXTURE_RESOURCES = {
 def test_runtime_inputs(package_name, target_name, unit=False):
     env, resources, worker = {}, [], False
     fixture_names = []
+    if package_name in {"tidepool", "exomonad-actor"}:
+        env["TIDEPOOL_TEST_FIXTURE_ROOT"] = "$(location //bridge/testing:haskell_test_fixtures)"
+        resources.append("//bridge/testing:haskell_test_fixtures")
     if package_name == "tidepool-codegen" and unit:
         fixture_names = ["Resume", "Retention"]
     elif package_name == "tidepool-runtime":
@@ -689,6 +754,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_RETAINED_IMPORT_FIXTURE_DIR",
     "TIDEPOOL_WORKSPACE_TEST_GIT",
     "TIDEPOOL_TYPED_RECEIVE_FIXTURE_DIR",
+    "TIDEPOOL_TEST_FIXTURE_ROOT",
 )
 
 
@@ -1014,6 +1080,7 @@ def facade_test_cases(binary):
     }
     host_paths = {
         **process_paths,
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
         "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
@@ -1030,6 +1097,7 @@ def facade_test_cases(binary):
     }
     process_resources = ["toolchains//:test_tools_closure", "//build/rust:workspace_gitlink", "//build/rust:workspace_git_bundle"]
     host_resources = process_resources + [
+        "//bridge/testing:haskell_test_fixtures",
         "toolchains//:exomonad_runtime_tools",
         "//web:dist",
         "//bridge/haskell:facade_embedded_sources",
@@ -1127,6 +1195,8 @@ for package_name, package in local.items():
     if package_name == "tidepool-runtime":
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
         rules.append('load("//build/rust:compile_fail.bzl", "rust_compile_fail")\n')
+    if package_name == "tidepool-testing":
+        rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name == "tidepool":
         rules.append('''load("//build/rust:buildscript.bzl", "tidepool_buildscript_run")
 load("//build/rust:facade_build_inputs.bzl", "tidepool_facade_build_inputs")
@@ -1246,6 +1316,8 @@ tidepool_buildscript_run(
             unit_rule = "tidepool_rust_binary"
             unit_extra = '    rustc_flags = ["--test"],'
         rules.append(render_rule(unit_rule, unit_target["name"], unit_target, package, unit_deps, unit_named, unit_extra, features=package_features, test_target=True))
+        if package_name == "tidepool-testing":
+            rules.append(testing_fixture_test_cases(unit_target["name"]))
         shared = package_name in {"tidepool", "tidepool-runtime", "exomonad-actor"}
         if package_name in {"tidepool-runtime", "exomonad-actor"}:
             env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
@@ -1400,6 +1472,50 @@ cxx_library(
     output_path = ROOT / CURRENT_DIR / "BUCK"
     outputs[output_path] = output
 
+# Runtime fixture exports are emitted after all source walks, so a consumer may
+# discover bytes owned by a package generated earlier in this invocation.
+def fixture_resource_outputs(complete=True):
+    for relative, label in sorted(HASKELL_TEST_FIXTURES.items()):
+        owner, name = label.removeprefix("//").split(":", 1)
+        output_path = ROOT / owner / "BUCK"
+        if name.startswith("haskell_test_fixture_"):
+            if output_path not in outputs:
+                if complete:
+                    raise SystemExit(f"fixture owner {owner} needs generation alongside its consumer")
+                continue
+            source = relative.removeprefix(owner + "/")
+            outputs[output_path] += "\n" + "\n".join([
+                "export_file(", f"    name = {json.dumps(name)},",
+                f"    src = {json.dumps(source)},",
+                f"    out = {json.dumps(pathlib.PurePosixPath(source).name)},",
+                '    visibility = ["PUBLIC"],', ")", "",
+            ])
+    if complete:
+        outputs[ROOT / "build/test-fixtures.json"] = json.dumps({
+            "schema": 1, "kind": "haskell-test-fixtures", "files": sorted(HASKELL_TEST_FIXTURES),
+        }, indent=2) + "\n"
+    if ROOT / "bridge/testing/BUCK" not in outputs:
+        return
+    outputs[ROOT / "bridge/testing/BUCK"] += "\n" + "\n".join([
+        "filegroup(", '    name = "haskell_test_fixtures",', "    srcs = {",
+        *(f"        {json.dumps(relative)}: {json.dumps(label)},"
+          for relative, label in sorted(HASKELL_TEST_FIXTURES.items())),
+        "    },", '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+if selected == set(SUPPORTED_PACKAGES):
+    fixture_resource_outputs()
+else:
+    manifest_path = ROOT / "build/test-fixtures.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+    if not HASKELL_RUNTIME_FIXTURE_READS.issubset(set(manifest.get("files", []))):
+        raise SystemExit("new runtime Haskell fixture inputs need complete native graph regeneration")
+    # Preserve the global roster when regenerating one resource owner. Only the
+    # complete source walk may replace the manifest and retire fixture exports.
+    for relative in manifest.get("files", []):
+        register_test_fixture(ROOT / relative, EXTERNAL_SOURCE_LABELS)
+    fixture_resource_outputs(complete=False)
+
 if "tidepool" in selected:
     gitlink_rows = subprocess.check_output(["git", "ls-files", "--stage", "--", ".exomonad/workspace"], cwd=ROOT, text=True).splitlines()
     if len(gitlink_rows) != 1:
@@ -1412,7 +1528,7 @@ if "tidepool" in selected:
 if selected == set(SUPPORTED_PACKAGES):
     qualification_trees = [("//" + package["directory"] + ":native_qualification_inputs", "") for package in NATIVE_TARGETS.values()]
     qualification_trees += [(label, "") for label in (
-        "//:qualification_inputs", "toolchains//:qualification_inputs", "//platforms:qualification_inputs",
+        "//:qualification_inputs", "//bridge/testing:haskell_test_fixtures", "toolchains//:qualification_inputs", "//platforms:qualification_inputs",
         "//build/rust:qualification_inputs", "//build/haskell:qualification_inputs", "//build/protocol:qualification_inputs",
         "//scripts:qualification_inputs", "//bridge/haskell:qualification_compiler_inputs",
         "//exomonad/examples/workspace:qualification_inputs", "//exomonad/prompts:qualification_inputs", "//build/package:qualification_inputs",
