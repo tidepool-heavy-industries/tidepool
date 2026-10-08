@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import itertools
 import json
 import hashlib
 import os
@@ -80,6 +81,9 @@ class IsolatedLibtestTests(unittest.TestCase):
                     def run(args, timeout, environment=None):
                         transaction = root / 'compiler-transactions/one'
                         transaction.mkdir(parents=True)
+                        # The producer issues a request marker before writing
+                        # transaction.json; absence after issuance is a failure.
+                        (transaction / 'compiler-request.bin').write_bytes(b'issued request')
                         if report is not None:
                             (transaction / 'transaction.json').write_text(
                                 report if isinstance(report, str) else json.dumps(report))
@@ -94,6 +98,53 @@ class IsolatedLibtestTests(unittest.TestCase):
                         self.assertFalse(record['diagnostic_evidence_complete'])
                         self.assertTrue(record['diagnostic_summaries']['issues'])
                         self.assertNotIn('artifacts_removed_after_success', record)
+
+    def test_scratch_without_capture_markers_has_no_transaction_report_obligation(self):
+        root = Path(self.tmp.name) / 'unstarted-scratch'
+        directory = root / 'compiler-transactions/scratch'
+        directory.mkdir(parents=True)
+        # Real pre-admission/cached scratch retains these inputs without ever
+        # calling CompilerDiagnosticCapture.start.
+        (directory / 'turn.txt').write_text('pure ()')
+        (directory / 'template-0.hs').write_text('module Main where')
+        (directory / 'module-candidates.cbor').write_bytes(b'candidate inputs')
+        summary = runner.diagnostic_summaries(root)
+        self.assertEqual(summary['transaction_count'], 0)
+        self.assertEqual(summary['scratch_without_capture_marker_count'], 1)
+        self.assertEqual(summary['issues'], [])
+        self.assertNotIn('physical_compiler_timing', summary)
+
+    def test_partial_capture_markers_require_the_issued_transaction_report(self):
+        for marker in ('compiler-request.bin', 'compiler-cwd.bin', 'transaction.json.pending',
+                       'compiler.stderr', 'consumed-sources.json'):
+            with self.subTest(marker=marker):
+                root = Path(self.tmp.name) / marker
+                directory = root / 'compiler-transactions/issued'
+                directory.mkdir(parents=True)
+                (directory / marker).write_bytes(b'partial issued diagnostic')
+                summary = runner.diagnostic_summaries(root)
+                self.assertEqual(summary['transaction_count'], 1)
+                self.assertEqual(summary['scratch_without_capture_marker_count'], 0)
+                self.assertTrue(summary['issues'])
+
+    def test_transaction_discovery_and_capture_retention_are_bounded_separately(self):
+        root = Path(self.tmp.name) / 'bounded-transactions'
+        for index in range(5):
+            directory = root / f'compiler-transactions/{index}'
+            directory.mkdir(parents=True)
+            (directory / 'transaction.json').write_text(json.dumps({
+                'phase': 'compiler_completed', 'files': [], 'issues': []}))
+        with patch.object(runner, 'TRANSACTION_CAPTURE_LIMIT', 2):
+            summary = runner.diagnostic_summaries(root)
+        self.assertEqual(summary['transaction_count'], 5)
+        self.assertEqual(len(summary['transactions']), 2)
+        self.assertTrue(summary['transactions_truncated'])
+        self.assertTrue(summary['transaction_discovery_complete'])
+        with patch.object(runner, 'TRANSACTION_DIRECTORY_LIMIT', 3):
+            summary = runner.diagnostic_summaries(root)
+        self.assertEqual(summary['transaction_count'], 3)
+        self.assertFalse(summary['transaction_discovery_complete'])
+        self.assertTrue(summary['issues'])
 
     def test_transaction_capture_issue_summary_preserves_total_and_truncation(self):
         root = Path(self.tmp.name) / 'capture-issues'
@@ -667,6 +718,129 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertTrue(timing['complete'])
         self.assertEqual(timing['physical_record_count'], 1)
         self.assertEqual(timing['records'][0]['fields']['physical_execution'], '73:1')
+
+    def test_full_trace_streaming_crosses_old_byte_cap_with_bounded_samples(self):
+        root = Path(self.tmp.name) / 'large-trace'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        padding = json.dumps({'fields': {'padding': 'x' * (64 << 10)}}).encode() + b'\n'
+        physical = json.dumps({'fields': {'execution_layer': 'physical',
+                                         'physical_execution': 'after-old-cap'}}).encode() + b'\n'
+        trace = compiler / 'compiler.jsonl'
+        with trace.open('wb') as stream:
+            for _ in range(513):
+                stream.write(padding)
+            stream.write(physical * 600)
+        summary = runner.diagnostic_summaries(root)
+        scan, timing = summary['compiler_trace_scan'], summary['physical_compiler_timing']
+        self.assertTrue(scan['complete'])
+        self.assertEqual(scan['malformed_lines'], 0)
+        self.assertEqual(scan['examined_bytes'], trace.stat().st_size)
+        self.assertEqual(scan['sha256'], hashlib.sha256(trace.read_bytes()).hexdigest())
+        self.assertEqual(timing['physical_record_count'], 600)
+        self.assertEqual(timing['physical_request_count'], 1)
+        self.assertTrue(timing['aggregate_complete'])
+        self.assertTrue(timing['records_truncated'])
+        self.assertFalse(timing['complete'], 'aggregate completeness does not upgrade sampled evidence')
+        self.assertLessEqual(len(timing['records']), runner.TRACE_RECORD_LIMIT)
+        self.assertLessEqual(len(json.dumps(timing['records'])), 2 * runner.TRACE_RECORD_BYTE_LIMIT)
+
+    def test_trace_limits_and_partial_tail_are_not_malformed_json(self):
+        physical = json.dumps({'fields': {'execution_layer': 'physical',
+                                         'physical_execution': 'request'}}).encode() + b'\n'
+        controls = {
+            'oversized-valid': (json.dumps({'padding': 'x' * 200}).encode() + b'\n', 0, 1, 0),
+            'oversized-malformed': (b'{' + b'x' * 200 + b'\n', 0, 1, 0),
+            'malformed': (b'{invalid}\n', 1, 0, 0),
+            'partial-tail': (b'{"fields":', 0, 0, 1),
+        }
+        for name, (line, malformed, oversized, incomplete) in controls.items():
+            with self.subTest(name=name):
+                root = Path(self.tmp.name) / name
+                compiler = root / 'compiler'
+                compiler.mkdir(parents=True)
+                # A later valid row proves oversized lines are drained fully.
+                (compiler / 'compiler.jsonl').write_bytes(
+                    physical + line + (b'' if incomplete else physical))
+                with patch.object(runner, 'TRACE_LINE_LIMIT', 128):
+                    summary = runner.diagnostic_summaries(root)
+                scan = summary['compiler_trace_scan']
+                self.assertEqual(scan['malformed_lines'], malformed)
+                self.assertEqual(scan['oversized_lines'], oversized)
+                self.assertEqual(scan['incomplete_lines'], incomplete)
+                self.assertFalse(scan['complete'])
+                self.assertEqual(summary['physical_compiler_timing']['physical_record_count'],
+                                 1 if incomplete else 2)
+                self.assertFalse(summary['physical_compiler_timing']['aggregate_complete'])
+
+    def test_trace_growth_keeps_snapshot_finite_and_marks_scan_incomplete(self):
+        trace = Path(self.tmp.name) / 'growing.jsonl'
+        row = b'{"fields": {"message": "first"}}\n'
+        trace.write_bytes(row * 2)
+        scan = {}
+        rows = runner.compiler_trace_rows(trace, scan)
+        first = next(rows)
+        with trace.open('ab') as stream:
+            stream.write(row)
+        self.assertEqual(len([first, *rows]), 2)
+        self.assertEqual(scan['examined_bytes'], len(row) * 2)
+        self.assertTrue(scan['changed_during_scan'])
+        self.assertFalse(scan['complete'])
+        self.assertEqual(scan['malformed_lines'], 0)
+        self.assertEqual(scan['sha256'], hashlib.sha256(row * 2).hexdigest())
+
+    def test_identity_and_queue_bounds_make_aggregation_explicitly_incomplete(self):
+        root = Path(self.tmp.name) / 'bounded-identities'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        rows = []
+        for index in range(5):
+            rows.extend([
+                {'fields': {'phase': 'compiler_queue', 'daemon_epoch': 'epoch',
+                            'admission_id': index, 'queue_ms': index}},
+                {'fields': {'execution_layer': 'physical', 'physical_execution': f'epoch:{index}:1',
+                            'daemon_epoch': 'epoch', 'admission_id': index}},
+            ])
+        (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        with patch.object(runner, 'TRACE_IDENTITY_LIMIT', 2), patch.object(runner, 'TRACE_QUEUE_LIMIT', 2):
+            summary = runner.diagnostic_summaries(root)
+        timing, queue = summary['physical_compiler_timing'], summary['compiler_job_queue']
+        self.assertTrue(summary['compiler_trace_scan']['complete'])
+        self.assertEqual(timing['malformed_lines'], 0)
+        self.assertEqual(timing['physical_record_count'], 5)
+        self.assertEqual(timing['physical_request_count'], 2)
+        self.assertTrue(timing['request_identities_truncated'])
+        self.assertFalse(timing['request_count_complete'])
+        self.assertFalse(timing['aggregate_complete'])
+        self.assertEqual(queue['physical_job_count'], 2)
+        self.assertTrue(queue['physical_job_identities_truncated'])
+        self.assertTrue(queue['records_truncated'])
+        self.assertEqual(queue['unclassified_record_count'], 0)
+        self.assertFalse(queue['complete'])
+
+    def test_trace_aggregation_matches_exhaustive_small_histories(self):
+        root = Path(self.tmp.name) / 'trace-histories'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        trace = compiler / 'compiler.jsonl'
+        # Independent oracle: tokens name two physical identities or a wrapper.
+        # Enumerating all length-four histories exposes repeated/retired IDs and
+        # ordering effects without reproducing the consumer's context merging.
+        for history in itertools.product(('one', 'two', None), repeat=4):
+            with self.subTest(history=history):
+                rows = [{'fields': ({'execution_layer': 'physical', 'physical_execution': token}
+                                   if token else {'execution_layer': 'transaction_wrapper'})}
+                        for token in history]
+                trace.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                with patch.object(runner, 'TRACE_RECORD_LIMIT', 1):
+                    summary = runner.diagnostic_summaries(root)
+                timing = summary['physical_compiler_timing']
+                physical = [token for token in history if token]
+                self.assertEqual(timing['physical_record_count'], len(physical))
+                self.assertEqual(timing['physical_request_count'], len(set(physical)))
+                self.assertTrue(summary['compiler_trace_scan']['complete'])
+                self.assertEqual(timing['aggregate_complete'], bool(physical))
+                self.assertEqual(timing['records_truncated'], len(physical) > 1)
 
     def test_actual_older_compiler_span_trace_is_explicitly_unclassified(self):
         # Four unmodified queue/start/timing/close rows from the retained 2026-10-05

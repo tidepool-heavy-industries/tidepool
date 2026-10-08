@@ -21,6 +21,15 @@ import uuid
 DEFAULT_TIMEOUT = 300
 DISCOVERY_TIMEOUT = 30
 OUTPUT_LIMIT = 4 << 20
+TRACE_LINE_LIMIT = 1 << 20
+TRACE_IDENTITY_LIMIT = 4096
+TRACE_IDENTITY_BYTE_LIMIT = 512
+TRACE_RECORD_LIMIT = 512
+TRACE_RECORD_BYTE_LIMIT = 256 << 10
+TRACE_QUEUE_LIMIT = 256
+TRACE_QUEUE_BYTE_LIMIT = 64 << 10
+TRANSACTION_DIRECTORY_LIMIT = 4096
+TRANSACTION_CAPTURE_LIMIT = 256
 RESULT = re.compile(
     r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
     re.MULTILINE,
@@ -512,6 +521,71 @@ def compiler_trace_context(row):
     return merged, request
 
 
+def compiler_trace_rows(trace, scan):
+    """Scan a finite file snapshot with bounded rows, draining oversized lines.
+
+    Retention limits belong to the aggregators. A row limit is missing evidence,
+    not proof of malformed JSON; only complete, bounded rows are decoded.
+    """
+    scan.update(complete=False, examined_bytes=0, row_count=0, malformed_lines=0,
+                oversized_lines=0, incomplete_lines=0, changed_during_scan=False)
+    if trace.is_symlink():
+        raise ValueError('compiler diagnostic trace must not be a symlink')
+    with trace.open('rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError('compiler diagnostic trace must be a regular file')
+        scan['trace_bytes'] = before.st_size
+        remaining = before.st_size
+        digest = hashlib.sha256()
+        while remaining:
+            line = stream.readline(min(remaining, TRACE_LINE_LIMIT + 1))
+            if not line:
+                scan['incomplete_lines'] += 1
+                break
+            remaining -= len(line)
+            scan['examined_bytes'] += len(line)
+            digest.update(line)
+            if len(line) > TRACE_LINE_LIMIT:
+                scan['oversized_lines'] += 1
+                # Recover the next line without treating fragments as JSON.
+                while not line.endswith(b'\n') and remaining:
+                    line = stream.readline(min(remaining, 64 << 10))
+                    if not line:
+                        break
+                    remaining -= len(line)
+                    scan['examined_bytes'] += len(line)
+                    digest.update(line)
+                if not line.endswith(b'\n'):
+                    scan['incomplete_lines'] += 1
+                continue
+            if not line.endswith(b'\n'):
+                scan['incomplete_lines'] += 1
+                continue
+            scan['row_count'] += 1
+            try:
+                yield json.loads(line), len(line)
+            except (ValueError, UnicodeDecodeError):
+                scan['malformed_lines'] += 1
+        after = os.fstat(stream.fileno())
+        current = trace.stat()
+        def stamp(value):
+            return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        scan['changed_during_scan'] = stamp(before) != stamp(after) or stamp(after) != stamp(current)
+        scan['sha256'] = digest.hexdigest()
+        scan['sha256_scope'] = 'examined_bytes'
+        scan['complete'] = (scan['examined_bytes'] == before.st_size
+                            and not scan['changed_during_scan']
+                            and not scan['malformed_lines']
+                            and not scan['oversized_lines']
+                            and not scan['incomplete_lines'])
+
+
+def bounded_trace_identity(value):
+    return (isinstance(value, str) and bool(value)
+            and len(value.encode('utf-8')) <= TRACE_IDENTITY_BYTE_LIMIT)
+
+
 def diagnostic_summaries(artifact_root):
     """Keep bounded compiler outcome/timing evidence after success scratch removal."""
     def read_json(path):
@@ -530,14 +604,41 @@ def diagnostic_summaries(artifact_root):
         discovery['complete'] = False
         discovery['issues'].append({'kind': kind, 'path': str(path)})
     transaction_root = artifact_root / 'compiler-transactions'
-    if transaction_root.is_symlink():
-        summaries['issues'].append('compiler transaction directory must not be a symlink')
-        transactions = []
-    else:
-        transactions = sorted(path / 'transaction.json' for path in transaction_root.glob('*')
-                              if path.is_dir() or path.is_symlink())
-    summaries['transaction_count'] = len(transactions)
-    for path in transactions[:256]:
+    transactions, transaction_count, scratch_count = [], 0, 0
+    summaries['transaction_discovery_complete'] = True
+    if transaction_root.is_symlink() or (transaction_root.exists() and not transaction_root.is_dir()):
+        summaries['issues'].append('compiler transaction directory must be a directory, not a symlink')
+        summaries['transaction_discovery_complete'] = False
+    elif transaction_root.exists():
+        # Scratch is allocated before admission/cache lookup. Capture.start
+        # writes request/cwd before its atomic transaction marker, so only
+        # issued capture markers establish an obligation to read that report.
+        with os.scandir(transaction_root) as directories:
+            for index, entry in enumerate(directories):
+                if index >= TRANSACTION_DIRECTORY_LIMIT:
+                    summaries['transaction_discovery_complete'] = False
+                    summaries['issues'].append('compiler transaction directory discovery bound exceeded')
+                    break
+                directory = Path(entry.path)
+                if entry.is_symlink():
+                    summaries['transaction_discovery_complete'] = False
+                    summaries['issues'].append(f'compiler transaction directory must not be a symlink: {directory}')
+                    continue
+                if not entry.is_dir():
+                    continue
+                markers = ('transaction.json', 'transaction.json.pending', 'compiler-request.bin',
+                           'compiler-cwd.bin', 'compiler.stderr', 'consumed-sources.json')
+                if any((directory / marker).exists() or (directory / marker).is_symlink()
+                       for marker in markers):
+                    transaction_count += 1
+                    if len(transactions) < TRANSACTION_CAPTURE_LIMIT:
+                        transactions.append(directory / 'transaction.json')
+                else:
+                    scratch_count += 1
+        transactions.sort()
+    summaries['scratch_without_capture_marker_count'] = scratch_count
+    summaries['transaction_count'] = transaction_count
+    for path in transactions:
         try:
             if path.is_symlink() or path.parent.is_symlink():
                 raise ValueError('compiler transaction marker must not be a symlink')
@@ -563,7 +664,7 @@ def diagnostic_summaries(artifact_root):
             summaries['transactions'].append(summary)
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
             summaries['issues'].append(f'{path}: {error}')
-    summaries['transactions_truncated'] = len(transactions) > 256
+    summaries['transactions_truncated'] = transaction_count > len(transactions)
     def summarize_compiler(compiler):
         result = {'path': str(compiler), 'authority': False, 'issues': []}
         if any((compiler / filename).exists() or (compiler / filename).is_symlink()
@@ -596,80 +697,101 @@ def diagnostic_summaries(artifact_root):
             }
             result['compiler_job_queue'] = {'records': [], 'data_status': 'trace_absent', 'complete': False}
             return result
-        physical, retained_bytes, examined_bytes, malformed, total = [], 0, 0, 0, 0
+        physical, retained_bytes, total = [], 0, 0
         unknown, physical_requests, physical_jobs = 0, set(), set()
+        requests_truncated = jobs_truncated = False
         queued, queue_bytes, queue_rows, queue_unknown = {}, 0, 0, 0
+        queue_truncated = False
+        scan = {}
         try:
-            if trace.is_symlink():
-                raise ValueError('compiler diagnostic trace must not be a symlink')
-            with trace.open('rb') as stream:
-                while True:
-                    line = stream.readline((1 << 20) + 1)
-                    if not line:
-                        break
-                    examined_bytes += len(line)
-                    if examined_bytes > 32 << 20 or len(line) > 1 << 20:
-                        malformed += 1
-                        break
-                    try:
-                        row = json.loads(line)
-                        context, request = compiler_trace_context(row)
-                        fields = row.get('fields', row)
-                        if fields.get('phase') == 'compiler_queue':
-                            queue_rows += 1
-                            epoch, admission, elapsed = (fields.get(key) for key in
-                                                         ('daemon_epoch', 'admission_id', 'queue_ms'))
-                            if (not isinstance(epoch, str) or not epoch
-                                    or type(admission) is not int or admission < 0
-                                    or type(elapsed) not in (int, float)
-                                    or not math.isfinite(elapsed) or elapsed < 0):
-                                queue_unknown += 1
+            for row, line_bytes in compiler_trace_rows(trace, scan):
+                try:
+                    context, request = compiler_trace_context(row)
+                    fields = row.get('fields', row)
+                    if fields.get('phase') == 'compiler_queue':
+                        queue_rows += 1
+                        epoch, admission, elapsed = (fields.get(key) for key in
+                                                     ('daemon_epoch', 'admission_id', 'queue_ms'))
+                        if (not bounded_trace_identity(epoch)
+                                or type(admission) is not int or not 0 <= admission < 1 << 64
+                                or type(elapsed) not in (int, float)
+                                or not math.isfinite(elapsed) or elapsed < 0):
+                            queue_unknown += 1
+                        else:
+                            job = (epoch, admission)
+                            if job in queued:
+                                if queued[job]['queue_ms'] != elapsed:
+                                    queue_unknown += 1
+                            elif len(queued) < TRACE_QUEUE_LIMIT and queue_bytes + line_bytes <= TRACE_QUEUE_BYTE_LIMIT:
+                                queued[job] = {'daemon_epoch': epoch, 'admission_id': admission,
+                                               'queue_ms': elapsed, 'row': row}
+                                queue_bytes += line_bytes
+                            else:
+                                queue_truncated = True
+                    layer = context.get('execution_layer')
+                    if layer == 'physical' and bounded_trace_identity(context.get('physical_execution')):
+                        total += 1
+                        identity = context['physical_execution']
+                        if identity in physical_requests or len(physical_requests) < TRACE_IDENTITY_LIMIT:
+                            physical_requests.add(identity)
+                        else:
+                            requests_truncated = True
+                        epoch, admission = context.get('daemon_epoch'), context.get('admission_id')
+                        if epoch is not None or admission is not None:
+                            if not bounded_trace_identity(epoch) or type(admission) is not int or not 0 <= admission < 1 << 64:
+                                unknown += 1
                             else:
                                 job = (epoch, admission)
-                                if job in queued:
-                                    if queued[job]['queue_ms'] != elapsed:
-                                        queue_unknown += 1
-                                elif len(queued) < 256 and queue_bytes + len(line) <= 64 << 10:
-                                    queued[job] = {'daemon_epoch': epoch, 'admission_id': admission,
-                                                   'queue_ms': elapsed, 'row': row}
-                                    queue_bytes += len(line)
+                                if job in physical_jobs or len(physical_jobs) < TRACE_IDENTITY_LIMIT:
+                                    physical_jobs.add(job)
                                 else:
-                                    queue_unknown += 1
-                        layer = context.get('execution_layer')
-                        if layer == 'physical' and context.get('physical_execution'):
-                            total += 1
-                            physical_requests.add(str(context['physical_execution']))
-                            if context.get('daemon_epoch') is not None and context.get('admission_id') is not None:
-                                physical_jobs.add((context['daemon_epoch'], context['admission_id']))
-                            if retained_bytes + len(line) <= 256 << 10 and len(physical) < 512:
-                                physical.append({**row, 'physical_context': context})
-                                retained_bytes += len(line)
-                        elif request and layer not in ('endpoint_submission', 'transaction_wrapper'):
-                            unknown += 1
-                    except (ValueError, TypeError, AttributeError):
-                        malformed += 1
+                                    jobs_truncated = True
+                        if retained_bytes + line_bytes <= TRACE_RECORD_BYTE_LIMIT and len(physical) < TRACE_RECORD_LIMIT:
+                            physical.append({**row, 'physical_context': context})
+                            retained_bytes += line_bytes
+                    elif request and layer not in ('endpoint_submission', 'transaction_wrapper'):
+                        unknown += 1
+                except (ValueError, TypeError, AttributeError):
+                    scan['malformed_lines'] += 1
         except (OSError, ValueError) as error:
-            malformed += 1
+            scan['complete'] = False
+            scan['error'] = str(error)
             result['issues'].append(f'{trace}: {error}')
-        scanned = examined_bytes <= 32 << 20 and malformed == 0
+        # Schema failures discovered by the consumer also invalidate the scan.
+        scanned = scan.get('complete', False) and scan.get('malformed_lines', 0) == 0
+        scan['complete'] = scanned
+        result['compiler_trace_scan'] = scan
         result['physical_compiler_timing'] = {
             'records': physical, 'physical_record_count': total,
             'physical_request_count': len(physical_requests),
+            'request_count_complete': scanned and not requests_truncated,
+            'request_identities_truncated': requests_truncated,
             'unclassified_request_records': unknown,
-            'retained_record_count': len(physical), 'malformed_lines': malformed,
+            'retained_record_count': len(physical),
+            'records_truncated': total > len(physical),
+            'malformed_lines': scan.get('malformed_lines', 0),
             'data_status': 'observed' if total else 'no_identified_physical_requests',
-            'complete': scanned and unknown == 0 and total > 0 and total == len(physical),
-            'trace_bytes': trace.stat().st_size,
+            # Preserve the original full-record completeness contract. Aggregate
+            # completeness is separate from the explicitly bounded row sample.
+            'aggregate_complete': scanned and not requests_truncated and unknown == 0 and total > 0,
+            'complete': (scanned and not requests_truncated and unknown == 0
+                         and total > 0 and total == len(physical)),
+            'trace_bytes': scan.get('trace_bytes'),
         }
         result['compiler_job_queue'] = {
             'records': list(queued.values()), 'observed_record_count': queue_rows,
             'retained_job_count': len(queued), 'unclassified_record_count': queue_unknown,
+            'records_truncated': queue_truncated,
             'physical_job_count': len(physical_jobs),
+            'physical_job_count_complete': scanned and not jobs_truncated,
+            'physical_job_identities_truncated': jobs_truncated,
             'physical_jobs_without_queue': len(physical_jobs.difference(queued)),
             'data_status': 'observed' if queue_rows else 'no_observed_job_queue',
-            'complete': (scanned and queue_unknown == 0 and queue_rows > 0
+            'complete': (scanned and not jobs_truncated and not queue_truncated
+                         and queue_unknown == 0 and queue_rows > 0
                          and physical_jobs.issubset(queued)),
         }
+
         return result
 
     roots = []
