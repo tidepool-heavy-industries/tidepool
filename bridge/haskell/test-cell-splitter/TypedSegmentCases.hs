@@ -15,6 +15,7 @@ import GHC
 import GHC.Core (bindersOfBinds)
 import GHC.Driver.Session (PackageDBFlag(..), PkgDbRef(..))
 import GHC.Driver.Env.Types (HscEnv, hsc_NC, hsc_unit_env)
+import GHC.Iface.Env (allocateGlobalBinder)
 import GHC.Data.FastString (fsLit)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
@@ -37,6 +38,7 @@ import GHC.Unit.Module.ModIface (mi_decls, mi_exports, mi_module)
 import GHC.Unit.Home.ModInfo (hm_details, hm_iface)
 import qualified GHC.Stg.Syntax as Stg
 import GHC.Types.SourceError (SourceError)
+import GHC.Types.SrcLoc (noSrcSpan)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import System.Directory
@@ -478,6 +480,14 @@ assertTypedSegmentRootsRegistered environment pending = do
         found -> fail ("typed segment root Name is not the exact cached module/OccName Name: "
           ++ renderNameWithUnique name ++ "; cached="
           ++ maybe "<missing>" renderNameWithUnique found)
+  forM_ roots $ \root -> do
+    let name = varName root
+    owner <- maybe (fail ("typed segment root has no module-owned Name: "
+      ++ renderNameWithUnique name)) pure (nameModule_maybe name)
+    repeated <- allocateGlobalBinder (hsc_NC environment) owner (nameOccName name) noSrcSpan
+    unless (repeated == name) $ fail
+      ("repeated typed segment root allocation changed its exact Name: "
+        ++ renderNameWithUnique name ++ "; returned=" ++ renderNameWithUnique repeated)
 
 data PreparationExpected = PrepareAccepted | PrepareTypedRefusal | PrepareSourceRefusal
 
