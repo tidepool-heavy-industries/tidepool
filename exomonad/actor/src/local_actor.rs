@@ -162,6 +162,8 @@ impl<T> KernelStep<T> {
 #[derive(Clone)]
 pub struct KernelContext {
     identity: ActorRef,
+    terminal: RetainedActorExit,
+    spawn_ownership: SpawnOwnership,
     myself: RactorRef<KernelMessage>,
     children: std::sync::Arc<parking_lot::Mutex<HashMap<ractor::ActorId, LocalActorRef>>>,
     resources: Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
@@ -201,6 +203,63 @@ fn advance_actor_ids_past(actor: crate::ActorId) {
     NEXT_ACTOR_ID.fetch_max(actor.0.saturating_add(1), Ordering::Relaxed);
 }
 
+/// Ownership issued before Ractor runs `pre_start`; live supervision may not yet
+/// be linked and remains independently queryable after replacement transfers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnOwnership {
+    Independent,
+    Supervised(ActorRef),
+}
+
+impl SpawnOwnership {
+    pub(crate) fn is_independent(self) -> bool {
+        matches!(self, Self::Independent)
+    }
+}
+
+#[derive(Default)]
+struct DirectoryMembership {
+    closed: bool,
+    entries: HashMap<ActorRef, DirectoryEntry>,
+}
+
+/// A sealed membership snapshot must issue cancellation before root cleanup.
+pub(crate) struct SealedActorMembership {
+    actors: Vec<(LocalActorRef, SpawnOwnership)>,
+}
+
+pub(crate) struct ForestRetirementBatch {
+    _fence: crate::kernel::RetirementBatch,
+    roots: Vec<LocalActorRef>,
+}
+
+impl SealedActorMembership {
+    pub(crate) fn cancel_all(self, terminal: ActorTerminal) -> ForestRetirementBatch {
+        let roots = self
+            .actors
+            .iter()
+            .filter(|(_, ownership)| ownership.is_independent())
+            .map(|(actor, _)| actor.clone())
+            .collect();
+        let fence = crate::kernel::RetirementBatch::issue(
+            self.actors
+                .into_iter()
+                .map(|(actor, _)| (actor, terminal.clone()))
+                .collect(),
+        );
+        ForestRetirementBatch {
+            _fence: fence,
+            roots,
+        }
+    }
+}
+
+impl ForestRetirementBatch {
+    pub(crate) fn into_roots(self) -> Vec<LocalActorRef> {
+        self.roots
+    }
+}
+
 /// Routing and terminal-observation index for one resident actor forest.
 ///
 /// This is deliberately not a scheduler or lifecycle state machine. Ractor
@@ -214,7 +273,7 @@ fn advance_actor_ids_past(actor: crate::ActorId) {
 /// fenced, claimed, or live in this particular forest.
 #[derive(Clone, Default)]
 pub struct LocalActorDirectory {
-    actors: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, DirectoryEntry>>>,
+    actors: std::sync::Arc<parking_lot::RwLock<DirectoryMembership>>,
     sessions: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, crate::ActorSessionContext>>>,
     identities: std::sync::Arc<parking_lot::Mutex<DirectoryIdentities>>,
 }
@@ -228,6 +287,7 @@ struct DirectoryIdentities {
 
 struct DirectoryEntry {
     actor: LocalActorRef,
+    spawn_ownership: SpawnOwnership,
     // Retaining an exit must not keep its execution context (and thus this
     // directory) alive. Ractor's actor state owns the strong context reference.
     context: std::sync::Weak<KernelContext>,
@@ -269,6 +329,7 @@ impl LocalActorDirectory {
             let predecessor_is_terminal = self
                 .actors
                 .read()
+                .entries
                 .get(&previous)
                 .is_some_and(|entry| entry.actor.terminal().get().is_some());
             if !predecessor_is_terminal || actor.incarnation <= previous.incarnation {
@@ -291,6 +352,7 @@ impl LocalActorDirectory {
     pub fn resolve(&self, actor: ActorRef) -> Option<LocalActorRef> {
         self.actors
             .read()
+            .entries
             .get(&actor)
             .map(|entry| entry.actor.clone())
     }
@@ -300,27 +362,57 @@ impl LocalActorDirectory {
         self.sessions.read().get(&actor).cloned()
     }
 
-    fn insert(&self, actor: LocalActorRef, context: std::sync::Weak<KernelContext>) {
-        self.identities
-            .lock()
+    fn insert(
+        &self,
+        actor: LocalActorRef,
+        context: std::sync::Weak<KernelContext>,
+        spawn_ownership: SpawnOwnership,
+    ) -> Result<(), &'static str> {
+        // Match claim_exact's identities -> membership lock order. No staged
+        // actor becomes routable after the owning shutdown snapshot is sealed.
+        let mut identities = self.identities.lock();
+        let mut membership = self.actors.write();
+        if membership.closed {
+            return Err("actor forest admission is closed");
+        }
+        identities
             .runtime
             .insert(actor.address().get_id(), actor.identity());
-        self.actors
-            .write()
-            .insert(actor.identity(), DirectoryEntry { actor, context });
+        membership.entries.insert(
+            actor.identity(),
+            DirectoryEntry {
+                actor,
+                context,
+                spawn_ownership,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn seal(&self) -> SealedActorMembership {
+        let mut membership = self.actors.write();
+        membership.closed = true;
+        SealedActorMembership {
+            actors: membership
+                .entries
+                .values()
+                .map(|entry| (entry.actor.clone(), entry.spawn_ownership))
+                .collect(),
+        }
     }
 
     fn context(&self, actor: ActorRef) -> Option<std::sync::Arc<KernelContext>> {
-        self.actors.read().get(&actor)?.context.upgrade()
+        self.actors.read().entries.get(&actor)?.context.upgrade()
     }
 
     fn forget_terminal(&self, actor: ActorRef) -> bool {
         let mut actors = self.actors.write();
         let terminal = actors
+            .entries
             .get(&actor)
             .is_some_and(|entry| entry.actor.terminal().get().is_some());
         if terminal {
-            actors.remove(&actor);
+            actors.entries.remove(&actor);
             self.sessions.write().remove(&actor);
         }
         terminal
@@ -396,26 +488,21 @@ impl KernelContext {
         }
     }
 
+    pub(crate) fn spawn_ownership(&self) -> SpawnOwnership {
+        self.spawn_ownership
+    }
+
     pub(crate) fn requested_shutdown(&self) -> Option<ActorTerminal> {
-        self.directory
-            .resolve(self.identity)?
-            .terminal()
-            .requested_shutdown()
+        self.terminal.requested_shutdown()
     }
 
     pub(crate) fn retained_exit(&self) -> RetainedActorExit {
-        #[allow(
-            clippy::expect_used,
-            reason = "called on this actor's own KernelContext while it is \
-                      still running its turn loop; forget_terminal only ever \
-                      removes an entry already observed terminal, so a live \
-                      actor's own identity always resolves in its directory"
-        )]
-        self.directory
-            .resolve(self.identity)
-            .expect("running actor remains in its local directory")
-            .terminal()
-            .clone()
+        self.terminal.clone()
+    }
+
+    pub(crate) fn retain_child_startup_cleanup(&self, outcome: crate::CleanupComponentOutcome) {
+        let mut retained = self.forgotten_children.lock();
+        *retained = combine_cleanup(retained.clone(), outcome);
     }
 
     pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
@@ -544,11 +631,6 @@ impl KernelContext {
         // Hold admission through registration so retirement cannot miss a
         // child whose startup is already in flight.
         let admission = self.child_admission_closed.clone().read_owned().await;
-        if *admission {
-            return Err(ractor::SpawnErr::StartupFailed(
-                std::io::Error::other("actor child admission is closed").into(),
-            ));
-        }
         let mut custody = StartupCustody {
             retained: self.forgotten_children.clone(),
             accounted: false,
@@ -561,47 +643,72 @@ impl KernelContext {
             .map_err(|error| {
                 ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into())
             })?;
-        if let Some(admission) = &startup_admission {
-            admission.reserve(identity).map_err(|detail| {
-                custody.accounted = true;
-                ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into())
-            })?;
-        }
+        let startup_refusal = if *admission {
+            Some("actor child admission is closed".to_owned())
+        } else {
+            startup_admission
+                .as_ref()
+                .and_then(|admission| admission.reserve(identity).err())
+        };
+        // An already prepared behavior still owns real resources on refusal.
+        // Run its ordinary cleanup in an unlinked startup, never registering or
+        // starting authored work after the admission boundary has closed.
+        let cleanup_only = startup_refusal.is_some();
         let arguments = LocalActorArguments {
+            spawn_ownership: match lifetime {
+                crate::WorkerLifetime::SwarmOwned => SpawnOwnership::Independent,
+                crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::ActorOwned => {
+                    SpawnOwnership::Supervised(self.identity)
+                }
+            },
             behavior,
+            startup_refusal,
             startup_admission,
             terminal: terminal.clone(),
             directory: self.directory.clone(),
             identity,
             mailbox_admission: mailbox_admission.clone(),
         };
-        let spawned = match lifetime {
-            crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::ActorOwned => {
-                Box::pin(
-                    self.myself
-                        .spawn_linked(name, LocalActor::<C>(PhantomData), arguments),
-                )
-                .await
-            }
-            crate::WorkerLifetime::SwarmOwned => {
-                Box::pin(LocalActor::<C>::spawn(
-                    name,
-                    LocalActor::<C>(PhantomData),
-                    arguments,
-                ))
-                .await
+        let spawned = if cleanup_only {
+            Box::pin(LocalActor::<C>::spawn(
+                name,
+                LocalActor::<C>(PhantomData),
+                arguments,
+            ))
+            .await
+        } else {
+            match lifetime {
+                crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::ActorOwned => {
+                    Box::pin(self.myself.spawn_linked(
+                        name,
+                        LocalActor::<C>(PhantomData),
+                        arguments,
+                    ))
+                    .await
+                }
+                crate::WorkerLifetime::SwarmOwned => {
+                    Box::pin(LocalActor::<C>::spawn(
+                        name,
+                        LocalActor::<C>(PhantomData),
+                        arguments,
+                    ))
+                    .await
+                }
             }
         };
         let (address, task) = match spawned {
             Ok(spawned) => spawned,
             Err(error) => {
-                let mut retained = self.forgotten_children.lock();
-                *retained = combine_cleanup(
-                    retained.clone(),
-                    crate::CleanupComponentOutcome::Unconfirmed(format!(
-                        "child startup failed without retained cleanup: {error}"
-                    )),
-                );
+                if let Some(cleanup) = startup_cleanup(&error) {
+                    self.retain_child_startup_cleanup(combine_cleanup(
+                        combine_cleanup(cleanup.hook, cleanup.realm),
+                        cleanup.children,
+                    ));
+                } else {
+                    self.retain_child_startup_cleanup(crate::CleanupComponentOutcome::Unconfirmed(
+                        format!("child startup failed without retained cleanup: {error}"),
+                    ));
+                }
                 custody.accounted = true;
                 return Err(error);
             }
@@ -616,6 +723,22 @@ impl KernelContext {
         }
         custody.accounted = true;
         Ok((child, admission))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{detail}")]
+struct StartupRefusal {
+    detail: String,
+    cleanup: Option<crate::ResidentCleanupOutcome>,
+}
+
+pub(crate) fn startup_cleanup(error: &ractor::SpawnErr) -> Option<crate::ResidentCleanupOutcome> {
+    match error {
+        ractor::SpawnErr::StartupFailed(error) => {
+            error.downcast_ref::<StartupRefusal>()?.cleanup.clone()
+        }
+        _ => None,
     }
 }
 
@@ -1015,6 +1138,8 @@ pub(crate) trait WorkerStartupAdmission: Send + Sync {
 }
 
 pub struct LocalActorArguments<B> {
+    pub(crate) startup_refusal: Option<String>,
+    pub(crate) spawn_ownership: SpawnOwnership,
     pub behavior: B,
     pub(crate) startup_admission: Option<Arc<dyn WorkerStartupAdmission>>,
     pub terminal: RetainedActorExit,
@@ -1491,6 +1616,8 @@ where
         let identity = arguments.identity;
         let context = std::sync::Arc::new(KernelContext {
             identity,
+            terminal: arguments.terminal.clone(),
+            spawn_ownership: arguments.spawn_ownership,
             myself,
             children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
             resources: Arc::new(Mutex::new(HashMap::new())),
@@ -1501,6 +1628,7 @@ where
             )),
         });
         let startup_admission = arguments.startup_admission;
+        let startup_refusal = arguments.startup_refusal;
         let mut state = Box::new(LocalActorState {
             replacement: None,
             drain: DrainState::Open,
@@ -1515,16 +1643,48 @@ where
             mailbox_drain_scheduled: false,
             hosted_admission: HostedAdmission::Open,
         });
+        if let Some(detail) = startup_refusal {
+            finish_actor(
+                &state.context.myself.clone(),
+                &mut state,
+                Disposition::Stop(ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: detail.clone(),
+                    diagnostic: None,
+                }),
+            )
+            .await;
+            return Err(Box::new(StartupRefusal {
+                detail,
+                cleanup: state.terminal.cleanup(),
+            }));
+        }
         let child = LocalActorRef::with_identity_admission(
             state.context.myself.clone(),
             state.terminal.clone(),
             state.context.identity,
             state.mailbox_admission.clone(),
         );
-        state
-            .context
-            .directory
-            .insert(child.clone(), std::sync::Arc::downgrade(&state.context));
+        if let Err(detail) = state.context.directory.insert(
+            child.clone(),
+            std::sync::Arc::downgrade(&state.context),
+            state.context.spawn_ownership,
+        ) {
+            finish_actor(
+                &state.context.myself.clone(),
+                &mut state,
+                Disposition::Stop(ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: detail.into(),
+                    diagnostic: None,
+                }),
+            )
+            .await;
+            return Err(Box::new(StartupRefusal {
+                detail: detail.into(),
+                cleanup: state.terminal.cleanup(),
+            }));
+        }
         if let Some(admission) = startup_admission {
             if let Err(detail) = admission.admit(child) {
                 finish_actor(
@@ -1537,7 +1697,21 @@ where
                     }),
                 )
                 .await;
-                return Err(std::io::Error::other(detail).into());
+                return Err(Box::new(StartupRefusal {
+                    detail,
+                    cleanup: state.terminal.cleanup(),
+                }));
+            }
+        }
+        if !state.behavior.replacement_staged() {
+            if let Some(terminal) = state.context.requested_shutdown() {
+                finish_actor(
+                    &state.context.myself.clone(),
+                    &mut state,
+                    Disposition::Stop(terminal),
+                )
+                .await;
+                return Ok(state);
             }
         }
         match state.behavior.start(&state.context).await {
@@ -1566,7 +1740,20 @@ where
                     Disposition::Stop(terminal),
                 )
                 .await;
-                return Err(Box::new(error));
+                return Err(Box::new(StartupRefusal {
+                    detail: error.to_string(),
+                    cleanup: state.terminal.cleanup(),
+                }));
+            }
+        }
+        if !state.behavior.replacement_staged() {
+            if let Some(terminal) = state.context.requested_shutdown() {
+                finish_actor(
+                    &state.context.myself.clone(),
+                    &mut state,
+                    Disposition::Stop(terminal),
+                )
+                .await;
             }
         }
         Ok(state)
@@ -1787,7 +1974,13 @@ where
                     state.drain = DrainState::Draining;
                 }
                 match state.behavior.activate_replacement(&state.context).await {
-                    Ok(step) => finish_after_step(&myself, state, step).await,
+                    Ok(step) => {
+                        if let Some(terminal) = state.context.requested_shutdown() {
+                            finish_actor(&myself, state, Disposition::Stop(terminal)).await;
+                        } else {
+                            finish_after_step(&myself, state, step).await;
+                        }
+                    }
                     Err(error) => fail_actor_with_error(&myself, state, error).await,
                 }
             }
@@ -3043,6 +3236,8 @@ where
         name,
         LocalActor::<B>(PhantomData),
         LocalActorArguments {
+            spawn_ownership: SpawnOwnership::Independent,
+            startup_refusal: None,
             behavior,
             startup_admission: None,
             terminal: terminal.clone(),
@@ -3274,7 +3469,7 @@ fn failed_terminal(summary: String) -> ActorTerminal {
     ActorTerminal::failed(summary, None)
 }
 
-fn combine_cleanup(
+pub(crate) fn combine_cleanup(
     left: crate::CleanupComponentOutcome,
     right: crate::CleanupComponentOutcome,
 ) -> crate::CleanupComponentOutcome {
@@ -3314,6 +3509,27 @@ async fn shutdown_children(
     owner_exit: ActorExitKind,
     timeout: Duration,
 ) -> crate::CleanupComponentOutcome {
+    let (children, mut outcome) = {
+        let children = context.children.lock();
+        (
+            children.values().cloned().collect::<Vec<_>>(),
+            context.forgotten_children.lock().clone(),
+        )
+    };
+    let requested = ActorTerminal {
+        kind: match owner_exit {
+            ActorExitKind::Failed => ActorExitKind::Failed,
+            ActorExitKind::Completed | ActorExitKind::Cancelled => ActorExitKind::Cancelled,
+        },
+        summary: "owner actor stopped".into(),
+        diagnostic: None,
+    };
+    let batch = crate::kernel::RetirementBatch::issue(
+        children
+            .into_iter()
+            .map(|child| (child, requested.clone()))
+            .collect(),
+    );
     let resources: Vec<_> = context.resources.lock().values().cloned().collect();
     for resource in &resources {
         resource.cell.stop(None);
@@ -3340,24 +3556,11 @@ async fn shutdown_children(
         let mut retained = context.forgotten_children.lock();
         *retained = combine_cleanup(retained.clone(), outcome);
     }
-    let (children, mut outcome) = {
-        let children = context.children.lock();
-        (
-            children.values().cloned().collect::<Vec<_>>(),
-            context.forgotten_children.lock().clone(),
-        )
-    };
+    // Include resource cleanup evidence retained after the child fence.
+    outcome = combine_cleanup(outcome, context.forgotten_children.lock().clone());
     let mut shutdowns = FuturesUnordered::new();
-    for child in children {
+    for (child, requested) in batch.into_actors() {
         shutdowns.push(async move {
-            let requested = ActorTerminal {
-                kind: match owner_exit {
-                    ActorExitKind::Failed => ActorExitKind::Failed,
-                    ActorExitKind::Completed | ActorExitKind::Cancelled => ActorExitKind::Cancelled,
-                },
-                summary: "owner actor stopped".into(),
-                diagnostic: None,
-            };
             let result =
                 tokio::time::timeout(timeout, child.shutdown_with_cleanup(requested.clone())).await;
             match result {
@@ -6857,6 +7060,8 @@ mod tests {
         assert!(fixture.calls.lock().contains(&"first-start"));
         let context = KernelContext {
             identity: actor.identity(),
+            terminal: actor.terminal().clone(),
+            spawn_ownership: SpawnOwnership::Independent,
             myself: actor.address().clone(),
             children: Arc::new(Mutex::new(HashMap::from([(
                 actor.address().get_id(),
@@ -6892,7 +7097,12 @@ mod tests {
         assert_eq!(observed.cleanup.actor(), actor.identity());
         context
             .directory
-            .insert(actor.clone(), std::sync::Weak::new());
+            .insert(
+                actor.clone(),
+                std::sync::Weak::new(),
+                SpawnOwnership::Independent,
+            )
+            .unwrap();
         assert!(context.forget_terminal_actor(actor.identity()));
         assert!(context.children.lock().is_empty());
         assert!(
@@ -6912,6 +7122,8 @@ mod tests {
                 .unwrap();
             let context = KernelContext {
                 identity: owner.identity(),
+                terminal: owner.terminal().clone(),
+                spawn_ownership: SpawnOwnership::Independent,
                 myself: owner.address().clone(),
                 children: Arc::new(Mutex::new(HashMap::new())),
                 directory: LocalActorDirectory::default(),
@@ -7562,6 +7774,8 @@ mod tests {
 
         let context = std::sync::Arc::new(KernelContext {
             identity: placeholder.identity(),
+            terminal: terminal.clone(),
+            spawn_ownership: SpawnOwnership::Independent,
             myself: placeholder.address().clone(),
             children: Arc::new(Mutex::new(HashMap::new())),
             directory: LocalActorDirectory::default(),
