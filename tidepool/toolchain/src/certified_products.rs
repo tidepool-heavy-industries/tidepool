@@ -6270,9 +6270,9 @@ pub(crate) fn certify_products_with_validation(
     validation.inventory.reserve::<(
         CachedHomeOwner,
         [u8; 32],
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
+        &[u8],
+        &[u8],
+        &[u8],
         ProductOrigin,
     )>(receipt.modules.len())?;
     let mut module_bytes = Vec::with_capacity(receipt.modules.len());
@@ -6556,19 +6556,17 @@ pub(crate) fn certify_products_with_validation(
         origin_counts[origin_index][0] += 1;
         origin_counts[origin_index][1] += product.groups.len() as u64;
         origin_counts[origin_index][2] += product_bytes.len() as u64;
-        // Certification retains independent immutable payload copies.
-        // Shared group arenas below clone handles rather than whole programs.
-        validation.inventory.charge(product.interface.len())?;
-        validation.inventory.charge(product_bytes.len())?;
-        validation.inventory.charge(package_bytes.len())?;
+        // Keep the issuer-owned payloads borrowed through validation and
+        // promotion. Reused originals need no new storage; fresh interfaces and
+        // package imports already belong to the validated canonical carrier.
         validation.inventory.charge(owner.unit.len())?;
         validation.inventory.charge(owner.module.len())?;
         module_bytes.push((
             owner.clone(),
             source_sha,
-            product.interface.clone(),
-            product_bytes.to_vec(),
-            package_bytes.to_vec(),
+            product.interface.as_slice(),
+            product_bytes,
+            package_bytes,
             accepted.origin,
         ));
         let mut seen_ordinals = BTreeSet::new();
@@ -6896,9 +6894,9 @@ pub(crate) fn certify_products_with_validation(
             .iter()
             .find(|interface| interface.unit() == owner.unit && interface.module() == owner.module)
             .ok_or(CertificationError::Mismatch("retained canonical identity"))?;
-        if original.interface_bytes() != interface
-            || original.product_bytes() != product_bytes
-            || original.package_imports_bytes() != package_bytes
+        if original.interface_bytes() != *interface
+            || original.product_bytes() != *product_bytes
+            || original.package_imports_bytes() != *package_bytes
             || original.source_sha256() != Some(*source_sha)
             || original
                 .module_interface()
@@ -7193,9 +7191,10 @@ pub(crate) fn certify_products_with_validation(
                     validation,
                 )?;
                 let certification = encode_home_witness_with_operation(&witness, &validation.inventory)?;
-                let binding = validate_module_binding(&witness, canonical_interface, &interface, &package_bytes, Some(source_sha))?;
+                let binding = validate_module_binding(&witness, canonical_interface, interface, package_bytes, Some(source_sha))?;
+                validation.inventory.charge(product_bytes.len())?;
                 let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
-                    owner, product_bytes, certification, binding,
+                    owner, product_bytes.to_vec(), certification, binding,
                 ).with_source_sha256(source_sha);
                 let product = retain_original_native(product, original, witness)?;
                 match execution_source {
