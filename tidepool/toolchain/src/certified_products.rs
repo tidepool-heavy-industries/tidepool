@@ -9929,23 +9929,56 @@ pub(crate) mod tests {
     #[test]
     fn original_native_witness_checks_package_drift_and_zero_group_downgrade() {
         let root = tempfile::tempdir().unwrap();
+        let external_unit = "external-package";
         let package_path = root.path().join("External.hi");
         std::fs::write(&package_path, [0x43]).unwrap();
         let packages = BTreeMap::from([(
-            ("fixture".into(), "External".into()),
+            (external_unit.into(), "External".into()),
             PackageInterfaceWitness {
                 selected_path: package_path.clone(),
                 sha256: sha(&[0x43]),
             },
         )]);
         let import = PendingImportOwner::Package {
-            unit: "fixture".into(),
+            unit: external_unit.into(),
             module: "External".into(),
-            binder: testing::identity("External", "entry"),
+            binder: SymbolIdentity {
+                unit: external_unit.into(),
+                ..testing::identity("External", "entry")
+            },
             interface_digest: sha(&[0x43]),
         };
         let consumer = original_witness_fixture("Consumer", Some(import), 7, &packages);
-        let empty = original_witness_fixture("External", None, 7, &BTreeMap::new());
+        let interface = vec![0x42];
+        let product_bytes =
+            tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+                unit: external_unit.into(),
+                module: "External".into(),
+                interface: interface.clone(),
+                groups: vec![],
+            }]);
+        let owner = CachedHomeOwner {
+            unit: external_unit.into(),
+            module: "External".into(),
+            module_version: ModuleVersion([7; 32]),
+            skinny_iface_sha256: sha(&interface),
+            product_sha256: sha(&product_bytes),
+        };
+        let certification = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let package_bytes = crate::module_candidates::tests::package_imports_with_roots(
+            &owner.unit,
+            &owner.module,
+            &interface,
+            Vec::new(),
+        );
+        let empty = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner,
+            interface,
+            product_bytes,
+            package_bytes,
+            certification,
+        );
+        let legacy_empty = empty.clone();
         let consumer = fixture_finalized_product(consumer, [1; 32]);
         let empty = fixture_finalized_product(empty, [1; 32]);
         let recovered = recovered_witness_fixtures(&[consumer, empty]);
@@ -9978,7 +10011,6 @@ pub(crate) mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let legacy_empty = original_witness_fixture("External", None, 7, &BTreeMap::new());
         assert!(matches!(
             certify_owned_products_in_context_with_validation(
                 &[empty],
