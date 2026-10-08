@@ -9,7 +9,7 @@ default:
 
 [positional-arguments]
 build *targets:
-    bash scripts/buck2-run.sh build --local-only -c remote.enabled=false "$@"
+    bash scripts/buck2-run.sh build --local-only -c remote.enabled=false -c {{quote("tidepool.profile=" + native_profile)}} "$@"
 
 # Native libtest runners own discovery, nonzero counts, isolation, and evidence.
 [positional-arguments]
@@ -56,17 +56,17 @@ fixtures-check *cohorts:
     python3 scripts/native-workflow.py --profile {{quote(native_profile)}} fixtures-check "$@"
 
 probe-opacity-check:
-    bash scripts/buck2-run.sh build --local-only -c remote.enabled=false //bridge/haskell:probe_opacity
+    bash scripts/buck2-run.sh build --local-only -c remote.enabled=false -c {{quote("tidepool.profile=" + native_profile)}} //bridge/haskell:probe_opacity
 
 # Broad integration gate; use focused targets during ordinary development.
 verify:
     python3 scripts/native-workflow.py --profile {{quote(native_profile)}} verify
 
 test-toolchain-scripts:
-    bash scripts/buck2-run.sh test --local-only -c remote.enabled=false //scripts:toolchain_script_tests
+    bash scripts/buck2-run.sh test --local-only -c remote.enabled=false -c {{quote("tidepool.profile=" + native_profile)}} //scripts:toolchain_script_tests
 
 test-workflow-scripts:
-    bash scripts/buck2-run.sh test --local-only -c remote.enabled=false //scripts:native_workflow_tests
+    bash scripts/buck2-run.sh test --local-only -c remote.enabled=false -c {{quote("tidepool.profile=" + native_profile)}} //scripts:native_workflow_tests
 
 # A raw build is frozen/qualified explicitly before it can own a run.
 exomonad-build:

@@ -39,8 +39,11 @@ Ordinary `just test-lib`, `test-target`, `test-bin`, `test-native`, `quick` and
 `just --set native_profile production test-lib PACKAGE --exact FULL_NAME --expected-count 1`
 for an optimized test, or pass `--profile production` before the command to
 `scripts/native-workflow.py`. The same Just variable selects the profile for
-`exomonad-build`. Frozen qualification still requires its explicit matching
-`--expect-profile`; a fast-dev result does not qualify production bytes.
+`build`, `probe-opacity-check`, the script test recipes and `exomonad-build`;
+`just --set native_profile production build LABEL` requests an optimized build.
+Raw `buck2` commands select their configuration directly. Frozen qualification
+still requires its explicit matching `--expect-profile`; a fast-dev result does
+not qualify production bytes.
 
 Fast-dev compiles test harnesses at O0, including engine unit tests that compile
 their owning code again. The production libraries of `tidepool-codegen`,
