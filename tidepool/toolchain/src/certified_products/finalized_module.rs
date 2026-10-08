@@ -497,7 +497,7 @@ pub(super) fn decode_envelope_with_operation(
 #[derive(Clone, Debug)]
 pub(crate) struct CertifiedModuleInterface {
     producer_sha256: [u8; 32],
-    receipt: FinalizedModuleReceipt,
+    receipt: Arc<FinalizedModuleReceipt>,
     home_units: Arc<BTreeSet<String>>,
     interface: Arc<[u8]>,
     package_imports: Arc<[u8]>,
@@ -1015,9 +1015,31 @@ pub(super) fn issue_interfaces(
             &origin,
             &validation.inventory,
         )?;
+        validation
+            .inventory
+            .reserve::<(FinalizedModuleReceipt, [usize; 2])>(1)?;
+        validation
+            .inventory
+            .charge(module.unit.len() + module.module.len())?;
+        for descriptor in [&module.interface, &module.package_imports]
+            .into_iter()
+            .chain(module.core.iter())
+        {
+            validation
+                .inventory
+                .charge(descriptor.relative_path.as_os_str().len())?;
+        }
+        validation
+            .inventory
+            .reserve::<((String, String), [u8; 32], [usize; 4])>(
+                module.interface_requirements.len(),
+            )?;
+        for (unit, name) in module.interface_requirements.keys() {
+            validation.inventory.charge(unit.len() + name.len())?;
+        }
         issued.push(CertifiedModuleInterface {
             producer_sha256: producer,
-            receipt: module.clone(),
+            receipt: Arc::new(module.clone()),
             home_units: Arc::clone(&home_units),
             interface: interface.into(),
             package_imports: package_imports.into(),
@@ -1133,9 +1155,12 @@ pub(super) fn recover_interface(
             "noncanonical finalized certificate",
         ));
     }
+    validation
+        .inventory
+        .reserve::<(FinalizedModuleReceipt, [usize; 2])>(1)?;
     Ok(CertifiedModuleInterface {
         producer_sha256: producer,
-        receipt,
+        receipt: Arc::new(receipt),
         home_units: Arc::new(canonical_envelope.home_units),
         interface: interface.into(),
         package_imports: package_imports.into(),
@@ -1451,7 +1476,7 @@ mod tests {
             home_units: original.home_units().clone(),
             modules: BTreeMap::from([(
                 (original.unit().into(), original.module().into()),
-                original.receipt.clone(),
+                original.receipt.as_ref().clone(),
             )]),
         };
         assert!(matches!(
@@ -1550,7 +1575,7 @@ mod tests {
             fixture.package_imports_bytes(),
         )
         .unwrap();
-        let mut receipt = fixture.receipt.clone();
+        let mut receipt = fixture.receipt.as_ref().clone();
         receipt.source_sha256 = sha(bytes);
         let envelope = FinalizationEnvelope {
             profile: FINALIZATION_ENVELOPE_PROFILE.into(),
@@ -1820,6 +1845,25 @@ mod tests {
         assert!(envelope.validate_owners(&[], &packages).is_err());
     }
     #[test]
+    fn canonical_interface_clones_share_all_finalized_receipt_facts() {
+        let interface = interface(Some(b"tidy-core".to_vec()));
+        let copy = interface.clone();
+        assert!(Arc::ptr_eq(&interface.receipt, &copy.receipt));
+        assert!(Arc::ptr_eq(&interface.home_units, &copy.home_units));
+        assert!(Arc::ptr_eq(&interface.interface, &copy.interface));
+        assert!(Arc::ptr_eq(
+            &interface.package_imports,
+            &copy.package_imports
+        ));
+        assert!(Arc::ptr_eq(&interface.certificate, &copy.certificate));
+        assert!(Arc::ptr_eq(
+            interface.core.as_ref().unwrap(),
+            copy.core.as_ref().unwrap()
+        ));
+        assert_eq!(interface, copy);
+    }
+
+    #[test]
     fn typed_finalization_refuses_durable_bound_and_home_inventory_drift() {
         let module = interface(Some(b"tidy-core".to_vec()));
         let key = (module.unit().to_owned(), module.module().to_owned());
@@ -1827,7 +1871,7 @@ mod tests {
             profile: FINALIZATION_ENVELOPE_PROFILE.into(),
             value_interfaces: BTreeMap::new(),
             home_units: module.home_units().clone(),
-            modules: BTreeMap::from([(key.clone(), module.receipt.clone())]),
+            modules: BTreeMap::from([(key.clone(), module.receipt.as_ref().clone())]),
         };
         envelope.validate_structure().unwrap();
         let mut changed = envelope.clone();

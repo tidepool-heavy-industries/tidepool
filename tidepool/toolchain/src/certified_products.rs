@@ -5648,6 +5648,14 @@ impl ParsedModuleProducts {
             .certified_originals
             .lock()
             .map_err(|_| CertificationError::Mismatch("segment certification owner"))?;
+        let count = receipt
+            .modules
+            .iter()
+            .filter(|module| module.origin == ProductOrigin::RetainedCore)
+            .count();
+        self.operation
+            .reserve::<&crate::recovery_artifacts::CertifiedRecoveryProduct>(count)?;
+        let mut staged = Vec::with_capacity(count);
         for accepted in receipt
             .modules
             .iter()
@@ -5677,22 +5685,11 @@ impl ParsedModuleProducts {
             )>(1)?;
             self.operation
                 .charge(2 * (product.owner().unit.len() + product.owner().module.len()))?;
+            staged.push(product);
         }
-        for accepted in receipt
-            .modules
-            .iter()
-            .filter(|module| module.origin == ProductOrigin::RetainedCore)
-        {
-            let product = products
-                .iter()
-                .find(|product| {
-                    product.owner().unit == accepted.unit
-                        && product.owner().module == accepted.module
-                })
-                .expect("completed promotions validated above");
-            if !retained.contains_key(product.owner()) {
-                retained.insert(product.owner().clone(), product.clone());
-            }
+        // All checks and copy admission complete before installing any proof.
+        for product in staged {
+            retained.insert(product.owner().clone(), product.clone());
         }
         Ok(())
     }

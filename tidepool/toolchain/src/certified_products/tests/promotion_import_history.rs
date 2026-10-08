@@ -576,6 +576,28 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         targets: BTreeMap::new(),
         packages: BTreeMap::new(),
     };
+    let mut failed = promoted_packet.clone();
+    let duplicate_group = failed.modules[0].groups[0].clone();
+    failed.modules[0].groups.push(duplicate_group);
+    assert!(certify_products(
+        None,
+        &failed,
+        &promoted,
+        &evidence_bytes,
+        &input,
+        root.path(),
+        &normalized,
+        target_source,
+        &producer,
+        &include,
+        Some(&exact),
+        None
+    )
+    .is_err());
+    assert!(
+        promoted.certified_originals.lock().unwrap().is_empty(),
+        "failed certification installs no proof"
+    );
     let certified = certify_products(
         None,
         &promoted_packet,
@@ -685,6 +707,67 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
             selected_owners
         );
     }
+    assert_eq!(promoted.certified_originals.lock().unwrap().len(), 2);
+    let publication = promoted.copy_for_publication().unwrap();
+    assert!(
+        publication.certified_originals.lock().unwrap().is_empty(),
+        "publication owns no prior item certification"
+    );
+    assert_eq!(promoted.certified_originals.lock().unwrap().len(), 2);
+    let packages = BTreeMap::new();
+    let mut other_validation = PackageInterfaceValidation::default();
+    let cross_operation = promoted.reused_certified_original(
+        OriginalCertificationObservation {
+            owner: current_a.owner(),
+            source_sha256: current_a.source_sha256().unwrap(),
+            interface: current_a.module_interface().unwrap(),
+            interface_bytes: current_a.interface_bytes(),
+            product_bytes: current_a.product_bytes(),
+            package_bytes: current_a.package_imports_bytes(),
+            groups: &[],
+            interface_requirements: current_a.module_interface().unwrap().requirements(),
+            packages: &packages,
+            execution_source: current_a.execution_source(),
+        },
+        &mut other_validation,
+    );
+    assert!(
+        matches!(
+            cross_operation,
+            Err(CertificationError::Mismatch("inventory accounting owner"))
+        ),
+        "cross operation refusal: {cross_operation:?}"
+    );
+
+    let bounded = ParsedModuleProducts::decode(&promoted_bytes, &package_bundle()).unwrap();
+    let staged_bytes = promoted_packet.modules.len()
+        * std::mem::size_of::<&crate::recovery_artifacts::CertifiedRecoveryProduct>();
+    let first_bytes = std::mem::size_of::<(
+        CachedHomeOwner,
+        crate::recovery_artifacts::CertifiedRecoveryProduct,
+        [usize; 4],
+    )>() + 2 * (current_a.owner().unit.len() + current_a.owner().module.len());
+    let remaining = bounded.operation.work_usage().unwrap().1;
+    bounded
+        .operation
+        .charge(remaining - staged_bytes - first_bytes)
+        .unwrap();
+    let refusal =
+        bounded.retain_completed_promotions(&promoted_packet, &certified.recovery_products);
+    assert!(
+        matches!(
+            refusal,
+            Err(CertificationError::Product(
+                tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+            ))
+        ),
+        "atomic retention refusal: {refusal:?}"
+    );
+    assert!(
+        bounded.certified_originals.lock().unwrap().is_empty(),
+        "admission refusal installs no partial proof"
+    );
+
     let independent = ParsedModuleProducts::decode(&promoted_bytes, &package_bundle()).unwrap();
     let independent_result = certify_products(
         None,
@@ -765,6 +848,29 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         None,
     )
     .is_err());
+
+    let mut changed_source = promoted_packet.clone();
+    changed_source.modules[0].source_sha256[0] ^= 1;
+    assert!(certify_products(
+        None,
+        &changed_source,
+        &promoted,
+        &evidence_bytes,
+        &input,
+        root.path(),
+        &normalized,
+        target_source,
+        &producer,
+        &include,
+        Some(&exact),
+        None
+    )
+    .is_err());
+    assert_eq!(
+        promoted.certified_originals.lock().unwrap().len(),
+        2,
+        "failed observations leave completed custody intact"
+    );
 
     let first_a_owner = current_a.owner().clone();
     let first_b_owner = current_b.owner().clone();
