@@ -3937,12 +3937,9 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
             .dispatch_boxed(ToolInvocation {
                 context: Some(dispatch_context),
                 name: exomonad_actor::HASKELL_TOOL.into(),
-                arguments: ToolArguments::Raw(
-                    tidepool_testing::fixture_source(
-                        "bridge/facade/src/actor_host/notebook_explicit_display_siblings.hs",
-                    )
-                    .into(),
-                ),
+                arguments: ToolArguments::Raw(tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/notebook_explicit_display_siblings.hs",
+                )),
             })
             .await
     });
