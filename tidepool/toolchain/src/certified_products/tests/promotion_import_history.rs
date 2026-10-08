@@ -598,6 +598,7 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         promoted.certified_originals.lock().unwrap().is_empty(),
         "failed certification installs no proof"
     );
+    let first_work_start = promoted.operation.work_usage().unwrap().0;
     let certified = certify_products(
         None,
         &promoted_packet,
@@ -613,6 +614,7 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         None,
     )
     .unwrap();
+    let first_work = promoted.operation.work_usage().unwrap().0 - first_work_start;
     let selected_owners = certified
         .source_selection
         .selected_original_owners()
@@ -668,6 +670,7 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
     // They retain their own target and value admission; completed native proof
     // custody is shared after all current promotion checks run again.
     for item in 1..14 {
+        let repeated_work_start = promoted.operation.work_usage().unwrap().0;
         let repeated = certify_products(
             None,
             &promoted_packet,
@@ -683,6 +686,9 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
             None,
         )
         .unwrap();
+        let repeated_work = promoted.operation.work_usage().unwrap().0 - repeated_work_start;
+        assert!(repeated_work < first_work,
+            "item {item} still admits all current facts with less work: first={first_work} repeated={repeated_work}");
         for original in [current_a, current_b] {
             let observed = repeated
                 .recovery_products

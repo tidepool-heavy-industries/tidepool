@@ -9087,6 +9087,98 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn retained_native_observation_rechecks_module_packages_and_allows_extra_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("External.hi");
+        let alternative = root.path().join("Alternative.hi");
+        for path in [&path, &alternative] {
+            std::fs::write(path, [0x43]).unwrap();
+        }
+        let package_owner = ("external-package".into(), "External".into());
+        let packages = BTreeMap::from([(
+            package_owner.clone(),
+            PackageInterfaceWitness {
+                selected_path: path.clone(),
+                sha256: sha(&[0x43]),
+            },
+        )]);
+        let import = PendingImportOwner::Package {
+            unit: "external-package".into(),
+            module: "External".into(),
+            binder: SymbolIdentity {
+                unit: "external-package".into(),
+                ..testing::identity("External", "entry")
+            },
+            interface_digest: sha(&[0x43]),
+        };
+        let product = recovered_witness_fixtures(&[fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                "Consumer",
+                vec![(7, vec![import])],
+                7,
+                &packages,
+                b"Consumer interface".to_vec(),
+            ),
+            [1; 32],
+        )])
+        .remove(0)
+        .product;
+        let source_sha = product.module_interface().unwrap().source_sha256();
+        let product = product.with_source_sha256(source_sha);
+        let groups = product
+            .original_native()
+            .unwrap()
+            .groups
+            .iter()
+            .map(AuthenticatedOriginalGroup::admitted)
+            .collect::<Vec<_>>();
+        let check = |observed: &BTreeMap<_, _>| {
+            validate_certified_original_observation(
+                &product,
+                &observe_native_fixture(&product, &groups, observed),
+                &mut PackageInterfaceValidation::default(),
+            )
+        };
+        check(&packages).unwrap();
+        let mut extra = packages.clone();
+        extra.insert(
+            ("target-only".into(), "Other".into()),
+            PackageInterfaceWitness {
+                selected_path: root.path().join("not-required-by-module.hi"),
+                sha256: [9; 32],
+            },
+        );
+        check(&extra).unwrap();
+        assert!(matches!(
+            check(&BTreeMap::new()),
+            Err(CertificationError::Mismatch(
+                "segment original package selection"
+            ))
+        ));
+        let mut changed = packages.clone();
+        changed.get_mut(&package_owner).unwrap().selected_path = alternative;
+        assert!(matches!(
+            check(&changed),
+            Err(CertificationError::Mismatch(
+                "segment original package selection"
+            ))
+        ));
+        let mut changed = packages.clone();
+        changed.get_mut(&package_owner).unwrap().sha256[0] ^= 1;
+        assert!(matches!(
+            check(&changed),
+            Err(CertificationError::Mismatch(
+                "segment original package selection"
+            ))
+        ));
+        std::fs::write(&path, [0x44]).unwrap();
+        assert!(matches!(
+            check(&packages),
+            Err(CertificationError::StaleEvidence)
+        ));
+    }
+
     proptest::proptest! {
         #![proptest_config(original_native_index_property_config())]
         #[test]
