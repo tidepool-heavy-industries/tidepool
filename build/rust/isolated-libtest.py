@@ -707,7 +707,7 @@ def diagnostic_summaries(artifact_root):
                     summaries['issues'].append('owned compiler diagnostic root bound exceeded')
     summaries['owned_compiler_roots'] = []
     for compiler, role in roots:
-        if compiler.is_symlink():
+        if compiler.is_symlink() or (compiler.exists() and not compiler.is_dir()):
             incomplete_discovery('unsafe_compiler_root', compiler)
             summaries['issues'].append(f'unsafe compiler diagnostic directory: {compiler}')
             continue

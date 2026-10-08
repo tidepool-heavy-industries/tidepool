@@ -246,7 +246,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             (path / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
             (path / 'lifecycle.json').write_text('{}')
         for kind in ('complete', 'root_limit', 'control_limit', 'child_limit',
-                     'unsafe_control', 'unsafe_child', 'unsafe_compiler_root'):
+                     'unsafe_control', 'unsafe_child', 'unsafe_compiler_root', 'unsafe_compiler_file'):
             with self.subTest(kind=kind):
                 root = Path(self.tmp.name) / f'owner-discovery-{kind}'
                 record = {}
@@ -263,6 +263,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                         confirmed_owner(control / 'compiler')
                         for index in range(32):
                             (control / f'empty-{index}').mkdir()
+                    elif kind == 'unsafe_compiler_file':
+                        (root / 'compiler').write_text('not an owner directory')
                     else:
                         foreign = Path(self.tmp.name) / f'foreign-{kind}'
                         confirmed_owner(foreign / 'compiler')
@@ -291,7 +293,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                     self.assertEqual(len(record['diagnostic_summaries']['owned_compiler_roots']), 8)
                     self.assertFalse(record['diagnostic_evidence_complete'], 'timing absence is independent')
                 else:
-                    self.assertIn(kind, [issue['kind'] for issue in discovery['issues']])
+                    self.assertIn('unsafe_compiler_root' if kind == 'unsafe_compiler_file' else kind,
+                                  [issue['kind'] for issue in discovery['issues']])
                     self.assertIn('owned compiler cleanup observation is incomplete', errors)
 
     def test_invalid_utf8_native_output_keeps_counts_and_cleanup_evidence(self):
