@@ -46,6 +46,88 @@ def root_entry_source_fixture(root, modules):
     return generated
 
 
+class RegisteredGcRootTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.tools = self.root / 'tools'
+        self.stores = [self.root / 'store-a', self.root / 'store-b']
+        self.links = [self.root / 'root-a', self.root / 'root-b']
+        for store, link in zip(self.stores, self.links):
+            store.mkdir()
+            link.symlink_to(store)
+        self.pins = [{'path': str(link), 'store_path': str(store)}
+                     for link, store in zip(self.links, self.stores)]
+
+    def test_one_query_verifies_every_exact_pair_and_deduplicates_store_paths(self):
+        alias = self.root / 'another-root-a'
+        alias.symlink_to(self.stores[0])
+        pins = self.pins + [{'path': str(alias), 'store_path': str(self.stores[0])}]
+        output = (f'{self.links[1]} -> {self.stores[1]}\n'
+                  f'{alias} -> {self.stores[0]}\n'
+                  f'{self.root / "unrelated-root"} -> {self.stores[1]}\n'
+                  f'{self.links[0]} -> {self.stores[0]}\n')
+        with patch.object(qualification.subprocess, 'check_output', return_value=output) as query:
+            qualification.verify_registered_gc_roots(self.tools, pins)
+        query.assert_called_once_with(
+            [str(self.tools / 'bin/nix-store'), '--query', '--roots',
+             str(self.stores[0]), str(self.stores[1])], text=True, timeout=60)
+
+    def test_missing_pair_refuses_despite_another_registered_root_for_its_store(self):
+        output = (f'{self.links[0]} -> {self.stores[0]}\n'
+                  f'{self.root / "other-root-b"} -> {self.stores[1]}\n')
+        with patch.object(qualification.subprocess, 'check_output', return_value=output):
+            with self.assertRaisesRegex(ValueError, 'not registered'):
+                qualification.verify_registered_gc_roots(self.tools, self.pins)
+
+    def test_wrong_pairs_refuse_despite_all_expected_root_and_store_names(self):
+        output = (f'{self.links[0]} -> {self.stores[1]}\n'
+                  f'{self.links[1]} -> {self.stores[0]}\n')
+        with patch.object(qualification.subprocess, 'check_output', return_value=output):
+            with self.assertRaisesRegex(ValueError, 'not registered'):
+                qualification.verify_registered_gc_roots(self.tools, self.pins)
+
+    def test_malformed_registration_does_not_establish_the_expected_pair(self):
+        for invalid in ('', str(self.links[1]), f'{self.links[1]} -> ',
+                        f'{self.links[1]} -> {self.stores[1]} trailing-junk'):
+            with self.subTest(output=invalid):
+                output = f'{self.links[0]} -> {self.stores[0]}\n{invalid}\n'
+                with patch.object(qualification.subprocess, 'check_output', return_value=output):
+                    with self.assertRaisesRegex(ValueError, 'not registered'):
+                        qualification.verify_registered_gc_roots(self.tools, self.pins)
+
+    def test_query_failure_or_timeout_cannot_establish_registration(self):
+        for failure in (subprocess.CalledProcessError(1, ['nix-store']),
+                        subprocess.TimeoutExpired(['nix-store'], 60)):
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(qualification.subprocess, 'check_output', side_effect=failure):
+                    with self.assertRaises(type(failure)):
+                        qualification.verify_registered_gc_roots(self.tools, self.pins)
+
+    def test_changed_or_removed_symlink_refuses_before_the_query(self):
+        self.links[1].unlink()
+        with patch.object(qualification.subprocess, 'check_output') as query:
+            with self.assertRaises(FileNotFoundError):
+                qualification.verify_registered_gc_roots(self.tools, self.pins)
+            self.links[1].symlink_to(self.stores[0])
+            with self.assertRaisesRegex(ValueError, 'removed or changed'):
+                qualification.verify_registered_gc_roots(self.tools, self.pins)
+            query.assert_not_called()
+
+    def test_relative_root_refuses_before_the_query(self):
+        pins = [self.pins[0] | {'path': 'relative-root'}]
+        with patch.object(qualification.subprocess, 'check_output') as query:
+            with self.assertRaisesRegex(ValueError, 'removed or changed'):
+                qualification.verify_registered_gc_roots(self.tools, pins)
+            query.assert_not_called()
+
+    def test_no_pins_requires_no_query(self):
+        with patch.object(qualification.subprocess, 'check_output') as query:
+            qualification.verify_registered_gc_roots(self.tools, [])
+            query.assert_not_called()
+
+
 class NativeQualificationTests(unittest.TestCase):
     def fixture_source(self, root, relative='workspace/fixtures/sample.hs', track_fixture=True):
         source = root / 'source'
