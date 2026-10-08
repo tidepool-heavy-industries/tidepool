@@ -1,6 +1,6 @@
 use super::*;
 use crate::module_candidates::product_decode_observer::DecodeCounter;
-use tidepool_repr::execution_schema::{Atom, ExprFrame, Group, ScalarLiteral, testing};
+use tidepool_repr::execution_schema::{testing, Atom, ExprFrame, Group, ScalarLiteral};
 
 #[test]
 fn ordinary_selection_decodes_once_and_refuses_corrupt_products() {
