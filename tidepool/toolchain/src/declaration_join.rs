@@ -626,13 +626,15 @@ fn certify_authored_declaration_inner(
     // under one module identity. The shared closure admission below refuses
     // any unexpected retained reference to that transient owner.
     let originals = compiled
-        .selected_originals
+        .source_selection
         .as_ref()
         .ok_or_else(|| contract("authored certification has no issued original selection"))?
-        .excluding_module(
+        .selected_original_closure_excluding_module(
+            &compiled.artifact_view,
             &candidates[0].unit,
             crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE,
-        )?;
+        )
+        .map_err(|error| contract(&format!("authored original closure: {error}")))?;
     let products = originals.products();
     let matches = products
         .iter()

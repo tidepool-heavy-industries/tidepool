@@ -1692,42 +1692,6 @@ impl SelectedOriginalClosure {
         &self.products
     }
 
-    pub(crate) fn excluding_module(
-        &self,
-        unit: &str,
-        module: &str,
-    ) -> Result<Self, crate::CompileError> {
-        let metadata = self.native_closure.metadata_snapshot();
-        let selected = self
-            .selected
-            .iter()
-            .filter(|id| {
-                let owner = &metadata.artifacts[*id].descriptor.owner;
-                owner.unit != unit || owner.module != module
-            })
-            .copied()
-            .collect::<Vec<_>>();
-        let native_closure = self.native_closure.select_roots(selected.clone())?;
-        let selected = Self {
-            products: self
-                .products
-                .iter()
-                .filter(|product| product.owner().unit != unit || product.owner().module != module)
-                .cloned()
-                .collect(),
-            selected,
-            native_closure,
-        };
-        if selected.native_closure.entries().iter().any(|entry| {
-            entry.descriptor.owner.unit == unit && entry.descriptor.owner.module == module
-        }) {
-            return Err(crate::CompileError::ExtractFailed(
-                "authored original closure retains its transient probe".into(),
-            ));
-        }
-        Ok(selected)
-    }
-
     /// Whole original validation follows exact native edges through custody.
     /// Historical dependency versions do not become compiler namespace roles.
     pub(crate) fn validate_with(
@@ -1787,10 +1751,32 @@ impl CertifiedSourceSelection {
         &self,
         view: &crate::artifact_inventory::ArtifactView,
     ) -> CertResult<SelectedOriginalClosure> {
+        self.selected_original_closure_inner(view, None)
+    }
+
+    /// Authored declarations require every selected original except the
+    /// authenticated generated probe. Required backedges to that owner refuse.
+    pub(crate) fn selected_original_closure_excluding_module(
+        &self,
+        view: &crate::artifact_inventory::ArtifactView,
+        unit: &str,
+        module: &str,
+    ) -> CertResult<SelectedOriginalClosure> {
+        self.selected_original_closure_inner(view, Some((unit, module)))
+    }
+
+    fn selected_original_closure_inner(
+        &self,
+        view: &crate::artifact_inventory::ArtifactView,
+        excluded: Option<(&str, &str)>,
+    ) -> CertResult<SelectedOriginalClosure> {
         let projection = self.compiler_projection(view)?;
-        let selected = projection
+        let mut selected = projection
             .entries_from_metadata(&view.metadata_snapshot())
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        if let Some((unit, module)) = excluded {
+            selected.retain(|owner, _| owner.unit != unit || owner.module != module);
+        }
         let entries = selected
             .values()
             .filter(|entry| {
@@ -1810,6 +1796,15 @@ impl CertifiedSourceSelection {
             .admit_shared(view, entries)
             .and_then(|view| view.select_roots(selected_ids.clone()))
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        if excluded.is_some_and(|(unit, module)| {
+            native_closure.entries().iter().any(|entry| {
+                entry.descriptor.owner.unit == unit && entry.descriptor.owner.module == module
+            })
+        }) {
+            return Err(CertificationError::Mismatch(
+                "authored original closure retains its transient probe",
+            ));
+        }
         let closure = SelectedOriginalClosure {
             products: selected
                 .values()

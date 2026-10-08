@@ -487,7 +487,7 @@ pub struct CompiledArtifacts {
     pub module_products: Vec<RawModuleProduct>,
     pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
-    pub(crate) selected_originals: Option<certified_products::SelectedOriginalClosure>,
+    pub(crate) source_selection: Option<certified_products::CertifiedSourceSelection>,
     /// Bound compiler producer identity for this exact invocation. `None`
     /// means the bundle was assembled from bytes without an endpoint.
     pub producer_identity: Option<[u8; 32]>,
@@ -2101,8 +2101,11 @@ impl ModuleCandidateOffer {
             validation,
         )?
         .ok_or_else(fail)?;
-        let products = sealed
-            .selected_originals
+        let selected_originals = sealed
+            .source_selection
+            .selected_original_closure(&sealed.artifact_view)
+            .map_err(compiler_evidence_failure)?;
+        let products = selected_originals
             .products()
             .iter()
             .filter(|product| product.owner().module == module_name)
@@ -2125,7 +2128,7 @@ impl ModuleCandidateOffer {
             module,
             source,
             &self.producer,
-            &sealed.selected_originals,
+            &selected_originals,
             &sealed.artifact_view,
             &crate::declaration_context::ExactProductAdmission {
                 request: exact,
@@ -2320,7 +2323,6 @@ pub struct SealedTurnProducts {
     original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
     pub(crate) source_selection: certified_products::CertifiedSourceSelection,
-    pub(crate) selected_originals: certified_products::SelectedOriginalClosure,
     pub target_native_selection: crate::artifact_inventory::TargetNativeSelection,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
@@ -2807,10 +2809,6 @@ fn seal_turn_outputs_with_validation(
             .map_or(&[], |request| request.groups.as_ref()),
         validation,
     )?;
-    let selected_originals = certified
-        .source_selection
-        .selected_original_closure(&artifact_view)
-        .map_err(compiler_evidence_failure)?;
     let target_imports = match &target_demand {
         TargetDemand::Checked { imports, .. } | TargetDemand::Ordinary(imports) => {
             imports.as_slice()
@@ -2992,7 +2990,6 @@ fn seal_turn_outputs_with_validation(
         recovery_products: certified.recovery_products,
         retained_core_products: certified.retained_core_products,
         source_selection: certified.source_selection,
-        selected_originals,
         target_native_selection,
         package_interfaces,
     }))
@@ -4275,12 +4272,7 @@ fn compile_invocation_inner(
             0,
             receipt.targets.len(),
         );
-        artifacts.selected_originals = Some(
-            certified
-                .source_selection
-                .selected_original_closure(&artifacts.artifact_view)
-                .map_err(compiler_evidence_failure)?,
-        );
+        artifacts.source_selection = Some(certified.source_selection);
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
         artifacts.exact_source_admission = exact_source;
@@ -5059,7 +5051,7 @@ pub(crate) fn assemble(
         module_products: Vec::new(),
         certified_groups: Vec::new(),
         recovery_products: Vec::new(),
-        selected_originals: None,
+        source_selection: None,
         producer_identity: None,
         module_inventory: None,
         exact_source_admission: None,
