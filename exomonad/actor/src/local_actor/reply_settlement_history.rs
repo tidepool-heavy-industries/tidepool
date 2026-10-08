@@ -102,7 +102,7 @@ impl KernelBehavior for ReplyDriver {
     }
     fn dispatch_resume(
         &mut self,
-        _: &KernelContext,
+        context: &KernelContext,
         kind: crate::kernel::KernelResume,
     ) -> Result<OwnedActorTask<Self, ()>, KernelBehaviorError> {
         assert_eq!(kind, crate::kernel::KernelResume::ContinueProgram);
@@ -112,17 +112,27 @@ impl KernelBehavior for ReplyDriver {
             .take()
             .expect("one continuation per accepted reply");
         let entered = self.entered.clone();
+        let context = context.clone();
         Ok(OwnedActorTask::new(Box::pin(async move {
             entered.notify_one();
-            let successful = completion.await.expect("controlled continuation released");
+            let successful = tokio::select! {
+                completed = completion => Some(completed.expect("controlled continuation released")),
+                _ = context.wait_requested_shutdown() => None,
+            };
             OwnedActorCompletion::new(move |driver: &mut Self| {
                 let request = driver.request.lock().expect("request retained");
-                if successful {
-                    driver.registry.finish_reply(request, None);
-                } else {
-                    driver
-                        .registry
-                        .fail_reply_settlement(request, "controlled continuation failure");
+                match successful {
+                    Some(true) => {
+                        driver.registry.finish_reply(request, None);
+                    }
+                    Some(false) => {
+                        driver
+                            .registry
+                            .fail_reply_settlement(request, "controlled continuation failure");
+                    }
+                    // The kernel defers shutdown while this task is parked.
+                    // Release the task; the real shutdown hook owns closure.
+                    None => {}
                 }
                 driver.applied.notify_one();
                 Ok(KernelStep::Continue(()))
