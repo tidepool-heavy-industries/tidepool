@@ -717,16 +717,45 @@ fn immutable_candidates_in_context(
                 .map(|owner| (owner.unit.clone(), owner.module.clone())),
         );
     }
+    let selected = context.compiler_metadata_snapshot()?;
+    let canonical_interfaces = selected
+        .entries
+        .values()
+        .filter_map(|entry| {
+            let canonical = match &entry.payload {
+                crate::artifact_inventory::ArtifactPayload::Canonical(interface) => interface,
+                crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                    product.module_interface()?
+                }
+                crate::artifact_inventory::ArtifactPayload::Interface(_, _) => return None,
+            };
+            Some((
+                (canonical.unit().to_owned(), canonical.module().to_owned()),
+                canonical.clone(),
+            ))
+        })
+        .collect();
+    let ambiguous = context
+        .artifact_view()
+        .metadata_snapshot()
+        .ambiguous_native_owners
+        .into_iter()
+        .map(|owner| (owner.unit, owner.module))
+        .collect();
     let exclusions = module_candidates::ExactCandidateContext::new(protected, reserved)
         .with_originals(context.compiler_original_products()?)
+        .with_canonical_interfaces(canonical_interfaces, ambiguous)
         .with_interface_seals(
-            context
-                .artifact_view()
-                .descriptors()
-                .into_iter()
+            selected
+                .entries
+                .values()
+                .map(|entry| &entry.descriptor)
                 .map(|descriptor| {
                     (
-                        (descriptor.owner.unit, descriptor.owner.module),
+                        (
+                            descriptor.owner.unit.clone(),
+                            descriptor.owner.module.clone(),
+                        ),
                         descriptor.interface_sha256,
                     )
                 })
@@ -736,6 +765,23 @@ fn immutable_candidates_in_context(
         module_candidates::select_configured_in_context(producer, include, scratch, &exclusions)?
             .map(Arc::new),
     )
+}
+
+fn private_native_availability(
+    context: &crate::declaration_join::ExactDeclarationContext,
+    producer: &[u8],
+    selected: Option<&module_candidates::CandidateSet>,
+) -> Result<Option<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
+    let Some(selected) = selected.filter(|selected| !selected.native_availability.is_empty())
+    else {
+        return Ok(None);
+    };
+    crate::declaration_context::OriginalCompilerInputs::from_native_availability(
+        context,
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
+        &selected.native_availability,
+    )
+    .map(Some)
 }
 
 fn checked_candidate_reservations(
@@ -770,8 +816,6 @@ fn checked_candidate_reservations(
 }
 
 impl ModuleCandidateOffer {
-    /// Select immutable source candidates under configured compiler authority.
-    /// Executing the offer through its owning turn method can issue input continuity.
     pub fn select_admitted(
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
@@ -966,18 +1010,20 @@ impl ModuleCandidateOffer {
             encode_inspection_authorization(&owners, inputs.baseline_authorization()),
             include,
         )?;
+        let selected =
+            immutable_candidates_in_context(&context, producer, include, scratch, owners)?;
+        let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {
-            selected: immutable_candidates_in_context(
-                &context, producer, include, scratch, owners,
-            )?,
+            selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
                 context
-                    .prepare_compilation_with_authorization(
+                    .prepare_compilation_with_private_input(
                         &scratch.join("exact-scope"),
                         producer,
                         Some(authorization),
+                        private,
                     )?
                     .with_source_search_context(include)
                     .with_checked_value_imports(inputs.import_authority()),
@@ -1036,22 +1082,25 @@ impl ModuleCandidateOffer {
             &context,
             include,
         )?;
+        let selected = immutable_candidates_in_context(
+            &context,
+            producer,
+            include,
+            scratch,
+            checked_candidate_reservations(&specification, None),
+        )?;
+        let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {
-            selected: immutable_candidates_in_context(
-                &context,
-                producer,
-                include,
-                scratch,
-                checked_candidate_reservations(&specification, None),
-            )?,
+            selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
                 compile_context_with_declarations(compile_context, context.clone())
-                    .prepare_compilation_with_authorization(
+                    .prepare_compilation_with_private_input(
                         &scratch.join("exact-scope"),
                         producer,
                         Some(authorization),
+                        private,
                     )?
                     .with_source_search_context(include)
                     .with_checked_value_imports(checked_values.import_authority())
@@ -1126,22 +1175,25 @@ impl ModuleCandidateOffer {
                 .map(|path| Value::Text(path.to_string_lossy().into_owned()))
                 .collect(),
         ));
+        let selected = immutable_candidates_in_context(
+            &context,
+            producer,
+            include,
+            scratch,
+            checked_candidate_reservations(&specification, Some(&planned)),
+        )?;
+        let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {
-            selected: immutable_candidates_in_context(
-                &context,
-                producer,
-                include,
-                scratch,
-                checked_candidate_reservations(&specification, Some(&planned)),
-            )?,
+            selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
                 compile_context_with_declarations(compile_context, context.clone())
-                    .prepare_compilation_with_authorization(
+                    .prepare_compilation_with_private_input(
                         &scratch.join("exact-scope"),
                         producer,
                         Some(authorization),
+                        private,
                     )?
                     .with_source_search_context(include)
                     .with_checked_value_imports(inputs.import_authority())
@@ -1208,7 +1260,7 @@ impl ModuleCandidateOffer {
                     .iter()
                     .map(|(_, source)| source.as_str()),
             )?
-            .prepare_compilation_authorizing(
+            .prepare_compilation_authorizing_with_private_input(
                 &scratch.join("exact-scope"),
                 producer,
                 |semantic_sha256| {
@@ -1237,7 +1289,9 @@ impl ModuleCandidateOffer {
                     selected = immutable_candidates_in_context(
                         &context, producer, include, scratch, reserved,
                     )?;
-                    Ok(authorization)
+                    let private =
+                        private_native_availability(&context, producer, selected.as_deref())?;
+                    Ok((authorization, private))
                 },
             )?;
         Ok(Self {

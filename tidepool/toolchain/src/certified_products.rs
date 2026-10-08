@@ -3363,6 +3363,19 @@ pub(crate) fn certified_home_requirements(
         .collect())
 }
 
+pub(crate) fn candidate_home_requirements_with_validation(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<Vec<CachedHomeOwner>> {
+    Ok(
+        verify_home_witness_with_validation(bytes, owner, validation)?
+            .sources
+            .into_values()
+            .collect(),
+    )
+}
+
 pub(crate) fn original_home_requirements_with_validation(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
     validation: &mut PackageInterfaceValidation,
@@ -3440,6 +3453,27 @@ pub(crate) fn fixture_source_module_interface(
         requirements,
         Some(b"fixture-core".to_vec()),
     )
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_module_core(
+    interface: &CertifiedModuleInterface,
+    core: Vec<u8>,
+) -> CertifiedModuleInterface {
+    let changed = finalized_module::fixture_interface(
+        interface.producer_sha256(),
+        interface.unit(),
+        interface.module(),
+        interface.source_sha256(),
+        interface.interface_bytes().to_vec(),
+        interface.package_imports_bytes().to_vec(),
+        interface.requirements().clone(),
+        Some(core),
+    );
+    match interface.source_imports() {
+        Some(imports) => finalized_module::fixture_source_imports(changed, imports.to_vec()),
+        None => changed,
+    }
 }
 
 #[cfg(test)]
@@ -4667,56 +4701,10 @@ pub(crate) fn certify_recovery_products_with_validation(
         }
         validate_inherited_group_headers(product, witness)?;
     }
-    let mut resolved = Vec::with_capacity(parsed.len());
-    for (product, witness) in &parsed {
-        let mut scoped_owners = BTreeMap::new();
-        for owner in std::iter::once(&witness.owner).chain(witness.sources.values()) {
-            let key = (owner.unit.clone(), owner.module.clone());
-            if scoped_owners
-                .insert(key, owner)
-                .is_some_and(|old| old != owner)
-            {
-                return Err(CertificationError::Mismatch(
-                    "ambiguous recovery source owner",
-                ));
-            }
-        }
-        let mut group_imports = Vec::with_capacity(product.groups.len());
-        for (group, (_, _, globals)) in product.groups.iter().zip(&witness.groups) {
-            let mut imports = Vec::with_capacity(globals.len());
-            for (declaration, selected) in group.globals().iter().zip(globals) {
-                if let ReceiptImportOwner::Package { unit, module, .. }
-                | ReceiptImportOwner::RetainedPackage { unit, module, .. } = &selected.owner
-                {
-                    if scoped_owners.contains_key(&(unit.clone(), module.clone())) {
-                        return Err(CertificationError::Mismatch(
-                            "home owner downgraded to package",
-                        ));
-                    }
-                }
-                let import = validate_global_witness(
-                    declaration,
-                    group.definitions().signatures(),
-                    selected,
-                )?;
-                let resolved_import = match import {
-                    source @ ReceiptImportOwner::Source { .. } => {
-                        resolve_cold_recovery_source(source, witness, product)?
-                    }
-                    other => resolve_receipt_owner_with_validation(
-                        other,
-                        &SourceGroupMap::new(),
-                        None,
-                        &witness.packages,
-                        validation,
-                    )?,
-                };
-                imports.push(resolved_import);
-            }
-            group_imports.push(imports);
-        }
-        resolved.push(group_imports);
-    }
+    let resolved = parsed
+        .iter()
+        .map(|(product, witness)| authenticate_original_imports(product, witness, validation))
+        .collect::<CertResult<Vec<_>>>()?;
     artifacts
         .into_iter()
         .zip(parsed)
@@ -4771,6 +4759,138 @@ pub(crate) fn certify_recovery_products_with_validation(
             })
         })
         .collect()
+}
+
+/// The candidate loader owns decoded TPMOD bytes. This issuer authenticates
+/// their native witnesses under the unchanged original owner and canonical seal.
+pub(crate) struct OriginalNativeCandidate {
+    pub(crate) owner: CachedHomeOwner,
+    pub(crate) product: crate::module_candidates::CandidateProduct,
+    pub(crate) certification_bytes: Vec<u8>,
+    pub(crate) module_interface: CertifiedModuleInterface,
+    pub(crate) execution_source:
+        Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+}
+
+pub(crate) fn certify_candidate_original_with_validation(
+    candidate: OriginalNativeCandidate,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<crate::recovery_artifacts::CertifiedRecoveryProduct> {
+    let OriginalNativeCandidate {
+        owner,
+        product,
+        certification_bytes,
+        module_interface,
+        execution_source,
+    } = candidate;
+    let (product_bytes, raw) = product.into_parts();
+    if sha(&product_bytes) != owner.product_sha256
+        || raw.unit != owner.unit
+        || raw.module != owner.module
+        || raw.interface != module_interface.interface_bytes()
+        || sha(&raw.interface) != owner.skinny_iface_sha256
+    {
+        return Err(CertificationError::Mismatch("candidate original bytes"));
+    }
+    let witness = verify_home_witness_with_validation(&certification_bytes, &owner, validation)?;
+    if witness.execution_source_sha256 != execution_source.as_ref().map(|graph| graph.digest())
+        || execution_source
+            .as_ref()
+            .is_some_and(|graph| graph.producer_sha256() != module_interface.producer_sha256())
+    {
+        return Err(CertificationError::Mismatch(
+            "candidate original execution source",
+        ));
+    }
+    check_direct_package_agreement_with_validation(
+        module_interface.package_imports_bytes(),
+        &owner,
+        &witness.packages,
+        validation,
+    )?;
+    let binding = validate_module_binding(
+        &witness,
+        &module_interface,
+        &raw.interface,
+        module_interface.package_imports_bytes(),
+        None,
+    )?;
+    validate_inherited_group_headers(&raw, &witness)?;
+    let imports = authenticate_original_imports(&raw, &witness, validation)?;
+    let groups = raw
+        .groups
+        .into_iter()
+        .zip(imports)
+        .map(|(group, imports)| AuthenticatedOriginalGroup {
+            owner: owner.clone(),
+            group: Arc::new(group),
+            imports: imports.into(),
+        })
+        .collect();
+    let mut product =
+        crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
+            owner,
+            product_bytes,
+            certification_bytes,
+            binding,
+        );
+    if let Some(graph) = execution_source {
+        product = product
+            .with_execution_source_with_validation(graph, validation)
+            .map_err(|_| CertificationError::Mismatch("candidate execution source owner"))?;
+    }
+    retain_authenticated_original_native(product, groups, witness)
+}
+
+fn authenticate_original_imports(
+    product: &RawModuleProduct,
+    witness: &HomeCertification,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<Vec<Vec<PendingImportOwner>>> {
+    let mut scoped_owners = BTreeMap::new();
+    for owner in std::iter::once(&witness.owner).chain(witness.sources.values()) {
+        let key = (owner.unit.clone(), owner.module.clone());
+        if scoped_owners
+            .insert(key, owner)
+            .is_some_and(|old| old != owner)
+        {
+            return Err(CertificationError::Mismatch(
+                "ambiguous recovery source owner",
+            ));
+        }
+    }
+    let mut group_imports = Vec::with_capacity(product.groups.len());
+    for (group, (_, _, globals)) in product.groups.iter().zip(&witness.groups) {
+        let mut imports = Vec::with_capacity(globals.len());
+        for (declaration, selected) in group.globals().iter().zip(globals) {
+            if let ReceiptImportOwner::Package { unit, module, .. }
+            | ReceiptImportOwner::RetainedPackage { unit, module, .. } = &selected.owner
+            {
+                if scoped_owners.contains_key(&(unit.clone(), module.clone())) {
+                    return Err(CertificationError::Mismatch(
+                        "home owner downgraded to package",
+                    ));
+                }
+            }
+            let import =
+                validate_global_witness(declaration, group.definitions().signatures(), selected)?;
+            let resolved_import = match import {
+                source @ ReceiptImportOwner::Source { .. } => {
+                    resolve_cold_recovery_source(source, witness, product)?
+                }
+                other => resolve_receipt_owner_with_validation(
+                    other,
+                    &SourceGroupMap::new(),
+                    None,
+                    &witness.packages,
+                    validation,
+                )?,
+            };
+            imports.push(resolved_import);
+        }
+        group_imports.push(imports);
+    }
+    Ok(group_imports)
 }
 
 fn validate_inherited_group_headers(
@@ -9505,6 +9625,104 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn candidate_original_issuer_matches_cold_recovery_and_refuses_seal_drift() {
+        let fixture = fixture_finalized_product(
+            original_groups_fixture(
+                "CatalogNative",
+                vec![(7, vec![]), (9001, vec![])],
+                23,
+                &BTreeMap::new(),
+            ),
+            [5; 32],
+        );
+        let cold = recovered_witness_fixtures(std::slice::from_ref(&fixture))
+            .remove(0)
+            .product;
+        let candidate = |owner: CachedHomeOwner,
+                         certification_bytes: Vec<u8>,
+                         module_interface: CertifiedModuleInterface| {
+            OriginalNativeCandidate {
+                owner,
+                product: crate::module_candidates::CandidateProduct::decode(
+                    fixture.product_bytes().to_vec(),
+                )
+                .unwrap(),
+                certification_bytes,
+                module_interface,
+                execution_source: None,
+            }
+        };
+        let decoded_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
+        let carried = certify_candidate_original_with_validation(
+            candidate(
+                fixture.owner().clone(),
+                fixture.certification_bytes().to_vec(),
+                fixture.module_interface().unwrap().clone(),
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
+            decoded_before
+        );
+        assert!(carried.same_durable_artifact(&cold));
+        assert_eq!(
+            carried.original_native().unwrap().groups,
+            cold.original_native().unwrap().groups
+        );
+        assert_eq!(
+            original_native_requirements(&carried).unwrap(),
+            original_native_requirements(&cold).unwrap()
+        );
+        let mut wrong_owner = fixture.owner().clone();
+        wrong_owner.module_version = ModuleVersion([24; 32]);
+        assert!(certify_candidate_original_with_validation(
+            candidate(
+                wrong_owner,
+                fixture.certification_bytes().to_vec(),
+                fixture.module_interface().unwrap().clone()
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
+        let changed_core =
+            fixture_module_core(fixture.module_interface().unwrap(), b"other-core".to_vec());
+        assert_eq!(changed_core.interface_bytes(), fixture.interface_bytes());
+        assert!(certify_candidate_original_with_validation(
+            candidate(
+                fixture.owner().clone(),
+                fixture.certification_bytes().to_vec(),
+                changed_core
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
+        let mut missing_graph = decode_home_witness(fixture.certification_bytes()).unwrap();
+        missing_graph.execution_source_sha256 = Some([31; 32]);
+        assert!(certify_candidate_original_with_validation(
+            candidate(
+                fixture.owner().clone(),
+                encode_home_witness(&missing_graph).unwrap(),
+                fixture.module_interface().unwrap().clone()
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
+        let mut changed_seal = fixture.certification_bytes().to_vec();
+        changed_seal.push(0);
+        assert!(certify_candidate_original_with_validation(
+            candidate(
+                fixture.owner().clone(),
+                changed_seal,
+                fixture.module_interface().unwrap().clone()
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn original_native_witness_reuses_nonempty_cycle_and_checks_selected_closure() {
         let source = |owner: CachedHomeOwner| PendingImportOwner::Source {
             binder: testing::identity(&owner.module, "entry"),
@@ -10896,6 +11114,7 @@ pub(crate) mod tests {
                     (("main".into(), "A".into()), a),
                     (("main".into(), "B".into()), b),
                 ]),
+                native_availability: Vec::new(),
             },
             CertifiedReceipt {
                 source_recipe: WorkerExecutionSource::Ordinary,

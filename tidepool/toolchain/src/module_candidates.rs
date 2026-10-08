@@ -14,6 +14,8 @@ mod fixture_packets;
 mod inventory;
 #[cfg(test)]
 mod product_decode_observer;
+#[cfg(test)]
+mod protected_native_availability_tests;
 pub(crate) mod shared_evidence;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -298,6 +300,10 @@ impl CandidateProduct {
         Some(Self { bytes, decoded })
     }
 
+    pub(crate) fn into_parts(self) -> (Vec<u8>, RawModuleProduct) {
+        (self.bytes, self.decoded)
+    }
+
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -336,6 +342,7 @@ pub(crate) struct CandidateBundle {
 pub(crate) struct CandidateSet {
     pub manifest_path: PathBuf,
     pub by_owner: BTreeMap<(String, String), CandidateBundle>,
+    pub(crate) native_availability: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
 }
 
 /// Emit receipt-derived evidence only after products and target owners passed
@@ -1774,6 +1781,9 @@ pub(crate) struct ExactCandidateContext {
     reserved: BTreeSet<String>,
     originals: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     interface_seals: BTreeMap<(String, String), [u8; 32]>,
+    canonical_interfaces:
+        BTreeMap<(String, String), crate::certified_products::CertifiedModuleInterface>,
+    ambiguous_native_owners: BTreeSet<(String, String)>,
 }
 
 impl ExactCandidateContext {
@@ -1783,6 +1793,8 @@ impl ExactCandidateContext {
             reserved,
             originals: Vec::new(),
             interface_seals: BTreeMap::new(),
+            canonical_interfaces: BTreeMap::new(),
+            ambiguous_native_owners: BTreeSet::new(),
         }
     }
 
@@ -1802,10 +1814,41 @@ impl ExactCandidateContext {
         self
     }
 
-    fn excludes_root(&self, unit: &str, module: &str) -> bool {
-        self.protected
-            .contains(&(unit.to_owned(), module.to_owned()))
-            || self.reserved.contains(module)
+    pub(crate) fn with_canonical_interfaces(
+        mut self,
+        interfaces: BTreeMap<(String, String), crate::certified_products::CertifiedModuleInterface>,
+        ambiguous: BTreeSet<(String, String)>,
+    ) -> Self {
+        self.canonical_interfaces = interfaces;
+        self.ambiguous_native_owners = ambiguous;
+        self
+    }
+
+    fn admits_canonical_original(
+        &self,
+        owner: &CachedHomeOwner,
+        canonical: &crate::certified_products::CertifiedModuleInterface,
+    ) -> bool {
+        let key = (owner.unit.clone(), owner.module.clone());
+        if self.reserved.contains(&owner.module) {
+            return false;
+        }
+        if self
+            .canonical_interfaces
+            .get(&key)
+            .is_some_and(|selected| selected != canonical)
+            || (self.protected.contains(&key) && !self.canonical_interfaces.contains_key(&key))
+        {
+            return false;
+        }
+        match self.originals.iter().find(|original| {
+            original.owner().unit == owner.unit && original.owner().module == owner.module
+        }) {
+            Some(original) => {
+                original.owner() == owner && original.module_interface() == Some(canonical)
+            }
+            None => !self.ambiguous_native_owners.contains(&key),
+        }
     }
 }
 
@@ -1905,7 +1948,12 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                 && context.is_none()
                 && record.include != include)
             || record.source.is_relative()
-            || context.is_some_and(|e| e.excludes_root(&record.unit, &record.module))
+            || context.is_some_and(|e| {
+                e.reserved.contains(&record.module)
+                    || (matches!(origin, CandidateOrigin::Ordinary)
+                        && e.protected
+                            .contains(&(record.unit.clone(), record.module.clone())))
+            })
         {
             continue;
         }
@@ -2307,6 +2355,11 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             }
             continue;
         }
+        if context.is_some_and(|context| {
+            !context.admits_canonical_original(&record.original_owner.owner(), &canonical)
+        }) {
+            continue;
+        }
         let owner_key = (record.unit.clone(), record.module.clone());
         let Some(record) = ValidatedRecord::admit(record, canonical) else {
             if omit_or_refuse_candidate(
@@ -2405,14 +2458,41 @@ fn select_records_inner<R: Into<CandidateRecord>>(
         invalid_record = selection_omissions.omissions.get(&CacheOfferOmission::InvalidRecord).copied().unwrap_or_default(),
         total = selection_omissions.total(),
         "ordinary optional cache offer omissions");
+    let availability = match context {
+        Some(context) => protected_native_closure(&validated, context, &mut package_validation)?,
+        None => BTreeSet::new(),
+    };
     let mut inventory = inventory::InventoryTables::new(
         validated
-            .values()
-            .flat_map(|(_, _, product, _)| product.groups.iter()),
+            .iter()
+            .filter(|(key, _)| !availability.contains(*key))
+            .flat_map(|(_, (_, _, product, _))| product.groups.iter()),
     )?;
+    let mut native_availability = Vec::new();
     let mut by_owner = BTreeMap::new();
     let mut manifest = Vec::new();
-    for (_, (mut record, origin, product, _)) in validated {
+    for (key, (mut record, origin, product, _)) in validated {
+        if availability.contains(&key) {
+            native_availability.push(
+                crate::certified_products::certify_candidate_original_with_validation(
+                    crate::certified_products::OriginalNativeCandidate {
+                        owner: record.original_owner.owner(),
+                        product: CandidateProduct {
+                            bytes: std::mem::take(&mut record.data.products),
+                            decoded: product,
+                        },
+                        certification_bytes: std::mem::take(
+                            &mut record.data.original_certification,
+                        ),
+                        module_interface: record.canonical,
+                        execution_source: record.execution_source,
+                    },
+                    &mut package_validation,
+                )
+                .ok()?,
+            );
+            continue;
+        }
         let product_sha: [u8; 32] = Sha256::digest(&record.products).into();
         let Some(evidence_sha) = record.evidence.json_sha256().map(|digest| hex(&digest)) else {
             continue;
@@ -2525,10 +2605,13 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             core_sha256: &core_reference.sha256,
         }));
     }
-    retain_closed_execution_capabilities(
-        &mut by_owner,
-        context.map_or(&[], |context| context.originals.as_slice()),
-    );
+    let originals = context
+        .into_iter()
+        .flat_map(|context| context.originals.iter())
+        .chain(native_availability.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    retain_closed_execution_capabilities(&mut by_owner, &originals);
     let graph_bytes = by_owner
         .values()
         .filter(|bundle| bundle.execution_admitted)
@@ -2598,7 +2681,64 @@ fn select_records_inner<R: Into<CandidateRecord>>(
     Some(CandidateSet {
         manifest_path,
         by_owner,
+        native_availability,
     })
+}
+
+/// Close only compatible protected roots. Native dependencies retain full
+/// original owners; canonical requirements may need private support interfaces.
+fn protected_native_closure(
+    candidates: &BTreeMap<(String, String), ValidatedCandidate>,
+    context: &ExactCandidateContext,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Option<BTreeSet<(String, String)>> {
+    let mut pending = candidates
+        .keys()
+        .filter(|key| context.protected.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut selected = BTreeSet::new();
+    while let Some(key) = pending.pop() {
+        if !selected.insert(key.clone()) {
+            continue;
+        }
+        let (record, _, _, _) = candidates.get(&key)?;
+        let owner = record.original_owner.owner();
+        for required in crate::certified_products::candidate_home_requirements_with_validation(
+            &record.original_certification,
+            &owner,
+            validation,
+        )
+        .ok()?
+        {
+            if context
+                .originals
+                .iter()
+                .any(|original| original.owner() == &required)
+            {
+                continue;
+            }
+            let required_key = (required.unit.clone(), required.module.clone());
+            if context.reserved.contains(&required.module)
+                || candidates.get(&required_key)?.0.original_owner.owner() != required
+            {
+                return None;
+            }
+            pending.push(required_key);
+        }
+        for (required, seal) in record.canonical.requirements() {
+            if context.interface_seals.get(required) == Some(seal) {
+                continue;
+            }
+            if context.reserved.contains(&required.1)
+                || candidates.get(required)?.0.canonical.interface_sha256() != *seal
+            {
+                return None;
+            }
+            pending.push(required.clone());
+        }
+    }
+    Some(selected)
 }
 
 /// Encoding data is separate from the retained executable candidate set.
@@ -2885,10 +3025,9 @@ fn retain_compatible_dependencies(
                         if originals.contains_key(&dependency_key) {
                             return true;
                         }
-                        !context.protected.contains(&dependency_key)
-                            && candidates
-                                .get(&dependency_key)
-                                .is_some_and(|(body, _, _, _)| body.source == selected)
+                        candidates
+                            .get(&dependency_key)
+                            .is_some_and(|(body, _, _, _)| body.source == selected)
                     })
                 });
                 (!closed).then(|| key.clone())

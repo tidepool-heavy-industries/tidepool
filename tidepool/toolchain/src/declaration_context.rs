@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use crate::artifact_inventory::{
     admission_failure, ArtifactEntry, ArtifactId, ArtifactInventory, ArtifactInventoryFailure,
-    ArtifactMetadataSnapshot, ArtifactPayload, ArtifactView, CompilerInputProjection,
-    CompilerInputRole, JoinedInterfaceRole, NativeGroupKey,
+    ArtifactMetadataSnapshot, ArtifactPayload, ArtifactView, CanonicalProducerIdentity,
+    CompilerInputProjection, CompilerInputRole, JoinedInterfaceRole, NativeGroupKey,
 };
 use crate::certified_products::{
     certify_selected_owned_products_in_context_with_validation, PendingCertifiedGroup,
@@ -141,6 +141,63 @@ impl OriginalCompilerInputs {
                 .compiler_projection(artifacts)
                 .map_err(compiler_evidence_failure)?,
             artifacts: artifacts.clone(),
+        })
+    }
+
+    /// Supply compatible immutable code privately. Exact canonical equality
+    /// upgrades an issued type role; it grants no lexical or instance authority.
+    pub(crate) fn from_native_availability(
+        context: &ExactDeclarationContext,
+        producer: CanonicalProducerIdentity,
+        products: &[CertifiedRecoveryProduct],
+    ) -> Result<Self, CompileError> {
+        let selected = context.compiler_metadata_snapshot()?;
+        let retained = context.inventory.metadata_snapshot();
+        let mut validation = PackageInterfaceValidation::default();
+        let mut entries = Vec::new();
+        for product in products {
+            let owner = identity(&product.owner().unit, &product.owner().module);
+            if let Some(previous) = selected.entries.get(&owner) {
+                if canonical_source_interface(previous) != product.module_interface() {
+                    return Err(failure(
+                        "private native availability differs from selected canonical interface",
+                    ));
+                }
+                if let ArtifactPayload::Original(original) = &previous.payload {
+                    if !original.same_durable_artifact(product) {
+                        return Err(failure(
+                            "private native availability competes with selected original",
+                        ));
+                    }
+                } else if retained.ambiguous_native_owners.contains(&owner) {
+                    return Err(failure(
+                        "private native availability has ambiguous retained originals",
+                    ));
+                }
+            } else if retained.ambiguous_native_owners.contains(&owner) {
+                return Err(failure(
+                    "private native availability has ambiguous retained originals",
+                ));
+            }
+            entries.push(Arc::new(ArtifactEntry::original_with_validation(
+                producer,
+                product.clone(),
+                &mut validation,
+            )?));
+        }
+        let projection = CompilerInputProjection::from_issued_entries(&entries)?;
+        // All groups constitute the availability census, not target demand.
+        let artifacts = context
+            .inventory
+            .inventory()
+            .admit_shared(&context.inventory, entries)?;
+        context
+            .compiler_projection
+            .merge(&projection)?
+            .validate(&artifacts)?;
+        Ok(Self {
+            projection,
+            artifacts,
         })
     }
 
@@ -408,19 +465,32 @@ impl ExactCompileContext {
         producer: &[u8],
         authorization: Option<Value>,
     ) -> Result<ExactCompilationRequest, CompileError> {
+        self.prepare_compilation_with_private_input(root, producer, authorization, None)
+    }
+
+    pub(crate) fn prepare_compilation_with_private_input(
+        &self,
+        root: &Path,
+        producer: &[u8],
+        authorization: Option<Value>,
+        private: Option<OriginalCompilerInputs>,
+    ) -> Result<ExactCompilationRequest, CompileError> {
         self.declarations.prepare_compilation_with_scaffold(
             root,
             producer,
             self.authorization(authorization),
             &self.protected_scaffold,
+            private,
         )
     }
 
-    pub(crate) fn prepare_compilation_authorizing(
+    pub(crate) fn prepare_compilation_authorizing_with_private_input(
         &self,
         root: &Path,
         producer: &[u8],
-        authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
+        authorize: impl FnOnce(
+            [u8; 32],
+        ) -> Result<(Value, Option<OriginalCompilerInputs>), CompileError>,
     ) -> Result<ExactCompilationRequest, CompileError> {
         self.declarations
             .prepare_compilation_authorizing_with_scaffold(
@@ -428,9 +498,12 @@ impl ExactCompileContext {
                 producer,
                 &self.protected_scaffold,
                 |semantic| {
-                    Ok(self
-                        .authorization(Some(authorize(semantic)?))
-                        .expect("purpose authorization"))
+                    let (authorization, private) = authorize(semantic)?;
+                    Ok((
+                        self.authorization(Some(authorization))
+                            .expect("purpose authorization"),
+                        private,
+                    ))
                 },
             )
     }
@@ -5021,7 +5094,7 @@ impl ExactDeclarationContext {
                 retained._directory.disable_cleanup(true);
                 Ok(retained)
             })?;
-        self.prepare_compilation_from_metadata(root, producer, None, inputs, &scaffold)
+        self.prepare_compilation_from_metadata(root, producer, None, inputs, &scaffold, None)
     }
 
     pub(crate) fn prepare_compilation_with_authorization(
@@ -5030,11 +5103,22 @@ impl ExactDeclarationContext {
         producer: &[u8],
         authorization: Option<Value>,
     ) -> Result<ExactCompilationRequest, CompileError> {
+        self.prepare_compilation_with_private_input(root, producer, authorization, None)
+    }
+
+    pub(crate) fn prepare_compilation_with_private_input(
+        self: &Arc<Self>,
+        root: &Path,
+        producer: &[u8],
+        authorization: Option<Value>,
+        private: Option<OriginalCompilerInputs>,
+    ) -> Result<ExactCompilationRequest, CompileError> {
         self.prepare_compilation_with_scaffold(
             root,
             producer,
             authorization,
             &ProtectedScaffoldRequirements::default(),
+            private,
         )
     }
 
@@ -5044,10 +5128,18 @@ impl ExactDeclarationContext {
         producer: &[u8],
         authorization: Option<Value>,
         scaffold: &ProtectedScaffoldRequirements,
+        private: Option<OriginalCompilerInputs>,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        let inputs = scaffold.compiler_inputs(self, None)?;
+        let inputs = scaffold.compiler_inputs(self, private.as_ref())?;
         inputs.metadata.validate_native_selection()?;
-        self.prepare_compilation_from_metadata(root, producer, authorization, inputs, scaffold)
+        self.prepare_compilation_from_metadata(
+            root,
+            producer,
+            authorization,
+            inputs,
+            scaffold,
+            private,
+        )
     }
 
     /// Bind authorization and the request to one observation of this immutable
@@ -5063,7 +5155,7 @@ impl ExactDeclarationContext {
             root,
             producer,
             &ProtectedScaffoldRequirements::default(),
-            authorize,
+            |semantic| Ok((authorize(semantic)?, None)),
         )
     }
 
@@ -5072,17 +5164,25 @@ impl ExactDeclarationContext {
         root: &Path,
         producer: &[u8],
         scaffold: &ProtectedScaffoldRequirements,
-        authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
+        authorize: impl FnOnce(
+            [u8; 32],
+        ) -> Result<(Value, Option<OriginalCompilerInputs>), CompileError>,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        let inputs = scaffold.compiler_inputs(self, None)?;
+        let baseline = scaffold.compiler_inputs(self, None)?;
+        baseline.metadata.validate_native_selection()?;
+        let (authorization, private) = authorize(baseline.declaration_semantic_sha256)?;
+        let inputs = match private.as_ref() {
+            Some(private) => scaffold.compiler_inputs(self, Some(private))?,
+            None => baseline,
+        };
         inputs.metadata.validate_native_selection()?;
-        let authorization = authorize(inputs.declaration_semantic_sha256)?;
         self.prepare_compilation_from_metadata(
             root,
             producer,
             Some(authorization),
             inputs,
             scaffold,
+            private,
         )
     }
 
@@ -5238,6 +5338,7 @@ impl ExactDeclarationContext {
         authorization: Option<Value>,
         inputs: RequestCompilerInputs,
         scaffold: &ProtectedScaffoldRequirements,
+        private: Option<OriginalCompilerInputs>,
     ) -> Result<ExactCompilationRequest, CompileError> {
         let metadata = &inputs.metadata;
         let semantic_sha256 = inputs.declaration_semantic_sha256;
@@ -5420,7 +5521,7 @@ impl ExactDeclarationContext {
             reused_materialization = reused, manifest_written_bytes = bytes.len() as u64,
             selected_artifacts = artifacts.len(), "exact request references retained immutable products");
         Ok(ExactCompilationRequest {
-            inputs: ExactRequestInputs::issue(self.clone(), scaffold.clone(), None, inputs),
+            inputs: ExactRequestInputs::issue(self.clone(), scaffold.clone(), private, inputs),
             manifest,
             request_sha256: sha256(&bytes),
             semantic_sha256,
@@ -5692,6 +5793,9 @@ fn compose_lexical_nodes<'a>(
 
 #[cfg(test)]
 pub(crate) use tests::assert_source_selected_receipt_pairing;
+
+#[cfg(test)]
+mod native_availability_tests;
 
 #[cfg(test)]
 mod tests {
