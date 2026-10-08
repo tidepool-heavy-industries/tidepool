@@ -5,7 +5,6 @@
 //! logical submissions. Physical service/queue time belongs to the daemon trace.
 
 use super::*;
-use harness::item::ToolExecution;
 use std::time::Instant;
 
 struct Phase {
@@ -16,20 +15,20 @@ struct Phase {
 }
 
 fn issue(round: RequestedRound, phase: &Phase, call_id: &str) {
-    let item = Item(json!({
-        "type": "custom_tool_call", "call_id": call_id,
-        "name": if phase.asynchronous { "haskell" } else { "haskell_sync" },
-        "input": phase.source, "async": phase.asynchronous,
-    }));
-    assert_eq!(
-        item.tool_call().unwrap().unwrap().execution,
-        if phase.asynchronous { ToolExecution::Asynchronous } else { ToolExecution::Synchronous },
-        "the provider invocation, rather than its tool name, selects Engine scheduling"
+    round.cell_named(
+        if phase.asynchronous {
+            "haskell"
+        } else {
+            "haskell_sync"
+        },
+        call_id,
+        phase.source,
+        if phase.asynchronous {
+            ToolExecution::Asynchronous
+        } else {
+            ToolExecution::Synchronous
+        },
     );
-    round.reply.send(ResponsesTurn {
-        response_id: format!("usecase-{call_id}"),
-        items: vec![item], usage: Default::default(),
-    }).expect("real Engine awaits the scripted reply");
 }
 
 fn has_output(round: &RequestedRound, call_id: &str) -> bool {
@@ -106,21 +105,19 @@ async fn production_harness_notebook_usecase_phases() {
         let provider_before = round.provider_calls.load(Ordering::SeqCst);
         let started = Instant::now();
         issue(round, phase, &call_id);
-        round = next_round(&mut rounds).await;
+        let successor = next_round(&mut rounds).await;
         let first_successor_ns = started.elapsed().as_nanos();
-        let yielded_before_terminal = !has_output(&round, &call_id);
+        let yielded_before_terminal = !has_output(&successor, &call_id);
         if phase.asynchronous {
             assert!(yielded_before_terminal,
                 "async:true must admit a successor while the real cell remains unfinished");
         }
-        let mut yielded_rounds = 0;
-        while !has_output(&round, &call_id) {
-            assert!(phase.asynchronous, "synchronous invocation inferred before its result");
-            assert!(yielded_rounds < 8, "bounded completion wake observation");
-            round.finish();
-            yielded_rounds += 1;
-            round = next_round(&mut rounds).await;
-        }
+        round = if phase.asynchronous {
+            successor.wait_for_pending();
+            next_round_with_output(&mut rounds, &call_id).await
+        } else {
+            successor
+        };
         let completed_ns = started.elapsed().as_nanos();
         let output = successful_output(&round.request, &call_id);
         let displayed = test_campaign::explicit_display_text(&output);
@@ -140,7 +137,7 @@ async fn production_harness_notebook_usecase_phases() {
             "context_items": round.request.input.len(),
             "context_json_bytes": serde_json::to_vec(&round.request.input).unwrap().len(),
             "invocation_execution": if phase.asynchronous { "asynchronous" } else { "synchronous" },
-            "yielded_before_terminal": yielded_before_terminal, "yielded_provider_rounds": yielded_rounds,
+            "yielded_before_terminal": yielded_before_terminal,
             "source": phase.source, "expected": phase.expected, "displayed": displayed,
             "history": if index == 0 { "first authored cell in fresh session" } else { "ordered prior phases in same session" },
         }));
