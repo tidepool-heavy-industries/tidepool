@@ -3777,6 +3777,7 @@ version = "0.1.0"
 dependencies = [
  "frunk",
  "serde_json",
+ "tempfile",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-bridge-effects",

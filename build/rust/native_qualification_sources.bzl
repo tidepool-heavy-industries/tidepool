@@ -8,6 +8,7 @@ NATIVE_QUALIFICATION_TREES = [
     ("//bridge/mcp:native_qualification_inputs", ""),
     ("//bridge/protocol:native_qualification_inputs", ""),
     ("//bridge/test-data:native_qualification_inputs", ""),
+    ("//bridge/testing:haskell_test_fixtures", ""),
     ("//bridge/testing:native_qualification_inputs", ""),
     ("//build/haskell:qualification_inputs", ""),
     ("//build/package:qualification_inputs", ""),

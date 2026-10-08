@@ -24,18 +24,6 @@ rust_filegroup(
         "src/conversation.rs": "exomonad/actor/src/conversation.rs",
         "src/descriptor.rs": "exomonad/actor/src/descriptor.rs",
         "src/external_application.rs": "exomonad/actor/src/external_application.rs",
-        "src/fixtures/LookupPlanChoice.hs": "exomonad/actor/src/fixtures/LookupPlanChoice.hs",
-        "src/fixtures/LookupPlanModuleOnly.hs": "exomonad/actor/src/fixtures/LookupPlanModuleOnly.hs",
-        "src/fixtures/LookupPlanParent.hs": "exomonad/actor/src/fixtures/LookupPlanParent.hs",
-        "src/fixtures/ProgressRuntime.hs": "exomonad/actor/src/fixtures/ProgressRuntime.hs",
-        "src/fixtures/host-job-first.hs": "exomonad/actor/src/fixtures/host-job-first.hs",
-        "src/fixtures/host-job-retained.hs": "exomonad/actor/src/fixtures/host-job-retained.hs",
-        "src/fixtures/host-json-first.hs": "exomonad/actor/src/fixtures/host-json-first.hs",
-        "src/fixtures/host-json-retained.hs": "exomonad/actor/src/fixtures/host-json-retained.hs",
-        "src/fixtures/host-text-first.hs": "exomonad/actor/src/fixtures/host-text-first.hs",
-        "src/fixtures/host-text-retained.hs": "exomonad/actor/src/fixtures/host-text-retained.hs",
-        "src/fixtures/quoted-agent-provider.hs": "exomonad/actor/src/fixtures/quoted-agent-provider.hs",
-        "src/fixtures/quoted-agent-spec.hs": "exomonad/actor/src/fixtures/quoted-agent-spec.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_rs]": "exomonad/actor/src/generated/actor.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_context_rs]": "exomonad/actor/src/generated/actor_context.rs",
@@ -116,8 +104,6 @@ rust_filegroup(
         "src/resident_actor/request_wait.rs": "exomonad/actor/src/resident_actor/request_wait.rs",
         "src/resident_actor/request_wait_tests.rs": "exomonad/actor/src/resident_actor/request_wait_tests.rs",
         "src/resident_actor/status_rendering.rs": "exomonad/actor/src/resident_actor/status_rendering.rs",
-        "src/resident_actor/terminal_transfer_request.hs": "exomonad/actor/src/resident_actor/terminal_transfer_request.hs",
-        "src/resident_actor/terminal_transfer_setup.hs": "exomonad/actor/src/resident_actor/terminal_transfer_setup.hs",
         "src/resident_actor/terminal_transfer_tests.rs": "exomonad/actor/src/resident_actor/terminal_transfer_tests.rs",
         "src/resident_actor/terminal_wait.rs": "exomonad/actor/src/resident_actor/terminal_wait.rs",
         "src/resident_actor/terminal_wait_tests.rs": "exomonad/actor/src/resident_actor/terminal_wait_tests.rs",
@@ -154,8 +140,6 @@ rust_filegroup(
         "//exomonad/prompts:doc_watch": "exomonad/prompts/docs/watch.md",
         "//exomonad/prompts:doc_workbench": "exomonad/prompts/docs/workbench.md",
         "//exomonad/prompts:haskell_tool_instructions": "exomonad/prompts/haskell-tool-instructions.md",
-        "//tidepool/runtime:activation_input_function_fixture": "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
-        "//tidepool/runtime:activation_input_receiver_fixture": "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -214,21 +198,6 @@ rust_filegroup(
         "src/conversation.rs": "exomonad/actor/src/conversation.rs",
         "src/descriptor.rs": "exomonad/actor/src/descriptor.rs",
         "src/external_application.rs": "exomonad/actor/src/external_application.rs",
-        "src/fixtures/ForkReplyContracts.hs": "exomonad/actor/src/fixtures/ForkReplyContracts.hs",
-        "src/fixtures/LookupPlanChoice.hs": "exomonad/actor/src/fixtures/LookupPlanChoice.hs",
-        "src/fixtures/LookupPlanModuleOnly.hs": "exomonad/actor/src/fixtures/LookupPlanModuleOnly.hs",
-        "src/fixtures/LookupPlanParent.hs": "exomonad/actor/src/fixtures/LookupPlanParent.hs",
-        "src/fixtures/ProgressRuntime.hs": "exomonad/actor/src/fixtures/ProgressRuntime.hs",
-        "src/fixtures/host-job-first.hs": "exomonad/actor/src/fixtures/host-job-first.hs",
-        "src/fixtures/host-job-retained.hs": "exomonad/actor/src/fixtures/host-job-retained.hs",
-        "src/fixtures/host-json-first.hs": "exomonad/actor/src/fixtures/host-json-first.hs",
-        "src/fixtures/host-json-retained.hs": "exomonad/actor/src/fixtures/host-json-retained.hs",
-        "src/fixtures/host-text-first.hs": "exomonad/actor/src/fixtures/host-text-first.hs",
-        "src/fixtures/host-text-retained.hs": "exomonad/actor/src/fixtures/host-text-retained.hs",
-        "src/fixtures/prepared-instance-agent-spec.hs": "exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs",
-        "src/fixtures/prepared-instance-provider.hs": "exomonad/actor/src/fixtures/prepared-instance-provider.hs",
-        "src/fixtures/quoted-agent-provider.hs": "exomonad/actor/src/fixtures/quoted-agent-provider.hs",
-        "src/fixtures/quoted-agent-spec.hs": "exomonad/actor/src/fixtures/quoted-agent-spec.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_rs]": "exomonad/actor/src/generated/actor.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_actor_context_rs]": "exomonad/actor/src/generated/actor_context.rs",
@@ -261,7 +230,6 @@ rust_filegroup(
         "src/lineage/capture_lifetime_tests.rs": "exomonad/actor/src/lineage/capture_lifetime_tests.rs",
         "src/lineage/captured_tests.rs": "exomonad/actor/src/lineage/captured_tests.rs",
         "src/local_actor.rs": "exomonad/actor/src/local_actor.rs",
-        "src/local_actor/failure_origin.hs": "exomonad/actor/src/local_actor/failure_origin.hs",
         "src/local_actor/reply_settlement_history.rs": "exomonad/actor/src/local_actor/reply_settlement_history.rs",
         "src/local_actor/terminal_transfer_tests.rs": "exomonad/actor/src/local_actor/terminal_transfer_tests.rs",
         "src/local_actor/workbench_step.rs": "exomonad/actor/src/local_actor/workbench_step.rs",
@@ -288,13 +256,9 @@ rust_filegroup(
         "src/resident_actor.rs": "exomonad/actor/src/resident_actor.rs",
         "src/resident_actor/activation_publication_tests.rs": "exomonad/actor/src/resident_actor/activation_publication_tests.rs",
         "src/resident_actor/after_tool_wait.rs": "exomonad/actor/src/resident_actor/after_tool_wait.rs",
-        "src/resident_actor/capture_partial_startup_failure.hs": "exomonad/actor/src/resident_actor/capture_partial_startup_failure.hs",
-        "src/resident_actor/capture_workspace_child.hs": "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
         "src/resident_actor/capture_workspace_tests.rs": "exomonad/actor/src/resident_actor/capture_workspace_tests.rs",
         "src/resident_actor/captured_commit.rs": "exomonad/actor/src/resident_actor/captured_commit.rs",
         "src/resident_actor/captured_commit/deferred.rs": "exomonad/actor/src/resident_actor/captured_commit/deferred.rs",
-        "src/resident_actor/captured_reader_reuse.hs": "exomonad/actor/src/resident_actor/captured_reader_reuse.hs",
-        "src/resident_actor/captured_readers_parent.hs": "exomonad/actor/src/resident_actor/captured_readers_parent.hs",
         "src/resident_actor/child_initialization.rs": "exomonad/actor/src/resident_actor/child_initialization.rs",
         "src/resident_actor/child_launch.rs": "exomonad/actor/src/resident_actor/child_launch.rs",
         "src/resident_actor/clock_wait.rs": "exomonad/actor/src/resident_actor/clock_wait.rs",
@@ -319,8 +283,6 @@ rust_filegroup(
         "src/resident_actor/request_wait.rs": "exomonad/actor/src/resident_actor/request_wait.rs",
         "src/resident_actor/request_wait_tests.rs": "exomonad/actor/src/resident_actor/request_wait_tests.rs",
         "src/resident_actor/status_rendering.rs": "exomonad/actor/src/resident_actor/status_rendering.rs",
-        "src/resident_actor/terminal_transfer_request.hs": "exomonad/actor/src/resident_actor/terminal_transfer_request.hs",
-        "src/resident_actor/terminal_transfer_setup.hs": "exomonad/actor/src/resident_actor/terminal_transfer_setup.hs",
         "src/resident_actor/terminal_transfer_tests.rs": "exomonad/actor/src/resident_actor/terminal_transfer_tests.rs",
         "src/resident_actor/terminal_wait.rs": "exomonad/actor/src/resident_actor/terminal_wait.rs",
         "src/resident_actor/terminal_wait_tests.rs": "exomonad/actor/src/resident_actor/terminal_wait_tests.rs",
@@ -330,7 +292,6 @@ rust_filegroup(
         "src/resident_tools.rs": "exomonad/actor/src/resident_tools.rs",
         "src/resident_tools/operation_settlement.rs": "exomonad/actor/src/resident_tools/operation_settlement.rs",
         "src/resident_workbench.rs": "exomonad/actor/src/resident_workbench.rs",
-        "src/resident_workbench/display_callback_immediate.hs": "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
         "src/resident_workbench/display_callback_tests.rs": "exomonad/actor/src/resident_workbench/display_callback_tests.rs",
         "src/resident_workbench/structured_introspection.rs": "exomonad/actor/src/resident_workbench/structured_introspection.rs",
         "src/resident_workbench/to_haskell.rs": "exomonad/actor/src/resident_workbench/to_haskell.rs",
@@ -359,8 +320,6 @@ rust_filegroup(
         "//exomonad/prompts:doc_watch": "exomonad/prompts/docs/watch.md",
         "//exomonad/prompts:doc_workbench": "exomonad/prompts/docs/workbench.md",
         "//exomonad/prompts:haskell_tool_instructions": "exomonad/prompts/haskell-tool-instructions.md",
-        "//tidepool/runtime:activation_input_function_fixture": "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
-        "//tidepool/runtime:activation_input_receiver_fixture": "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
     },
     visibility = ["PUBLIC"],
 )
@@ -419,6 +378,7 @@ tidepool_rust_test_cases(
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
+        "//bridge/testing:haskell_test_fixtures",
         "//build/package:compiler_deployment",
         "//build/package:tidepool_extract_runtime_libraries",
         "//build/rust:workspace_git_bundle",
@@ -434,6 +394,7 @@ tidepool_rust_test_cases(
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
         "TIDEPOOL_WORKSPACE_TEST_GIT": "$(location toolchains//:exomonad_runtime_tools)/bin/git",
     },
     haskell_worker = True,
@@ -624,6 +585,7 @@ tidepool_rust_isolated_test(
     },
     resources = [
         "//bridge/haskell:facade_embedded_sources",
+        "//bridge/testing:haskell_test_fixtures",
         "//build/package:compiler_deployment",
         "//build/package:tidepool_extract_runtime_libraries",
     ],
@@ -634,6 +596,7 @@ tidepool_rust_isolated_test(
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
     },
     haskell_worker = True,
     visibility = ["PUBLIC"],
@@ -664,21 +627,6 @@ filegroup(
         "exomonad/actor/src/conversation.rs": "src/conversation.rs",
         "exomonad/actor/src/descriptor.rs": "src/descriptor.rs",
         "exomonad/actor/src/external_application.rs": "src/external_application.rs",
-        "exomonad/actor/src/fixtures/ForkReplyContracts.hs": "src/fixtures/ForkReplyContracts.hs",
-        "exomonad/actor/src/fixtures/LookupPlanChoice.hs": "src/fixtures/LookupPlanChoice.hs",
-        "exomonad/actor/src/fixtures/LookupPlanModuleOnly.hs": "src/fixtures/LookupPlanModuleOnly.hs",
-        "exomonad/actor/src/fixtures/LookupPlanParent.hs": "src/fixtures/LookupPlanParent.hs",
-        "exomonad/actor/src/fixtures/ProgressRuntime.hs": "src/fixtures/ProgressRuntime.hs",
-        "exomonad/actor/src/fixtures/host-job-first.hs": "src/fixtures/host-job-first.hs",
-        "exomonad/actor/src/fixtures/host-job-retained.hs": "src/fixtures/host-job-retained.hs",
-        "exomonad/actor/src/fixtures/host-json-first.hs": "src/fixtures/host-json-first.hs",
-        "exomonad/actor/src/fixtures/host-json-retained.hs": "src/fixtures/host-json-retained.hs",
-        "exomonad/actor/src/fixtures/host-text-first.hs": "src/fixtures/host-text-first.hs",
-        "exomonad/actor/src/fixtures/host-text-retained.hs": "src/fixtures/host-text-retained.hs",
-        "exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs": "src/fixtures/prepared-instance-agent-spec.hs",
-        "exomonad/actor/src/fixtures/prepared-instance-provider.hs": "src/fixtures/prepared-instance-provider.hs",
-        "exomonad/actor/src/fixtures/quoted-agent-provider.hs": "src/fixtures/quoted-agent-provider.hs",
-        "exomonad/actor/src/fixtures/quoted-agent-spec.hs": "src/fixtures/quoted-agent-spec.hs",
         "exomonad/actor/src/fork_workspace.rs": "src/fork_workspace.rs",
         "exomonad/actor/src/hosted_lifecycle.rs": "src/hosted_lifecycle.rs",
         "exomonad/actor/src/identity.rs": "src/identity.rs",
@@ -690,7 +638,6 @@ filegroup(
         "exomonad/actor/src/lineage/capture_lifetime_tests.rs": "src/lineage/capture_lifetime_tests.rs",
         "exomonad/actor/src/lineage/captured_tests.rs": "src/lineage/captured_tests.rs",
         "exomonad/actor/src/local_actor.rs": "src/local_actor.rs",
-        "exomonad/actor/src/local_actor/failure_origin.hs": "src/local_actor/failure_origin.hs",
         "exomonad/actor/src/local_actor/reply_settlement_history.rs": "src/local_actor/reply_settlement_history.rs",
         "exomonad/actor/src/local_actor/terminal_transfer_tests.rs": "src/local_actor/terminal_transfer_tests.rs",
         "exomonad/actor/src/local_actor/workbench_step.rs": "src/local_actor/workbench_step.rs",
@@ -717,13 +664,9 @@ filegroup(
         "exomonad/actor/src/resident_actor.rs": "src/resident_actor.rs",
         "exomonad/actor/src/resident_actor/activation_publication_tests.rs": "src/resident_actor/activation_publication_tests.rs",
         "exomonad/actor/src/resident_actor/after_tool_wait.rs": "src/resident_actor/after_tool_wait.rs",
-        "exomonad/actor/src/resident_actor/capture_partial_startup_failure.hs": "src/resident_actor/capture_partial_startup_failure.hs",
-        "exomonad/actor/src/resident_actor/capture_workspace_child.hs": "src/resident_actor/capture_workspace_child.hs",
         "exomonad/actor/src/resident_actor/capture_workspace_tests.rs": "src/resident_actor/capture_workspace_tests.rs",
         "exomonad/actor/src/resident_actor/captured_commit.rs": "src/resident_actor/captured_commit.rs",
         "exomonad/actor/src/resident_actor/captured_commit/deferred.rs": "src/resident_actor/captured_commit/deferred.rs",
-        "exomonad/actor/src/resident_actor/captured_reader_reuse.hs": "src/resident_actor/captured_reader_reuse.hs",
-        "exomonad/actor/src/resident_actor/captured_readers_parent.hs": "src/resident_actor/captured_readers_parent.hs",
         "exomonad/actor/src/resident_actor/child_initialization.rs": "src/resident_actor/child_initialization.rs",
         "exomonad/actor/src/resident_actor/child_launch.rs": "src/resident_actor/child_launch.rs",
         "exomonad/actor/src/resident_actor/clock_wait.rs": "src/resident_actor/clock_wait.rs",
@@ -748,8 +691,6 @@ filegroup(
         "exomonad/actor/src/resident_actor/request_wait.rs": "src/resident_actor/request_wait.rs",
         "exomonad/actor/src/resident_actor/request_wait_tests.rs": "src/resident_actor/request_wait_tests.rs",
         "exomonad/actor/src/resident_actor/status_rendering.rs": "src/resident_actor/status_rendering.rs",
-        "exomonad/actor/src/resident_actor/terminal_transfer_request.hs": "src/resident_actor/terminal_transfer_request.hs",
-        "exomonad/actor/src/resident_actor/terminal_transfer_setup.hs": "src/resident_actor/terminal_transfer_setup.hs",
         "exomonad/actor/src/resident_actor/terminal_transfer_tests.rs": "src/resident_actor/terminal_transfer_tests.rs",
         "exomonad/actor/src/resident_actor/terminal_wait.rs": "src/resident_actor/terminal_wait.rs",
         "exomonad/actor/src/resident_actor/terminal_wait_tests.rs": "src/resident_actor/terminal_wait_tests.rs",
@@ -759,7 +700,6 @@ filegroup(
         "exomonad/actor/src/resident_tools.rs": "src/resident_tools.rs",
         "exomonad/actor/src/resident_tools/operation_settlement.rs": "src/resident_tools/operation_settlement.rs",
         "exomonad/actor/src/resident_workbench.rs": "src/resident_workbench.rs",
-        "exomonad/actor/src/resident_workbench/display_callback_immediate.hs": "src/resident_workbench/display_callback_immediate.hs",
         "exomonad/actor/src/resident_workbench/display_callback_tests.rs": "src/resident_workbench/display_callback_tests.rs",
         "exomonad/actor/src/resident_workbench/structured_introspection.rs": "src/resident_workbench/structured_introspection.rs",
         "exomonad/actor/src/resident_workbench/to_haskell.rs": "src/resident_workbench/to_haskell.rs",
@@ -804,5 +744,292 @@ filegroup(
         "exomonad/actor/tests/suites/actor.rs": "tests/suites/actor.rs",
         "exomonad/actor/tests/support/mod.rs": "tests/support/mod.rs",
     },
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f466f726b5265706c79436f6e7472616374732e6873",
+    src = "src/fixtures/ForkReplyContracts.hs",
+    out = "ForkReplyContracts.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e43686f6963652e6873",
+    src = "src/fixtures/LookupPlanChoice.hs",
+    out = "LookupPlanChoice.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e4d6f64756c654f6e6c792e6873",
+    src = "src/fixtures/LookupPlanModuleOnly.hs",
+    out = "LookupPlanModuleOnly.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f4c6f6f6b7570506c616e506172656e742e6873",
+    src = "src/fixtures/LookupPlanParent.hs",
+    out = "LookupPlanParent.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f50726f677265737352756e74696d652e6873",
+    src = "src/fixtures/ProgressRuntime.hs",
+    out = "ProgressRuntime.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f686f73742d6a6f622d66697273742e6873",
+    src = "src/fixtures/host-job-first.hs",
+    out = "host-job-first.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f686f73742d6a6f622d72657461696e65642e6873",
+    src = "src/fixtures/host-job-retained.hs",
+    out = "host-job-retained.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f686f73742d6a736f6e2d66697273742e6873",
+    src = "src/fixtures/host-json-first.hs",
+    out = "host-json-first.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f686f73742d6a736f6e2d72657461696e65642e6873",
+    src = "src/fixtures/host-json-retained.hs",
+    out = "host-json-retained.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f686f73742d746578742d66697273742e6873",
+    src = "src/fixtures/host-text-first.hs",
+    out = "host-text-first.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f686f73742d746578742d72657461696e65642e6873",
+    src = "src/fixtures/host-text-retained.hs",
+    out = "host-text-retained.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f70726570617265642d696e7374616e63652d6167656e742d737065632e6873",
+    src = "src/fixtures/prepared-instance-agent-spec.hs",
+    out = "prepared-instance-agent-spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f70726570617265642d696e7374616e63652d70726f76696465722e6873",
+    src = "src/fixtures/prepared-instance-provider.hs",
+    out = "prepared-instance-provider.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f71756f7465642d6167656e742d70726f76696465722e6873",
+    src = "src/fixtures/quoted-agent-provider.hs",
+    out = "quoted-agent-provider.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f71756f7465642d6167656e742d737065632e6873",
+    src = "src/fixtures/quoted-agent-spec.hs",
+    out = "quoted-agent-spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6c6f63616c5f6163746f722f6661696c7572655f6f726967696e2e6873",
+    src = "src/local_actor/failure_origin.hs",
+    out = "failure_origin.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f7061727469616c5f737461727475705f6661696c7572652e6873",
+    src = "src/resident_actor/capture_partial_startup_failure.hs",
+    out = "capture_partial_startup_failure.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f776f726b73706163655f6368696c642e6873",
+    src = "src/resident_actor/capture_workspace_child.hs",
+    out = "capture_workspace_child.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f63617074757265645f7265616465725f72657573652e6873",
+    src = "src/resident_actor/captured_reader_reuse.hs",
+    out = "captured_reader_reuse.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f63617074757265645f726561646572735f706172656e742e6873",
+    src = "src/resident_actor/captured_readers_parent.hs",
+    out = "captured_readers_parent.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f7465726d696e616c5f7472616e736665725f726571756573742e6873",
+    src = "src/resident_actor/terminal_transfer_request.hs",
+    out = "terminal_transfer_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f7465726d696e616c5f7472616e736665725f73657475702e6873",
+    src = "src/resident_actor/terminal_transfer_setup.hs",
+    out = "terminal_transfer_setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f646973706c61795f63616c6c6261636b5f696d6d6564696174652e6873",
+    src = "src/resident_workbench/display_callback_immediate.hs",
+    out = "display_callback_immediate.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f70726f66696c655f636f6d70696c655f6661696c757265732f726561645f6f6e6c795f66735f77726974652e6873",
+    src = "tests/profile_compile_failures/read_only_fs_write.hs",
+    out = "read_only_fs_write.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265636f72645f64796e616d69635f736f75726365732f636f6d70696c652e6873",
+    src = "tests/record_dynamic_sources/compile.hs",
+    out = "compile.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265636f72645f64796e616d69635f736f75726365732f72756e2e6873",
+    src = "tests/record_dynamic_sources/run.hs",
+    out = "run.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265636f72645f64796e616d69635f736f75726365732f72756e5f6661696c65645f68616e646c65722e6873",
+    src = "tests/record_dynamic_sources/run_failed_handler.hs",
+    out = "run_failed_handler.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265636f72645f64796e616d69635f736f75726365732f736368656d612e6873",
+    src = "tests/record_dynamic_sources/schema.hs",
+    out = "schema.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f61776169745f636f6d6d616e645f63656c6c2e6873",
+    src = "tests/resident_local_actor/await_command_cell.hs",
+    out = "await_command_cell.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f61776169745f636f6d6d616e645f706f6c6963792e6873",
+    src = "tests/resident_local_actor/await_command_policy.hs",
+    out = "await_command_policy.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f61776169745f736c6565705f63656c6c2e6873",
+    src = "tests/resident_local_actor/await_sleep_cell.hs",
+    out = "await_sleep_cell.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f61776169745f77617463685f63656c6c2e6873",
+    src = "tests/resident_local_actor/await_watch_cell.hs",
+    out = "await_watch_cell.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f61776169745f77617463685f706f6c6963792e6873",
+    src = "tests/resident_local_actor/await_watch_policy.hs",
+    out = "await_watch_policy.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f636f6d6d616e645f72657461696e5f62696e64696e675f63656c6c2e6873",
+    src = "tests/resident_local_actor/command_retain_binding_cell.hs",
+    out = "command_retain_binding_cell.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f636f6d6d616e645f72657461696e5f62696e64696e675f6661696c7572655f63656c6c2e6873",
+    src = "tests/resident_local_actor/command_retain_binding_failure_cell.hs",
+    out = "command_retain_binding_failure_cell.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f636f6e666c696374696e675f6a6f696e5f63656c6c2e6873",
+    src = "tests/resident_local_actor/conflicting_join_cell.hs",
+    out = "conflicting_join_cell.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f696e7465726c65617665645f62696e645f63656c6c2e6873",
+    src = "tests/resident_local_actor/interleaved_bind_cell.hs",
+    out = "interleaved_bind_cell.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f6a6f696e5f626173652e6873",
+    src = "tests/resident_local_actor/join_base.hs",
+    out = "join_base.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f706f6c6963792e6873",
+    src = "tests/resident_local_actor/policy.hs",
+    out = "policy.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f706f6c6963795f6661696c65645f686f6f6b2e6873",
+    src = "tests/resident_local_actor/policy_failed_hook.hs",
+    out = "policy_failed_hook.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f736861646f775f63656c6c2e6873",
+    src = "tests/resident_local_actor/shadow_cell.hs",
+    out = "shadow_cell.hs",
     visibility = ["PUBLIC"],
 )

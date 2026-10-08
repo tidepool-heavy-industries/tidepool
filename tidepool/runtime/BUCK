@@ -1221,3 +1221,17 @@ filegroup(
     },
     visibility = ["PUBLIC"],
 )
+
+export_file(
+    name = "haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d66756e6374696f6e2e6873",
+    src = "src/session/fixtures/activation-input-function.hs",
+    out = "activation-input-function.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d72656365697665722e6873",
+    src = "src/session/fixtures/activation-input-receiver.hs",
+    out = "activation-input-receiver.hs",
+    visibility = ["PUBLIC"],
+)
