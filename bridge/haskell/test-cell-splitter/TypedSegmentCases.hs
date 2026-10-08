@@ -1,7 +1,10 @@
-module TypedSegmentCases (typedSegmentRewriteSemantics, typedSegmentNativePreparation) where
+module TypedSegmentCases
+  ( typedSegmentRewriteSemantics, typedSegmentNativePreparation
+  , typedSegmentRecordMetadataProperty
+  ) where
 
 import Control.Exception (SomeException, bracket, evaluate, fromException, try)
-import Control.Monad (forM, forM_, unless, void)
+import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (isPrefixOf)
 import Data.Maybe (isJust)
@@ -20,7 +23,14 @@ import GHC.Unit.Types (unitIdString, GenUnit(RealUnit), Definite(Definite))
 import GHC.Builtin.Types (intTy, doubleTy)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Types.Name (getOccString, nameModule_maybe)
+import GHC.Types.Avail (availNames)
+import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Var (varName)
+import GHC.Iface.Syntax (IfaceConDecl(..), IfaceConDecls(..), IfaceDecl(..))
+import GHC.Types.FieldLabel (FieldSelectors(..), flHasFieldSelector, flSelector)
+import GHC.Unit.Module.ModDetails (md_types)
+import GHC.Unit.Module.ModIface (mi_decls, mi_exports, mi_module)
+import GHC.Unit.Home.ModInfo (hm_details, hm_iface)
 import qualified GHC.Stg.Syntax as Stg
 import GHC.Types.SourceError (SourceError)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
@@ -31,6 +41,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Tidepool.Binders
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.FinalizedModule (finalizedHomeModInfo)
 import Tidepool.DiagJson (diagsFromSourceError)
 import Tidepool.GhcPipeline
 import Tidepool.PreparedStg (pmModule, pmBindings, pmOriginalTopNames)
@@ -156,6 +167,258 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
       TypedSegment.OpenCaptureType _ _ -> True
       TypedSegment.OpenItemCore _ _ -> True
       _ -> False
+
+-- Exercise finalized record metadata through the same resident pipeline used
+-- to prepare executable cells. Selectors are interface metadata even when the
+-- cell never uses them; they must retain their exact Name and Id without
+-- becoming lexical exports.
+typedSegmentRecordMetadataProperty :: IO ()
+typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive $ \root -> do
+  effects <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
+  prelude <- requiredInput "TIDEPOOL_PRELUDE_DIR"
+  libdir <- getLibdir
+  flags <- runGhc (Just libdir) getSessionDynFlags
+  let fixtures = "test-cell-splitter/fixtures/typed-segment-native"
+      includes = [root, fixtures, effects, prelude]
+  withResidentPipelineSelectedRequests includes $ \runRequest ->
+    forM_ recordMetadataCases $ \(index, shape, used, generic) -> do
+      let owner = "TypedRecordMetadata" ++ show index
+          (declarations, selectors, useExpression) = recordMetadataSource index shape generic
+          template = metadataTemplate generic
+            (metadataPragmas index shape generic (preparationTemplateWithHelpers owner declarations))
+          body = if used
+            then "selected <- pure (" ++ useExpression ++ ")\n"
+            else "pure (0 :: Int)\n"
+      wholePlan <- analyzeOrderedCellWithFlags flags template body >>= either (fail . show) pure
+      sourcePlan <- fixtureExecutableSegment owner wholePlan
+      let slots = [(ordinal, fromIntegral (index * 10 + ordinal + 1), observation ordinal item)
+            | (ordinal, item) <- zip [0 ..] (cellPlanItems sourcePlan)]
+          observation ordinal item = case sbKind (cellAnalysisVerdict item) of
+            KExpr -> Just ("__metadataObservation" ++ show ordinal)
+            _ -> Nothing
+      source <- either fail pure
+        (prepareTypedSegmentSource template sourcePlan (replicate 64 'a') slots)
+      let path = root </> owner ++ ".hs"
+          plan = preparedTypedSegmentPlan source
+          prepare environment admissions segment = do
+            batch <- prepareTypedSegmentSessionBindings environment admissions segment
+              (root </> "metadata-stage" ++ show index)
+            pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
+              typedSegmentSessionInterfaces batch)
+      writeFile path (preparedTypedSegmentSource source)
+      products <- runRequest (pure ()) (\compiler -> compiler
+        (WithTypedSegmentPreparation prepare (PreparedSegmentProducts plan Nothing))
+        mempty (TypedSegmentCompile plan (preparedTypedSegmentOperations source) GeneralCompile)
+        Nothing path includes Nothing)
+      let prepared = preparedSegmentProducts products
+          segment = preparedSegmentCaptures products
+          issued = bindersOfBinds (TypedSegment.typedSegmentRoots segment)
+          issuedNames = Set.fromList (map varName issued)
+      finalized <- maybe (fail (owner ++ ": actual finalized home module is absent")) pure
+        (Map.lookup (mkModuleName owner) (pprFinalizedModules prepared))
+      let home = finalizedHomeModInfo finalized
+          interface = hm_iface home
+          details = hm_details home
+          moduleOwner = mi_module interface
+          selectorIds = [identifier | identifier <- typeEnvIds (md_types details)
+            , elem (getOccString (varName identifier)) selectors]
+          selectorNames = map varName selectorIds
+          ifaceSelectorNames = [ifName declaration
+            | (_, declaration@IfaceId{}) <- mi_decls interface
+            , elem (getOccString (ifName declaration)) selectors]
+          ifaceIdNames = [ifName declaration
+            | (_, declaration@IfaceId{}) <- mi_decls interface]
+          patternSynSupportNames = concat
+            [ fst (ifPatMatcher declaration)
+                : maybe [] ((: []) . fst) (ifPatBuilder declaration)
+            | (_, declaration@IfacePatSyn{}) <- mi_decls interface]
+          ifacePatternFields = [getOccString (flSelector field)
+            | (_, declaration@IfacePatSyn{}) <- mi_decls interface
+            , field <- ifFieldLabels declaration]
+          ifaceDataFields = concat
+            [ map flSelector fields
+            | (_, declaration@IfaceData{}) <- mi_decls interface
+            , fields <- case ifCons declaration of
+                IfAbstractTyCon -> []
+                IfDataTyCon _ constructors -> map ifConFields constructors
+                IfNewTyCon constructor -> [ifConFields constructor]
+            ]
+          noFieldSelectorFlags = [flHasFieldSelector field
+            | (_, declaration@IfaceData{}) <- mi_decls interface
+            , fields <- case ifCons declaration of
+                IfAbstractTyCon -> []
+                IfDataTyCon _ constructors -> map ifConFields constructors
+                IfNewTyCon constructor -> [ifConFields constructor]
+            , field <- fields
+            , elem (getOccString (flSelector field)) selectors]
+          actualFieldOwners =
+            [ (getOccString (ifName declaration), getOccString (flSelector field))
+            | (_, declaration@IfaceData{}) <- mi_decls interface
+            , fields <- case ifCons declaration of
+                IfAbstractTyCon -> []
+                IfDataTyCon _ constructors -> map ifConFields constructors
+                IfNewTyCon constructor -> [ifConFields constructor]
+            , field <- fields]
+            ++ [ (getOccString (ifName declaration), getOccString (flSelector field))
+               | (_, declaration@IfacePatSyn{}) <- mi_decls interface
+               , field <- ifFieldLabels declaration]
+          ifaceRecordFields = ifaceDataFields
+            ++ [flSelector field
+              | (_, declaration@IfacePatSyn{}) <- mi_decls interface
+              , field <- ifFieldLabels declaration]
+          exportedNames = concatMap availNames (mi_exports interface)
+          expectedCounts = Map.fromListWith (+) [(selector, 1 :: Int) | selector <- selectors]
+          actualCounts = Map.fromListWith (+) [(getOccString name, 1 :: Int) | name <- selectorNames]
+          expectedPatternFields = case shape of
+            MetadataPatternSynonym -> selectors
+            _ -> []
+          actualPatternCounts = Map.fromListWith (+) [(field, 1 :: Int) | field <- ifacePatternFields]
+          expectedPatternCounts = Map.fromListWith (+) [(field, 1 :: Int) | field <- expectedPatternFields]
+          expectedFieldOwners = metadataFieldOwners index shape selectors
+          actualFieldOwnerCounts = Map.fromListWith (+) [(identity, 1 :: Int) | identity <- actualFieldOwners]
+          expectedFieldOwnerCounts = Map.fromListWith (+) [(identity, 1 :: Int) | identity <- expectedFieldOwners]
+      unless (moduleNameString (moduleName moduleOwner) == owner)
+        (fail (owner ++ ": finalized interface has another module identity"))
+      unless (actualCounts == expectedCounts)
+        (fail (owner ++ ": finalized type environment lost selector Ids: "
+          ++ show (expectedCounts, actualCounts)))
+      unless (Set.size (Set.fromList selectorNames) == length selectors)
+        (fail (owner ++ ": distinct generated fields collapsed to one selector Name"))
+      unless (Set.fromList ifaceSelectorNames == Set.fromList selectorNames)
+        (fail (owner ++ ": finalized IfaceId declarations do not match selector Id Names"))
+      unless (Set.fromList ifaceRecordFields == Set.fromList selectorNames)
+        (fail (owner ++ ": finalized field metadata does not name the retained selector Ids"))
+      unless (actualFieldOwnerCounts == expectedFieldOwnerCounts)
+        (fail (owner ++ ": finalized fields have another generated parent type identity"))
+      unless (actualPatternCounts == expectedPatternCounts)
+        (fail (owner ++ ": finalized pattern-synonym field metadata differs from its source declaration"))
+      when (shape == MetadataPatternSynonym) $
+        unless (length patternSynSupportNames == 2
+            && all (\name -> Set.member name (Set.fromList ifaceIdNames)) patternSynSupportNames
+            && all ((== Just moduleOwner) . nameModule_maybe) patternSynSupportNames)
+          (fail (owner ++ ": finalized pattern synonym lost its explicit matcher or builder Id"))
+      when (shape == MetadataNoFieldSelectors) $
+        unless (noFieldSelectorFlags == [NoFieldSelectors])
+          (fail (owner ++ ": finalized field metadata lost the NoFieldSelectors source flag"))
+      unless (all ((== Just moduleOwner) . nameModule_maybe) selectorNames)
+        (fail (owner ++ ": a selector Id lost its generated module owner"))
+      unless (all (\name -> notElem name exportedNames) selectorNames)
+        (fail (owner ++ ": record selectors became lexical module exports"))
+      unless (Set.fromList exportedNames == issuedNames)
+        (fail (owner ++ ": finalized exports differ from actual issued typed-segment roots"))
+  putStrLn ("typed record metadata: " ++ show (length recordMetadataCases)
+    ++ " serial generated requests; record/newtype/multi-constructor, used/unused, "
+    ++ "Generic/no-Generic, NoFieldSelectors, existential fields, duplicate selector "
+    ++ "occurrences, and used/unused record pattern synonyms passed")
+
+data MetadataShape
+  = MetadataRecord
+  | MetadataNewtype
+  | MetadataMultipleConstructors
+  | MetadataNoFieldSelectors
+  | MetadataExistential
+  | MetadataPatternSynonym
+  deriving (Eq)
+
+recordMetadataCases :: [(Int, MetadataShape, Bool, Bool)]
+recordMetadataCases =
+  [ (index, shape, used, generic)
+  | (index, (shape, used, generic)) <- zip [0 :: Int ..]
+      ([(shape, used, generic)
+       | shape <- [MetadataRecord, MetadataNewtype, MetadataMultipleConstructors]
+       , used <- [False, True]
+       , generic <- [False, True]]
+       ++ [ (MetadataNoFieldSelectors, False, False)
+          , (MetadataExistential, False, False)
+          , (MetadataPatternSynonym, False, False)
+          , (MetadataPatternSynonym, True, False)
+          ]) ]
+
+recordMetadataSource :: Int -> MetadataShape -> Bool -> (String, [String], String)
+recordMetadataSource index shape generic =
+  (declarations ++ duplicateOwners, selectors, firstUse)
+  where
+    suffix = show index
+    typeName = "MetadataType" ++ suffix
+    constructor = "MetadataConstructor" ++ suffix
+    firstField = "metadataField" ++ suffix
+    secondField = "metadataOtherField" ++ suffix
+    patternBase = "MetadataPatternBase" ++ suffix
+    patternName = "MetadataPattern" ++ suffix
+    patternField = "metadataPatternField" ++ suffix
+    derivingClause = if generic then " deriving (G.Generic)" else ""
+    (declarations, coreSelectors, firstUse) = case shape of
+      MetadataRecord ->
+        ("data " ++ typeName ++ " = " ++ constructor ++ " { " ++ firstField
+          ++ " :: Int }" ++ derivingClause ++ "\n", [firstField],
+          firstField ++ " (" ++ constructor ++ " (1 :: Int))")
+      MetadataNewtype ->
+        ("newtype " ++ typeName ++ " = " ++ constructor ++ " { " ++ firstField
+          ++ " :: Int }" ++ derivingClause ++ "\n", [firstField],
+          firstField ++ " (" ++ constructor ++ " (1 :: Int))")
+      MetadataMultipleConstructors ->
+        ("data " ++ typeName ++ " = " ++ constructor ++ " { " ++ firstField
+          ++ " :: Int } | MetadataOtherConstructor" ++ suffix ++ " { " ++ secondField
+          ++ " :: Bool }" ++ derivingClause ++ "\n", [firstField, secondField],
+          firstField ++ " (" ++ constructor ++ " (1 :: Int))")
+      MetadataNoFieldSelectors ->
+        ("data " ++ typeName ++ " = " ++ constructor ++ " { " ++ firstField
+          ++ " :: Int }\n", [firstField], "")
+      MetadataExistential ->
+        ("data " ++ typeName ++ " where\n  " ++ constructor
+          ++ " :: forall hidden. { " ++ firstField ++ " :: hidden } -> " ++ typeName ++ "\n",
+          [firstField], "")
+      MetadataPatternSynonym ->
+        ("data " ++ patternBase ++ " = " ++ patternBase ++ " Int\n"
+          ++ "pattern " ++ patternName ++ " { " ++ patternField ++ " } = "
+          ++ patternBase ++ " " ++ patternField ++ "\n",
+          [patternField], patternField ++ " (" ++ patternName ++ " (1 :: Int))")
+    -- The final generated point checks that equal selector occurrences owned
+    -- by separate record types remain two distinct interface Ids.
+    duplicateOwners
+      | index == 11 = unlines
+          [ "data DuplicateMetadataLeft = DuplicateMetadataLeft { duplicateMetadataField :: Int }"
+          , "data DuplicateMetadataRight = DuplicateMetadataRight { duplicateMetadataField :: Bool }"
+          ]
+      | otherwise = ""
+    selectors
+      | index == 11 = coreSelectors ++ ["duplicateMetadataField", "duplicateMetadataField"]
+      | otherwise = coreSelectors
+
+metadataPragmas :: Int -> MetadataShape -> Bool -> String -> String
+metadataPragmas index shape generic template = case lines template of
+  first : rest -> unlines (first : map pragma extensions ++ rest)
+  [] -> template
+  where
+    extensions =
+      (if index == 11 then ["DuplicateRecordFields"] else [])
+      ++ (if generic then ["DeriveGeneric"] else [])
+      ++ (case shape of
+        MetadataNoFieldSelectors -> ["NoFieldSelectors"]
+        MetadataExistential -> ["GADTs"]
+        MetadataPatternSynonym -> ["PatternSynonyms"]
+        _ -> [])
+    pragma extension = "{-# LANGUAGE " ++ extension ++ " #-}"
+
+metadataTemplate :: Bool -> String -> String
+metadataTemplate generic template
+  | not generic = template
+  | otherwise = unlines (concatMap addGenericsImport (lines template))
+  where
+    addGenericsImport "{{CELL_IMPORTS}}" =
+      ["import qualified GHC.Generics as G", "{{CELL_IMPORTS}}"]
+    addGenericsImport line = [line]
+
+metadataFieldOwners :: Int -> MetadataShape -> [String] -> [(String, String)]
+metadataFieldOwners index shape selectors = case shape of
+  MetadataPatternSynonym -> [("MetadataPattern" ++ show index, selector) | selector <- selectors]
+  _ ->
+    [("MetadataType" ++ show index, selector)
+    | selector <- take (if shape == MetadataMultipleConstructors then 2 else 1) selectors]
+    ++ if index == 11
+      then [("DuplicateMetadataLeft", "duplicateMetadataField")
+           ,("DuplicateMetadataRight", "duplicateMetadataField")]
+      else []
 
 data PreparationExpected = PrepareAccepted | PrepareTypedRefusal | PrepareSourceRefusal
 

@@ -8,7 +8,10 @@ import HarnessSourceTest (harnessSourceChecks)
 import InspectionRunnerTest (inspectionRunnerChecks)
 import WorkerDiagnosticsTest (runWorkerDiagnosticsTests)
 import QuasiQuoteOccurrencesTest (quasiQuoteOccurrenceChecks)
-import TypedSegmentCases (typedSegmentNativePreparation, typedSegmentRewriteSemantics)
+import TypedSegmentCases
+  ( typedSegmentNativePreparation, typedSegmentRecordMetadataProperty
+  , typedSegmentRewriteSemantics
+  )
 import TypedSessionCases (typedSessionHydrationPublicationChecks)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
 import Tidepool.ExtractUtil (getLibdir)
@@ -50,6 +53,7 @@ tests = testGroup "cell-splitter"
   , testCase "sigmaValueInterfaceCompilation" sigmaValueInterfaceCompilation
   , testCase "constructorEvidenceClassification" constructorEvidenceClassification
   , testCase "typedSegmentNativePreparation" typedSegmentNativePreparation
+  , testCase "typedSegmentRecordMetadataProperty" typedSegmentRecordMetadataProperty
   , testCase "typedSegmentRewriteSemantics" typedSegmentRewriteSemantics
   , testCase "typedSessionHydrationPublicationChecks" typedSessionHydrationPublicationChecks
   , testCase "sessionValueFinalizedDependency" sessionValueFinalizedDependency
