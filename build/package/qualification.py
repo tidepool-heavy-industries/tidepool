@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from enum import Enum
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -47,6 +48,10 @@ M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_has
 HARNESS_PERFORMANCE_TESTS = [
     "actor_host::context_transaction_acceptance_tests::harness_usecase_performance::production_harness_notebook_usecase_phases",
 ]
+HARNESS_THREE_ACTOR_PERFORMANCE_TESTS = [
+    "actor_host::scripted_three_actor_performance::production_harness_three_actor_capture_phases",
+]
+HARNESS_PERFORMANCE_REPORTER = "scripts/harness-usecase-perf-report.py"
 PREPARED_CHILD_TESTS = [
     "actor_host::prepared_runtime_acceptance::production_prepared_toolset_twenty_children_execute_original_native_probe",
 ]
@@ -95,6 +100,7 @@ REQUIRED_RUNTIME_EXECUTABLES = (
 def programs(root: Path) -> dict:
     return {"libtest": str(root / "bin/tidepool-tests"),
             "runner": str(root / "share/exomonad/isolated-libtest.py"),
+            "harness_perf_reporter": str(root / "share/exomonad/harness-usecase-perf-report.py"),
             "host": str(root / "bin/exomonad"), "host_elf": str(root / "bin/exomonad-unwrapped")}
 
 def cohorts() -> dict:
@@ -116,11 +122,18 @@ def cohorts() -> dict:
                                     "ignored": True, "timeout": 1800,
                                     "compiler_mode": "owned-resident", "max_jobs": 1,
                                     "retain_artifacts": True,
-                                    "measurement_reporter": "scripts/harness-usecase-perf-report.py",
+                                    "measurement_reporter": HARNESS_PERFORMANCE_REPORTER,
                                     "required_stdlib_mode": "catalog-backed",
                                     "required_startup_mode": "prepared",
                                     "required_environment": ["TIDEPOOL_COMPILER_MODULES",
-                                                             "TIDEPOOL_PREPARED_ROOT_ENTRY"]}}
+                                                             "TIDEPOOL_PREPARED_ROOT_ENTRY"]},
+            "harness-performance-three-actor": {
+                "tests": HARNESS_THREE_ACTOR_PERFORMANCE_TESTS, "expected_count": 1,
+                "ignored": True, "timeout": 2400, "compiler_mode": "owned-resident",
+                "max_jobs": 1, "retain_artifacts": True,
+                "measurement_reporter": HARNESS_PERFORMANCE_REPORTER,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY"]}}
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -1104,6 +1117,8 @@ def freeze(args) -> Path:
     (root / "share/exomonad/runtime-tools").symlink_to((args.bundle / "share/exomonad/runtime-tools").resolve(strict=True))
     shutil.copy2(source / "build/rust/isolated-libtest.py", root / "share/exomonad/isolated-libtest.py")
     shutil.copy2(source / "build/package/qualification.py", root / "share/exomonad/qualification.py")
+    shutil.copy2(source / "scripts/harness-usecase-perf-report.py",
+                 root / "share/exomonad/harness-usecase-perf-report.py")
     shutil.copy2(source / "build/package/packaged-catalog-consumer.sh", root / "share/exomonad/packaged-catalog-consumer.sh")
     fixture_record = freeze_test_fixtures(source, args.bundle)
     if fixture_record["manifest"] != fixture_source_manifest or fixture_record["files"] != fixture_source_hashes:
@@ -1258,9 +1273,10 @@ def run_cohort(args) -> int:
         required = cohort.get("required_" + field)
         if required is not None and descriptor.get(field) != required:
             raise ValueError(f"{args.cohort} requires {field} {required}")
-    for name in cohort.get("required_environment", []):
-        if not descriptor["environment"].get(name):
-            raise ValueError(f"{args.cohort} requires bundle-owned {name}")
+    missing_environment = [name for name in cohort.get("required_environment", [])
+                           if not descriptor.get("environment", {}).get(name)]
+    if missing_environment:
+        raise ValueError(f"{args.cohort} requires bundle-owned inputs: {', '.join(missing_environment)}")
     output = args.output.absolute()
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
     command = [str(tools / "bin/python3"), descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
@@ -1284,7 +1300,8 @@ def run_cohort(args) -> int:
     started = time.monotonic_ns()
     with (output / "runner.stdout").open("wb") as stdout, (output / "runner.stderr").open("wb") as stderr:
         result = subprocess.run(command, env=execution_environment(descriptor), stdout=stdout, stderr=stderr, check=False)
-    records = [json.loads(path.read_text()) for path in sorted((output / "tests").glob("*.json"))]
+    record_paths = sorted((output / "tests").glob("*.json"))
+    records = [json.loads(path.read_text()) for path in record_paths]
     exact = {record["test"] for record in records} == set(cohort["tests"])
     confirmed = exact and len(records) == cohort["expected_count"] and all(record["passed"] and record["execution"]["executed_test_count"] == 1
         and record["execution"]["exit_code"] == 0
@@ -1292,19 +1309,10 @@ def run_cohort(args) -> int:
     behavioral_completed = result.returncode == 0 and confirmed
     measurement = None
     if "measurement_reporter" in cohort:
-        measurement = {
-            "diagnostic_evidence_complete": exact and all(
-                record["execution"].get("diagnostic_evidence_complete") is True for record in records),
-            "artifacts_retained": exact and all(
-                record["execution"].get("artifacts_retained_after_success") is True for record in records),
-        }
-        measurement["prerequisites_complete"] = behavioral_completed and all(measurement.values())
-        # Generic runner diagnostics do not reconcile workload phases or join
-        # their exact physical requests. That remains the performance reporter's
-        # contract until the bundle owns and invokes it.
-        measurement.update(status="unreconciled", completed=False,
-                           reporter=cohort["measurement_reporter"],
-                           runner_records=[str(path) for path in sorted((output / "tests").glob("*.json"))])
+        measurement = analyze_harness_performance(
+            descriptor, records, record_paths, cohort, behavioral_completed, args.descriptor.absolute())
+        measurement.setdefault("reporter", cohort["measurement_reporter"])
+        write_json(output / "harness-usecase-perf-report.json", measurement)
     completed = behavioral_completed
     code = result.returncode if result.returncode else int(not completed)
     report = {"schema": 1, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
@@ -1322,6 +1330,83 @@ def run_cohort(args) -> int:
               "measurement": measurement, "completed": completed, "tests": records}
     write_json(output / "report.json", report)
     return code
+
+
+def analyze_harness_performance(descriptor, records, record_paths, cohort, behavioral_completed, descriptor_path):
+    # Runner records are adjacent to their artifact directories under tests/.
+    if not records or len(records) != 1:
+        return {"status": "refused", "completed": False,
+                "reason": "performance report requires exactly one retained runner record",
+                "runner_record_count": len(records), "reporter": cohort["measurement_reporter"]}
+    if len(record_paths) != 1:
+        return {"status": "refused", "completed": False,
+                "reason": "performance report requires exactly one retained runner record path",
+                "runner_record_path_count": len(record_paths), "reporter": cohort["measurement_reporter"]}
+    runner_record_path = record_paths[0]
+    reporter_path = Path(programs(Path(descriptor["bundle_root"]))["harness_perf_reporter"])
+    if not reporter_path.is_file():
+        return {"status": "refused", "completed": False,
+                "reason": "frozen bundle is missing its Harness performance reporter",
+                "reporter": cohort["measurement_reporter"]}
+    spec = importlib.util.spec_from_file_location("frozen_harness_usecase_perf_report", reporter_path)
+    if spec is None or spec.loader is None:
+        return {"status": "refused", "completed": False,
+                "reason": "frozen Harness performance reporter could not be loaded",
+                "reporter": cohort["measurement_reporter"]}
+    reporter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reporter)
+    try:
+        report = reporter.analyze(runner_record_path)
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        return {"status": "refused", "completed": False,
+                "reason": f"Harness performance evidence was rejected: {error}",
+                "runner_record": str(runner_record_path), "reporter": cohort["measurement_reporter"]}
+    record = records[0]
+    execution = record.get("execution") or {}
+    phase_env = report.get("environment") or {}
+    observed_deployment = report.get("environment", {}).get("deployment") or {}
+    expected_entry = descriptor.get("environment", {}).get("TIDEPOOL_PREPARED_ROOT_ENTRY")
+    required_profile_inputs = ("TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
+                               "TIDEPOOL_COMPILER_DEPLOYMENT")
+    observed_input_mismatches = [name for name in required_profile_inputs
+                                 if descriptor.get("environment", {}).get(name) is None
+                                 or str(descriptor["environment"][name]) != str(observed_deployment.get(name))]
+    phase_entry = observed_deployment.get("TIDEPOOL_PREPARED_ROOT_ENTRY")
+    prepared_match = (phase_env.get("prepared_root_entry_supplied") is True
+                      and expected_entry is not None and str(expected_entry) == str(phase_entry))
+    prerequisites = {
+        "counted_behavior_passed": behavioral_completed and record.get("passed") is True
+                                      and execution.get("executed_test_count") == 1
+                                      and execution.get("exit_code") == 0,
+        "artifacts_retained": execution.get("artifacts_retained_after_success") is True,
+        "prepared_frozen_root_entry_matches_descriptor": prepared_match,
+        "frozen_native_inputs_match_descriptor": not observed_input_mismatches,
+        "phase_coverage_complete": (report.get("phase_coverage") or {}).get("complete") is True,
+        "workload_request_service_joins_complete": (report.get("workload_request_service_joins") or {}).get("status") == "complete",
+        "whole_physical_stream_reconciled": (report.get("whole_physical_stream_reconciliation") or {}).get("status") == "complete",
+        "all_physical_services_succeeded": (report.get("whole_physical_stream_reconciliation") or {}).get("physical_service_outcome_status") == "all_successful",
+        "raw_trace_capture_complete": (report.get("whole_physical_stream_reconciliation") or {}).get("raw_event_capture_status") == "complete",
+        "queue_evidence_complete": (report.get("queue_evidence") or {}).get("status") == "complete",
+        "startup_owner_complete": (report.get("startup_scope") or {}).get("owner_status") == "complete",
+        "cleanup_confirmed": ((report.get("runner") or {}).get("cleanup") or {}).get("complete") is True,
+    }
+    complete = all(prerequisites.values())
+    report["status"] = "qualified" if complete else "partial"
+    report["completed"] = complete
+    report["reporter"] = str(reporter_path)
+    report["runner_record"] = str(runner_record_path)
+    report["qualification"] = {
+        "descriptor": str(descriptor_path), "descriptor_sha256": sha256(descriptor_path),
+        "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
+        "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"],
+        "startup_mode": descriptor["startup_mode"], "runner_record": str(runner_record_path),
+        "runner_record_sha256": sha256(runner_record_path),
+        "observed_input_mismatches": observed_input_mismatches,
+        "prerequisites": prerequisites,
+        "status": "qualified" if complete else "partial",
+        "completed": complete,
+    }
+    return report
 
 
 class NativeExecution:

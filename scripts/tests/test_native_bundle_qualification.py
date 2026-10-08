@@ -638,41 +638,37 @@ class NativeQualificationTests(unittest.TestCase):
                                       if value == '--exact'], qualification.HARNESS_PERFORMANCE_TESTS)
                     self.assertEqual({command[index + 1] for index, value in enumerate(command)
                                       if value == '--resource-env'}, set(descriptor['environment']))
-                    if label in ('missing-phase-artifact', 'unjoined-physical-request'):
-                        from scripts.tests.test_harness_usecase_perf_report import (
-                            HarnessUsecasePerfReportTests, reporter)
-                        fixture = HarnessUsecasePerfReportTests()
-                        fixture.root = root / 'retained-traces'
-                        fixture.root.mkdir()
-                        retained_case = fixture.make_case(submissions=label != 'unjoined-physical-request')
-                        reconciled = reporter.analyze(retained_case)
-                        self.assertTrue(reconciled['runner']['diagnostic_evidence_complete'])
-                        if label == 'missing-phase-artifact':
-                            self.assertFalse(reconciled['phase_coverage']['complete'])
-                        else:
-                            self.assertEqual(reconciled['phases'][0]['compiler_attribution'], 'partial')
                     qualification.write_json(output / 'tests/case.json', {
                         'test': qualification.HARNESS_PERFORMANCE_TESTS[0], 'passed': True,
-                        'execution': {'executed_test_count': count, 'exit_code': 0,
+                        'execution': {'artifact_root': str(root / 'case/artifacts'),
+                                      'executed_test_count': count, 'exit_code': 0,
                                       'diagnostic_evidence_complete': diagnostics,
                                       'artifacts_retained_after_success': retained}})
                     return subprocess.CompletedProcess(command, 0)
 
+                def measurement(*args):
+                    records = args[1]
+                    paths = args[2]
+                    return {'status': 'partial' if records else 'refused', 'completed': False,
+                            'reporter': qualification.HARNESS_PERFORMANCE_REPORTER,
+                            'runner_record': str(paths[0]) if paths else None,
+                            'qualification': {'prerequisites': {
+                                'artifacts_retained': retained, 'runner_passed': count == 1}}}
+
                 with patch.object(qualification, 'verify', return_value=descriptor), \
-                     patch.object(qualification.subprocess, 'run', side_effect=execute):
+                     patch.object(qualification.subprocess, 'run', side_effect=execute), \
+                     patch.object(qualification, 'analyze_harness_performance', side_effect=measurement) as analyze:
                     code = qualification.main(['run', str(path), '--cohort', 'harness-performance',
                                                '--output', str(output)])
                 self.assertEqual(code, expected)
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(report['behavioral_completed'], count == 1)
                 self.assertFalse(report['measurement']['completed'])
-                self.assertEqual(report['measurement']['status'], 'unreconciled')
-                self.assertEqual(report['measurement']['prerequisites_complete'],
-                                 count == 1 and diagnostics is True and retained)
-                self.assertEqual(report['measurement']['reporter'], 'scripts/harness-usecase-perf-report.py')
-                self.assertEqual(report['measurement']['runner_records'], [str(output / 'tests/case.json')])
-                self.assertEqual(report['measurement']['diagnostic_evidence_complete'], diagnostics is True)
-                self.assertEqual(report['measurement']['artifacts_retained'], retained)
+                self.assertEqual(report['measurement']['status'], 'partial')
+                self.assertEqual(report['measurement']['reporter'], qualification.HARNESS_PERFORMANCE_REPORTER)
+                if count:
+                    analyze.assert_called_once()
+                    self.assertEqual(report['measurement']['runner_record'], str(output / 'tests/case.json'))
                 self.assertEqual(report['completed'], expected == 0)
                 self.assertTrue(report['tests'][0]['passed'])
 
@@ -706,6 +702,77 @@ class NativeQualificationTests(unittest.TestCase):
                         '--output', str(output), *options]), 1)
                 execute.assert_not_called()
                 self.assertFalse(output.exists())
+
+    def test_frozen_harness_reporter_qualifies_only_complete_descriptor_bound_measurement(self):
+        import shutil
+        from scripts.tests.test_harness_usecase_perf_report import HarnessUsecasePerfReportTests, reporter
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = HarnessUsecasePerfReportTests()
+            fixture.root = root / 'case'
+            fixture.root.mkdir()
+            runner_path = fixture.make_case()
+            artifact_root = fixture.root / 'artifacts'
+            phase_path = artifact_root / 'phases.jsonl'
+            phases = reporter.read_jsonl(phase_path)
+            env = phases[0]
+            env['prepared_root_entry_supplied'] = True
+            env['deployment']['TIDEPOOL_PREPARED_ROOT_ENTRY'] = '/frozen/root-entry'
+            env['deployment']['TIDEPOOL_COMPILER_MODULES'] = '/frozen/catalog/catalog.json'
+            env['deployment']['TIDEPOOL_COMPILER_DEPLOYMENT'] = '/frozen/compiler/compiler-deployment.json'
+            phases[1]['logical_compiler_requests'] = 0
+            workload = []
+            for sequence, name in enumerate(reporter.EXPECTED_PHASES):
+                workload.append({
+                    'schema': 1, 'phase': name, 'sequence': sequence, 'completed': True,
+                    'call_id': 'usecase-3' if sequence == 3 else f'usecase-{sequence}',
+                    'logical_compiler_requests': 1 if sequence == 3 else 0,
+                    'wall_ns': 1000, 'source': 'retained source',
+                })
+            phases = [env, phases[1], *workload]
+            phase_path.write_text(''.join(json.dumps(row) + '\n' for row in phases))
+            record = json.loads(runner_path.read_text())
+            record['execution'].update({
+                'exit_code': 0,
+                'executed_test_count': 1,
+                'process_cleanup_status': 'confirmed', 'hosted_cleanup_status': 'confirmed',
+                'compiler_cleanup_status': 'confirmed', 'compiler_cleanup_observation_complete': True,
+                'artifacts_retained_after_success': True,
+            })
+            runner_path.write_text(json.dumps(record) + '\n')
+            descriptor_path = root / 'qualification.json'
+            descriptor_path.write_text('verified by run_cohort')
+            bundle = root / 'bundle'
+            reporter_path = bundle / 'share/exomonad/harness-usecase-perf-report.py'
+            reporter_path.parent.mkdir(parents=True)
+            source_reporter = Path(__file__).resolve().parents[1] / 'harness-usecase-perf-report.py'
+            shutil.copy2(source_reporter, reporter_path)
+            descriptor = {
+                'bundle_root': str(bundle), 'source_oid': 'a' * 40,
+                'harness_revision': 'b' * 40, 'profile': 'production',
+                'stdlib_mode': 'catalog-backed', 'startup_mode': 'prepared',
+                'environment': {'TIDEPOOL_PREPARED_ROOT_ENTRY': '/frozen/root-entry',
+                                'TIDEPOOL_COMPILER_MODULES': '/frozen/catalog/catalog.json',
+                                'TIDEPOOL_COMPILER_DEPLOYMENT': '/frozen/compiler/compiler-deployment.json'},
+            }
+            measured = qualification.analyze_harness_performance(
+                descriptor, [record], [runner_path],
+                {'measurement_reporter': qualification.HARNESS_PERFORMANCE_REPORTER},
+                True, descriptor_path)
+            self.assertEqual(measured['status'], 'qualified')
+            self.assertTrue(measured['completed'])
+            self.assertTrue(measured['qualification']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
+            self.assertTrue(measured['qualification']['prerequisites']['startup_owner_complete'])
+            self.assertTrue(measured['whole_physical_stream_reconciliation']['detailed_compiler_sample_records_truncated'])
+
+            descriptor['environment']['TIDEPOOL_PREPARED_ROOT_ENTRY'] = '/different/root-entry'
+            refused_match = qualification.analyze_harness_performance(
+                descriptor, [record], [runner_path],
+                {'measurement_reporter': qualification.HARNESS_PERFORMANCE_REPORTER},
+                True, descriptor_path)
+            self.assertEqual(refused_match['status'], 'partial')
+            self.assertFalse(refused_match['qualification']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
 
     def test_frozen_cohort_refuses_diagnostic_startup_override_before_execution(self):
         with patch.dict(os.environ, {'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600'}):

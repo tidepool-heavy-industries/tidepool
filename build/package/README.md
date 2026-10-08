@@ -292,20 +292,25 @@ this new cohort; build and freeze the new candidate rather than editing an old
 qualification contract.
 
 The supplementary `harness-performance` cohort selects the one ignored
-eight-phase HTTP/Engine/Store/notebook workload. It requires the frozen prepared
-catalog/root entry, an isolated owned resident compiler, one test process, and
-retained artifacts. Only provider replies are scripted. It records behavior and
-measurement separately: `behavioral_completed` requires the one executed passing
-case and determines this supplementary run's exit status. Complete runner
-diagnostics and retained artifacts are measurement prerequisites;
-`measurement.status` remains `unreconciled` and `measurement.completed` is false.
-The existing `scripts/harness-usecase-perf-report.py` owns exact phase coverage
-and physical request joins. Run it on the retained runner record listed in the
-report; generic diagnostic flags cannot establish its conclusions. Packaging and
-invoking that reporter through this qualification owner remain the explicit
-integration step before automatic measurement acceptance. The supplementary
-measurement does not block M2 acceptance. It imposes no latency threshold and
-does not establish provider network performance.
+eight-phase HTTP/Engine/Store/notebook workload. The separate
+`harness-performance-three-actor` cohort selects the scripted parent/two-child
+capture workload. Both require the frozen prepared catalog/root entry, an
+isolated owned resident compiler, one test process, and retained artifacts. Only
+provider replies are scripted. The frozen owner runs its bundled
+`harness-usecase-perf-report.py` after the counted test and writes
+`harness-usecase-perf-report.json` beside `report.json`.
+
+Behavioral and measurement outcomes remain separate. `behavioral_completed`
+requires the one executed passing case and controls the cohort exit status.
+The measurement report separately records phase coverage, exact workload
+request/service joins, whole observed physical-stream reconciliation, raw trace
+capture versus truncated detailed samples, queue admission evidence, explicit
+startup ownership, cleanup, and descriptor/profile identity. Missing or
+ambiguous joins remain partial; unknown queue or startup evidence is not inferred
+from counts or timestamps. `measurement.completed` becomes true only when every
+required evidence dimension is complete. It imposes no latency threshold and
+does not establish provider network performance. These supplementary cohorts do
+not block M2 acceptance.
 
 ```sh
 python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
