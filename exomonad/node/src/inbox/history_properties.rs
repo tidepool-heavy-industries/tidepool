@@ -649,13 +649,17 @@ where
                         prop_assert_eq!(attempt.envelope(), original);
                         // Establish the real in-flight premise before injecting
                         // the native observation; this read does not consume it.
-                        prop_assert!(matches!(
-                            inbox.observe_receipt(sequence),
-                            Ok(ReceiptLookup::Retained(ReceiptEvidence {
-                                phase: DeliveryPhase::InFlight,
-                                ..
-                            }))
-                        ));
+                        prop_assert!(
+                            matches!(
+                                inbox.observe_receipt(sequence),
+                                Ok(ReceiptLookup::Retained(ReceiptEvidence {
+                                    phase: DeliveryPhase::InFlight,
+                                    ..
+                                }))
+                            ),
+                            "admitted receipt {} must be InFlight before native evidence",
+                            sequence
+                        );
                         if let Some(evidence) = race {
                             coverage.attempt_races += 1;
                             let context = &contexts[context as usize];
