@@ -198,9 +198,12 @@ test-suite cell-splitter-test
     bytestring,
     cborg,
     containers,
+    cryptohash-sha256,
     filepath,
     text,
     tidepool-extract-internal,
+    tasty-quickcheck,
+    QuickCheck >= 2.14 && < 2.16,
     unix,
     syb
   default-language: GHC2024

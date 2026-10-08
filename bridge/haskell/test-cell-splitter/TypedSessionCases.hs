@@ -1,16 +1,20 @@
-module TypedSessionCases (typedSessionHydrationPublicationChecks) where
+module TypedSessionCases
+  ( typedSessionHydrationPublicationChecks, typedSessionPrefixProperties ) where
 
 import Control.Exception
-  ( AsyncException(ThreadKilled), Exception, IOException, SomeException, bracket, throwIO, try )
-import Control.Monad (forM_, unless, void)
+  ( AsyncException(ThreadKilled), Exception, IOException, SomeException, bracket, onException, throwIO, try )
+import Control.Monad (forM, forM_, unless, void)
+import qualified Crypto.Hash.SHA256 as SHA256
+import Data.Bits (testBit)
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List (sort)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import GHC (getSessionDynFlags, runGhc)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Type (liftedTypeKind, mkInfForAllTy, mkInfForAllTys, mkTyVarTy, mkVisFunTyMany)
-import GHC.Driver.Env (HscEnv, hsc_HPT)
+import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_home_unit)
 import GHC.Types.Fixity (Fixity(..), FixityDirection(..))
 import GHC.Types.Id (Id, idName, idType)
 import GHC.Types.Name (mkInternalName, nameModule_maybe, nameOccName)
@@ -21,9 +25,12 @@ import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var (mkTyVar, varName)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
-import GHC.Unit.Module (moduleName, moduleNameString)
+import GHC.Unit.Home (homeUnitAsUnit)
+import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Module.ModIface (mi_fixities, mi_extra_decls)
+import GHC.Unit.Types (unitString)
+import Numeric (showHex)
 import System.Directory
   ( createDirectory, createDirectoryIfMissing, doesPathExist
   , getTemporaryDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile )
@@ -31,6 +38,10 @@ import System.FilePath ((</>), takeDirectory)
 import System.IO (openTempFile, hClose)
 import System.IO.Error (isAlreadyExistsError)
 import System.Posix.Files (createSymbolicLink, readSymbolicLink)
+import Test.Tasty (TestTree, testGroup, withResource)
+import Test.Tasty.HUnit (testCase)
+import Test.Tasty.QuickCheck (testProperty)
+import qualified Test.QuickCheck as QC
 import Tidepool.Binders
   ( BoundBinder(..), ValueTier(..), CellSplitError(..)
   , analyzeCellWithFlags, analyzeOrderedCellWithFlags
@@ -38,7 +49,8 @@ import Tidepool.Binders
   , preparedTypedSegmentSource, preparedTypedSegmentOperations )
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.DependencyEvidence (DependencyEvidence(..))
-import Tidepool.ExactHydration (newOriginalInterfaceArtifactsWithSessionOutputs)
+import Tidepool.ExactHydration
+  ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionOutputs )
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, selectFinalizedSessionOutputs
   , finalizedValueInterfaceSeals, finalizedInterfaceSeals )
@@ -57,11 +69,181 @@ import Tidepool.Test.Runner (requiredInput)
 import Tidepool.TypedSegment
   ( PendingTypedSegment
   , typedSegmentItems, pendingSegmentItems, typedItemCaptures, typedCaptureIdentifier
-  , typedCaptureType, typedCaptureFixity )
+  , typedCaptureType, typedCaptureFixity, typedItemInputs, typedInputCapture
+  , typedItemPlan, TypedItemPlan(..) )
 
 data SessionBoundaryFailure = HydrationCompletionRefused | PublicationCompletionRefused
   deriving (Eq, Show)
 instance Exception SessionBoundaryFailure
+
+type InterfaceSeal = ((T.Text, T.Text), T.Text)
+
+data PrefixAdmission = PrefixAdmission
+  OriginalInterfaceArtifacts FinalizedModuleArtifacts [CapturedSessionInterface] [CapturedSessionInterface]
+
+data PrefixFixture = PrefixFixture FilePath PreparedTypedSegmentBindings
+  [(Int, InterfaceSeal)] (Map.Map Int PrefixAdmission)
+
+data PrefixHistory = PrefixHistory Int [Int] deriving Show
+
+-- Compile once per selected group, then generate cheap issuer calls against
+-- its real immutable captures. The oracle uses authored reservation ordinals,
+-- exact home-unit owners and independently hashed interface bytes; it never
+-- uses the production prefix selector to compute expected membership.
+typedSessionPrefixProperties :: TestTree
+typedSessionPrefixProperties = withResource acquirePrefixFixture releasePrefixFixture $ \fixture ->
+  testGroup "typed-session-prefix"
+    [ testCase "delayed capture stays unavailable before its item" $ do
+        value@(PrefixFixture _ prepared rows admissions) <- fixture
+        let admission = admissions Map.! 0
+        early <- issuePrefix prepared admission 1
+        unless (sort (finalizedValueInterfaceSeals early) == sort (expectedPrefix value 0 1))
+          (fail "item 1 published the future Val.G4 capture")
+        later <- issuePrefix prepared admission 5
+        unless (sort (finalizedValueInterfaceSeals later) == sort (map snd rows))
+          (fail "later reader did not retain its delayed capture interface")
+        -- Returning the complete output inventory at item 1 would violate
+        -- prefix authority and fails this same observation.
+        unless (sort (map snd rows) /= sort (expectedPrefix value 0 1))
+          (fail "prefix oracle cannot distinguish future-output publication")
+    , testProperty "real prefix issuer matches exact role inventory" $
+        QC.checkCoverage $
+        QC.forAllShrink prefixHistoryGenerator shrinkPrefixHistory $ \history@(PrefixHistory mask queries) ->
+          QC.cover 10 (mask == 0) "all produced"
+          $ QC.cover 10 (mask == 7) "all imported"
+          $ QC.cover 60 (mask > 0 && mask < 7) "mixed roles"
+          $ QC.cover 30 (any (<= 2) queries) "before delayed capture"
+          $ QC.cover 30 (any (>= 5) queries) "later reader"
+          $ QC.ioProperty $ do
+              value@(PrefixFixture _ prepared rows admissions) <- fixture
+              let admission@(PrefixAdmission _ full _ _) = admissions Map.! mask
+              projected <- mapM (issuePrefix prepared admission) queries
+              pure $ QC.counterexample (show history) $ QC.conjoin
+                ( [sort (finalizedValueInterfaceSeals issued) QC.=== sort (expectedPrefix value mask ordinal)
+                  | (ordinal, issued) <- zip queries projected]
+                  ++ [sort (finalizedInterfaceSeals full) QC.=== sort (map snd rows)] )
+    , testProperty "role and duplicate refusals preserve later issuance" $
+        QC.forAllShrink (QC.chooseInt (1, 6)) (filter (\mask -> mask >= 1 && mask <= 6) . QC.shrink) $ \mask ->
+          QC.ioProperty $ do
+            value@(PrefixFixture _ prepared _ admissions) <- fixture
+            let admission@(PrefixAdmission originals full imported produced) = admissions Map.! mask
+            wrongRole <- try (selectFinalizedSessionOutputs originals [head imported] full)
+              :: IO (Either SomeException FinalizedModuleArtifacts)
+            duplicate <- try (selectFinalizedSessionOutputs originals [head produced, head produced] full)
+              :: IO (Either SomeException FinalizedModuleArtifacts)
+            early <- issuePrefix prepared admission 1
+            later <- issuePrefix prepared admission 5
+            pure $ QC.counterexample ("role mask " ++ show mask) $ QC.conjoin
+              [ QC.property (either (const True) (const False) wrongRole)
+              , QC.property (either (const True) (const False) duplicate)
+              , sort (finalizedValueInterfaceSeals early) QC.=== sort (expectedPrefix value mask 1)
+              , sort (finalizedValueInterfaceSeals later) QC.=== sort (expectedPrefix value mask 5)
+              ]
+    ]
+
+prefixHistoryGenerator :: QC.Gen PrefixHistory
+prefixHistoryGenerator = do
+  mask <- QC.chooseInt (0, 7)
+  count <- QC.chooseInt (1, 8)
+  PrefixHistory mask <$> QC.vectorOf count (QC.chooseInt (-1, 6))
+
+shrinkPrefixHistory :: PrefixHistory -> [PrefixHistory]
+shrinkPrefixHistory (PrefixHistory mask queries) =
+  [PrefixHistory smaller queries | smaller <- QC.shrink mask, smaller >= 0, smaller <= 7]
+    ++ [PrefixHistory mask smaller | smaller <- QC.shrinkList shrinkOrdinal queries, not (null smaller)]
+  where shrinkOrdinal ordinal = filter (\n -> n >= -1 && n <= 6) (QC.shrink ordinal)
+
+expectedPrefix :: PrefixFixture -> Int -> Int -> [InterfaceSeal]
+expectedPrefix (PrefixFixture _ _ rows _) mask ordinal =
+  [row | (index, (captureOrdinal, row)) <- zip [0 ..] rows
+    , testBit mask index || captureOrdinal <= ordinal]
+
+issuePrefix :: PreparedTypedSegmentBindings -> PrefixAdmission -> Int -> IO FinalizedModuleArtifacts
+issuePrefix prepared (PrefixAdmission originals full _ produced) ordinal =
+  selectFinalizedSessionOutputs originals
+    [snapshot | snapshot <- typedSegmentSessionInterfacesThrough ordinal prepared
+      , interfaceOwner snapshot `elem` map interfaceOwner produced] full
+
+interfaceOwner :: CapturedSessionInterface -> (T.Text, T.Text)
+interfaceOwner snapshot = let (owner, _) = capturedSessionInterface snapshot
+  in (T.pack (unitString (moduleUnit owner)), T.pack (moduleNameString (moduleName owner)))
+
+releasePrefixFixture :: PrefixFixture -> IO ()
+releasePrefixFixture (PrefixFixture root _ _ _) = removeDirectoryRecursive root
+
+acquirePrefixFixture :: IO PrefixFixture
+acquirePrefixFixture = do
+  root <- temporary
+  prepare root `onException` removeDirectoryRecursive root
+  where
+    prepare root = do
+      effects <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
+      prelude <- requiredInput "TIDEPOOL_PRELUDE_DIR"
+      body <- readFile "test-cell-splitter/fixtures/typed-session/TypedSessionDelayedCapture.hs"
+      libdir <- getLibdir
+      flags <- runGhc (Just libdir) getSessionDynFlags
+      let target = root </> "TypedSessionDelayedCapture.hs"
+          includes = [root, effects, prelude]
+          template = unlines
+            [ "{-# LANGUAGE DataKinds #-}"
+            , "{{CELL_PRAGMAS}}"
+            , "module TypedSessionDelayedCapture where"
+            , "import Control.Monad.Freer (Eff)"
+            , "import Tidepool.Effects.Core ()"
+            , "{{CELL_IMPORTS}}"
+            , "{{CELL_DECLS}}"
+            , "__tidepool_cell_check :: Eff '[] ()"
+            , "__tidepool_cell_check = do { {{CELL_BODY}} ; pure () }"
+            ]
+          expectedCaptures = [(0, ["first"]), (1, []), (2, []), (3, ["delayed"]), (4, []), (5, ["later"])]
+          reservations = [(ordinal, fromIntegral (ordinal + 1), Nothing) | ordinal <- [0 .. 5]]
+      sourcePlan <- analyzeOrderedCellWithFlags flags template body >>= either (fail . show) pure
+      source <- either fail pure (prepareTypedSegmentSource template sourcePlan (replicate 64 'd') reservations)
+      writeFile target (preparedTypedSegmentSource source)
+      prepared <- withResidentPipelineSelectedRequests includes $ \runRequest -> do
+        observed <- newIORef Nothing
+        let complete initial admitted typed = do
+              let items = pendingSegmentItems typed
+                  actual = [(plannedItemOrdinal (typedItemPlan item), map (occurrence . typedCaptureIdentifier)
+                    (typedItemCaptures item)) | item <- items]
+              unless (actual == expectedCaptures)
+                (fail ("delayed-prefix fixture changed its capture premises: " ++ show actual))
+              let delayed = typedCaptureIdentifier (head (typedItemCaptures (items !! 3)))
+              unless (delayed `elem` map typedInputCapture (typedItemInputs (items !! 5)))
+                (fail "later reader does not depend on the original delayed capture")
+              batch <- prepareTypedSegmentSessionBindings initial admitted typed (root </> "stage")
+              let snapshots = typedSegmentSessionInterfaces batch
+                  unit = T.pack (unitString (homeUnitAsUnit (hsc_home_unit initial)))
+                  owners = [(unit, T.pack (moduleNameString (renderSessionModule (SessionModule ValMod (Generation generation)))))
+                    | generation <- [1, 4, 6]]
+              unless (map interfaceOwner snapshots == owners)
+                (fail "delayed-prefix fixture lost its exact compiler home-unit/output owners")
+              writeIORef observed (Just batch)
+              pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
+                typedSegmentSessionInterfaces batch)
+        void $ runRequest (pure ()) $ \compiler -> compiler
+          (WithTypedSegmentPreparation complete (PreparedSegmentProducts (preparedTypedSegmentPlan source) Nothing))
+          mempty (TypedSegmentCompile (preparedTypedSegmentPlan source) (preparedTypedSegmentOperations source) GeneralCompile)
+          Nothing target includes Nothing
+        readIORef observed >>= maybe (fail "delayed-prefix preparation callback did not execute") pure
+      let snapshots = typedSegmentSessionInterfaces prepared
+          rows = zip [0, 3, 5] [ (interfaceOwner snapshot, digest (snd (capturedSessionInterface snapshot)))
+            | snapshot <- snapshots ]
+          environment = typedSegmentSessionEnvironment prepared
+          evidence = DependencyEvidence False False [] [] [] []
+      admissions <- forM [0 .. 7] $ \mask -> do
+        let imported = [snapshot | (index, snapshot) <- zip [0 ..] snapshots, testBit mask index]
+            produced = [snapshot | (index, snapshot) <- zip [0 ..] snapshots, not (testBit mask index)]
+            directory = root </> "roles-" ++ show mask
+        createDirectoryIfMissing True directory
+        originals <- newOriginalInterfaceArtifactsWithSessionOutputs environment Map.empty [] imported produced directory
+        full <- captureFinalizedModuleArtifacts originals environment Map.empty Map.empty evidence directory
+        unless (sort (finalizedInterfaceSeals full) == sort (map snd rows))
+          (fail "real role issuer changed an exact output owner or interface digest")
+        pure (mask, PrefixAdmission originals full imported produced)
+      pure (PrefixFixture root prepared rows (Map.fromList admissions))
+    digest = T.pack . concatMap hex . BS.unpack . SHA256.hash
+    hex byte = let rendered = showHex byte "" in replicate (2 - length rendered) '0' ++ rendered
 
 -- Every negative follows a real compiler/capture/hydration positive. The
 -- protected fixture's local fixity is an internal GHC component control,

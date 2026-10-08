@@ -12,7 +12,7 @@ import TypedSegmentCases
   ( typedSegmentNativePreparation, typedSegmentRecordMetadataProperty
   , typedSegmentRewriteSemantics
   )
-import TypedSessionCases (typedSessionHydrationPublicationChecks)
+import TypedSessionCases (typedSessionHydrationPublicationChecks, typedSessionPrefixProperties)
 import UnreachableCompileTimeTest (unreachableCompileTimeCompilation)
 import Tidepool.ExtractUtil (getLibdir)
 import GHC (runGhc, getSessionDynFlags)
@@ -56,6 +56,7 @@ tests = testGroup "cell-splitter"
   , testCase "typedSegmentRecordMetadataProperty" typedSegmentRecordMetadataProperty
   , testCase "typedSegmentRewriteSemantics" typedSegmentRewriteSemantics
   , testCase "typedSessionHydrationPublicationChecks" typedSessionHydrationPublicationChecks
+  , typedSessionPrefixProperties
   , testCase "sessionValueFinalizedDependency" sessionValueFinalizedDependency
   , testCase "sessionFixitiesCompilation" sessionFixitiesCompilation
   , testCase "unreachableCompileTimeCompilation" unreachableCompileTimeCompilation
