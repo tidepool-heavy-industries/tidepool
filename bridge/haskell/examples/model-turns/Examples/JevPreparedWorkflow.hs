@@ -5,10 +5,9 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
--- | Compileable notebook composition. Bind the result of 'observeCourier' to
--- retain the typed response for later metadata, policy and payload projections.
-module JevPreparedWorkflow
-  ( CourierPacket, CourierResponse, courierQuestion, observeCourier ) where
+-- | Observe once, then reuse the typed response for presentation and policy.
+module Examples.JevPreparedWorkflow
+  ( CourierPacket, CourierResponse, courierQuestion, observeCourier, courierNotebook ) where
 
 import Prelude
 import Control.Monad (void)
@@ -32,7 +31,7 @@ courierQuestion captured = J.choice "Which decision is justified by the courier 
     J..| J.alt #missing "No explicit deadline or spending criteria justify choosing" (\n -> ("missing-original", captured * n)))
 
 observeCourier
-  :: (Member Jev effects, Member Console effects)
+  :: Member Jev effects
   => Text
   -> Eff effects (Either (J.JevError J.JevCallError) CourierResponse)
 observeCourier criteria = do
@@ -41,16 +40,26 @@ observeCourier criteria = do
         J.:& #options J.:= (["quick: tomorrow, price 8", "economy: two days, price 5"] :: [Text]))
   case J.prepare J.jevLatest world (#route J.:= question) of
     Left failure -> pure (Left (J.Prepare failure))
-    Right prepared -> do
-      void (display prepared)
-      result <- J.executePrepared prepared
-      case result of
-        Left failure -> void (display failure)
-        Right response -> do
-          let answer = (J.answers response).route
-          -- Explicit projection inspects only the selected value. Rendering a
-          -- Settled action itself never traverses or executes its payload.
-          void (display (fmap (\settled -> J.settledValue settled 4)
-            (J.takenUnder J.careful answer)))
-          void (display (J.resolvedModel response, J.usage response, J.diagnostics response))
-      pure result
+    Right prepared -> J.executePrepared prepared
+
+-- | Caller composition: one explicit Jev request, then presentation and two
+-- pure policy decisions over that same observation. Return the original result
+-- so a later notebook cell can inspect or interpret it again without requesting.
+courierNotebook
+  :: (Member Jev effects, Member Console effects)
+  => Text
+  -> Eff effects (Either (J.JevError J.JevCallError) CourierResponse)
+courierNotebook criteria = do
+  result <- observeCourier criteria
+  case result of
+    Left failure -> void (display failure)
+    Right response -> do
+      void (display response)
+      let answer = (J.answers response).route
+          under :: J.Policy policy -> Either J.Doubt (Text, Int)
+          under policy = fmap (\settled -> J.settledValue settled 4)
+            (J.takenUnder policy answer)
+      -- Only this explicit projection applies the selected original function.
+      -- Mapping a Response or displaying Settled never demands that payload.
+      void (display (under J.careful, under J.strict))
+  pure result

@@ -328,7 +328,7 @@ instance (Unique t, Schema Value (Packet t)) => Display (Packet t Answers) where
 
 instance Display (Core.Response Value a) where
   displayTree response = Constructor "Jev.Response"
-    [ ("answers", previewTree (Core.responsePreview response))
+    [ ("originalAnswerEvidence", previewTree (Core.responsePreview response))
     , ("model", displayTree (Core.responseModel response))
     , ("usage", displayTree (Core.usage response))
     , ("diagnostics", displayTree (Core.diagnostics response))
@@ -341,12 +341,99 @@ instance Display (Core.Prepared Value a) where
 instance Display (Settled p a) where
   displayTree _ = TextLeaf "<Jev settled value; use settledValue to project>"
 
-instance Display Usage where displayTree = StringLeaf . show
-instance Display Diagnostic where displayTree = StringLeaf . show
-instance Display Doubt where displayTree = StringLeaf . show
-instance Display Cause where displayTree = StringLeaf . show
+instance Display Usage where
+  displayTree (Usage input output) = Constructor "Jev.Usage"
+    [("inputTokens", displayTree input), ("outputTokens", displayTree output)]
+
+instance Display Diagnostic where
+  displayTree (DistributionDrift question total) = Constructor "DistributionDrift"
+    [("questionId", displayTree question), ("distributionTotal", displayTree total)]
+
+instance Display Doubt where
+  displayTree (Doubt reason message) = Constructor "Jev.Doubt"
+    [("cause", displayTree reason), ("why", displayTree message)]
+
+instance Display Cause where
+  displayTree reason = case reason of
+    NearTie winner runnerUp -> Constructor "NearTie"
+      [("winner", displayTree winner), ("runnerUp", displayTree runnerUp)]
+    Underweight observedMass -> Constructor "Underweight" [("mass", displayTree observedMass)]
+    Unconfident reportedConfidence -> Constructor "Unconfident" [("confidence", displayTree reportedConfidence)]
+
 instance Display (Policy p) where displayTree = StringLeaf . show
-instance Show err => Display (JevError err) where displayTree = StringLeaf . show
+
+instance Display err => Display (JevError err) where
+  displayTree failure = case failure of
+    Prepare reason -> Constructor "Prepare" [("failure", displayTree reason)]
+    Transport reason -> Constructor "Transport" [("failure", displayTree reason)]
+    Decode reason -> Constructor "Decode" [("failure", displayTree reason)]
+
+instance Display JevCallError where
+  displayTree failure = case failure of
+    JevUnconfigured -> Constructor "JevUnconfigured" []
+    JevCallCap -> Constructor "JevCallCap" []
+    JevTransport message -> Constructor "JevTransport" [("message", displayTree message)]
+    JevTimeout -> Constructor "JevTimeout" []
+    JevHttp status body -> Constructor "JevHttp"
+      [("status", displayTree status), ("body", displayTree body)]
+    JevCircuitOpen status retryAfter -> Constructor "JevCircuitOpen"
+      [("status", displayTree status), ("retryAfter", displayTree retryAfter)]
+    JevClientSetup message -> Constructor "JevClientSetup" [("message", displayTree message)]
+    JevBodyLimit -> Constructor "JevBodyLimit" []
+    JevMalformed message -> Constructor "JevMalformed" [("message", displayTree message)]
+
+instance Display PrepError where
+  displayTree failure = case failure of
+    EmptyOffer question -> Constructor "EmptyOffer" [("questionId", displayTree question)]
+    DuplicateKeys question keys -> Constructor "DuplicateKeys"
+      [("questionId", displayTree question), ("keys", displayTree keys)]
+    KeyCollidesWithLabel question alternativeKey -> Constructor "KeyCollidesWithLabel"
+      [("questionId", displayTree question), ("key", displayTree alternativeKey)]
+    TooManyAlternatives question count -> Constructor "TooManyAlternatives"
+      [("questionId", displayTree question), ("count", displayTree count)]
+    BadLevelCount question count -> Constructor "BadLevelCount"
+      [("questionId", displayTree question), ("count", displayTree count)]
+    DuplicateQuestionPath question -> Constructor "DuplicateQuestionPath" [("questionId", displayTree question)]
+    EmptyQuestionMap -> Constructor "EmptyQuestionMap" []
+    EmptyQuestionKey question -> Constructor "EmptyQuestionKey" [("questionId", displayTree question)]
+    BadStateShape -> Constructor "BadStateShape" []
+    BadInstructions question -> Constructor "BadInstructions" [("questionId", displayTree question)]
+    BadDescription question alternativeKey -> Constructor "BadDescription"
+      [("questionId", displayTree question), ("key", displayTree alternativeKey)]
+    BadLevel question index -> Constructor "BadLevel"
+      [("questionId", displayTree question), ("index", displayTree index)]
+
+instance Display DecodeError where
+  displayTree failure = case failure of
+    ResponseShape message -> Constructor "ResponseShape" [("message", displayTree message)]
+    ProviderRejected reason -> Constructor "ProviderRejected" [("rejection", displayTree reason)]
+    MissingAnswer question -> Constructor "MissingAnswer" [("questionId", displayTree question)]
+    UnexpectedAnswer question -> Constructor "UnexpectedAnswer" [("questionId", displayTree question)]
+    DuplicateAnswer question -> Constructor "DuplicateAnswer" [("questionId", displayTree question)]
+    WrongKind question -> Constructor "WrongKind" [("questionId", displayTree question)]
+    Malformed question message -> Constructor "Malformed"
+      [("questionId", displayTree question), ("message", displayTree message)]
+    UnknownSelection question alternativeKey -> Constructor "UnknownSelection"
+      [("questionId", displayTree question), ("key", displayTree alternativeKey)]
+    MissingMass question alternativeKey -> Constructor "MissingMass"
+      [("questionId", displayTree question), ("key", displayTree alternativeKey)]
+    ExtraMass question alternativeKey -> Constructor "ExtraMass"
+      [("questionId", displayTree question), ("key", displayTree alternativeKey)]
+    LegendMismatch question -> Constructor "LegendMismatch" [("questionId", displayTree question)]
+    ValueOutOfRange question fieldName -> Constructor "ValueOutOfRange"
+      [("questionId", displayTree question), ("field", displayTree fieldName)]
+
+instance Display Rejection where
+  displayTree rejection = case rejection of
+    RejectionMessage message -> Constructor "RejectionMessage" [("message", displayTree message)]
+    RejectionError code message -> Constructor "RejectionError"
+      [("error", displayTree code), ("message", displayTree message)]
+    RejectionValidation issues -> Constructor "RejectionValidation" [("issues", displayTree issues)]
+    RejectionOther -> Constructor "RejectionOther" []
+
+instance Display ValidationIssue where
+  displayTree (ValidationIssue location message kind) = Constructor "ValidationIssue"
+    [("issueLocation", displayTree location), ("issueMessage", displayTree message), ("issueType", displayTree kind)]
 
 previewTree :: Value -> DisplayTree
 previewTree = jsonTree "Jev.Answer"
@@ -405,6 +492,8 @@ decode = Core.decode
 answers :: Response a -> a
 answers = Core.answers
 
+-- | Transform the carried answer while preserving the original answer evidence,
+-- resolved model, usage and diagnostics. This does not execute a carried action.
 mapResponse :: (a -> b) -> Response a -> Response b
 mapResponse = Core.mapResponse
 
