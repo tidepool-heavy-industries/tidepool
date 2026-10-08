@@ -12,6 +12,10 @@ pub(crate) mod deployment;
 #[cfg(test)]
 mod fixture_packets;
 mod inventory;
+#[cfg(test)]
+mod product_decode_observer;
+#[cfg(test)]
+mod protected_native_availability_tests;
 pub(crate) mod shared_evidence;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -280,6 +284,8 @@ impl CandidateProduct {
         requirements: &tidepool_repr::execution_schema::ProgramRequirements,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Option<RawModuleProduct>, tidepool_repr::execution_schema::ParseError> {
+        #[cfg(test)]
+        product_decode_observer::record();
         let mut products = operation.parse_module_products(bytes, requirements)?;
         if products.len() != 1 {
             return Ok(None);
@@ -292,6 +298,10 @@ impl CandidateProduct {
         let requirements = crate::prepared_artifact::production_requirements().ok()?;
         let decoded = Self::decode_product(&bytes, &requirements)?;
         Some(Self { bytes, decoded })
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<u8>, RawModuleProduct) {
+        (self.bytes, self.decoded)
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
@@ -332,6 +342,7 @@ pub(crate) struct CandidateBundle {
 pub(crate) struct CandidateSet {
     pub manifest_path: PathBuf,
     pub by_owner: BTreeMap<(String, String), CandidateBundle>,
+    pub(crate) native_availability: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
 }
 
 /// Emit receipt-derived evidence only after products and target owners passed
@@ -449,6 +460,43 @@ struct Record {
     evidence: shared_evidence::SharedEvidence,
     module_interface_proof: Option<crate::certified_products::CertifiedModuleInterface>,
     execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+}
+
+/// A deployment record carries the product decoded by its owning loader.
+/// Ordinary durable records still decode at candidate acquisition.
+enum CandidateRecord {
+    Encoded(Record),
+    Deployment(deployment::DecodedDeploymentRecord),
+}
+
+enum CandidateProductInput {
+    Encoded,
+    Decoded(RawModuleProduct),
+}
+
+impl From<Record> for CandidateRecord {
+    fn from(record: Record) -> Self {
+        Self::Encoded(record)
+    }
+}
+
+impl CandidateRecord {
+    fn record(&self) -> &Record {
+        match self {
+            Self::Encoded(record) => record,
+            Self::Deployment(record) => record.record(),
+        }
+    }
+
+    fn into_parts(self) -> (Record, CandidateProductInput) {
+        match self {
+            Self::Encoded(record) => (record, CandidateProductInput::Encoded),
+            Self::Deployment(record) => {
+                let (record, product) = record.into_parts();
+                (record, CandidateProductInput::Decoded(product))
+            }
+        }
+    }
 }
 
 impl std::ops::Deref for Record {
@@ -1733,6 +1781,9 @@ pub(crate) struct ExactCandidateContext {
     reserved: BTreeSet<String>,
     originals: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     interface_seals: BTreeMap<(String, String), [u8; 32]>,
+    canonical_interfaces:
+        BTreeMap<(String, String), crate::certified_products::CertifiedModuleInterface>,
+    ambiguous_native_owners: BTreeSet<(String, String)>,
 }
 
 impl ExactCandidateContext {
@@ -1742,6 +1793,8 @@ impl ExactCandidateContext {
             reserved,
             originals: Vec::new(),
             interface_seals: BTreeMap::new(),
+            canonical_interfaces: BTreeMap::new(),
+            ambiguous_native_owners: BTreeSet::new(),
         }
     }
 
@@ -1761,10 +1814,41 @@ impl ExactCandidateContext {
         self
     }
 
-    fn excludes_root(&self, unit: &str, module: &str) -> bool {
-        self.protected
-            .contains(&(unit.to_owned(), module.to_owned()))
-            || self.reserved.contains(module)
+    pub(crate) fn with_canonical_interfaces(
+        mut self,
+        interfaces: BTreeMap<(String, String), crate::certified_products::CertifiedModuleInterface>,
+        ambiguous: BTreeSet<(String, String)>,
+    ) -> Self {
+        self.canonical_interfaces = interfaces;
+        self.ambiguous_native_owners = ambiguous;
+        self
+    }
+
+    fn admits_canonical_original(
+        &self,
+        owner: &CachedHomeOwner,
+        canonical: &crate::certified_products::CertifiedModuleInterface,
+    ) -> bool {
+        let key = (owner.unit.clone(), owner.module.clone());
+        if self.reserved.contains(&owner.module) {
+            return false;
+        }
+        if self
+            .canonical_interfaces
+            .get(&key)
+            .is_some_and(|selected| selected != canonical)
+            || (self.protected.contains(&key) && !self.canonical_interfaces.contains_key(&key))
+        {
+            return false;
+        }
+        match self.originals.iter().find(|original| {
+            original.owner().unit == owner.unit && original.owner().module == owner.module
+        }) {
+            Some(original) => {
+                original.owner() == owner && original.module_interface() == Some(canonical)
+            }
+            None => !self.ambiguous_native_owners.contains(&key),
+        }
     }
 }
 
@@ -1802,14 +1886,14 @@ fn select_configured_inner(
     };
     let deployed: std::collections::BTreeSet<_> = records
         .iter()
-        .map(|(r, _)| (r.unit.clone(), r.module.clone()))
+        .map(|(r, _)| (r.record().unit.clone(), r.record().module.clone()))
         .collect();
     records.extend(
         ordinary_records(endpoint_identity, include, context.is_some())
             .unwrap_or_default()
             .into_iter()
             .filter(|r| !deployed.contains(&(r.unit.clone(), r.module.clone())))
-            .map(|r| (r, CandidateOrigin::Ordinary)),
+            .map(|r| (CandidateRecord::Encoded(r), CandidateOrigin::Ordinary)),
     );
     let selected = select_records_inner(endpoint_identity, include, scratch, records, context);
     tracing::info!(target: "tidepool_toolchain::module_candidates",
@@ -1834,11 +1918,11 @@ fn select_records(
     select_records_inner(endpoint_identity, include, scratch, records, None)
 }
 
-fn select_records_inner(
+fn select_records_inner<R: Into<CandidateRecord>>(
     endpoint_identity: &[u8],
     include: &[PathBuf],
     scratch: &Path,
-    records: Vec<(Record, CandidateOrigin)>,
+    records: Vec<(R, CandidateOrigin)>,
     context: Option<&ExactCandidateContext>,
 ) -> Option<CandidateSet> {
     let include = context_paths(include)?;
@@ -1855,7 +1939,8 @@ fn select_records_inner(
         BTreeMap::<[u8; 32], Arc<crate::execution_source::CertifiedExecutionSourceGraph>>::new();
     let mut graph_bytes = 0usize;
     let mut selection_omissions = CacheOfferDiagnostics::default();
-    for (mut record, origin) in records {
+    for (record, origin) in records {
+        let (mut record, product_input) = record.into().into_parts();
         if record.tag != "TPMCAN"
             || record.version != RECORD_VERSION
             || record.endpoint != endpoint_identity
@@ -1863,7 +1948,12 @@ fn select_records_inner(
                 && context.is_none()
                 && record.include != include)
             || record.source.is_relative()
-            || context.is_some_and(|e| e.excludes_root(&record.unit, &record.module))
+            || context.is_some_and(|e| {
+                e.reserved.contains(&record.module)
+                    || (matches!(origin, CandidateOrigin::Ordinary)
+                        && e.protected
+                            .contains(&(record.unit.clone(), record.module.clone())))
+            })
         {
             continue;
         }
@@ -1907,12 +1997,17 @@ fn select_records_inner(
             continue;
         }
         let decode_started = std::time::Instant::now();
-        decoded_bytes += record.products.len() as u64;
-        let parsed = CandidateProduct::decode_product_with_operation(
-            &record.products,
-            &requirements,
-            &package_validation.inventory,
-        );
+        let parsed = match product_input {
+            CandidateProductInput::Encoded => {
+                decoded_bytes += record.products.len() as u64;
+                CandidateProduct::decode_product_with_operation(
+                    &record.products,
+                    &requirements,
+                    &package_validation.inventory,
+                )
+            }
+            CandidateProductInput::Decoded(product) => Ok(Some(product)),
+        };
         decode_elapsed += decode_started.elapsed();
         let product = match parsed {
             Ok(Some(product)) => product,
@@ -2260,6 +2355,11 @@ fn select_records_inner(
             }
             continue;
         }
+        if context.is_some_and(|context| {
+            !context.admits_canonical_original(&record.original_owner.owner(), &canonical)
+        }) {
+            continue;
+        }
         let owner_key = (record.unit.clone(), record.module.clone());
         let Some(record) = ValidatedRecord::admit(record, canonical) else {
             if omit_or_refuse_candidate(
@@ -2358,14 +2458,41 @@ fn select_records_inner(
         invalid_record = selection_omissions.omissions.get(&CacheOfferOmission::InvalidRecord).copied().unwrap_or_default(),
         total = selection_omissions.total(),
         "ordinary optional cache offer omissions");
+    let availability = match context {
+        Some(context) => protected_native_closure(&validated, context, &mut package_validation)?,
+        None => BTreeSet::new(),
+    };
     let mut inventory = inventory::InventoryTables::new(
         validated
-            .values()
-            .flat_map(|(_, _, product, _)| product.groups.iter()),
+            .iter()
+            .filter(|(key, _)| !availability.contains(*key))
+            .flat_map(|(_, (_, _, product, _))| product.groups.iter()),
     )?;
+    let mut native_availability = Vec::new();
     let mut by_owner = BTreeMap::new();
     let mut manifest = Vec::new();
-    for (_, (mut record, origin, product, _)) in validated {
+    for (key, (mut record, origin, product, _)) in validated {
+        if availability.contains(&key) {
+            native_availability.push(
+                crate::certified_products::certify_candidate_original_with_validation(
+                    crate::certified_products::OriginalNativeCandidate {
+                        owner: record.original_owner.owner(),
+                        product: CandidateProduct {
+                            bytes: std::mem::take(&mut record.data.products),
+                            decoded: product,
+                        },
+                        certification_bytes: std::mem::take(
+                            &mut record.data.original_certification,
+                        ),
+                        module_interface: record.canonical,
+                        execution_source: record.execution_source,
+                    },
+                    &mut package_validation,
+                )
+                .ok()?,
+            );
+            continue;
+        }
         let product_sha: [u8; 32] = Sha256::digest(&record.products).into();
         let Some(evidence_sha) = record.evidence.json_sha256().map(|digest| hex(&digest)) else {
             continue;
@@ -2478,10 +2605,13 @@ fn select_records_inner(
             core_sha256: &core_reference.sha256,
         }));
     }
-    retain_closed_execution_capabilities(
-        &mut by_owner,
-        context.map_or(&[], |context| context.originals.as_slice()),
-    );
+    let originals = context
+        .into_iter()
+        .flat_map(|context| context.originals.iter())
+        .chain(native_availability.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    retain_closed_execution_capabilities(&mut by_owner, &originals);
     let graph_bytes = by_owner
         .values()
         .filter(|bundle| bundle.execution_admitted)
@@ -2551,7 +2681,64 @@ fn select_records_inner(
     Some(CandidateSet {
         manifest_path,
         by_owner,
+        native_availability,
     })
+}
+
+/// Close only compatible protected roots. Native dependencies retain full
+/// original owners; canonical requirements may need private support interfaces.
+fn protected_native_closure(
+    candidates: &BTreeMap<(String, String), ValidatedCandidate>,
+    context: &ExactCandidateContext,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Option<BTreeSet<(String, String)>> {
+    let mut pending = candidates
+        .keys()
+        .filter(|key| context.protected.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut selected = BTreeSet::new();
+    while let Some(key) = pending.pop() {
+        if !selected.insert(key.clone()) {
+            continue;
+        }
+        let (record, _, _, _) = candidates.get(&key)?;
+        let owner = record.original_owner.owner();
+        for required in crate::certified_products::candidate_home_requirements_with_validation(
+            &record.original_certification,
+            &owner,
+            validation,
+        )
+        .ok()?
+        {
+            if context
+                .originals
+                .iter()
+                .any(|original| original.owner() == &required)
+            {
+                continue;
+            }
+            let required_key = (required.unit.clone(), required.module.clone());
+            if context.reserved.contains(&required.module)
+                || candidates.get(&required_key)?.0.original_owner.owner() != required
+            {
+                return None;
+            }
+            pending.push(required_key);
+        }
+        for (required, seal) in record.canonical.requirements() {
+            if context.interface_seals.get(required) == Some(seal) {
+                continue;
+            }
+            if context.reserved.contains(&required.1)
+                || candidates.get(required)?.0.canonical.interface_sha256() != *seal
+            {
+                return None;
+            }
+            pending.push(required.clone());
+        }
+    }
+    Some(selected)
 }
 
 /// Encoding data is separate from the retained executable candidate set.
@@ -2838,10 +3025,9 @@ fn retain_compatible_dependencies(
                         if originals.contains_key(&dependency_key) {
                             return true;
                         }
-                        !context.protected.contains(&dependency_key)
-                            && candidates
-                                .get(&dependency_key)
-                                .is_some_and(|(body, _, _, _)| body.source == selected)
+                        candidates
+                            .get(&dependency_key)
+                            .is_some_and(|(body, _, _, _)| body.source == selected)
                     })
                 });
                 (!closed).then(|| key.clone())
@@ -2866,6 +3052,8 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod product_carry;
+
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
     use proptest::prelude::*;

@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 
 module Tidepool.ExactHydration
@@ -6,6 +7,7 @@ module Tidepool.ExactHydration
   , newOriginalInterfaceArtifactsWithSessionOutputs
   , originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces, serializeOriginalInterface
   , ExactIfaceArtifact(..)
+  , ExactInterfaceOperations, exactInterfaceOperations, runExactInterfaceOperation
   , freshExactState, freshExactContext, forkExactContext
   , PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts
   , ExactContextForkFailure(..)
@@ -48,7 +50,7 @@ import Data.Maybe (isJust, isNothing)
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
-  ( HscEnv(..), hscUpdateHPT_lazy, hptSomeThingsBelowUs, hsc_home_unit, hsc_home_unit_maybe, hsc_HPT, hscEPS, discardIC, hsc_all_home_unit_ids )
+  ( HscEnv(..), hscUpdateHPT_lazy, hscUpdateFlags, hptSomeThingsBelowUs, hsc_home_unit, hsc_home_unit_maybe, hsc_HPT, hscEPS, discardIC, hsc_all_home_unit_ids )
 import GHC.Driver.Plugins
   ( Plugin(..), PluginWithArgs(..), Plugins(..), StaticPlugin(..), PluginRecompile(..), defaultPlugin )
 import GHC.Tc.Types (TcGblEnv(..), ImportAvails(..))
@@ -66,7 +68,7 @@ import GHC.Unit.Home.ModInfo
   , lookupHpt )
 import GHC.Iface.Load (readIface, loadInterface, WhereFrom(..))
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Driver.Session (DynFlags, targetProfile, ghcMode, GhcMode(CompManager))
+import GHC.Driver.Session (DynFlags, importPaths, targetProfile, ghcMode, GhcMode(CompManager))
 import GHC.Driver.Config.Parser (initParserOpts)
 import qualified GHC.Parser as Parser (parseImport)
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
@@ -135,6 +137,29 @@ data ExactIfaceArtifact = ExactIfaceArtifact
   , exactSha256 :: String
   , exactRequirements :: [(String, String)]
   } deriving (Eq, Show)
+
+-- The compiler owner supplies its guarded runner, rather than an ambient
+-- HscEnv. Every operation borrows that owner's fixed package facts with empty
+-- home visibility. The runner also rejects use after release or during another
+-- operation; this capability creates no separate lifetime or interpreter owner.
+newtype ExactInterfaceOperations = ExactInterfaceOperations
+  (forall result. (HscEnv -> IO result) -> IO result)
+
+exactInterfaceOperations
+  :: (forall result. Ghc result -> IO result) -> [FilePath] -> ExactInterfaceOperations
+exactInterfaceOperations run includes = ExactInterfaceOperations $ \operation -> run $ do
+  current <- getSession
+  let selected = hscUpdateHPT_lazy (const emptyHomePackageTable) current
+        { hsc_mod_graph = mkModuleGraph []
+        , hsc_targets = []
+        , hsc_type_env_vars = emptyKnotVars
+        }
+      configured = hscUpdateFlags (\flags -> flags { importPaths = includes }) selected
+  setSession configured
+  liftIO (operation configured)
+
+runExactInterfaceOperation :: ExactInterfaceOperations -> (HscEnv -> IO result) -> IO result
+runExactInterfaceOperation (ExactInterfaceOperations run) = run
 
 -- Checked value modules are injected in dependency order after the lexical
 -- graph is installed. Their verified identities authorize source imports at

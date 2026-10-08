@@ -2463,6 +2463,7 @@ fn pane_environment_from(
         "TIDEPOOL_TIMING",
         "TIDEPOOL_KEEP_TEST_LOGS",
         "TIDEPOOL_TEST_ARTIFACT_ROOT",
+        "TIDEPOOL_TEST_DIAGNOSTIC_SCOPE",
     ];
     NAMES
         .iter()
@@ -3868,6 +3869,31 @@ mod tests {
             selected
         );
         assert!(!pane_environment_from(|_| None).contains_key("EXOMONAD_TRACE"));
+    }
+
+    #[test]
+    fn pane_environment_preserves_explicit_compiler_diagnostic_scope() {
+        let selected = std::collections::BTreeMap::from([
+            ("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE".to_owned(), "1".to_owned()),
+            (
+                "TIDEPOOL_TEST_ARTIFACT_ROOT".to_owned(),
+                "/tmp/owned-compiler-evidence".to_owned(),
+            ),
+        ]);
+        assert_eq!(
+            pane_environment_from(|name| selected.get(name).cloned()),
+            selected
+        );
+        let unset = pane_environment_from(|name| {
+            (name == "TIDEPOOL_TEST_ARTIFACT_ROOT")
+                .then(|| "/tmp/owned-compiler-evidence".to_owned())
+        });
+        assert!(!unset.contains_key("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE"));
+        assert_eq!(
+            unset.get("TIDEPOOL_TEST_ARTIFACT_ROOT").map(String::as_str),
+            Some("/tmp/owned-compiler-evidence")
+        );
+        assert!(pane_environment_from(|_| None).is_empty());
     }
 
     #[test]

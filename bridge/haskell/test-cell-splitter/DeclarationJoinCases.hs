@@ -46,10 +46,15 @@ import System.IO (hClose, openTempFile)
 import System.Process (callProcess, readProcess)
 import Tidepool.DeclarationJoin
 import Tidepool.ExactHydration
+import Tidepool.GhcPipeline (withExactInterfaceTransaction)
 
 declarationJoinScenario :: IO ()
 declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> do
     let fixture = "test-cell-splitter/fixtures/declaration-join/exact-isolation"
+        inspectOwned artifacts = withExactInterfaceTransaction [root] $ \operations ->
+          inspectDeclarationArtifacts operations artifacts
+        validateOwned input = withExactInterfaceTransaction [root] $ \operations ->
+          validateDeclarationJoin operations input
     forM_ sourceFiles $ \file -> copyFile (fixture </> file) (root </> file)
     libdir <- ghcLibdir
     -- Each defining module is compiled once in its original lexical context.
@@ -91,7 +96,7 @@ declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> 
       operation <- liftIO (readDeclarationOperation inventoryManifest)
       liftIO $ unless (operation == InspectInventory declarationArtifacts)
         (fail "inventory manifest changed across transport")
-      inspected <- liftIO (inspectDeclarationArtifacts initial declarationArtifacts)
+      inspected <- liftIO (inspectOwned declarationArtifacts)
       liftIO $ case inspectionResult inspected of
         Right inventories | map inventoryArtifact inventories == declarationArtifacts
           , map inventoryInstances inventories == originalInventories -> pure ()
@@ -100,7 +105,7 @@ declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> 
       liftIO $ do
         forM_ ["FamilyOnly", "RichInventory"] $ \name -> do
           extra <- artifact root name
-          outcome <- inspectDeclarationArtifacts initial
+          outcome <- inspectOwned
             (declarationArtifacts ++ [DeclarationArtifact extra Nothing])
           case inspectionResult outcome of
             Right inventories -> case [inventoryInstances entry | entry <- inventories,
@@ -113,7 +118,7 @@ declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> 
               other -> fail ("rich original inventory incomplete: " ++ show other)
             other -> fail ("rich original inventory rejected: " ++ show other)
         ambiguous <- artifact root "AmbiguousInventory"
-        outcome <- inspectDeclarationArtifacts initial [DeclarationArtifact ambiguous Nothing]
+        outcome <- inspectOwned [DeclarationArtifact ambiguous Nothing]
         case inspectionResult outcome of
           Left (Unprovable, _) -> pure ()
           other -> fail ("ambiguous associated axiom owner was admitted: " ++ show other)
@@ -125,7 +130,7 @@ declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> 
       liftIO $ BS.writeFile manifest (encodeDeclarationJoin input)
       decoded <- liftIO (readDeclarationJoin manifest)
       liftIO $ unless (decoded == input) (fail "exact join manifest changed across transport")
-      outcome <- liftIO (validateDeclarationJoin initial decoded)
+      outcome <- liftIO (validateOwned decoded)
       liftIO $ case outcomeDecision outcome of
         JoinAccepted | outcomeInput outcome == input, Just _ <- outcomeArtifact outcome -> pure ()
         rejected -> fail ("sound isolation join rejected: " ++ show rejected)
@@ -166,7 +171,7 @@ declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> 
         entry : rest -> pure input { implementationArtifacts = entry
           { artifactInterface = (artifactInterface entry) { exactSha256 = replicate 64 '0' } } : rest }
         [] -> liftIO (fail "fixture implementation artifacts unexpectedly empty")
-      rejected <- liftIO (validateDeclarationJoin initial rejectedInput)
+      rejected <- liftIO (validateOwned rejectedInput)
       liftIO $ case outcomeDecision rejected of
         JoinRejected ArtifactChanged _ | outcomeInput rejected == rejectedInput
           , outcomeArtifact rejected == Nothing -> pure ()
@@ -176,11 +181,11 @@ declarationJoinScenario = bracket temporary removeDirectoryRecursive $ \root -> 
           let path = exactPath (artifactInterface entry)
           bracket (BS.readFile path) (BS.writeFile path) $ \_ -> do
             BS.writeFile path (BS.singleton 0)
-            inspectedChanged <- inspectDeclarationArtifacts initial (implementationArtifacts input)
+            inspectedChanged <- inspectOwned (implementationArtifacts input)
             case inspectionResult inspectedChanged of
               Left (ArtifactChanged, _) -> pure ()
               other -> fail ("mutated interface passed worker inventory admission: " ++ show other)
-            joinedChanged <- validateDeclarationJoin initial input
+            joinedChanged <- validateOwned input
             case outcomeDecision joinedChanged of
               JoinRejected ArtifactChanged _ | outcomeInput joinedChanged == input -> pure ()
               other -> fail ("mutated interface passed worker join admission: " ++ show other)

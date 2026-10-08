@@ -487,6 +487,7 @@ pub struct CompiledArtifacts {
     pub module_products: Vec<RawModuleProduct>,
     pub certified_groups: Vec<certified_products::PendingCertifiedGroup>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    pub(crate) selected_originals: Option<certified_products::SelectedOriginalClosure>,
     /// Bound compiler producer identity for this exact invocation. `None`
     /// means the bundle was assembled from bytes without an endpoint.
     pub producer_identity: Option<[u8; 32]>,
@@ -717,16 +718,45 @@ fn immutable_candidates_in_context(
                 .map(|owner| (owner.unit.clone(), owner.module.clone())),
         );
     }
+    let selected = context.compiler_metadata_snapshot()?;
+    let canonical_interfaces = selected
+        .entries
+        .values()
+        .filter_map(|entry| {
+            let canonical = match &entry.payload {
+                crate::artifact_inventory::ArtifactPayload::Canonical(interface) => interface,
+                crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                    product.module_interface()?
+                }
+                crate::artifact_inventory::ArtifactPayload::Interface(_, _) => return None,
+            };
+            Some((
+                (canonical.unit().to_owned(), canonical.module().to_owned()),
+                canonical.clone(),
+            ))
+        })
+        .collect();
+    let ambiguous = context
+        .artifact_view()
+        .metadata_snapshot()
+        .ambiguous_native_owners
+        .into_iter()
+        .map(|owner| (owner.unit, owner.module))
+        .collect();
     let exclusions = module_candidates::ExactCandidateContext::new(protected, reserved)
         .with_originals(context.compiler_original_products()?)
+        .with_canonical_interfaces(canonical_interfaces, ambiguous)
         .with_interface_seals(
-            context
-                .artifact_view()
-                .descriptors()
-                .into_iter()
+            selected
+                .entries
+                .values()
+                .map(|entry| &entry.descriptor)
                 .map(|descriptor| {
                     (
-                        (descriptor.owner.unit, descriptor.owner.module),
+                        (
+                            descriptor.owner.unit.clone(),
+                            descriptor.owner.module.clone(),
+                        ),
                         descriptor.interface_sha256,
                     )
                 })
@@ -736,6 +766,23 @@ fn immutable_candidates_in_context(
         module_candidates::select_configured_in_context(producer, include, scratch, &exclusions)?
             .map(Arc::new),
     )
+}
+
+fn private_native_availability(
+    context: &crate::declaration_join::ExactDeclarationContext,
+    producer: &[u8],
+    selected: Option<&module_candidates::CandidateSet>,
+) -> Result<Option<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
+    let Some(selected) = selected.filter(|selected| !selected.native_availability.is_empty())
+    else {
+        return Ok(None);
+    };
+    crate::declaration_context::OriginalCompilerInputs::from_native_availability(
+        context,
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
+        &selected.native_availability,
+    )
+    .map(Some)
 }
 
 fn checked_candidate_reservations(
@@ -770,8 +817,6 @@ fn checked_candidate_reservations(
 }
 
 impl ModuleCandidateOffer {
-    /// Select immutable source candidates under configured compiler authority.
-    /// Executing the offer through its owning turn method can issue input continuity.
     pub fn select_admitted(
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
@@ -966,18 +1011,20 @@ impl ModuleCandidateOffer {
             encode_inspection_authorization(&owners, inputs.baseline_authorization()),
             include,
         )?;
+        let selected =
+            immutable_candidates_in_context(&context, producer, include, scratch, owners)?;
+        let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {
-            selected: immutable_candidates_in_context(
-                &context, producer, include, scratch, owners,
-            )?,
+            selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
                 context
-                    .prepare_compilation_with_authorization(
+                    .prepare_compilation_with_private_input(
                         &scratch.join("exact-scope"),
                         producer,
                         Some(authorization),
+                        private,
                     )?
                     .with_source_search_context(include)
                     .with_checked_value_imports(inputs.import_authority()),
@@ -1036,22 +1083,25 @@ impl ModuleCandidateOffer {
             &context,
             include,
         )?;
+        let selected = immutable_candidates_in_context(
+            &context,
+            producer,
+            include,
+            scratch,
+            checked_candidate_reservations(&specification, None),
+        )?;
+        let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {
-            selected: immutable_candidates_in_context(
-                &context,
-                producer,
-                include,
-                scratch,
-                checked_candidate_reservations(&specification, None),
-            )?,
+            selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
                 compile_context_with_declarations(compile_context, context.clone())
-                    .prepare_compilation_with_authorization(
+                    .prepare_compilation_with_private_input(
                         &scratch.join("exact-scope"),
                         producer,
                         Some(authorization),
+                        private,
                     )?
                     .with_source_search_context(include)
                     .with_checked_value_imports(checked_values.import_authority())
@@ -1126,22 +1176,25 @@ impl ModuleCandidateOffer {
                 .map(|path| Value::Text(path.to_string_lossy().into_owned()))
                 .collect(),
         ));
+        let selected = immutable_candidates_in_context(
+            &context,
+            producer,
+            include,
+            scratch,
+            checked_candidate_reservations(&specification, Some(&planned)),
+        )?;
+        let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {
-            selected: immutable_candidates_in_context(
-                &context,
-                producer,
-                include,
-                scratch,
-                checked_candidate_reservations(&specification, Some(&planned)),
-            )?,
+            selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
                 compile_context_with_declarations(compile_context, context.clone())
-                    .prepare_compilation_with_authorization(
+                    .prepare_compilation_with_private_input(
                         &scratch.join("exact-scope"),
                         producer,
                         Some(authorization),
+                        private,
                     )?
                     .with_source_search_context(include)
                     .with_checked_value_imports(inputs.import_authority())
@@ -1208,7 +1261,7 @@ impl ModuleCandidateOffer {
                     .iter()
                     .map(|(_, source)| source.as_str()),
             )?
-            .prepare_compilation_authorizing(
+            .prepare_compilation_authorizing_with_private_input(
                 &scratch.join("exact-scope"),
                 producer,
                 |semantic_sha256| {
@@ -1237,7 +1290,9 @@ impl ModuleCandidateOffer {
                     selected = immutable_candidates_in_context(
                         &context, producer, include, scratch, reserved,
                     )?;
-                    Ok(authorization)
+                    let private =
+                        private_native_availability(&context, producer, selected.as_deref())?;
+                    Ok((authorization, private))
                 },
             )?;
         Ok(Self {
@@ -1374,7 +1429,7 @@ impl ModuleCandidateOffer {
         match &self.checked {
             Some(NativeCheckedOffer::ActivationPreview(preview)) => {
                 let exact = self.exact.as_ref().expect("preview has exact offer");
-                exact.context.validate_artifacts(&exact.artifacts)?;
+                exact.context().validate_artifacts(&exact.artifacts)?;
                 preview.unavailable(root, &exact.request_sha256)
             }
             _ => {
@@ -1463,7 +1518,7 @@ impl ModuleCandidateOffer {
             root,
             &self.producer,
             exact.semantic_sha256,
-            exact.context.clone(),
+            exact.context().clone(),
             self.checked_projections.clone(),
             &exact.request_sha256,
             specification,
@@ -1515,7 +1570,7 @@ impl ModuleCandidateOffer {
             specification,
             planned,
         )?;
-        let mut context = initial.context.clone();
+        let mut context = initial.context().clone();
         let mut program_request = initial.clone();
         // One host admission observes package bytes once across all original
         // outputs. The next admission starts a fresh filesystem observation.
@@ -1712,7 +1767,7 @@ impl ModuleCandidateOffer {
             root,
             &self.producer,
             initial.semantic_sha256,
-            initial.context.clone(),
+            initial.context().clone(),
             self.checked_projections.clone(),
             &initial.request_sha256,
             specification,
@@ -2047,7 +2102,8 @@ impl ModuleCandidateOffer {
         )?
         .ok_or_else(fail)?;
         let products = sealed
-            .recovery_products
+            .selected_originals
+            .products()
             .iter()
             .filter(|product| product.owner().module == module_name)
             .collect::<Vec<_>>();
@@ -2060,7 +2116,7 @@ impl ModuleCandidateOffer {
         if string(&fields[5])? != digest || original.interface_bytes() != iface {
             return Err(fail());
         }
-        let baseline = &exact.context;
+        let baseline = exact.context();
         let empty = baseline.recovery_products().is_empty()
             && baseline.joined_interfaces().is_empty()
             && baseline.lexical_graph().is_empty()
@@ -2069,7 +2125,8 @@ impl ModuleCandidateOffer {
             module,
             source,
             &self.producer,
-            &sealed,
+            &sealed.selected_originals,
+            &sealed.artifact_view,
             &crate::declaration_context::ExactProductAdmission {
                 request: exact,
                 source: &admission,
@@ -2263,6 +2320,7 @@ pub struct SealedTurnProducts {
     original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
     pub(crate) source_selection: certified_products::CertifiedSourceSelection,
+    pub(crate) selected_originals: certified_products::SelectedOriginalClosure,
     pub target_native_selection: crate::artifact_inventory::TargetNativeSelection,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
@@ -2726,8 +2784,7 @@ fn seal_turn_outputs_with_validation(
     let compiler_inputs = offer
         .exact
         .as_ref()
-        .map(|request| request.compiler_inputs())
-        .transpose()?;
+        .map(|request| request.compiler_inputs());
     let artifact_view =
         crate::declaration_context::certified_product_artifact_view_with_validation(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -2750,6 +2807,10 @@ fn seal_turn_outputs_with_validation(
             .map_or(&[], |request| request.groups.as_ref()),
         validation,
     )?;
+    let selected_originals = certified
+        .source_selection
+        .selected_original_closure(&artifact_view)
+        .map_err(compiler_evidence_failure)?;
     let target_imports = match &target_demand {
         TargetDemand::Checked { imports, .. } | TargetDemand::Ordinary(imports) => {
             imports.as_slice()
@@ -2890,7 +2951,7 @@ fn seal_turn_outputs_with_validation(
         && offer
             .exact
             .as_ref()
-            .is_none_or(|exact| empty_exact_context(&exact.context))
+            .is_none_or(|exact| empty_exact_context(exact.context()))
     {
         let publication_products = match owned_fresh_products {
             Some(products) => products,
@@ -2931,6 +2992,7 @@ fn seal_turn_outputs_with_validation(
         recovery_products: certified.recovery_products,
         retained_core_products: certified.retained_core_products,
         source_selection: certified.source_selection,
+        selected_originals,
         target_native_selection,
         package_interfaces,
     }))
@@ -2982,7 +3044,7 @@ fn checked_output_context(
     let support = program_support_artifacts(artifacts, &generated)?;
     let mut request = exact.clone();
     let context = request.admit_program_support_with_selection(
-        exact.context.clone(),
+        exact.context().clone(),
         &support,
         std::slice::from_ref(source_admission),
         produced_types,
@@ -3823,7 +3885,7 @@ fn compile_invocation_inner(
         let actual =
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer)
                 .sha256();
-        if actual != request.context.toolchain_identity_sha256() {
+        if actual != request.context().toolchain_identity_sha256() {
             return Err(CompileError::ExtractFailed(
                 "exact compile rebound to a different producer".into(),
             ));
@@ -4156,8 +4218,7 @@ fn compile_invocation_inner(
         }
         let compiler_inputs = exact_request
             .as_ref()
-            .map(|request| request.compiler_inputs())
-            .transpose()?;
+            .map(|request| request.compiler_inputs());
         artifacts.artifact_view =
             crate::declaration_context::certified_product_artifact_view_with_validation(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -4213,6 +4274,12 @@ fn compile_invocation_inner(
             target_admission_start.elapsed(),
             0,
             receipt.targets.len(),
+        );
+        artifacts.selected_originals = Some(
+            certified
+                .source_selection
+                .selected_original_closure(&artifacts.artifact_view)
+                .map_err(compiler_evidence_failure)?,
         );
         artifacts.certified_groups = certified.groups;
         artifacts.recovery_products = certified.recovery_products;
@@ -4992,6 +5059,7 @@ pub(crate) fn assemble(
         module_products: Vec::new(),
         certified_groups: Vec::new(),
         recovery_products: Vec::new(),
+        selected_originals: None,
         producer_identity: None,
         module_inventory: None,
         exact_source_admission: None,

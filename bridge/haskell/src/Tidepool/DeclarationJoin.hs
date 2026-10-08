@@ -19,7 +19,8 @@ import Codec.CBOR.Decoding
 import Codec.CBOR.Encoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (bracket)
+import Control.DeepSeq (rnf)
+import Control.Exception (bracket, evaluate)
 import Control.Monad (forM, replicateM, unless, when)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
@@ -67,6 +68,7 @@ import System.Posix.Files (createLink)
 import Tidepool.ExactHydration
 import Tidepool.CheckedCell (CheckedSignature, decodeCheckedSignature, encodeCheckedSignature, validateCheckedTypeWitnessBytes)
 import Tidepool.Json (jsonString)
+import Tidepool.Timing (readTimingEnabled, timeDetailPhase)
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), emptyPackageImports, readPackageImports, sealPackageImports, validatePackageImportRoot )
 
@@ -109,6 +111,43 @@ sha256 :: BS.ByteString -> String
 sha256 = concatMap (\byte -> let digits = showHex byte "" in replicate (2 - length digits) '0' ++ digits)
   . BS.unpack . SHA.hash
 
+-- Force only the issued scalar observations, never the hydrated GHC knot.
+-- Otherwise an IO action returning a lazy Either would charge its checks to
+-- the later interface writer instead of the phase that owns them.
+measureJoin :: Bool -> String -> (a -> ()) -> IO a -> IO a
+measureJoin enabled phase forceResult action =
+  timeDetailPhase enabled "declaration_join" phase $ do
+    result <- action
+    when enabled (evaluate (forceResult result))
+    pure result
+
+forceIdentity :: ExportIdentity -> ()
+forceIdentity identity = rnf
+  (exportUnit identity, exportModule identity, exportNamespace identity `seq` (),
+    exportOccurrence identity, exportRecordParent identity)
+
+forceIdentities :: [ExportIdentity] -> ()
+forceIdentities = foldr (\identity rest -> forceIdentity identity `seq` rest) ()
+
+forceInventory :: InstanceInventory -> ()
+forceInventory inventory =
+  foldr (\record rest -> forceIdentity (instanceDfun record) `seq`
+    forceIdentity (instanceClass record) `seq`
+    forceIdentities (instanceSelectedAxioms record) `seq` rest)
+    (forceIdentities (inventoryFamilies inventory)) (inventoryClasses inventory)
+
+forceExport :: DeclarationExport -> ()
+forceExport exported = exportKind exported `seq` forceIdentity (exportHead exported)
+  `seq` forceIdentities (exportChildren exported)
+
+forceEither :: (a -> ()) -> Either String a -> ()
+forceEither _ (Left diagnostic) = rnf diagnostic
+forceEither forceResult (Right result) = forceResult result
+
+forceDecision :: JoinDecision -> ()
+forceDecision JoinAccepted = ()
+forceDecision (JoinRejected reason diagnostic) = reason `seq` rnf diagnostic
+
 -- | Construct a source-less reexport interface from already verified, hydrated
 -- immutable implementation artifacts. Original Names, dfuns and coercion axioms
 -- remain owned by those artifacts; the Join introduces no declaration bodies.
@@ -119,8 +158,15 @@ buildJoinedInterface
   -> [DeclarationExport] -> InstanceInventory -> [ExportIdentity]
   -> IO (Either (JoinRejection, String) ModuleSnapshot)
 buildJoinedInterface hsc joined path originals exports selected familyClosure = do
-  exportChoices <- mapM selectExport exports
-  inventories <- mapM (interfaceInventory hsc) originals
+  timing <- readTimingEnabled
+  exportChoices <- measureJoin timing "exports"
+    (forceEither (foldr (\avail rest -> forceIdentities (map exportIdentity (availNames avail)) `seq` rest) ()) . sequence)
+    (mapM selectExport exports)
+  inventories <- measureJoin timing "inventories"
+    (\rows -> case sequence exportChoices of
+      Left _ -> ()
+      Right _ -> forceEither (foldr (\inventory rest -> forceInventory inventory `seq` rest) ()) (sequence rows))
+    (mapM (interfaceInventory hsc) originals)
   case (sequence exportChoices, sequence inventories) of
     (Left diagnostic, _) -> pure (Left (ExportMismatch, diagnostic))
     (_, Left diagnostic) -> pure (Left (Unprovable, diagnostic))
@@ -149,15 +195,20 @@ buildJoinedInterface hsc joined path originals exports selected familyClosure = 
           -- Force the pinned package closure before taking an EPS snapshot.
           -- Home lookups must resolve from the already complete HPT, so these
           -- metadata loads cannot add hidden home instances to EPS.
-          _ <- initIfaceCheck (ppr joined) hsc $
+          _ <- timeDetailPhase timing "declaration_join" "package_visibility" $
+            initIfaceCheck (ppr joined) hsc $
             mapM (loadSysInterface (ppr joined)) (stableModules (orphanOwners ++ familyOwners))
           eps <- hscEPS hsc
           let classes = InstEnvs (eps_inst_env eps)
                   (mkInstEnv (nubBy (\a b -> is_dfun_name a == is_dfun_name b) selectedClasses))
                   (mkModuleSet orphanOwners)
               selectedEnv = (emptyFamInstEnv, extendFamInstEnvList emptyFamInstEnv selectedFamilies)
-              consistency = validateInstances classes selectedEnv
-              familyConsistency = validateRetainedFamilyInstances (eps_fam_inst_env eps) allFamilies
+          consistency <- measureJoin timing "selected_consistency" forceDecision
+            (pure (validateInstances classes selectedEnv))
+          familyConsistency <- case consistency of
+            JoinRejected {} -> pure JoinAccepted
+            JoinAccepted -> measureJoin timing "retained_family_consistency" forceDecision
+              (pure (validateRetainedFamilyInstances (eps_fam_inst_env eps) allFamilies))
           case firstRejection consistency familyConsistency of
             Just rejection -> pure (Left rejection)
             Nothing -> do
@@ -170,10 +221,12 @@ buildJoinedInterface hsc joined path originals exports selected familyClosure = 
                     }
                   partial = set_mi_fam_insts families $ set_mi_insts instances $
                     set_mi_exports (mkIfaceExports avails) $ set_mi_deps deps (emptyPartialModIface joined)
-              iface <- addFingerprints hsc partial
+              iface <- measureJoin timing "fingerprints"
+                (\value -> mi_iface_hash (mi_final_exts value) `seq` ())
+                (addFingerprints hsc partial)
               -- Hard-link publication is exclusive: an existing immutable Join
               -- artifact is never replaced, including a retry's old output.
-              digest <- bracket
+              digest <- measureJoin timing "write_interface" rnf $ bracket
                 (do (temporary, handle) <- openBinaryTempFile (takeDirectory path) "join-iface.tmp"
                     hClose handle
                     pure temporary)
@@ -506,8 +559,9 @@ kindWire = \case
 -- | Use a fresh compiler transaction and exact home interfaces. Package
 -- evidence follows the ordinary pinned package policy. Infrastructure failures
 -- propagate to the worker handler; semantic rejection is a successful receipt.
-validateDeclarationJoin :: HscEnv -> DeclarationJoinInput -> IO DeclarationJoinOutcome
-validateDeclarationJoin initial input = do
+validateDeclarationJoin :: ExactInterfaceOperations -> DeclarationJoinInput -> IO DeclarationJoinOutcome
+validateDeclarationJoin operations input = runExactInterfaceOperation operations $ \initial -> do
+  timing <- readTimingEnabled
   let reject reason diagnostic = pure (DeclarationJoinOutcome input Nothing (JoinRejected reason diagnostic))
       artifacts = implementationArtifacts input
       exacts = map artifactInterface artifacts
@@ -519,15 +573,14 @@ validateDeclarationJoin initial input = do
   if not (all anchorPresent anchors)
     then reject ArtifactChanged "a provenance anchor is absent from the exact interface closure"
     else do
-      unchanged <- artifactsUnchanged artifacts
+      unchanged <- measureJoin timing "revalidate_before" rnf (artifactsUnchanged artifacts)
       if not unchanged then reject ArtifactChanged "implementation artifact bytes changed" else do
-        fresh <- freshExactState initial
-        loaded <- readExactIfaceArtifacts fresh exacts
+        loaded <- readExactIfaceArtifacts initial exacts
         case loaded of
           Left diagnostic -> reject ArtifactChanged diagnostic
           Right verified -> do
-            hydrated <- hydrateExactScope fresh verified
-            writeChecks <- forM (declarationWrites input) $ \write -> do
+            hydrated <- hydrateExactScope initial verified
+            writeChecks <- measureJoin timing "write_delta" (rnf . and) $ forM (declarationWrites input) $ \write -> do
               let original = [iface | (_, iface) <- verified,
                     moduleNameString (moduleName (mi_module iface)) == snapshotModule (writeModule write)]
               case original of
@@ -543,15 +596,17 @@ validateDeclarationJoin initial input = do
               (_, Left diagnostic) -> reject ArtifactChanged diagnostic
               (True, Right roots) -> do
                 let joined = mkModule (stringToUnit (reservedUnit reservation)) (mkModuleName (reservedModule reservation))
-                result <- buildJoinedInterface hydrated joined (reservedPath reservation)
+                result <- timeDetailPhase timing "declaration_join" "build_interface" $
+                  buildJoinedInterface hydrated joined (reservedPath reservation)
                   (map snd verified) (expectedExports input) (expectedInstances input) (retainedFamilyClosure input)
                 case result of
                   Left (reason, diagnostic) -> reject reason diagnostic
                   Right output -> do
                     let exact = ExactIfaceArtifact (reservedUnit reservation) (reservedModule reservation)
                           (snapshotPath output) (snapshotSha256 output) []
-                    sealPackageImports (snapshotPath output ++ ".packages") exact roots
-                    unchangedAfter <- artifactsUnchanged artifacts
+                    timeDetailPhase timing "declaration_join" "seal_packages" $
+                      sealPackageImports (snapshotPath output ++ ".packages") exact roots
+                    unchangedAfter <- measureJoin timing "revalidate_after" rnf (artifactsUnchanged artifacts)
                     rootsAfter <- joinPackageRoots hydrated artifacts
                     if not unchangedAfter || rootsAfter /= Right roots
                       then reject ArtifactChanged "implementation artifacts changed during validation"
@@ -728,21 +783,25 @@ encodeDeclarationInventory :: [DeclarationArtifact] -> BS.ByteString
 encodeDeclarationInventory artifacts = toStrictByteString $
   encodeListLen 3 <> wireText "TPDINVENTORY" <> wireText "3" <> wireList wireArtifact artifacts
 
-inspectDeclarationArtifacts :: HscEnv -> [DeclarationArtifact] -> IO DeclarationInventoryOutcome
-inspectDeclarationArtifacts initial artifacts = do
+inspectDeclarationArtifacts :: ExactInterfaceOperations -> [DeclarationArtifact] -> IO DeclarationInventoryOutcome
+inspectDeclarationArtifacts operations artifacts = runExactInterfaceOperation operations $ \initial -> do
+  timing <- readTimingEnabled
   let rejected diagnostic = pure (DeclarationInventoryOutcome artifacts (Left (ArtifactChanged, diagnostic)))
-  unchanged <- artifactsUnchanged artifacts
+  unchanged <- measureJoin timing "revalidate_before" rnf (artifactsUnchanged artifacts)
   if not unchanged then rejected "implementation artifact bytes changed" else do
-    fresh <- freshExactState initial
-    loaded <- readExactIfaceArtifacts fresh (map artifactInterface artifacts)
+    loaded <- readExactIfaceArtifacts initial (map artifactInterface artifacts)
     case loaded of
       Left diagnostic -> rejected diagnostic
       Right verified -> do
-        hydrated <- hydrateExactScope fresh verified
-        inventories <- forM (zip artifacts verified) $ \(artifact, (_, iface)) -> do
-          exports <- interfaceExports hydrated iface
-          fmap (DeclarationInventory artifact exports) <$> interfaceInventory hydrated iface
-        unchangedAfter <- artifactsUnchanged artifacts
+        hydrated <- hydrateExactScope initial verified
+        inventories <- measureJoin timing "inspection_inventories"
+          (forceEither (foldr (\row rest ->
+            foldr (\exported next -> forceExport exported `seq` next)
+              (forceInventory (inventoryInstances row) `seq` rest) (inventoryExports row)) ()) . sequence) $
+          forM (zip artifacts verified) $ \(artifact, (_, iface)) -> do
+            exports <- interfaceExports hydrated iface
+            fmap (DeclarationInventory artifact exports) <$> interfaceInventory hydrated iface
+        unchangedAfter <- measureJoin timing "revalidate_after" rnf (artifactsUnchanged artifacts)
         if not unchangedAfter then rejected "implementation artifacts changed during inspection"
           else pure (DeclarationInventoryOutcome artifacts
             (case sequence inventories of

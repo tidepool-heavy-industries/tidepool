@@ -85,6 +85,7 @@ mod program_source_support_history {
     ) {
         let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(root, empty.clone());
+        assert_retained_input_reads(&request);
         request.program_support = Some(support.clone());
         let receipt = import_receipt_owner(
             root,
@@ -149,9 +150,24 @@ mod program_source_support_history {
             );
         }
         // Private execution evidence cannot change the request's public scope.
-        assert!(request.context.lexical_graph().is_empty());
+        assert!(request.context().lexical_graph().is_empty());
         assert!(request.program_source_lexical().is_empty());
         coverage.queries += 1;
+    }
+
+    fn assert_retained_input_reads(request: &ExactCompilationRequest) {
+        let before = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
+        let inputs = request.compiler_inputs();
+        let captured = request.clone();
+        for _ in 0..16 {
+            assert!(std::ptr::eq(inputs, request.compiler_inputs()));
+            assert!(std::ptr::eq(inputs, captured.compiler_inputs()));
+        }
+        assert_eq!(
+            REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
+            before,
+            "reads and captures must retain the issued input summary"
+        );
     }
 
     // Expected native choices come from the explicit fixture offers, independently
@@ -168,7 +184,8 @@ mod program_source_support_history {
         expected: &BTreeSet<CachedHomeOwner>,
         public: &ExactDeclarationContext,
     ) {
-        let inputs = request.compiler_inputs().unwrap();
+        assert_retained_input_reads(request);
+        let inputs = request.compiler_inputs();
         let actual = inputs
             .metadata
             .entries
@@ -249,9 +266,10 @@ mod program_source_support_history {
             public
                 .validate_artifacts_from_metadata(
                     &original.artifacts,
-                    &original.compiler_inputs().unwrap().metadata,
+                    &original.compiler_inputs().metadata,
                 )
                 .unwrap();
+            let before_promotion = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
             let request = original
                 .in_program_context_with_private_input(
                     &root.join("planned-input"),
@@ -259,7 +277,17 @@ mod program_source_support_history {
                     &input,
                 )
                 .unwrap();
+            assert_eq!(
+                REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
+                before_promotion + 1,
+                "promotion computes and retains exactly one new input summary"
+            );
+            assert!(!std::ptr::eq(
+                original.compiler_inputs(),
+                request.compiler_inputs()
+            ));
             assert_private_choices(&request, &expected, &public);
+            assert_private_choices(&original, &BTreeSet::new(), &public);
             let captured = request.clone();
 
             let receipt = import_receipt(&root, &request, "Unadmitted");
@@ -272,7 +300,7 @@ mod program_source_support_history {
             let generated_owner = admission.generated_source_owner().unwrap();
             assert_eq!(generated_owner, identity("fixture", "Consumer"));
             let source = "module Consumer where\n";
-            let effective = request.compiler_inputs().unwrap();
+            let effective = request.compiler_inputs();
             let full_view = effective.artifacts.merge(&sparse_view).unwrap();
             let full_projection = effective.projection.merge(&sparse_projection).unwrap();
             let full_selection = source_selection(&full_projection, &full_view);
@@ -321,6 +349,7 @@ mod program_source_support_history {
                 )
                 .unwrap();
             assert_private_choices(&request, &offered_owners(&selected), &public);
+            let before_continuation = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
             let continued = publication
                 .in_program_context_with_private_input(
                     &root.join("sparse-input"),
@@ -330,6 +359,15 @@ mod program_source_support_history {
                 .unwrap();
             assert!(expected.remove(sparse[0].owner()));
             assert_eq!(expected.len(), 21);
+            assert_eq!(
+                REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
+                before_continuation + 1,
+                "growth computes and retains exactly one new input summary"
+            );
+            assert!(!std::ptr::eq(
+                request.compiler_inputs(),
+                continued.compiler_inputs()
+            ));
             assert_private_choices(&continued, &expected, &published);
             assert_private_choices(&captured, &offered_owners(&selected), &public);
             assert_eq!(public.semantic_sha256(), before);
@@ -338,7 +376,8 @@ mod program_source_support_history {
             let wrong_selection = source_selection(&wrong_projection, &wrong_view);
             let wrong_input =
                 OriginalCompilerInputs::from_selection(&wrong_selection, &wrong_view).unwrap();
-            let stable_roles = continued.compiler_inputs().unwrap().projection.roles();
+            let stable_inputs = Arc::clone(&continued.inputs.compiler);
+            let stable_roles = continued.compiler_inputs().projection.roles();
             assert!(continued
                 .in_program_context_with_private_input(
                     &root.join("wrong-input"),
@@ -349,10 +388,11 @@ mod program_source_support_history {
             assert!(OriginalCompilerInputs::from_selection(&selection, &wrong_view).is_err());
             let without_first = support_view(&selected[1..]);
             assert!(OriginalCompilerInputs::from_selection(&selection, &without_first).is_err());
-            assert_eq!(
-                continued.compiler_inputs().unwrap().projection.roles(),
-                stable_roles
-            );
+            assert_eq!(continued.compiler_inputs().projection.roles(), stable_roles);
+            assert!(std::ptr::eq(
+                stable_inputs.as_ref(),
+                continued.compiler_inputs()
+            ));
             assert_private_choices(&continued, &expected, &published);
             let retried = continued
                 .in_program_context_with_private_input(
@@ -602,6 +642,8 @@ mod program_source_support_history {
                         .unwrap(),
                 );
                 let mut request = program_request(directory.path(), context.clone());
+                assert_retained_input_reads(&request);
+                let retained_inputs = Arc::clone(&request.inputs.compiler);
                 request.program_support = Some(current.clone());
                 let before_graph = Arc::clone(&current.imports);
                 let before_artifacts = current.artifacts.descriptors();
@@ -622,6 +664,11 @@ mod program_source_support_history {
                     )
                     .is_err());
                 coverage.artifact_refusals += 1;
+                assert!(std::ptr::eq(
+                    retained_inputs.as_ref(),
+                    request.compiler_inputs()
+                ));
+                assert_retained_input_reads(&request);
                 let after = request.program_support.as_ref().unwrap();
                 assert!(Arc::ptr_eq(&after.imports, &before_graph));
                 assert_eq!(after.artifacts.descriptors(), before_artifacts);

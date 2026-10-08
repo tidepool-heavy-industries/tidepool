@@ -485,14 +485,14 @@ runDeclarationOperation compilerScope args manifest = do
     out <- maybe (fail "declaration operation requires an output path") pure
       (requestDeclarationJoinOut args)
     operation <- readDeclarationOperation manifest
-    withScopedExactInterfaceTransaction compilerScope (requestIncludes args) $ \env ->
+    withScopedExactInterfaceTransaction compilerScope (requestIncludes args) $ \operations ->
       case operation of
         InspectInventory artifacts -> renderDeclarationInventoryOutcome
-          <$> inspectDeclarationArtifacts env artifacts >>= writeFile out
+          <$> inspectDeclarationArtifacts operations artifacts >>= writeFile out
         ValidateJoin input -> renderDeclarationJoinOutcome
-          <$> validateDeclarationJoin env input >>= writeFile out
+          <$> validateDeclarationJoin operations input >>= writeFile out
         EmitHostBindingInterface input -> do
-          (binder, issuedPurpose) <- emitHostBindingInterface env (hostInterfaceProducer input)
+          (binder, issuedPurpose) <- emitHostBindingInterface operations (hostInterfaceProducer input)
             (hostInterfaceGeneration input) (hostInterfaceBinder input) (hostInterfaceSignature input)
             (hostInterfaceScope input) (hostInterfaceRoot input) (hostInterfacePurpose input)
           let generation = hostInterfaceGeneration input

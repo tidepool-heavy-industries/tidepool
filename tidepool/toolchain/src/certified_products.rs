@@ -398,6 +398,7 @@ pub(crate) struct OriginalNativeWitness {
     execution_source_sha256: Option<[u8; 32]>,
     anchors: [Arc<[u8]>; 4],
     groups: Arc<[AuthenticatedOriginalGroup]>,
+    group_positions: BTreeMap<u32, usize>,
     sources: Vec<CachedHomeOwner>,
     interface_requirements: BTreeMap<(String, String), [u8; 32]>,
     packages: BTreeMap<(String, String), PackageInterfaceWitness>,
@@ -405,6 +406,12 @@ pub(crate) struct OriginalNativeWitness {
 }
 
 impl OriginalNativeWitness {
+    fn group(&self, original_ordinal: u32) -> Option<&AuthenticatedOriginalGroup> {
+        self.group_positions
+            .get(&original_ordinal)
+            .map(|position| &self.groups[*position])
+    }
+
     fn validate_promoted_groups(
         &self,
         current: &[(&ProjectedGroup, Vec<PendingImportOwner>)],
@@ -428,18 +435,14 @@ impl OriginalNativeWitness {
                     },
                 ));
             }
-            let original = self
-                .groups
-                .iter()
-                .find(|original| original.group.original_ordinal() == group.original_ordinal())
-                .ok_or_else(|| {
-                    original_group_conflict(
-                        &self.owner,
-                        OriginalGroupFailure::PromotionMissingOrdinal {
-                            ordinal: group.original_ordinal(),
-                        },
-                    )
-                })?;
+            let original = self.group(group.original_ordinal()).ok_or_else(|| {
+                original_group_conflict(
+                    &self.owner,
+                    OriginalGroupFailure::PromotionMissingOrdinal {
+                        ordinal: group.original_ordinal(),
+                    },
+                )
+            })?;
             if original.group() != *group {
                 return Err(original_group_conflict(
                     &self.owner,
@@ -484,10 +487,9 @@ pub(crate) fn authenticates_original_native_entry(
         witness.matches_original(product)
             && binder.unit == witness.owner.unit
             && binder.module == witness.owner.module
-            && witness.groups.iter().any(|group| {
-                group.group.original_ordinal() == original_ordinal
-                    && group.group.binders().contains(binder)
-            })
+            && witness
+                .group(original_ordinal)
+                .is_some_and(|group| group.group.binders().contains(binder))
     })
 }
 
@@ -522,12 +524,24 @@ fn retain_authenticated_original_native(
             "original native witness owner",
         ));
     }
+    let mut group_positions = BTreeMap::new();
+    for (position, group) in groups.iter().enumerate() {
+        if group_positions
+            .insert(group.group.original_ordinal(), position)
+            .is_some()
+        {
+            return Err(CertificationError::Mismatch(
+                "duplicate original native ordinal",
+            ));
+        }
+    }
     let native_requirements = native_requirements_from_witness(&witness);
     let facts = Arc::new(OriginalNativeWitness {
         owner: witness.owner,
         execution_source_sha256: witness.execution_source_sha256,
         anchors: product.original_byte_anchors().map(Arc::clone),
         groups: groups.into(),
+        group_positions,
         sources: witness.sources.into_values().collect(),
         interface_requirements: witness.interface_requirements,
         packages: witness.packages,
@@ -629,6 +643,12 @@ pub struct OriginalGroupConflict {
     pub failure: OriginalGroupFailure,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OriginalSelectionConflict {
+    pub selected: CachedHomeOwner,
+    pub artifacts: Vec<crate::artifact_inventory::ArtifactId>,
+}
+
 fn original_group_conflict(
     owner: &CachedHomeOwner,
     failure: OriginalGroupFailure,
@@ -661,6 +681,10 @@ pub enum CertificationError {
     DuplicateSourceBinder(Box<SourceBinderConflict>),
     #[error("compiler product original group conflict: {0:?}")]
     OriginalGroupConflict(Box<OriginalGroupConflict>),
+    #[error("compiler product original selection conflict: {0:?}")]
+    OriginalSelectionConflict(Box<OriginalSelectionConflict>),
+    #[error("selected compiler original closure rejected: {0}")]
+    OriginalClosure(#[source] Box<crate::CompileError>),
     #[error("finalized module payload capture failed: {0}")]
     CapturedModulePayload(#[source] crate::recovery_artifacts::RecoveryArtifactError),
     #[error("finalized interface {unit}:{module} requires {required_unit}:{required_module} seal {expected_sha256}; selected seal {selected_sha256:?}")]
@@ -1654,6 +1678,72 @@ pub(crate) struct CertifiedSourceSelection {
     modules: BTreeMap<(String, String), ReceiptSourceSelection>,
 }
 
+/// Native originals selected by one certified compiler namespace. Historical
+/// custody stays in the artifact view and cannot issue this unique selection.
+#[derive(Clone, Debug)]
+pub(crate) struct SelectedOriginalClosure {
+    products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    selected: Vec<crate::artifact_inventory::ArtifactId>,
+    native_closure: crate::artifact_inventory::ArtifactView,
+}
+
+impl SelectedOriginalClosure {
+    pub(crate) fn products(&self) -> &[crate::recovery_artifacts::CertifiedRecoveryProduct] {
+        &self.products
+    }
+
+    pub(crate) fn excluding_module(
+        &self,
+        unit: &str,
+        module: &str,
+    ) -> Result<Self, crate::CompileError> {
+        let metadata = self.native_closure.metadata_snapshot();
+        let selected = self
+            .selected
+            .iter()
+            .filter(|id| {
+                let owner = &metadata.artifacts[*id].descriptor.owner;
+                owner.unit != unit || owner.module != module
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        let native_closure = self.native_closure.select_roots(selected.clone())?;
+        let selected = Self {
+            products: self
+                .products
+                .iter()
+                .filter(|product| product.owner().unit != unit || product.owner().module != module)
+                .cloned()
+                .collect(),
+            selected,
+            native_closure,
+        };
+        if selected.native_closure.entries().iter().any(|entry| {
+            entry.descriptor.owner.unit == unit && entry.descriptor.owner.module == module
+        }) {
+            return Err(crate::CompileError::ExtractFailed(
+                "authored original closure retains its transient probe".into(),
+            ));
+        }
+        Ok(selected)
+    }
+
+    /// Whole original validation follows exact native edges through custody.
+    /// Historical dependency versions do not become compiler namespace roles.
+    pub(crate) fn validate_with(
+        &self,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<(), crate::CompileError> {
+        crate::declaration_context::certify_artifact_view_groups_with_validation(
+            &self.native_closure,
+            &[],
+            &[],
+            validation,
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 enum ReceiptSourceSelection {
     InterfaceOnly {
@@ -1693,6 +1783,52 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn selected_original_closure(
+        &self,
+        view: &crate::artifact_inventory::ArtifactView,
+    ) -> CertResult<SelectedOriginalClosure> {
+        let projection = self.compiler_projection(view)?;
+        let selected = projection
+            .entries_from_metadata(&view.metadata_snapshot())
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        let entries = selected
+            .values()
+            .filter(|entry| {
+                matches!(
+                    &entry.payload,
+                    crate::artifact_inventory::ArtifactPayload::Original(_)
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let selected_ids = entries
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<Vec<_>>();
+        let native_closure = view
+            .inventory()
+            .admit_shared(view, entries)
+            .and_then(|view| view.select_roots(selected_ids.clone()))
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        let closure = SelectedOriginalClosure {
+            products: selected
+                .values()
+                .filter_map(|entry| match &entry.payload {
+                    crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                        Some(product.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            selected: selected_ids,
+            native_closure,
+        };
+        closure
+            .validate_with(&mut PackageInterfaceValidation::default())
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        Ok(closure)
+    }
+
     /// Resolve already issued compiler roles against their authenticated custody.
     /// Merely retaining a native artifact does not grant an original offer.
     pub(crate) fn from_compiler_projection(
@@ -1764,15 +1900,18 @@ impl CertifiedSourceSelection {
                     matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == &native.owner)
                 }).collect::<Vec<_>>();
                 let [entry] = matching.as_slice() else {
-                    return Err(CertificationError::Mismatch(
-                        "issued compiler original artifact",
-                    ));
+                    return Err(CertificationError::OriginalSelectionConflict(Box::new(
+                        OriginalSelectionConflict {
+                            selected: native.owner.clone(),
+                            artifacts: matching.iter().map(|entry| entry.descriptor.id).collect(),
+                        },
+                    )));
                 };
                 entries.push(Arc::clone(entry));
             }
         }
         let projection = CompilerInputProjection::from_issued_entries(&entries)
-            .map_err(|_| CertificationError::Mismatch("issued compiler original projection"))?;
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         Self::from_compiler_projection(
             &projection,
             &metadata,
@@ -3349,6 +3488,19 @@ pub(crate) fn certified_home_requirements(
         .collect())
 }
 
+pub(crate) fn candidate_home_requirements_with_validation(
+    bytes: &[u8],
+    owner: &CachedHomeOwner,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<Vec<CachedHomeOwner>> {
+    Ok(
+        verify_home_witness_with_validation(bytes, owner, validation)?
+            .sources
+            .into_values()
+            .collect(),
+    )
+}
+
 pub(crate) fn original_home_requirements_with_validation(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
     validation: &mut PackageInterfaceValidation,
@@ -3426,6 +3578,27 @@ pub(crate) fn fixture_source_module_interface(
         requirements,
         Some(b"fixture-core".to_vec()),
     )
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_module_core(
+    interface: &CertifiedModuleInterface,
+    core: Vec<u8>,
+) -> CertifiedModuleInterface {
+    let changed = finalized_module::fixture_interface(
+        interface.producer_sha256(),
+        interface.unit(),
+        interface.module(),
+        interface.source_sha256(),
+        interface.interface_bytes().to_vec(),
+        interface.package_imports_bytes().to_vec(),
+        interface.requirements().clone(),
+        Some(core),
+    );
+    match interface.source_imports() {
+        Some(imports) => finalized_module::fixture_source_imports(changed, imports.to_vec()),
+        None => changed,
+    }
 }
 
 #[cfg(test)]
@@ -3684,6 +3857,20 @@ pub(crate) fn validate_canonical_native_bytes_with_operation(
         source_sha256,
     )
     .map(|_| ())
+}
+
+/// Availability census borrows the authenticated complete original. It does
+/// not select an executable group or resolve a live binding for a target.
+pub(crate) fn original_available_groups(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+) -> CertResult<impl Iterator<Item = &ProjectedGroup> + '_> {
+    let witness = product
+        .original_native()
+        .filter(|witness| witness.matches_original(product))
+        .ok_or(CertificationError::Mismatch(
+            "native availability lacks authenticated census",
+        ))?;
+    Ok(witness.groups.iter().map(|group| group.group()))
 }
 
 pub(crate) fn original_native_requirements(
@@ -4203,6 +4390,42 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
     available: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
+    validate_owned_originals_with_validation(
+        products,
+        current_groups,
+        available,
+        validation,
+        OriginalNativeUse::SelectedGroups,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OriginalNativeUse {
+    SelectedGroups,
+    Availability,
+}
+
+pub(crate) fn validate_available_originals_with_validation(
+    products: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<()> {
+    validate_owned_originals_with_validation(
+        products,
+        &[],
+        products,
+        validation,
+        OriginalNativeUse::Availability,
+    )
+    .map(|_| ())
+}
+
+fn validate_owned_originals_with_validation(
+    products: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
+    current_groups: &[PendingCertifiedGroup],
+    available: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
+    validation: &mut PackageInterfaceValidation,
+    native_use: OriginalNativeUse,
+) -> CertResult<Vec<PendingCertifiedGroup>> {
     if products.is_empty() {
         return Ok(Vec::new());
     }
@@ -4280,7 +4503,10 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
                 }
             }
         }
-        return Ok(result);
+        return Ok(match native_use {
+            OriginalNativeUse::SelectedGroups => result,
+            OriginalNativeUse::Availability => Vec::new(),
+        });
     }
     let mut sources = certified_source_map(current_groups)?;
     let mut seen = BTreeSet::new();
@@ -4396,7 +4622,9 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
                 }
             }
         }
-        if !shared.contains(&(witness.owner.unit.clone(), witness.owner.module.clone())) {
+        if native_use == OriginalNativeUse::SelectedGroups
+            && !shared.contains(&(witness.owner.unit.clone(), witness.owner.module.clone()))
+        {
             result.extend(
                 witness
                     .groups
@@ -4425,13 +4653,16 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
     let mut home_modules = BTreeSet::new();
     for (id, product) in available {
         let owner = product.owner();
-        if native_ids
+        if let Some(old) = native_ids
             .insert(owner.clone(), *id)
-            .is_some_and(|old| old != *id)
+            .filter(|old| old != id)
         {
-            return Err(CertificationError::Mismatch(
-                "ambiguous exact original native identity",
-            ));
+            return Err(CertificationError::OriginalSelectionConflict(Box::new(
+                OriginalSelectionConflict {
+                    selected: owner.clone(),
+                    artifacts: vec![old, *id],
+                },
+            )));
         }
         home_modules.insert((owner.unit.clone(), owner.module.clone()));
     }
@@ -4451,9 +4682,7 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
             ));
         }
         let group = witness
-            .groups
-            .iter()
-            .find(|group| group.group().original_ordinal() == key.original_ordinal)
+            .group(key.original_ordinal)
             .ok_or(CertificationError::Mismatch("selected original group"))?;
         if originals.insert(*key, (group, witness)).is_some() {
             return Err(CertificationError::Mismatch(
@@ -4655,56 +4884,10 @@ pub(crate) fn certify_recovery_products_with_validation(
         }
         validate_inherited_group_headers(product, witness)?;
     }
-    let mut resolved = Vec::with_capacity(parsed.len());
-    for (product, witness) in &parsed {
-        let mut scoped_owners = BTreeMap::new();
-        for owner in std::iter::once(&witness.owner).chain(witness.sources.values()) {
-            let key = (owner.unit.clone(), owner.module.clone());
-            if scoped_owners
-                .insert(key, owner)
-                .is_some_and(|old| old != owner)
-            {
-                return Err(CertificationError::Mismatch(
-                    "ambiguous recovery source owner",
-                ));
-            }
-        }
-        let mut group_imports = Vec::with_capacity(product.groups.len());
-        for (group, (_, _, globals)) in product.groups.iter().zip(&witness.groups) {
-            let mut imports = Vec::with_capacity(globals.len());
-            for (declaration, selected) in group.globals().iter().zip(globals) {
-                if let ReceiptImportOwner::Package { unit, module, .. }
-                | ReceiptImportOwner::RetainedPackage { unit, module, .. } = &selected.owner
-                {
-                    if scoped_owners.contains_key(&(unit.clone(), module.clone())) {
-                        return Err(CertificationError::Mismatch(
-                            "home owner downgraded to package",
-                        ));
-                    }
-                }
-                let import = validate_global_witness(
-                    declaration,
-                    group.definitions().signatures(),
-                    selected,
-                )?;
-                let resolved_import = match import {
-                    source @ ReceiptImportOwner::Source { .. } => {
-                        resolve_cold_recovery_source(source, witness, product)?
-                    }
-                    other => resolve_receipt_owner_with_validation(
-                        other,
-                        &SourceGroupMap::new(),
-                        None,
-                        &witness.packages,
-                        validation,
-                    )?,
-                };
-                imports.push(resolved_import);
-            }
-            group_imports.push(imports);
-        }
-        resolved.push(group_imports);
-    }
+    let resolved = parsed
+        .iter()
+        .map(|(product, witness)| authenticate_original_imports(product, witness, validation))
+        .collect::<CertResult<Vec<_>>>()?;
     artifacts
         .into_iter()
         .zip(parsed)
@@ -4759,6 +4942,138 @@ pub(crate) fn certify_recovery_products_with_validation(
             })
         })
         .collect()
+}
+
+/// The candidate loader owns decoded TPMOD bytes. This issuer authenticates
+/// their native witnesses under the unchanged original owner and canonical seal.
+pub(crate) struct OriginalNativeCandidate {
+    pub(crate) owner: CachedHomeOwner,
+    pub(crate) product: crate::module_candidates::CandidateProduct,
+    pub(crate) certification_bytes: Vec<u8>,
+    pub(crate) module_interface: CertifiedModuleInterface,
+    pub(crate) execution_source:
+        Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+}
+
+pub(crate) fn certify_candidate_original_with_validation(
+    candidate: OriginalNativeCandidate,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<crate::recovery_artifacts::CertifiedRecoveryProduct> {
+    let OriginalNativeCandidate {
+        owner,
+        product,
+        certification_bytes,
+        module_interface,
+        execution_source,
+    } = candidate;
+    let (product_bytes, raw) = product.into_parts();
+    if sha(&product_bytes) != owner.product_sha256
+        || raw.unit != owner.unit
+        || raw.module != owner.module
+        || raw.interface != module_interface.interface_bytes()
+        || sha(&raw.interface) != owner.skinny_iface_sha256
+    {
+        return Err(CertificationError::Mismatch("candidate original bytes"));
+    }
+    let witness = verify_home_witness_with_validation(&certification_bytes, &owner, validation)?;
+    if witness.execution_source_sha256 != execution_source.as_ref().map(|graph| graph.digest())
+        || execution_source
+            .as_ref()
+            .is_some_and(|graph| graph.producer_sha256() != module_interface.producer_sha256())
+    {
+        return Err(CertificationError::Mismatch(
+            "candidate original execution source",
+        ));
+    }
+    check_direct_package_agreement_with_validation(
+        module_interface.package_imports_bytes(),
+        &owner,
+        &witness.packages,
+        validation,
+    )?;
+    let binding = validate_module_binding(
+        &witness,
+        &module_interface,
+        &raw.interface,
+        module_interface.package_imports_bytes(),
+        None,
+    )?;
+    validate_inherited_group_headers(&raw, &witness)?;
+    let imports = authenticate_original_imports(&raw, &witness, validation)?;
+    let groups = raw
+        .groups
+        .into_iter()
+        .zip(imports)
+        .map(|(group, imports)| AuthenticatedOriginalGroup {
+            owner: owner.clone(),
+            group: Arc::new(group),
+            imports: imports.into(),
+        })
+        .collect();
+    let mut product =
+        crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
+            owner,
+            product_bytes,
+            certification_bytes,
+            binding,
+        );
+    if let Some(graph) = execution_source {
+        product = product
+            .with_execution_source_with_validation(graph, validation)
+            .map_err(|_| CertificationError::Mismatch("candidate execution source owner"))?;
+    }
+    retain_authenticated_original_native(product, groups, witness)
+}
+
+fn authenticate_original_imports(
+    product: &RawModuleProduct,
+    witness: &HomeCertification,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<Vec<Vec<PendingImportOwner>>> {
+    let mut scoped_owners = BTreeMap::new();
+    for owner in std::iter::once(&witness.owner).chain(witness.sources.values()) {
+        let key = (owner.unit.clone(), owner.module.clone());
+        if scoped_owners
+            .insert(key, owner)
+            .is_some_and(|old| old != owner)
+        {
+            return Err(CertificationError::Mismatch(
+                "ambiguous recovery source owner",
+            ));
+        }
+    }
+    let mut group_imports = Vec::with_capacity(product.groups.len());
+    for (group, (_, _, globals)) in product.groups.iter().zip(&witness.groups) {
+        let mut imports = Vec::with_capacity(globals.len());
+        for (declaration, selected) in group.globals().iter().zip(globals) {
+            if let ReceiptImportOwner::Package { unit, module, .. }
+            | ReceiptImportOwner::RetainedPackage { unit, module, .. } = &selected.owner
+            {
+                if scoped_owners.contains_key(&(unit.clone(), module.clone())) {
+                    return Err(CertificationError::Mismatch(
+                        "home owner downgraded to package",
+                    ));
+                }
+            }
+            let import =
+                validate_global_witness(declaration, group.definitions().signatures(), selected)?;
+            let resolved_import = match import {
+                source @ ReceiptImportOwner::Source { .. } => {
+                    resolve_cold_recovery_source(source, witness, product)?
+                }
+                other => resolve_receipt_owner_with_validation(
+                    other,
+                    &SourceGroupMap::new(),
+                    None,
+                    &witness.packages,
+                    validation,
+                )?,
+            };
+            imports.push(resolved_import);
+        }
+        group_imports.push(imports);
+    }
+    Ok(group_imports)
 }
 
 fn validate_inherited_group_headers(
@@ -5653,10 +5968,7 @@ pub(crate) fn certify_products_with_validation(
             endpoint_identity,
         )
         .sha256();
-    let compiler_inputs = exact
-        .map(|admission| admission.request.compiler_inputs())
-        .transpose()
-        .map_err(|_| CertificationError::Mismatch("compiler original projection"))?;
+    let compiler_inputs = exact.map(|admission| admission.request.compiler_inputs());
     let projected_metadata = compiler_inputs.as_ref().map(|inputs| &inputs.metadata);
     let inherited_module_interfaces =
         projected_metadata
@@ -5733,7 +6045,7 @@ pub(crate) fn certify_products_with_validation(
         validate_exact_cached_closure_with_validation(
             candidates,
             receipt,
-            &admission.request.context,
+            admission.request.context(),
             projected_metadata
                 .ok_or(CertificationError::Mismatch("compiler original projection"))?,
             final_evidence,
@@ -6472,11 +6784,7 @@ pub(crate) fn certify_products_with_validation(
                             "available original native witness",
                         ))?;
                     let original = native
-                        .groups
-                        .iter()
-                        .find(|original| {
-                            original.group.original_ordinal() == group.original_ordinal()
-                        })
+                        .group(group.original_ordinal())
                         .ok_or(CertificationError::Mismatch("shared original home groups"))?;
                     return validate_original_group_receipts(
                         &group,
@@ -6939,7 +7247,10 @@ mod home_self_issuer_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod artifact_view_group_index_properties;
     mod issued_interface_selection_history;
+    #[path = "../planned_original_history_tests.rs"]
+    mod planned_original_history_tests;
     mod promotion_import_history;
     mod sparse_interface_selection_properties;
     use super::*;
@@ -8278,6 +8589,26 @@ pub(crate) mod tests {
     pub(crate) fn recovered_witness_fixtures(
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) -> Vec<CertifiedRecoveredOriginal> {
+        assert!(
+            products
+                .iter()
+                .all(|product| product.module_interface().is_some()),
+            "recovery fixtures require canonical finalized module interfaces",
+        );
+        let mut canonical_packages = BTreeMap::new();
+        for product in products {
+            let interface = product.module_interface().unwrap();
+            if let Some(previous) = canonical_packages.insert(
+                interface.interface_sha256(),
+                interface.package_imports_bytes(),
+            ) {
+                assert_eq!(
+                    previous,
+                    interface.package_imports_bytes(),
+                    "recovery fixtures sharing canonical interface bytes must share package sidecars",
+                );
+            }
+        }
         let root = tempfile::tempdir().unwrap();
         let producer = products
             .first()
@@ -8313,6 +8644,211 @@ pub(crate) mod tests {
         )])
         .remove(0)
         .product
+    }
+
+    fn check_original_native_index_against_linear_scan(raw: &[(u32, bool, bool)], query: u32) {
+        use crate::artifact_inventory::{ArtifactId, NativeGroupKey};
+        let original = full_native_fixture(
+            "Indexed",
+            raw.iter()
+                .map(|(ordinal, has_import, _)| {
+                    let imports = has_import
+                        .then(|| PendingImportOwner::Retained {
+                            identity: testing::identity("Captured", &format!("value_{ordinal}")),
+                            generation: u64::from(*ordinal) + 1,
+                        })
+                        .into_iter()
+                        .collect();
+                    (*ordinal, imports)
+                })
+                .collect(),
+            7,
+        );
+        let native = original.original_native().unwrap();
+        assert_eq!(
+            native
+                .groups
+                .iter()
+                .map(|group| group.group.original_ordinal())
+                .collect::<Vec<_>>(),
+            raw.iter()
+                .map(|(ordinal, _, _)| *ordinal)
+                .collect::<Vec<_>>(),
+            "issuance preserves authenticated group order",
+        );
+        for ordinal in raw.iter().map(|(ordinal, _, _)| *ordinal).chain([query]) {
+            let expected = native
+                .groups
+                .iter()
+                .find(|group| group.group.original_ordinal() == ordinal);
+            let actual = native.group(ordinal);
+            assert_eq!(actual.is_some(), expected.is_some());
+            if let (Some(actual), Some(expected)) = (actual, expected) {
+                assert!(std::ptr::eq(actual, expected));
+                assert!(Arc::ptr_eq(&actual.group, &expected.group));
+                assert!(Arc::ptr_eq(&actual.imports, &expected.imports));
+            }
+            let binder = testing::identity("Indexed", &format!("entry_{ordinal}"));
+            // The existing one-group fixture has a special binder for ordinal 7.
+            let binder = if raw.len() == 1 && ordinal == 7 {
+                testing::identity("Indexed", "entry")
+            } else {
+                binder
+            };
+            assert_eq!(
+                authenticates_original_native_entry(&original, ordinal, &binder),
+                expected.is_some_and(|group| group.group.binders().contains(&binder)),
+            );
+            let mut wrong_owner = binder.clone();
+            wrong_owner.module = "Other".into();
+            assert!(!authenticates_original_native_entry(
+                &original,
+                ordinal,
+                &wrong_owner
+            ));
+            wrong_owner = binder.clone();
+            wrong_owner.unit = "other-unit".into();
+            assert!(!authenticates_original_native_entry(
+                &original,
+                ordinal,
+                &wrong_owner
+            ));
+            let mut missing_binder = binder;
+            missing_binder.occurrence = "missing".into();
+            assert!(!authenticates_original_native_entry(
+                &original,
+                ordinal,
+                &missing_binder
+            ));
+        }
+        let current = native
+            .groups
+            .iter()
+            .rev()
+            .map(|group| (group.group(), group.imports().to_vec()))
+            .collect::<Vec<_>>();
+        native.validate_promoted_groups(&current).unwrap();
+
+        let artifact = ArtifactId([3; 32]);
+        let available = BTreeMap::from([(artifact, &original)]);
+        let selected = raw
+            .iter()
+            .filter(|(_, _, select)| *select)
+            .map(|(ordinal, _, _)| NativeGroupKey {
+                artifact,
+                original_ordinal: *ordinal,
+            })
+            .collect::<BTreeSet<_>>();
+        let admitted = certify_selected_owned_products_in_context_with_validation(
+            &available,
+            &[],
+            &selected,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(admitted.len(), selected.len());
+        for (actual, key) in admitted.iter().zip(&selected) {
+            let expected = native
+                .groups
+                .iter()
+                .find(|group| group.group.original_ordinal() == key.original_ordinal)
+                .unwrap();
+            assert_eq!(actual.owner(), &expected.owner);
+            assert!(Arc::ptr_eq(&actual.group, &expected.group));
+            assert!(Arc::ptr_eq(&actual.imports, &expected.imports));
+        }
+        assert!(certify_selected_owned_products_in_context_with_validation(
+            &available,
+            &admitted,
+            &selected,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .is_empty());
+        if !raw.iter().any(|(ordinal, _, _)| *ordinal == query) {
+            assert!(matches!(
+                certify_selected_owned_products_in_context_with_validation(
+                    &available,
+                    &[],
+                    &BTreeSet::from([NativeGroupKey {
+                        artifact,
+                        original_ordinal: query
+                    }]),
+                    &mut PackageInterfaceValidation::default(),
+                ),
+                Err(CertificationError::Mismatch("selected original group"))
+            ));
+        }
+    }
+
+    #[test]
+    fn original_native_index_preserves_sparse_order_and_selected_identity() {
+        check_original_native_index_against_linear_scan(
+            &[(u32::MAX, true, true), (0, false, false), (29, true, true)],
+            1,
+        );
+        check_original_native_index_against_linear_scan(&[], u32::MAX);
+        check_original_native_index_against_linear_scan(&[(7, false, true)], 7);
+    }
+
+    #[test]
+    fn original_native_index_issuer_rejects_duplicate_ordinals_and_wrong_owners() {
+        let original = full_native_fixture("Indexed", vec![(29, vec![]), (3, vec![])], 7);
+        let native = original.original_native().unwrap();
+        let witness =
+            || verify_home_witness(original.certification_bytes(), original.owner()).unwrap();
+        let mut duplicate = native.groups.to_vec();
+        duplicate.push(duplicate[0].clone());
+        assert!(matches!(
+            retain_authenticated_original_native(original.clone(), duplicate, witness()),
+            Err(CertificationError::Mismatch(
+                "duplicate original native ordinal"
+            )),
+        ));
+        let mut wrong_owner = native.groups.to_vec();
+        wrong_owner[0].owner.module_version = ModuleVersion([8; 32]);
+        assert!(matches!(
+            retain_authenticated_original_native(original.clone(), wrong_owner, witness()),
+            Err(CertificationError::Mismatch(
+                "original native witness owner"
+            )),
+        ));
+        let mut wrong_witness = witness();
+        wrong_witness.owner.module_version = ModuleVersion([8; 32]);
+        assert!(matches!(
+            retain_authenticated_original_native(
+                original.clone(),
+                native.groups.to_vec(),
+                wrong_witness
+            ),
+            Err(CertificationError::Mismatch(
+                "original native witness owner"
+            )),
+        ));
+    }
+
+    fn original_native_index_property_config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
+    proptest::proptest! {
+        #![proptest_config(original_native_index_property_config())]
+        #[test]
+        fn original_native_index_matches_linear_scan_for_generated_sparse_groups(
+            groups in proptest::collection::vec((proptest::prelude::any::<u32>(),
+                proptest::prelude::any::<bool>(), proptest::prelude::any::<bool>()), 0..48),
+            query in proptest::prelude::any::<u32>(),
+        ) {
+            let mut seen = BTreeSet::new();
+            let groups = groups.into_iter().filter(|(ordinal, _, _)| seen.insert(*ordinal)).collect::<Vec<_>>();
+            check_original_native_index_against_linear_scan(&groups, query);
+        }
     }
 
     #[test]
@@ -9274,6 +9810,104 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn candidate_original_issuer_matches_cold_recovery_and_refuses_seal_drift() {
+        let fixture = fixture_finalized_product(
+            original_groups_fixture(
+                "CatalogNative",
+                vec![(7, vec![]), (9001, vec![])],
+                23,
+                &BTreeMap::new(),
+            ),
+            [5; 32],
+        );
+        let cold = recovered_witness_fixtures(std::slice::from_ref(&fixture))
+            .remove(0)
+            .product;
+        let candidate = |owner: CachedHomeOwner,
+                         certification_bytes: Vec<u8>,
+                         module_interface: CertifiedModuleInterface| {
+            OriginalNativeCandidate {
+                owner,
+                product: crate::module_candidates::CandidateProduct::decode(
+                    fixture.product_bytes().to_vec(),
+                )
+                .unwrap(),
+                certification_bytes,
+                module_interface,
+                execution_source: None,
+            }
+        };
+        let decoded_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
+        let carried = certify_candidate_original_with_validation(
+            candidate(
+                fixture.owner().clone(),
+                fixture.certification_bytes().to_vec(),
+                fixture.module_interface().unwrap().clone(),
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
+            decoded_before
+        );
+        assert!(carried.same_durable_artifact(&cold));
+        assert_eq!(
+            carried.original_native().unwrap().groups,
+            cold.original_native().unwrap().groups
+        );
+        assert_eq!(
+            original_native_requirements(&carried).unwrap(),
+            original_native_requirements(&cold).unwrap()
+        );
+        let mut wrong_owner = fixture.owner().clone();
+        wrong_owner.module_version = ModuleVersion([24; 32]);
+        assert!(certify_candidate_original_with_validation(
+            candidate(
+                wrong_owner,
+                fixture.certification_bytes().to_vec(),
+                fixture.module_interface().unwrap().clone()
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
+        let changed_core =
+            fixture_module_core(fixture.module_interface().unwrap(), b"other-core".to_vec());
+        assert_eq!(changed_core.interface_bytes(), fixture.interface_bytes());
+        assert!(certify_candidate_original_with_validation(
+            candidate(
+                fixture.owner().clone(),
+                fixture.certification_bytes().to_vec(),
+                changed_core
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
+        let mut missing_graph = decode_home_witness(fixture.certification_bytes()).unwrap();
+        missing_graph.execution_source_sha256 = Some([31; 32]);
+        assert!(certify_candidate_original_with_validation(
+            candidate(
+                fixture.owner().clone(),
+                encode_home_witness(&missing_graph).unwrap(),
+                fixture.module_interface().unwrap().clone()
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
+        let mut changed_seal = fixture.certification_bytes().to_vec();
+        changed_seal.push(0);
+        assert!(certify_candidate_original_with_validation(
+            candidate(
+                fixture.owner().clone(),
+                changed_seal,
+                fixture.module_interface().unwrap().clone()
+            ),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn original_native_witness_reuses_nonempty_cycle_and_checks_selected_closure() {
         let source = |owner: CachedHomeOwner| PendingImportOwner::Source {
             binder: testing::identity(&owner.module, "entry"),
@@ -9281,9 +9915,20 @@ pub(crate) mod tests {
             original_ordinal: 7,
         };
         let packages = BTreeMap::new();
-        let a = original_witness_fixture("A", Some(source(inherited_owner("B"))), 7, &packages);
-        let b = original_witness_fixture("B", Some(source(a.owner().clone())), 7, &packages);
-        let a = original_witness_fixture("A", Some(source(b.owner().clone())), 7, &packages);
+        let fixture = |module: &str, import| {
+            original_groups_fixture_with_interface(
+                module,
+                vec![(7, vec![import])],
+                7,
+                &packages,
+                format!("{module} interface").into_bytes(),
+            )
+        };
+        let a = fixture("A", source(inherited_owner("B")));
+        let b = fixture("B", source(a.owner().clone()));
+        let a = fixture("A", source(b.owner().clone()));
+        let a = fixture_finalized_product(a, [1; 32]);
+        let b = fixture_finalized_product(b, [1; 32]);
         let before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
         let recovered = recovered_witness_fixtures(&[a, b]);
         assert_eq!(
@@ -9319,7 +9964,19 @@ pub(crate) mod tests {
             let entry =
                 crate::artifact_inventory::ArtifactEntry::original([1; 32], (*product).clone())
                     .unwrap();
-            assert_eq!(entry.native_requirements, native.artifact_edges);
+            assert_eq!(
+                entry
+                    .native_requirements
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                native
+                    .artifact_edges
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            );
             assert_eq!(entry.retained_packages, native.retained_packages);
         }
         let groups = certify_owned_products_with_validation(
@@ -9696,23 +10353,64 @@ pub(crate) mod tests {
     #[test]
     fn original_native_witness_checks_package_drift_and_zero_group_downgrade() {
         let root = tempfile::tempdir().unwrap();
+        let external_unit = "external-package";
         let package_path = root.path().join("External.hi");
         std::fs::write(&package_path, [0x43]).unwrap();
         let packages = BTreeMap::from([(
-            ("fixture".into(), "External".into()),
+            (external_unit.into(), "External".into()),
             PackageInterfaceWitness {
                 selected_path: package_path.clone(),
                 sha256: sha(&[0x43]),
             },
         )]);
         let import = PendingImportOwner::Package {
-            unit: "fixture".into(),
+            unit: external_unit.into(),
             module: "External".into(),
-            binder: testing::identity("External", "entry"),
+            binder: SymbolIdentity {
+                unit: external_unit.into(),
+                ..testing::identity("External", "entry")
+            },
             interface_digest: sha(&[0x43]),
         };
-        let consumer = original_witness_fixture("Consumer", Some(import), 7, &packages);
-        let empty = original_witness_fixture("External", None, 7, &BTreeMap::new());
+        let consumer = original_groups_fixture_with_interface(
+            "Consumer",
+            vec![(7, vec![import])],
+            7,
+            &packages,
+            b"Consumer interface".to_vec(),
+        );
+        let interface = b"External interface".to_vec();
+        let product_bytes =
+            tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+                unit: external_unit.into(),
+                module: "External".into(),
+                interface: interface.clone(),
+                groups: vec![],
+            }]);
+        let owner = CachedHomeOwner {
+            unit: external_unit.into(),
+            module: "External".into(),
+            module_version: ModuleVersion([7; 32]),
+            skinny_iface_sha256: sha(&interface),
+            product_sha256: sha(&product_bytes),
+        };
+        let certification = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let package_bytes = crate::module_candidates::tests::package_imports_with_roots(
+            &owner.unit,
+            &owner.module,
+            &interface,
+            Vec::new(),
+        );
+        let empty = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner,
+            interface,
+            product_bytes,
+            package_bytes,
+            certification,
+        );
+        let legacy_empty = empty.clone();
+        let consumer = fixture_finalized_product(consumer, [1; 32]);
+        let empty = fixture_finalized_product(empty, [1; 32]);
         let recovered = recovered_witness_fixtures(&[consumer, empty]);
         let consumer = &recovered[0].product;
         let empty = &recovered[1].product;
@@ -9743,7 +10441,6 @@ pub(crate) mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let legacy_empty = original_witness_fixture("External", None, 7, &BTreeMap::new());
         assert!(matches!(
             certify_owned_products_in_context_with_validation(
                 &[empty],
@@ -10205,13 +10902,17 @@ pub(crate) mod tests {
     }
 
     fn empty_package_bundle_for(module: &str) -> Vec<u8> {
+        empty_package_bundle_for_interface(module, &[0x42])
+    }
+
+    fn empty_package_bundle_for_interface(module: &str, interface: &[u8]) -> Vec<u8> {
         let roots = Value::Array(vec![
             Value::Text("TPPKGROOTS".into()),
             Value::Text("2".into()),
             Value::Array(vec![
                 Value::Text("main".into()),
                 Value::Text(module.into()),
-                Value::Text(hex(&sha(&[0x42]))),
+                Value::Text(hex(&sha(interface))),
             ]),
             Value::Array(vec![]),
             Value::Array(vec![]),
@@ -10602,6 +11303,7 @@ pub(crate) mod tests {
                     (("main".into(), "A".into()), a),
                     (("main".into(), "B".into()), b),
                 ]),
+                native_availability: Vec::new(),
             },
             CertifiedReceipt {
                 source_recipe: WorkerExecutionSource::Ordinary,
@@ -11619,6 +12321,9 @@ pub(crate) mod tests {
     fn repeated_retained_core_promotion_preserves_exact_original_membership() {
         use crate::artifact_inventory::CanonicalProducerIdentity;
         use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
+        use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
+        use crate::recovery_artifacts::CertifiedRecoveryProduct;
+        use tidepool_repr::{Generation, SessionModule};
         let root = tempfile::tempdir().unwrap();
         let source = "module Target where";
         let support_source = "module Fresh where";
@@ -11626,7 +12331,7 @@ pub(crate) mod tests {
         std::fs::write(&support, support_source).unwrap();
         let mut admitted = evidence(support_source);
         admitted.sources[0].path = support.clone();
-        admitted.modules[0].source = support;
+        admitted.modules[0].source = support.clone();
         admitted.sources.push(SourceEvidence {
             path: "@generated-source".into(),
             sha256: hex(&sha(source.as_bytes())),
@@ -11743,7 +12448,9 @@ pub(crate) mod tests {
         current_evidence.modules[0].module = "Target".into();
         let normalized =
             CompletedSourceEvidence::from_normalized(current_evidence.clone(), source).unwrap();
-        for (index, body_tag) in [0, 0, 1, 0].into_iter().enumerate() {
+        let mut historical_child = None;
+        let mut current_child = None;
+        for (index, body_tag) in [0, 0, 1, 0, 2].into_iter().enumerate() {
             let projection = context.compiler_input_projection().interface_only();
             context = context.with_compiler_input_projection(projection).unwrap();
             let directory = root.path().join(format!("promotion-{index}"));
@@ -11755,7 +12462,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert!(request.compiler_original_products().unwrap().is_empty());
             assert_eq!(
-                request.context.recovery_products().len(),
+                request.context().recovery_products().len(),
                 expected_owners.len()
             );
             let mut worker = current_evidence.clone();
@@ -11841,6 +12548,11 @@ pub(crate) mod tests {
                 }
             } else {
                 assert_ne!(Some(&owner), first_promoted.as_ref());
+            }
+            match body_tag {
+                1 => historical_child = Some(owner.clone()),
+                2 => current_child = Some(owner.clone()),
+                _ => {}
             }
             let issued = certify_products(
                 None,
@@ -11989,7 +12701,384 @@ pub(crate) mod tests {
                 .unwrap();
             prior = context.recovery_products();
         }
-        assert_eq!(expected_owners.len(), 3);
+        assert_eq!(expected_owners.len(), 4);
+
+        // A new planned module can retain an exact historical native edge
+        // while the compiler projection selects the current Fresh original.
+        let historical_child = historical_child.unwrap();
+        let current_child = current_child.unwrap();
+        assert_ne!(historical_child, current_child);
+        let child = prior
+            .iter()
+            .find(|product| product.owner() == &historical_child)
+            .unwrap();
+        let current = prior
+            .iter()
+            .find(|product| product.owner() == &current_child)
+            .unwrap();
+        assert_eq!(child.module_interface(), current.module_interface());
+        assert!(prior
+            .iter()
+            .any(|product| product.owner() == &current_child));
+
+        let make_projection = |products: &[CertifiedRecoveryProduct]| {
+            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
+                &products
+                    .iter()
+                    .cloned()
+                    .map(|product| {
+                        Arc::new(
+                            crate::artifact_inventory::ArtifactEntry::original(
+                                canonical_producer,
+                                product,
+                            )
+                            .unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let historical_projection = make_projection(std::slice::from_ref(child)).unwrap();
+        let fresh_identity = ExactModuleIdentity {
+            unit: historical_child.unit.clone(),
+            module: historical_child.module.clone(),
+        };
+        let historical_context = context
+            .compiler_input_projection()
+            .interface_only()
+            .merge(&historical_projection)
+            .and_then(|projection| context.clone().with_compiler_input_projection(projection))
+            .and_then(|context| {
+                context.extend_lexical_joins(
+                    &[],
+                    &[ExactLexicalNode {
+                        owner: fresh_identity.clone(),
+                        imports: vec![],
+                    }],
+                )
+            })
+            .unwrap();
+        let prior_module = SessionModule::lib(Generation(6));
+        let prior_planned =
+            planned_original_history_tests::issue_planned_original_with_retained_child(
+                root.path(),
+                &historical_context,
+                prior_module,
+                &producer,
+                &include,
+                "ancestor_7",
+                child,
+                "entry_7",
+            )
+            .unwrap();
+        assert_eq!(
+            prior_planned.request.compiler_original_products().unwrap()[0].owner(),
+            &historical_child,
+            "the existing A original was issued while the old Fresh version was selected"
+        );
+        let prior_module_product = prior_planned.certified.recovery_products[0].clone();
+        let planned_context = context
+            .clone()
+            .extend_checked_original_products(
+                canonical_producer,
+                std::slice::from_ref(&prior_module_product),
+            )
+            .unwrap();
+        let current_projection =
+            make_projection(&[current.clone(), prior_module_product.clone()]).unwrap();
+        let planned_context = planned_context
+            .compiler_input_projection()
+            .interface_only()
+            .merge(&current_projection)
+            .and_then(|projection| planned_context.with_compiler_input_projection(projection))
+            .and_then(|context| {
+                context.extend_lexical_joins(
+                    &[],
+                    &[
+                        ExactLexicalNode {
+                            owner: fresh_identity.clone(),
+                            imports: vec![],
+                        },
+                        ExactLexicalNode {
+                            owner: ExactModuleIdentity {
+                                unit: prior_module_product.owner().unit.clone(),
+                                module: prior_module_product.owner().module.clone(),
+                            },
+                            imports: vec![fresh_identity.clone()],
+                        },
+                    ],
+                )
+            })
+            .unwrap();
+        let stale_fresh =
+            planned_original_history_tests::issue_planned_original_with_retained_child(
+                root.path(),
+                &planned_context,
+                SessionModule::lib(Generation(8)),
+                &producer,
+                &include,
+                "fresh_copy_7",
+                child,
+                "entry_7",
+            );
+        assert!(
+            matches!(
+                stale_fresh,
+                Err(crate::CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), CertificationError::Mismatch("source module version"))
+            ),
+            "a new Fresh import cannot bypass the current compiler-selected version"
+        );
+        let planned_module = SessionModule::lib(Generation(7));
+        let planned_source = format!(
+            "module {} where\nimport {} (ancestor_7)\nlocal_7 = ancestor_7\nentry_11 = 4\n",
+            planned_module.module_name(),
+            prior_module.module_name()
+        );
+        let planned = planned_original_history_tests::issue_planned_original_with_retained_child(
+            root.path(),
+            &planned_context,
+            planned_module,
+            &producer,
+            &include,
+            "local_7",
+            &prior_module_product,
+            "ancestor_7",
+        )
+        .unwrap();
+        let compiler_originals = planned.request.compiler_original_products().unwrap();
+        assert!(compiler_originals
+            .iter()
+            .any(|product| product.owner() == &current_child));
+        assert!(compiler_originals
+            .iter()
+            .any(|product| product.owner() == prior_module_product.owner()));
+        let planned_product = &planned.certified.recovery_products[0];
+        let native = planned_product.original_native().unwrap();
+        let historical_group = native
+            .groups
+            .iter()
+            .find(|group| group.group.original_ordinal() == 7)
+            .unwrap();
+        assert!(historical_group.imports.iter().any(|import| matches!(
+            import,
+            PendingImportOwner::Source { owner, .. } if owner == prior_module_product.owner()
+        )));
+        let prior_native = prior_module_product.original_native().unwrap();
+        assert!(prior_native.groups.iter().any(|group| {
+            group.group.original_ordinal() == 7
+                && group.group.binders().iter().any(|binder| {
+                    binder.occurrence == "ancestor_7" && binder.module == prior_module.module_name()
+                })
+                && group.imports.iter().any(|import| {
+                    matches!(
+                        import,
+                        PendingImportOwner::Source { owner, .. } if owner == &historical_child
+                    )
+                })
+        }));
+
+        let custody = prior
+            .iter()
+            .cloned()
+            .chain(prior_planned.certified.recovery_products.iter().cloned())
+            .chain(planned.certified.recovery_products.iter().cloned())
+            .collect::<Vec<_>>();
+        let view = crate::declaration_context::certified_product_artifact_view(
+            canonical_producer,
+            &custody,
+            &[],
+            None,
+        )
+        .unwrap();
+        let incompatible_source =
+            planned_original_history_tests::issue_planned_original_with_source_value(
+                root.path(),
+                planned_module,
+                &producer,
+                &include,
+                250,
+                250,
+                5,
+            );
+        assert!(
+            crate::declaration_context::certified_product_artifact_view(
+                canonical_producer,
+                &custody
+                    .iter()
+                    .cloned()
+                    .chain(
+                        incompatible_source
+                            .certified
+                            .recovery_products
+                            .iter()
+                            .cloned()
+                    )
+                    .collect::<Vec<_>>(),
+                &[],
+                None,
+            )
+            .is_err(),
+            "same-owner products with incompatible canonical source identities must refuse"
+        );
+        let planned_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            planned_product,
+        );
+        let historical_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            child,
+        );
+        let prior_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            &prior_module_product,
+        );
+        assert!(
+            view.dependencies().iter().any(|(source, target, edge)| {
+                *source == prior_id
+                    && *target == historical_id
+                    && matches!(
+                        edge,
+                        crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                            dependent_ordinal: 7,
+                            required_ordinal: 7
+                        }
+                    )
+            }),
+            "retained custody must preserve the exact A-to-historical-Fresh group edge"
+        );
+        assert!(
+            view.dependencies().iter().any(|(source, target, edge)| {
+                *source == planned_id
+                    && *target == prior_id
+                    && matches!(
+                        edge,
+                        crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                            dependent_ordinal: 7,
+                            required_ordinal: 7
+                        }
+                    )
+            }),
+            "the new G7 declaration imports the existing A original"
+        );
+        let selected = planned
+            .certified
+            .source_selection
+            .selected_original_closure(&view)
+            .unwrap();
+        let selected_fresh = selected
+            .products()
+            .iter()
+            .filter(|product| product.owner().module == "Fresh")
+            .map(|product| product.owner().clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(selected_fresh, BTreeSet::from([current_child]));
+        assert!(!selected_fresh.contains(&historical_child));
+        assert!(selected
+            .products()
+            .iter()
+            .any(|product| product.owner() == prior_module_product.owner()));
+        let exports = ["local_7", "entry_11"].map(|occurrence| {
+            serde_json::json!({
+                "kind": "value",
+                "head": {
+                    "unit": "main",
+                    "module": planned_module.module_name(),
+                    "namespace": "value",
+                    "occurrence": occurrence,
+                    "record_parent": null
+                },
+                "children": []
+            })
+        });
+        let inventory = serde_json::json!({
+            "original_unit": "main",
+            "original_module": planned_module.module_name(),
+            "interface_fingerprint": "1234567890abcdef1234567890abcdef",
+            "selection": {
+                "exports": exports,
+                "instances": { "classes": [], "families": [] },
+                "family_closure": []
+            }
+        });
+        let exact = ExactProductAdmission {
+            request: &planned.request,
+            source: &planned.source,
+        };
+        let baseline = Arc::new(planned_context.clone());
+        let legacy_products = planned
+            .certified
+            .recovery_products
+            .iter()
+            .filter(|product| {
+                planned.source.evidence.modules.iter().any(|row| {
+                    !row.boot
+                        && row.unit == product.owner().unit
+                        && row.module == product.owner().module
+                }) || baseline
+                    .recovery_products()
+                    .iter()
+                    .any(|retained| retained.owner() == product.owner())
+                    || planned
+                        .certified
+                        .retained_core_products
+                        .contains_original(product)
+            })
+            .collect::<Vec<_>>();
+        let mut legacy_owners = BTreeSet::new();
+        let legacy_refuses = legacy_products
+            .iter()
+            .any(|product| !legacy_owners.insert((&product.owner().unit, &product.owner().module)));
+        let legacy_fresh_versions = legacy_products
+            .iter()
+            .filter(|product| product.owner().module == "Fresh")
+            .map(|product| product.owner().clone())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            legacy_refuses && legacy_fresh_versions.len() > 1,
+            "the former full-custody predicate refuses this valid multiversion history"
+        );
+        eprintln!(
+            "planned_original_legacy_sensitivity={}",
+            serde_json::json!({
+                "full_custody_products": planned.certified.recovery_products.len(),
+                "legacy_selected_products": legacy_products.len(),
+                "legacy_fresh_versions": legacy_fresh_versions.len(),
+                "legacy_duplicate_refusal": legacy_refuses,
+                "issued_selected_products": selected.products().len(),
+                "issued_selected_fresh_versions": selected_fresh.len(),
+            })
+        );
+        let joined = crate::declaration_join::certify_same_offer_planned_declaration(
+            planned_module,
+            &planned_source,
+            &producer,
+            &selected,
+            &view,
+            &exact,
+            &include,
+            Some(&baseline),
+            &serde_json::to_vec(&inventory).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(joined.product().owner(), planned_product.owner());
+        let joined_products = joined.recovery_products();
+        for prior_product in planned_context.recovery_products() {
+            let retained = joined_products
+                .iter()
+                .find(|product| product.owner() == prior_product.owner())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "planned context dropped prior owner {:?}",
+                        prior_product.owner()
+                    )
+                });
+            assert!(retained
+                .original_byte_anchors()
+                .iter()
+                .zip(prior_product.original_byte_anchors())
+                .all(|(actual, expected)| Arc::ptr_eq(actual, expected)));
+        }
     }
 
     fn exact_current_original_history(nonempty: bool) {
@@ -12194,12 +13283,11 @@ pub(crate) mod tests {
             assert!(request.groups.is_empty());
             assert!(request
                 .compiler_inputs()
-                .unwrap()
                 .metadata
                 .selected_native_groups
                 .is_empty());
             assert!(request.compiler_original_products().unwrap().is_empty());
-            let effective = request.compiler_inputs().unwrap();
+            let effective = request.compiler_inputs();
             assert_eq!(
                 effective
                     .metadata
@@ -12513,7 +13601,7 @@ pub(crate) mod tests {
                 let bundle = &candidate.by_owner[&("main".into(), "Fresh".into())];
                 assert_eq!(bundle.owner, owner);
                 let inventory = ArtifactInventory::default();
-                let mut private_entries = request.compiler_inputs().unwrap().artifacts.entries();
+                let mut private_entries = request.compiler_inputs().artifacts.entries();
                 private_entries.extend(context.artifact_view().entries());
                 let private_view = inventory
                     .admit_recovery_selection(
@@ -12539,7 +13627,6 @@ pub(crate) mod tests {
                 assert!(cached_request.groups.is_empty());
                 assert!(cached_request
                     .compiler_inputs()
-                    .unwrap()
                     .metadata
                     .selected_native_groups
                     .is_empty());
@@ -12757,7 +13844,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(effective.artifacts.len(), 1);
         effective
-            .context
+            .context()
             .validate_artifacts(&effective.artifacts)
             .unwrap();
         std::fs::create_dir(directory.path().join("wrong-producer")).unwrap();

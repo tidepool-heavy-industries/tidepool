@@ -42,7 +42,8 @@ import GHC.Core.Subst (mkEmptySubst, extendSubst, substExpr)
 import GHC.Types.Var.Env (mkInScopeSet, emptyVarEnv, extendVarEnv, lookupVarEnv)
 import GHC.Types.Var.Set (unionVarSet, emptyVarSet, extendVarSet, elemVarSet)
 import GHC.Core.Utils (exprType)
-import GHC.Types.Name (mkExternalName, mkInternalName)
+import GHC.Types.Name (mkInternalName)
+import GHC.Iface.Env (allocateGlobalBinder)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import GHC.Types.SrcLoc (noSrcSpan)
 import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
@@ -56,9 +57,13 @@ import GHC.Core.Type
   ( Type, splitTyConApp_maybe, splitFunTy_maybe, getTyVar_maybe, tyConsOfType, tyCoVarsOfType, mkVisFunTyMany, mkTyVarTy )
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Core.TyCon (TyCon, tyConName)
+import GHC.Core.TyCon (TyCon, tyConName, isAlgTyCon, tyConDataCons)
+import GHC.Core.DataCon (dataConFieldLabels)
+import GHC.Core.PatSyn (patSynFieldLabels, patSynMatcher, patSynBuilder)
+import GHC.Types.FieldLabel (flSelector)
+import GHC.Types.Name.Set (mkNameSet, elemNameSet)
 import GHC.Data.FastString (fsLit)
-import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_dflags)
+import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_dflags, hsc_NC)
 import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Tc.Types (TcGblEnv, tcg_mod, tcg_type_env, tcg_binds, tcg_rn_decls, tcg_ev_binds)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
@@ -293,10 +298,11 @@ captureTypedSegment plan environment checked = do
     checkItemCore environment ordinal known core
     when (any ((== plannedItemEntry itemPlan) . occurrence) known) $
       throwIO (ExistingItemRoot ordinal)
-    supply <- mkSplitUniqSupply 'i'
-    let (uniqueId, _) = takeUniqFromSupply supply
-        root = mkExportedVanillaId (mkExternalName uniqueId (tcg_mod checked)
-          (mkVarOcc (plannedItemEntry itemPlan)) noSrcSpan) (exprType core)
+    -- Interface sharing re-interns external Names through this cache. Issue
+    -- the same canonical Name for the live Core and its paired ModDetails.
+    rootName <- allocateGlobalBinder (hsc_NC environment) (tcg_mod checked)
+      (mkVarOcc (plannedItemEntry itemPlan)) noSrcSpan
+    let root = mkExportedVanillaId rootName (exprType core)
     pure (TypedItem itemPlan root [TypedItemInput identifier identifier | identifier <- inputs]
       (exprType action) descriptors (retainedPredecessor item) observation core)
   auxiliary <- auxiliaryRoots operations environment checked
@@ -383,10 +389,9 @@ auxiliaryRoots operations environment checked = do
             when (any ((== name) . occurrence) (typeEnvIds (tcg_type_env checked))) $
               throwIO UnprovedSegmentOperations
             checkItemCore environment (-1) [] core
-            supply <- mkSplitUniqSupply 'r'
-            let (uniqueId, _) = takeUniqFromSupply supply
-                root = mkExportedVanillaId (mkExternalName uniqueId (tcg_mod checked)
-                  (mkVarOcc name) noSrcSpan) (exprType core)
+            rootName <- allocateGlobalBinder (hsc_NC environment) (tcg_mod checked)
+              (mkVarOcc name) noSrcSpan
+            let root = mkExportedVanillaId rootName (exprType core)
             pure (NonRec root core)
     _ -> throwIO UnprovedSegmentOperations
 
@@ -429,7 +434,7 @@ closeTypedSegment environment globals pending = do
           applyInputs ordinal (substExpr substitution body) rest
     applyInputs ordinal _ _ = throwIO (UnprovedItemParameters ordinal)
 
--- Only the actual item roots survive into the executable target interface.
+-- Only the actual item roots become lexical exports of the executable target.
 -- The private checker classes served inference and confer no published type.
 installTypedSegmentRoots :: HscEnv -> PendingTypedSegment -> ModGuts -> IO (TypedSegment,ModGuts)
 installTypedSegmentRoots environment pending guts = do
@@ -442,10 +447,25 @@ installTypedSegmentRoots environment pending guts = do
       privateTypes = filter synthetic (mg_tcs guts)
       mentionsPrivate ty = any (`elementOfUniqSet` tyConsOfType ty) privateTypes
       roots = typedSegmentRoots segment
+      recordFields = [field
+        | constructor <- mg_tcs guts, isAlgTyCon constructor
+        , dataConstructor <- tyConDataCons constructor
+        , field <- dataConFieldLabels dataConstructor]
+        ++ concatMap patSynFieldLabels (mg_patsyns guts)
+      patternSupportNames = concatMap (\patternSynonym ->
+        let (matcher, _, _) = patSynMatcher patternSynonym
+        in matcher : maybe [] (\(builder, _, _) -> [builder])
+          (patSynBuilder patternSynonym)) (mg_patsyns guts)
+      metadataNames = mkNameSet (map flSelector recordFields ++ patternSupportNames)
       metadataIds = map instanceDFunId (mg_insts guts)
+        ++ [identifier | binding <- mg_binds guts, identifier <- bindersOf binding
+            , idName identifier `elemNameSet` metadataNames]
       metadataRoots = foldl' extendVarSet emptyVarSet metadataIds
-      -- Tidy resolves every retained instance through an external final Id.
-      -- These actual metadata roots are retained without adding source exports.
+      -- Retained instances, records and pattern synonyms reference explicit
+      -- local Ids in the finalized interface. Keep those metadata dependencies
+      -- through tidy without adding lexical exports. Constructors and class
+      -- operations are implicit interface binders; selectors and pattern
+      -- synonym matchers/builders are not.
       retain identifier
         | identifier `elemVarSet` metadataRoots = setIdExported identifier
         | otherwise = setIdNotExported identifier
@@ -482,7 +502,7 @@ installTypedSegmentRoots environment pending guts = do
           (nonDetEltsUniqSet (foldl' unionVarSet (bindFreeVars binding)
             (map varTypeTyCoVars (bindersOf binding))) ++ rest)
   -- Keep the whole compiler graph, including support SCCs. Only issued roots
-  -- and metadata-mandated dfuns remain externally retained. Ordinary GHC DCE
+  -- and metadata-mandated Ids remain externally retained. Ordinary GHC DCE
   -- owns unused inference scaffolding; mg_exports names only the issued roots.
   support <- foldM (\selected binding -> do
     let ordinal = case [plannedItemOrdinal (typedItemPlan item)

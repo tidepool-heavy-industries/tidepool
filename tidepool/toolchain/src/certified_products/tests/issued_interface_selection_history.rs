@@ -71,12 +71,10 @@ pub(super) fn issued_original(
     )
     .unwrap();
     let original = certified.recovery_products.into_iter().next().unwrap();
-    assert!(
-        original
-            .original_native()
-            .unwrap()
-            .matches_original(&original)
-    );
+    assert!(original
+        .original_native()
+        .unwrap()
+        .matches_original(&original));
     assert_eq!(
         original.module_interface().unwrap().interface_bytes(),
         &[interface]
@@ -164,11 +162,11 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
                 &private,
             )
             .unwrap();
-        assert!(request.context.interface_owners().is_empty());
-        assert!(request.context.lexical_graph().is_empty());
-        assert!(request.context.recovery_products().is_empty());
+        assert!(request.context().interface_owners().is_empty());
+        assert!(request.context().lexical_graph().is_empty());
+        assert!(request.context().recovery_products().is_empty());
         assert!(request.groups.is_empty());
-        let effective = request.compiler_inputs().unwrap();
+        let effective = request.compiler_inputs();
         let expected = BTreeSet::from(["Fresh", if chosen == 1 { "Side" } else { "Other" }]);
         assert_eq!(
             effective
@@ -218,12 +216,10 @@ fn omission_of_an_issued_interface_only_role_is_refused() {
     let without_side = view
         .select_roots(vec![entries[0].descriptor.id, entries[2].descriptor.id])
         .unwrap();
-    assert!(
-        !without_side
-            .metadata_snapshot()
-            .artifacts
-            .contains_key(&entries[1].descriptor.id)
-    );
+    assert!(!without_side
+        .metadata_snapshot()
+        .artifacts
+        .contains_key(&entries[1].descriptor.id));
     assert!(
         OriginalCompilerInputs::from_selection(&selection, &without_side).is_err(),
         "omitted issued Side interface must not be reconstructed from other custody"

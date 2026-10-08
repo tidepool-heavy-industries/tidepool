@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tidepool_repr::execution_schema::{InventoryOperation, ParseError};
 
-use super::{absolute, sha, version_hash, Record, RECORD_LIMIT};
+use super::{absolute, sha, version_hash, CandidateProduct, CandidateRecord, Record, RECORD_LIMIT};
 use crate::toolchain::CompilerDeploymentAuthority;
 
 mod source_selection;
@@ -325,7 +325,46 @@ pub struct DeploymentModulePackage {
     artifact_root: PathBuf,
     catalog_identity: String,
     source_identity: String,
-    records: Vec<Record>,
+    records: Vec<DecodedDeploymentRecord>,
+}
+
+/// The loader owns both the original bytes and their single decoded product.
+/// No mutable record is exposed after this relationship is established.
+#[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
+pub(super) struct DecodedDeploymentRecord {
+    record: Record,
+    product: tidepool_repr::execution_schema::RawModuleProduct,
+}
+
+impl DecodedDeploymentRecord {
+    fn decode(record: Record, inventory: &InventoryOperation) -> Result<Self, ModulePackageError> {
+        let requirements = crate::prepared_artifact::production_requirements()
+            .map_err(|_| ModulePackageError::Format("host requirements"))?;
+        let product = CandidateProduct::decode_product_with_operation(
+            &record.products,
+            &requirements,
+            inventory,
+        )
+        .map_err(|error| decode_error(error, "original module products"))?
+        .ok_or(ModulePackageError::Format("original module owner"))?;
+        Ok(Self { record, product })
+    }
+
+    pub(super) fn record(&self) -> &Record {
+        &self.record
+    }
+
+    pub(super) fn into_parts(self) -> (Record, tidepool_repr::execution_schema::RawModuleProduct) {
+        (self.record, self.product)
+    }
+}
+
+impl std::ops::Deref for DecodedDeploymentRecord {
+    type Target = Record;
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
 }
 
 impl DeploymentModulePackage {
@@ -489,13 +528,17 @@ impl DeploymentModulePackage {
         if producer != self.catalog.producer_identity {
             return Err(ModulePackageError::CompilerMismatch);
         }
-        Ok(self.records.clone())
+        Ok(self
+            .records
+            .iter()
+            .map(|record| record.record.clone())
+            .collect())
     }
 
     pub(super) fn into_candidates(
         self,
         producer: &[u8],
-    ) -> Result<Vec<(Record, super::CandidateOrigin)>, ModulePackageError> {
+    ) -> Result<Vec<(CandidateRecord, super::CandidateOrigin)>, ModulePackageError> {
         if producer != self.catalog.producer_identity {
             return Err(ModulePackageError::CompilerMismatch);
         }
@@ -505,7 +548,7 @@ impl DeploymentModulePackage {
             .zip(self.catalog.modules)
             .map(|(record, files)| {
                 (
-                    record,
+                    CandidateRecord::Deployment(record),
                     super::CandidateOrigin::Deployment {
                         interface: self.artifact_root.join(files.interface.path),
                         packages: self.artifact_root.join(files.packages.path),
@@ -519,12 +562,12 @@ impl DeploymentModulePackage {
         &self,
         producer: &[u8],
         inventory: Arc<InventoryOperation>,
-    ) -> Result<Vec<Record>, ModulePackageError> {
+    ) -> Result<Vec<DecodedDeploymentRecord>, ModulePackageError> {
         if producer != self.catalog.producer_identity {
             return Err(ModulePackageError::CompilerMismatch);
         }
         inventory
-            .reserve::<Record>(self.catalog.modules.len())
+            .reserve::<DecodedDeploymentRecord>(self.catalog.modules.len())
             .and_then(|_| {
                 inventory.reserve::<((String, String), [usize; 4])>(self.catalog.modules.len())
             })
@@ -705,15 +748,11 @@ impl DeploymentModulePackage {
             {
                 return Err(ModulePackageError::OpenCohort);
             }
-            let requirements = crate::prepared_artifact::production_requirements()
-                .map_err(|_| ModulePackageError::Format("host requirements"))?;
-            let parsed = inventory
-                .parse_module_products(&record.products, &requirements)
-                .map_err(|error| decode_error(error, "original module products"))?;
-            if parsed.len() != 1
-                || parsed[0].unit != record.unit
-                || parsed[0].module != record.module
-                || parsed[0].interface != record.interface
+            let decoded = DecodedDeploymentRecord::decode(record, &inventory)?;
+            let record = decoded.record();
+            if decoded.product.unit != record.unit
+                || decoded.product.module != record.module
+                || decoded.product.interface != record.interface
                 || record.interface.is_empty()
                 || sha(&read(&record.source, RECORD_LIMIT, &inventory)?) != record.source_sha256
                 || record
@@ -748,22 +787,29 @@ impl DeploymentModulePackage {
                 &mut validation,
             )
             .map_err(canonical_error)?;
-            records.push(record);
+            records.push(decoded);
         }
         for record in &records {
-            require_complete_cohort(&records, &record.evidence)?;
+            require_complete_cohort(
+                records.iter().map(DecodedDeploymentRecord::record),
+                &record.record().evidence,
+            )?;
         }
-        validate_closed(&records, &self.catalog.source_selection)?;
+        validate_closed(
+            records.iter().map(DecodedDeploymentRecord::record),
+            &self.catalog.source_selection,
+        )?;
         Ok(records)
     }
 }
 
-fn validate_closed(
-    records: &[Record],
+fn validate_closed<'a>(
+    records: impl IntoIterator<Item = &'a Record> + Clone,
     selection: &NativeCatalogSourceSelection,
 ) -> Result<(), ModulePackageError> {
     let owners: std::collections::BTreeMap<_, _> = records
-        .iter()
+        .clone()
+        .into_iter()
         .map(|r| ((r.unit.as_str(), r.module.as_str()), r.source.as_path()))
         .collect();
     for record in records {
@@ -810,12 +856,12 @@ fn validate_closed(
     Ok(())
 }
 
-fn require_complete_cohort(
-    records: &[Record],
+fn require_complete_cohort<'a>(
+    records: impl IntoIterator<Item = &'a Record>,
     evidence: &crate::cache::DependencyEvidence,
 ) -> Result<(), ModulePackageError> {
     let owners: BTreeSet<_> = records
-        .iter()
+        .into_iter()
         .map(|r| (r.unit.as_str(), r.module.as_str()))
         .collect();
     for module in &evidence.modules {
@@ -835,6 +881,8 @@ fn require_complete_cohort(
 
 #[cfg(test)]
 mod tests {
+    mod product_carry;
+
     use super::super::tests::{package_bundle, product_bytes};
     use super::*;
     use crate::cache::{DependencyEvidence, ModuleEvidence, ProductAvailability, SourceEvidence};
@@ -1220,11 +1268,12 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mut current = vec![scratch.path().to_path_buf()];
         current.extend(package.source_selection().include_roots());
-        let selected = super::super::select_records(
+        let selected = super::super::select_records_inner(
             &[3; 32],
             &current,
             scratch.path(),
             package.into_candidates(&[3; 32]).unwrap(),
+            None,
         )
         .unwrap();
         assert_eq!(selected.by_owner.len(), 1);
@@ -1885,7 +1934,7 @@ fn export_under(
         return Err(ModulePackageError::Format("catalog already exists"));
     }
     let records = &prepared.records;
-    require_complete_cohort(&records, evidence)?;
+    require_complete_cohort(records, evidence)?;
     if records.is_empty() {
         return Err(ModulePackageError::Bounds);
     }

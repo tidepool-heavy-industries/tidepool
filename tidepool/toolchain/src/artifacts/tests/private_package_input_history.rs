@@ -305,7 +305,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         request.groups[0].imports(),
         [PendingImportOwner::Package { .. }]
     ));
-    let effective = request.compiler_inputs().unwrap();
+    let effective = request.compiler_inputs();
     let selection = CertifiedSourceSelection::from_compiler_projection(
         &effective.projection,
         &effective.metadata,
@@ -472,7 +472,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         )
         .unwrap();
     assert!(late_request.groups.is_empty());
-    let late_effective = late_request.compiler_inputs().unwrap();
+    let late_effective = late_request.compiler_inputs();
     let late_selection = CertifiedSourceSelection::from_compiler_projection(
         &late_effective.projection,
         &late_effective.metadata,
@@ -589,8 +589,8 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         Some(witness.sha256)
     );
     assert!(!late_closure.contains_key(&arbitrary_owner));
-    assert!(late_request.context.lexical_graph().is_empty());
-    assert!(late_request.context.compiler_input_roles().is_empty());
+    assert!(late_request.context().lexical_graph().is_empty());
+    assert!(late_request.context().compiler_input_roles().is_empty());
     issued.groups = selected_groups;
     let archive_root = directory.path().join("two-native-groups");
     std::fs::create_dir_all(&archive_root).unwrap();
@@ -643,8 +643,8 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     .unwrap();
     assert!(certified_target.matches_target(&target));
     assert_eq!(public.semantic_sha256(), public_hash);
-    assert!(request.context.lexical_graph().is_empty());
-    assert!(request.context.compiler_input_roles().is_empty());
+    assert!(request.context().lexical_graph().is_empty());
+    assert!(request.context().compiler_input_roles().is_empty());
     // CertifiedTargetImage::compile_originals uses this same-target digest to
     // admit the package literal token consumed by the original reader group.
     assert_eq!(

@@ -625,14 +625,15 @@ fn certify_authored_declaration_inner(
     // its owner would make successive declarations retain different probes
     // under one module identity. The shared closure admission below refuses
     // any unexpected retained reference to that transient owner.
-    let products = compiled
-        .recovery_products
-        .into_iter()
-        .filter(|product| {
-            product.owner().unit != candidates[0].unit
-                || product.owner().module != crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE
-        })
-        .collect::<Vec<_>>();
+    let originals = compiled
+        .selected_originals
+        .as_ref()
+        .ok_or_else(|| contract("authored certification has no issued original selection"))?
+        .excluding_module(
+            &candidates[0].unit,
+            crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE,
+        )?;
+    let products = originals.products();
     let matches = products
         .iter()
         .filter(|product| {
@@ -684,7 +685,7 @@ fn certify_authored_declaration_inner(
     )?;
     let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
         planned::admit_authored_artifact_closure(
-            &products,
+            &originals,
             &selected_owner,
             toolchain_identity_sha256,
             &evidence,
@@ -2046,14 +2047,14 @@ mod authored_tests {
         std::fs::write(interface, b"changed after preparation").unwrap();
         assert!(
             request
-                .context
+                .context()
                 .validate_artifacts(&request.artifacts)
                 .is_err(),
             "the preparation snapshot does not authorize changed post-worker artifacts"
         );
         std::fs::write(interface, saved).unwrap();
         request
-            .context
+            .context()
             .validate_artifacts(&request.artifacts)
             .unwrap();
     }

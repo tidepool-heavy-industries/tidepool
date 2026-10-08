@@ -67,7 +67,7 @@ import Tidepool.Session
   , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence )
 import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope
+  ( ExactIfaceArtifact(..), ExactInterfaceOperations, runExactInterfaceOperation, readExactIfaceArtifacts, hydrateExactScope
   , newOriginalInterfaceArtifacts )
 import Tidepool.ExactScope
   ( CanonicalInterfaceAdmission, ExactScope(..), scopeInterfaces, readExactScope, revalidateExactScope, scopeCanonicalInterfaces )
@@ -283,13 +283,12 @@ removeExisting paths = forM_ paths $ \path -> do
 -- Only retained compiler interfaces supply the signature's original Names.
 -- This operation emits a fresh type-only value interface without compiling code.
 emitHostBindingInterface
-  :: HscEnv -> String -> Word64 -> String -> CheckedSignature -> FilePath -> FilePath
+  :: ExactInterfaceOperations -> String -> Word64 -> String -> CheckedSignature -> FilePath -> FilePath
   -> BindingInterfacePurpose -> IO (BoundBinder, BindingInterfacePurpose)
-emitHostBindingInterface initial producer generation name signature manifest root purpose = do
+emitHostBindingInterface operations producer generation name signature manifest root purpose = runExactInterfaceOperation operations $ \initial -> do
   scope <- readExactScope manifest >>= either fail pure
   unless (scopeProducerSha256 scope == producer) (fail "host interface producer differs from exact scope")
-  fresh <- freshExactState initial
-  revalidateExactScope fresh scope >>= either fail pure
+  revalidateExactScope initial scope >>= either fail pure
   let artifacts = [artifact | (artifact, _, _) <- scopeInterfaces scope]
       sessionModule = SessionModule ValMod (Generation generation)
       path = sessionHiPath root sessionModule
@@ -298,8 +297,8 @@ emitHostBindingInterface initial producer generation name signature manifest roo
   forM_ [path, path ++ ".packages", path ++ ".requirements"] $ \output -> do
     exists <- doesPathExist output
     when exists (fail "host interface reservation output already exists")
-  loaded <- readExactIfaceArtifacts fresh artifacts >>= either fail pure
-  hydrated <- hydrateExactScope fresh loaded
+  loaded <- readExactIfaceArtifacts initial artifacts >>= either fail pure
+  hydrated <- hydrateExactScope initial loaded
   (ty, _) <- resolveCheckedSignature hydrated signature
   (representation, issuedPurpose) <- case purpose of
     HostBuilt -> do
