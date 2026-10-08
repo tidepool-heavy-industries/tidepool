@@ -6512,7 +6512,7 @@ mod tests {
                 &support_view(&[]),
                 std::slice::from_ref(&admission),
                 None,
-                &selection(&support_offer(&[generated])),
+                &selection(&support_offer(&[generated.clone()])),
             )
             .unwrap();
         assert_eq!(omitted.producer, request.producer_sha256);
@@ -6521,6 +6521,84 @@ mod tests {
         assert_eq!(empty.semantic_sha256(), before);
         assert!(request.program_support.is_none());
         assert!(request.program_source_lexical().is_empty());
+
+        let source_text = std::str::from_utf8(&source).unwrap();
+        let hidden = support_product("Hidden");
+        let issued = support_offer(&[generated.clone(), hidden.clone()]);
+        let private =
+            OriginalCompilerInputs::from_selection(&selection(&issued), &issued.artifacts).unwrap();
+        let support = support_view(std::slice::from_ref(&hidden));
+        let continued = private
+            .for_program_continuation(&support, std::slice::from_ref(&admission), source_text)
+            .unwrap();
+        assert_eq!(
+            continued.projection.roles(),
+            support_offer(std::slice::from_ref(&hidden))
+                .projection
+                .roles()
+        );
+        assert!(
+            private
+                .for_program_continuation(&support, &[], source_text)
+                .is_err(),
+            "source spelling alone cannot identify the generated original for exclusion"
+        );
+        assert!(
+            private
+                .for_program_continuation(
+                    &support_view(&[]),
+                    std::slice::from_ref(&admission),
+                    source_text
+                )
+                .is_err(),
+            "continuation must retain every issued non-generated original role"
+        );
+        let types = support
+            .interface_projection(&[identity("fixture", "Hidden")])
+            .unwrap();
+        assert!(
+            private
+                .for_program_continuation(&types, std::slice::from_ref(&admission), source_text)
+                .is_err(),
+            "retaining an issued interface does not preserve its native role"
+        );
+        let variant = scaffold_native_fixture([2; 32], "fixture", "Hidden", 99);
+        assert!(
+            private
+                .for_program_continuation(
+                    &support_view(&[variant]),
+                    std::slice::from_ref(&admission),
+                    source_text
+                )
+                .is_err(),
+            "same-named other native version cannot satisfy the exact issued role"
+        );
+        let foreign = support_product_in_unit("foreign", "Consumer");
+        let issued = support_offer(&[generated, hidden.clone(), foreign.clone()]);
+        let private =
+            OriginalCompilerInputs::from_selection(&selection(&issued), &issued.artifacts).unwrap();
+        assert!(
+            private
+                .for_program_continuation(&support, std::slice::from_ref(&admission), source_text)
+                .is_err(),
+            "the authenticated generated owner's module name cannot omit a foreign-unit role"
+        );
+        let preserved = private
+            .for_program_continuation(
+                &support_view(&[hidden, foreign]),
+                std::slice::from_ref(&admission),
+                source_text,
+            )
+            .unwrap();
+        assert_eq!(preserved.projection.roles().len(), 2);
+        assert!(
+            issued
+                .artifacts
+                .descriptors()
+                .iter()
+                .any(|entry| entry.owner == identity("fixture", "Consumer")),
+            "continuation refusal and exclusion do not mutate original custody"
+        );
 
         for (unit, module) in [("foreign", "Consumer"), ("fixture", "AnotherConsumer")] {
             let offer = support_offer(&[support_product_in_unit(unit, module)]);

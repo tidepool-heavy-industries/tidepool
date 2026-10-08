@@ -8999,6 +8999,57 @@ pub(crate) mod tests {
             let groups = groups.into_iter().filter(|(ordinal, _, _)| seen.insert(*ordinal)).collect::<Vec<_>>();
             check_original_native_index_against_linear_scan(&groups, query);
         }
+        #[test]
+        fn retained_original_membership_matches_raw_prefix_overlays(
+            ordinals in proptest::collection::vec(proptest::prelude::any::<u32>(), 1..24),
+            prefixes in proptest::collection::vec(0usize..24, 1..24),
+        ) {
+            let mut seen = BTreeSet::new();
+            let ordinals = ordinals.into_iter().filter(|ordinal| seen.insert(*ordinal)).collect::<Vec<_>>();
+            let products = [7, 9].map(|version| full_native_fixture("MembershipHistory",
+                ordinals.iter().map(|ordinal| (*ordinal, vec![])).collect(), version));
+            assert_ne!(products[0].owner(), products[1].owner());
+            let retained = RetainedOriginalSources::default();
+            let operation = Arc::new(InventoryOperation::new(Default::default()));
+            let original = retained.admit(&products, &operation).unwrap();
+            let expected = products.iter().flat_map(|product| ordinals.iter().map(move |ordinal| (
+                product.owner().clone(), *ordinal,
+                testing::identity("MembershipHistory", &format!("entry_{ordinal}")),
+            ))).collect::<BTreeSet<_>>();
+            let mut overlay_calls = 0;
+            for (index, prefix) in prefixes.into_iter().enumerate() {
+                let count = prefix % (ordinals.len() + 1);
+                let product = &products[index % products.len()];
+                let selected = product.original_native().unwrap().groups[..count].iter()
+                    .map(AuthenticatedOriginalGroup::admitted).collect::<Vec<_>>();
+                let membership = retained.admit(&products, &operation).unwrap();
+                assert!(Arc::ptr_eq(&original, &membership));
+                let overlay = membership.overlay(&selected, &operation).unwrap();
+                assert_eq!(overlay.groups.len(), count);
+                assert_eq!(overlay.iter().map(|(key, _)| key.clone()).collect::<BTreeSet<_>>(), expected,
+                    "selected prefix overlay cannot omit or add full available membership");
+                if let Some(group) = selected.first() {
+                    let mut foreign = group.clone();
+                    foreign.owner.unit = "foreign".into();
+                    assert!(membership.overlay(&[foreign], &operation).is_err());
+                    assert!(membership.overlay(&[group.clone(), group.clone()], &operation).is_err());
+                }
+                assert!(matches!(retained.admit(&products[..1], &operation),
+                    Err(CertificationError::OriginalMembership(reason))
+                        if *reason == OriginalMembershipFailure::MissingOwner(products[1].owner().clone())));
+                overlay_calls += 1;
+            }
+            let fresh = Arc::new(InventoryOperation::new(Default::default()));
+            let recovered = recovered_witness_fixtures(&products).into_iter().map(|row| row.product).collect::<Vec<_>>();
+            let next = retained.admit(&recovered, &fresh).unwrap();
+            assert!(!Arc::ptr_eq(&original, &next));
+            assert_eq!(next.sources.iter().map(|(key, _)| key.clone()).collect::<BTreeSet<_>>(), expected);
+            let weak = Arc::downgrade(&next);
+            drop(next);
+            drop(retained);
+            assert!(weak.upgrade().is_none());
+            eprintln!("original_membership_history owners=2 groups={} overlay_calls={overlay_calls} recovered=2", ordinals.len());
+        }
     }
 
     #[test]

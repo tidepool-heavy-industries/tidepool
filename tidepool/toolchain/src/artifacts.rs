@@ -7745,6 +7745,92 @@ mod dependency_cache_tests {
 }
 
 #[cfg(test)]
+mod program_support_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_support_refuses_backedges_to_its_exact_generated_owner() {
+        use crate::certified_products::tests::{
+            original_groups_fixture, recovered_witness_fixtures,
+        };
+        let generated = certified_products::fixture_finalized_product(
+            original_groups_fixture("Generated", vec![(3, vec![])], 7, &BTreeMap::new()),
+            [1; 32],
+        );
+        let generated = recovered_witness_fixtures(&[generated]).remove(0).product;
+        let required = certified_products::PendingImportOwner::Source {
+            owner: generated.owner().clone(),
+            original_ordinal: 3,
+            binder: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Generated".into(),
+                namespace: "value".into(),
+                occurrence: "entry_3".into(),
+                record_parent: None,
+            },
+        };
+        for backedge in [false, true] {
+            let support = certified_products::fixture_finalized_product(
+                original_groups_fixture(
+                    "Support",
+                    vec![(
+                        3,
+                        if backedge {
+                            vec![required.clone()]
+                        } else {
+                            vec![]
+                        },
+                    )],
+                    7,
+                    &BTreeMap::new(),
+                ),
+                [1; 32],
+            );
+            let products = recovered_witness_fixtures(&[generated.clone(), support])
+                .into_iter()
+                .map(|row| row.product)
+                .collect::<Vec<_>>();
+            let view = crate::declaration_context::certified_product_artifact_view(
+                [1; 32],
+                &products,
+                &[],
+                None,
+            )
+            .unwrap();
+            let exact = crate::declaration_join::ExactModuleIdentity {
+                unit: "fixture".into(),
+                module: "Generated".into(),
+            };
+            let result = program_support_artifacts(&view, &exact);
+            if backedge {
+                assert!(matches!(result, Err(CompileError::ExtractFailed(message))
+                    if message == "program support depends on its generated scaffold"));
+            } else {
+                let support = result.unwrap();
+                assert!(support
+                    .descriptors()
+                    .iter()
+                    .all(|entry| entry.owner != exact));
+                assert!(support
+                    .descriptors()
+                    .iter()
+                    .any(|entry| entry.owner.module == "Support"));
+            }
+            let foreign = crate::declaration_join::ExactModuleIdentity {
+                unit: "foreign".into(),
+                module: "Generated".into(),
+            };
+            let unexcluded = program_support_artifacts(&view, &foreign).unwrap();
+            assert_eq!(
+                unexcluded.descriptors(),
+                view.descriptors(),
+                "excluding a foreign-unit name cannot hide the actual generated owner"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod source_proof_pairing_tests {
     use super::*;
 
