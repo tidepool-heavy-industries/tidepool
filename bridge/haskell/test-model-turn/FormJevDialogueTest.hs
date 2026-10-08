@@ -8,66 +8,20 @@
 -- | A notebook-style dialogue through the real Form and Jev public surfaces.
 -- Host GHC executes typed transport failure/fallback. The successful response
 -- fixture requires Tidepool's native JSON anchors and is a separate native gate.
--- form-choice-response.json was emitted by Jev's test/Proto.stub "quick"
--- with Core.prepare and official Aeson at core revision 2883fdc38cc7a64572e76ea43bd38e1df3a5e28b.
-module FormJevDialogueTest (formJevDialogueTests, dialogue) where
+module FormJevDialogueTest (formJevDialogueTests) where
 import Prelude
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.List.NonEmpty (NonEmpty(..))
 import Control.Monad.Freer (Eff, Member, interpret, run)
 import Control.Monad.Freer.State (State, get, modify, runState)
 import Test.Tasty.HUnit (assertEqual)
 import Tidepool.Test.Runner (TestTree, testCase, testGroup)
 import Tidepool.Aeson.Value
-import qualified Tidepool.Form as F
-import qualified Tidepool.View as V
-import Tidepool.Inspection (display)
 import Tidepool.Effects.Core
   (AskUser(..), Jev(..), JevCallError(..), Console(..), FormLease(..), FormAttemptId(..), FormAttempt(..), FormTransition(..))
 import qualified Jev.Operators as J
 
-data SelectionFailure = InferenceFailure (J.JevError JevCallError) | PolicyDoubt J.Doubt
-  deriving (Show)
-data DialogueResult = Finished (Maybe SelectionFailure) Text Text
-  | FirstDismissed | FallbackDismissed SelectionFailure | FollowupDismissed
-  | FormFailed F.FormCause deriving (Show)
-
--- The same original action pairs supply both the semantic offers and the
--- human fallback. Preparing or displaying the unselected action must be lazy.
-dialogue :: (Member AskUser effects, Member Jev effects, Member Console effects) => Eff effects DialogueResult
-dialogue = do
-  first <- F.askUser (F.textInput "Subject" Nothing)
-  case first of
-    F.Submitted subject -> do
-      let quick = (V.text "Quick path", F.askUser (F.textInput "Follow-up" Nothing))
-          careful = (V.text "Careful path", error "unselected original continuation was demanded")
-          packet = #route J.:= J.choice "Which path?"
-            (J.alt #quick "Quick path" (snd quick) J..| J.alt #careful "Careful path" (snd careful))
-          world = J.rawState (object ["subject" .= subject])
-          runSelected failure action = do
-            followup <- action
-            case followup of
-              F.Submitted reason -> do
-                _ <- display (V.column [V.text subject, V.text reason])
-                pure (Finished failure subject reason)
-              F.Dismissed -> pure FollowupDismissed
-              F.FormUnavailable cause -> pure (FormFailed cause)
-          humanFallback failure = do
-            selected <- F.askUser (F.choice "Next step"
-              (F.option (fst quick) (snd quick) :| [F.option (fst careful) (snd careful)]))
-            case selected of
-              F.Submitted action -> runSelected (Just failure) action
-              F.Dismissed -> pure (FallbackDismissed failure)
-              F.FormUnavailable cause -> pure (FormFailed cause)
-      inferred <- J.ask world packet
-      case inferred of
-        Left failure -> humanFallback (InferenceFailure failure)
-        Right response -> case J.takenUnder J.careful (J.answers response).route of
-          Left doubt -> humanFallback (PolicyDoubt doubt)
-          Right selected -> runSelected Nothing (J.settledValue selected)
-    F.Dismissed -> pure FirstDismissed
-    F.FormUnavailable cause -> pure (FormFailed cause)
+import qualified Examples.JevFormWorkflow as Workflow
 
 data Event = Opened | Awaited | Committed | Closed | Inferred | Displayed Value deriving (Eq,Show)
 data Script = Script { answers :: [FormAttempt], events :: [Event], nextMount :: Int, leases :: [FormLease], currentAttempt :: Maybe FormAttemptId }
@@ -114,8 +68,8 @@ consoleHost :: Console a -> Eff '[State Script] a
 consoleHost DisplayAllowanceWith = pure 8192
 consoleHost (DisplayViewWith view) = mark (Displayed view)
 consoleHost _ = error "dialogue used an unexpected console operation"
-runDialogue :: [FormAttempt] -> (DialogueResult,Script)
-runDialogue replies = run (runState (initial replies) (interpret consoleHost (interpret jevHost (interpret formHost dialogue))))
+runDialogue :: [FormAttempt] -> (Workflow.DialogueResult '[AskUser,Jev,Console,State Script],Script)
+runDialogue replies = run (runState (initial replies) (interpret consoleHost (interpret jevHost (interpret formHost Workflow.dialogue))))
 submitted :: Text -> Text -> FormAttempt
 submitted token value = FormSubmitted (FormAttemptToken token) (object ["f0" .= value])
 
@@ -123,22 +77,55 @@ formJevDialogueTests :: TestTree
 formJevDialogueTests = testGroup "form-jev-dialogue"
   [ testCase "typed Jev failure selects original human continuation and appends next form" fallbackContinues
   , testCase "dismissed human fallback runs neither continuation nor another inference" fallbackDismissed
+  , testCase "missing criteria chosen by a human retains its separate domain result" fallbackMissingCriteria
+  , testCase "dismissed follow-up retains its chosen origin and meaning" followupDismissed
   ]
 fallbackContinues :: IO ()
 fallbackContinues = do
   let (outcome,final) = runDialogue [submitted "subject" "Inspect the change",submitted "fallback" "o0",submitted "followup" "Keep the original action"]
-  case outcome of
-    Finished (Just (InferenceFailure (J.Transport (JevCircuitOpen 503 987)))) "Inspect the change" "Keep the original action" -> pure ()
-    _ -> error ("typed failure or selected original value lost: " ++ show outcome)
-  let expectedView = object ["kind" .= ("column"::Text),"children" .=
-        [object ["kind" .= ("text"::Text),"text" .= ("Inspect the change"::Text),"truncated" .= False],
-         object ["kind" .= ("text"::Text),"text" .= ("Keep the original action"::Text),"truncated" .= False]]]
-  assertEqual "one inference, same sequential interpreter, final rich output" [Opened,Awaited,Committed,Inferred,Opened,Awaited,Committed,Opened,Awaited,Committed,Displayed expectedView] (events final)
+  case Workflow.outcome outcome of
+    Workflow.Finished (Workflow.HumanAfterInferenceFailure (J.Transport (JevCircuitOpen 503 987)))
+      (Workflow.Delivery Workflow.Express)
+      (Workflow.DeliveryPrepared Workflow.Express "Inspect the change" "Keep the original action") -> pure ()
+    actual -> error ("typed failure or selected original value lost: " ++ show actual)
+  assertEqual "exact effect history includes only chosen continuation"
+    [Opened,Awaited,Committed,Inferred,Opened,Awaited,Committed,Opened,Awaited,Committed]
+    [event | event <- events final, case event of Displayed _ -> False; _ -> True]
+  assertEqual "only authored final presentation executes Console" 1
+    (length [() | Displayed _ <- events final])
   assertEqual "all mounted leases settled" [] (leases final)
   assertEqual "all supplied answers consumed" [] (answers final)
+  case Workflow.retainedResponse outcome of
+    Nothing -> pure ()
+    Just _ -> error "transport failure acquired a response"
 fallbackDismissed :: IO ()
 fallbackDismissed = do
   let (outcome,final) = runDialogue [submitted "subject" "Inspect the change",FormDismissed]
-  case outcome of FallbackDismissed (InferenceFailure (J.Transport (JevCircuitOpen 503 987))) -> pure (); _ -> error (show outcome)
+  case Workflow.outcome outcome of
+    Workflow.SelectionDismissed (Workflow.HumanAfterInferenceFailure (J.Transport (JevCircuitOpen 503 987))) -> pure ()
+    actual -> error (show actual)
   assertEqual "dismissal ends before selected action or another inference" [Opened,Awaited,Committed,Inferred,Opened,Awaited,Closed] (events final)
   assertEqual "dismissed lease closed" [] (leases final)
+
+fallbackMissingCriteria :: IO ()
+fallbackMissingCriteria = do
+  let (result,final) = runDialogue
+        [submitted "subject" "A delivery",submitted "fallback" "o2",submitted "criteria" "Tomorrow, price 8"]
+  case Workflow.outcome result of
+    Workflow.Finished (Workflow.HumanAfterInferenceFailure (J.Transport (JevCircuitOpen 503 987)))
+      Workflow.MissingDeliveryCriteria (Workflow.CriteriaSupplied "A delivery" "Tomorrow, price 8") -> pure ()
+    actual -> error (show actual)
+  assertEqual "one inference and one selected follow-up" 1 (length [() | Inferred <- events final])
+  assertEqual "three independent sequential forms" 3 (length [() | Opened <- events final])
+  assertEqual "clarification leaves no live leases" [] (leases final)
+
+followupDismissed :: IO ()
+followupDismissed = do
+  let (result,final) = runDialogue [submitted "subject" "A delivery",submitted "fallback" "o1",FormDismissed]
+  case Workflow.outcome result of
+    Workflow.ContinuationDismissed (Workflow.HumanAfterInferenceFailure (J.Transport (JevCircuitOpen 503 987)))
+      (Workflow.Delivery Workflow.Economy) -> pure ()
+    actual -> error (show actual)
+  assertEqual "the selected follow-up closes once" 1 (length [() | Closed <- events final])
+  assertEqual "dismissal does not display a final result" 0 (length [() | Displayed _ <- events final])
+  assertEqual "dismissal releases all form leases" [] (leases final)

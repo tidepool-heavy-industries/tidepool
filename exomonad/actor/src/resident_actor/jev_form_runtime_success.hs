@@ -11,7 +11,7 @@ _ <- do
       replacementQuick = action "unselected-replacement-quick" 59
       replacementCareful = action "unselected-replacement-careful" 73
       packet quick careful = #route J.:= J.choice "Which path?"
-        (J.alt #quick (String "Quick path") quick J..| J.alt #careful (String "Careful path") careful)
+        (J.alt #quick "Quick path" quick J..| J.alt #careful "Careful path" careful)
       world = J.rawState (object [])
   original <- case J.prepare J.jevLatest world (packet originalQuick originalCareful) of
     Right prepared -> pure prepared
@@ -25,17 +25,14 @@ _ <- do
   prepared <- case human of
     F.Submitted retained -> pure retained
     _ -> error "prepared plan was not selected"
-  reply <- Host.jevTransport (J.request prepared)
-  envelope <- case reply of
-    Right wire -> case J.decode prepared wire of
-      Right decoded -> pure decoded
-      Left _ -> error "prepared decoder rejected the scripted response"
-    Left _ -> error "scripted Jev transport failed"
+  envelope <- J.executePrepared prepared >>= \result -> case result of
+    Right decoded -> pure decoded
+    Left _ -> error "public executePrepared rejected the scripted response"
   let projected = J.mapResponse (const ()) envelope
-      metadata = J.responseModel envelope == "stub-1.0"
+      metadata = J.resolvedModel envelope == "stub-1.0"
         && J.usage envelope == J.Usage (Just 100) (Just 7)
         && J.diagnostics envelope == []
-        && J.responseModel projected == J.responseModel envelope
+        && J.resolvedModel projected == J.resolvedModel envelope
         && J.rawUsage projected == J.rawUsage envelope
         && J.responsePreview projected == J.responsePreview envelope
         && J.diagnostics projected == J.diagnostics envelope

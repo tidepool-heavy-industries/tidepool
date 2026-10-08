@@ -633,6 +633,8 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "exomonad-actor" and unit:
         env["TIDEPOOL_JEV_SOURCE_DIR"] = "$(location toolchains//:jev_sources)"
         resources.append("toolchains//:jev_sources")
+        env["TIDEPOOL_JEV_WORKSPACE_DIR"] = "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad"
+        resources.append("//exomonad/examples/workspace:facade_test_sources")
         env["EXOMONAD_WORKSPACE_GITLINK"] = "$(location //build/rust:workspace_gitlink)"
         env["EXOMONAD_WORKSPACE_GIT_BUNDLE"] = "$(location //build/rust:workspace_git_bundle)"
         env["TIDEPOOL_WORKSPACE_TEST_GIT"] = "$(location toolchains//:exomonad_runtime_tools)/bin/git"
@@ -684,6 +686,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_GHC",
     "TIDEPOOL_HASKELL_ACTORS_DIR",
     "TIDEPOOL_JEV_SOURCE_DIR",
+    "TIDEPOOL_JEV_WORKSPACE_DIR",
     "TIDEPOOL_M3_FIXTURE_DIR",
     "TIDEPOOL_NATIVE_JSON_SOURCE_DIR",
     "TIDEPOOL_PREPARED_FIXTURE_COMPILER",

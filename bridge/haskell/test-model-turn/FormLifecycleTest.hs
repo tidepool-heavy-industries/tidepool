@@ -7,6 +7,7 @@
 module FormLifecycleTest (formLifecycleTests) where
 import Prelude
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.List.NonEmpty (NonEmpty(..))
 import Control.Monad.Freer (Eff, interpret, run)
 import Control.Monad.Freer.State (State, get, modify, runState)
@@ -19,6 +20,9 @@ import Tidepool.Effects.Core
   (AskUser(..), FormLease(..), FormAttemptId(..), FormAttempt(..), FormTransition(..))
 
 data Event = Opened | Awaited | Rejected | Committed | Closed deriving (Eq,Show)
+data Retry = InvalidRetry Int | StaleCommitRetry Int deriving (Eq,Show)
+data Ending = SubmitFinal Int | Dismiss | LoseTransport deriving (Eq,Show)
+data History = History [Retry] Ending deriving (Eq,Show)
 data Script = Script
   { attempts :: [Either FormCause FormAttempt]
   , commits :: [Either FormCause FormTransition]
@@ -85,6 +89,8 @@ formLifecycleTests = testGroup "human-form-lifecycle"
   , testCase "dismissal survives a cleanup failure" dismissal
   , testCase "transport cause survives a cleanup failure" unavailable
   , testCase "durable commit returns original value without another host operation" committedValue
+  , testCase "bounded retry histories match lifecycle counts and final outcome" retryHistories
+  , testCase "the accepted action runs once for each explicit sequence" acceptedActionRunsWhenSequenced
   ]
 invalidCorrected :: IO ()
 invalidCorrected = do
@@ -116,6 +122,74 @@ committedValue = do
       (answer,seen) = runForm initial (choice "Action" (option (text "Original") (+1) :| []))
   case answer of Submitted action -> assertEqual "selected original survives native commit" (11::Int) (action 10); _ -> error "commit failed"
   assertEqual "native applied commit authoritatively settles the lease" [Opened,Awaited,Committed] seen
+
+retryHistories :: IO ()
+retryHistories = mapM_ check histories
+  where
+    histories =
+      [ History retries ending
+      | depth <- [0..3]
+      , retries <- sequence (replicate depth [InvalidRetry 0,InvalidRetry (-1),StaleCommitRetry 2,StaleCommitRetry 3])
+      , ending <- [SubmitFinal 4, Dismiss, LoseTransport]
+      ]
+
+    check history@(History retries ending) = do
+      let form = validate (\n -> ["positive required" | n <= 0]) (intInput "Count" Nothing)
+          attempts = map retryAttempt retries ++ [endingAttempt ending]
+          rejects = [Right FormStale | InvalidRetry _ <- retries]
+          commits = [Right FormStale | StaleCommitRetry _ <- retries] ++
+            [Right FormApplied | SubmitFinal _ <- [ending]]
+          initial = (script attempts commits) { rejects = rejects }
+          (answer,seen) = runForm initial form
+          expected = expectedEvents retries ending
+          label = show history
+      assertEqual (label ++ " event sequence") expected seen
+      assertEqual (label ++ " opens") 1 (count Opened seen)
+      assertEqual (label ++ " reads") (length retries + 1) (count Awaited seen)
+      assertEqual (label ++ " rejects") (length [() | InvalidRetry _ <- retries]) (count Rejected seen)
+      assertEqual (label ++ " commits")
+        (length [() | StaleCommitRetry _ <- retries] + finalCommit ending)
+        (count Committed seen)
+      assertEqual (label ++ " closes") (finalClose ending) (count Closed seen)
+      case (ending,answer) of
+        (SubmitFinal expectedValue, Submitted actual) -> assertEqual (label ++ " final answer") expectedValue actual
+        (Dismiss, Dismissed) -> pure ()
+        (LoseTransport, FormUnavailable (FormTransportFailed "connection closed")) -> pure ()
+        _ -> error (label ++ " ended with the wrong form result")
+
+    retryAttempt (InvalidRetry n) = submitted (attemptKey "invalid" n) (String (T.pack (show n)))
+    retryAttempt (StaleCommitRetry n) = submitted (attemptKey "stale" n) (String (T.pack (show n)))
+    endingAttempt (SubmitFinal n) = submitted "final" (String (T.pack (show n)))
+    endingAttempt Dismiss = Right FormDismissed
+    endingAttempt LoseTransport = Left (FormTransportFailed "connection closed")
+    attemptKey prefix n = prefix <> "-" <> T.pack (show n)
+
+    expectedEvents retries ending =
+      [Opened] ++ concatMap retryEvents retries ++ terminalEvents ending
+    retryEvents (InvalidRetry _) = [Awaited,Rejected]
+    retryEvents (StaleCommitRetry _) = [Awaited,Committed]
+    terminalEvents (SubmitFinal _) = [Awaited,Committed]
+    terminalEvents Dismiss = [Awaited,Closed]
+    terminalEvents LoseTransport = [Awaited,Closed]
+    count event = length . filter (== event)
+    finalCommit (SubmitFinal _) = 1
+    finalCommit _ = 0
+    finalClose (SubmitFinal _) = 0
+    finalClose _ = 1
+
+acceptedActionRunsWhenSequenced :: IO ()
+acceptedActionRunsWhenSequenced = do
+  let action = modify (+ (1 :: Int))
+      form = choice "Action" (option (text "same") action :| [])
+      (answer,seen) = runForm (script [submitted "accepted" (String "o0")] [Right FormApplied]) form
+  case answer of
+    Submitted accepted -> do
+      let (_,once) = run (runState (0 :: Int) accepted)
+      let (_,runs) = run (runState (0 :: Int) (accepted >> accepted))
+      assertEqual "one explicit sequence runs once" 1 once
+      assertEqual "explicitly sequencing the same action runs it twice" 2 runs
+    _ -> error "accepted action unavailable"
+  assertEqual "the host sees one accepted submission" [Opened,Awaited,Committed] seen
 
 staleRejection :: IO ()
 staleRejection = do

@@ -173,8 +173,13 @@ impl Fixture {
             .expect("pinned Core source root");
         assert!(core.join("Jev/Core.hs").is_file());
         include.push(core);
+        let workspace = PathBuf::from(std::env::var_os("TIDEPOOL_JEV_WORKSPACE_DIR")
+            .expect("owning native action must declare the public Jev workspace sources"))
+            .canonicalize().expect("declared Jev workspace root");
+        assert!(workspace.join("Jev/Operators.hs").is_file());
+        include.push(workspace);
         let preamble = format!(
-            "{}\nimport qualified Jev.Core as J\nimport qualified Jev.Host as Host\nimport Jev.Tidepool ()\nimport qualified Tidepool.Form as F\nimport qualified Tidepool.View as V\nimport Data.List.NonEmpty (NonEmpty(..))\n",
+            "{}\nimport qualified Jev.Operators as J\nimport qualified Tidepool.Form as F\nimport qualified Tidepool.View as V\nimport Data.List.NonEmpty (NonEmpty(..))\nimport Control.Monad (foldM, forM_)\nimport Tidepool.Inspection.Display (Display(..))\n",
             tidepool_mcp::build_notebook_preamble(&declarations, false),
         );
         let directory = tempfile::tempdir().expect("session source directory");
@@ -305,6 +310,22 @@ async fn compiled_form_jev_transport_refusal_preserves_cause_and_runs_no_action(
         let view = state.views[0].to_string();
         assert!(view.contains("typed-circuit-open"), "{view}");
         assert!(!view.contains("unselected"), "{view}");
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn compiled_public_jev_response_histories_preserve_evidence_and_explicit_effect_counts() {
+    let fixture = Fixture::new(754, false);
+    fixture.execute(include_str!("jev_response_semantics.hs")).await;
+    // Forty-nine two-operation histories, plus the deliberate Execute/Run/Run
+    // sequence: only explicit Execute operations issue provider requests.
+    assert_eq!(fixture.jev.requests.lock().len(), 15);
+    {
+        let state = fixture.host.0.lock();
+        assert!(state.forms.is_empty(), "inspection and actions do not ask for forms");
+        assert_eq!(state.views.len(), 16, "only explicit Run operations execute actions");
+        assert!(state.views.iter().all(|view| view.to_string().contains("selected-action")));
     }
     fixture.finish().await;
 }
