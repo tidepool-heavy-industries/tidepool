@@ -827,6 +827,34 @@ fn staged_future_interface_does_not_widen_prior_views() {
 proptest! {
     #![proptest_config(property_config())]
     #[test]
+    fn native_requirement_index_matches_flat_edge_oracle(
+        raw in proptest::collection::vec((0u32..32, 0u8..4, 0u32..32, any::<bool>()), 0..96),
+        queries in proptest::collection::vec(0u32..40, 0..48),
+    ) {
+        let edges = raw.into_iter().map(|(ordinal, owner, required, binding)| {
+            let owner = ExactModuleIdentity { unit: "fixture".into(), module: format!("M{owner}") };
+            let dependency = if binding {
+                ArtifactDependency::NativeBinding { dependent_ordinal: ordinal, generation: u64::from(required), namespace: "value".into(), occurrence: format!("v{required}"), record_parent: None }
+            } else {
+                ArtifactDependency::NativeGroup { dependent_ordinal: ordinal, required_ordinal: required }
+            };
+            (owner, dependency)
+        }).collect::<Vec<_>>();
+        let indexed = index_native_requirements(edges.clone()).unwrap();
+        let mut reversed = edges.clone(); reversed.reverse();
+        prop_assert_eq!(&indexed, &index_native_requirements(reversed).unwrap());
+        for ordinal in queries.into_iter().chain(0..40) {
+            let expected = edges.iter().filter(|(_, dependency)| match dependency {
+                ArtifactDependency::NativeGroup { dependent_ordinal, .. } | ArtifactDependency::NativeBinding { dependent_ordinal, .. } => *dependent_ordinal == ordinal,
+                ArtifactDependency::Interface => false,
+            }).cloned().collect::<BTreeSet<_>>();
+            let actual = indexed.get(&ordinal).into_iter().flatten().cloned().collect::<BTreeSet<_>>();
+            prop_assert_eq!(&actual, &expected);
+            prop_assert_eq!(indexed.get(&ordinal).map_or(0, Vec::len), expected.len(), "duplicate edge rows are canonical sets");
+        }
+    }
+
+    #[test]
     fn staged_native_histories_match_raw_fact_model(
         masks in proptest::collection::vec(0u8..16, MODULES),
         generations in proptest::collection::vec(0u64..8, 2 * MODULES),

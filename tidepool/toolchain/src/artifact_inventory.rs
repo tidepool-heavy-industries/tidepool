@@ -463,13 +463,52 @@ pub(crate) struct ArtifactEntry {
     pub payload: ArtifactPayload,
     pub requirements: Vec<ExactModuleIdentity>,
     interface_seals: BTreeMap<ExactModuleIdentity, [u8; 32]>,
-    pub native_requirements: Vec<(ExactModuleIdentity, ArtifactDependency)>,
+    /// Complete certified edges grouped by their dependent original ordinal.
+    /// Zero-edge groups remain in the independent certified ordinal census.
+    pub native_requirements: BTreeMap<u32, Vec<(ExactModuleIdentity, ArtifactDependency)>>,
     native_owners: BTreeMap<ExactModuleIdentity, NativeOwnerKey>,
     native_group_ordinals: BTreeSet<u32>,
     pub retained_packages: Vec<RetainedPackageDependency>,
 }
 
+fn index_native_requirements(
+    requirements: Vec<(ExactModuleIdentity, ArtifactDependency)>,
+) -> Result<BTreeMap<u32, Vec<(ExactModuleIdentity, ArtifactDependency)>>, CompileError> {
+    let mut indexed = BTreeMap::<u32, Vec<_>>::new();
+    for (owner, dependency) in requirements {
+        let ordinal = match &dependency {
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal, ..
+            }
+            | ArtifactDependency::NativeBinding {
+                dependent_ordinal, ..
+            } => *dependent_ordinal,
+            ArtifactDependency::Interface => {
+                return Err(failure("interface edge in native group witness"));
+            }
+        };
+        indexed
+            .entry(ordinal)
+            .or_default()
+            .push((owner, dependency));
+    }
+    for requirements in indexed.values_mut() {
+        requirements.sort();
+        requirements.dedup();
+    }
+    Ok(indexed)
+}
+
 impl ArtifactEntry {
+    fn native_requirements_for(
+        &self,
+        ordinal: u32,
+    ) -> &[(ExactModuleIdentity, ArtifactDependency)] {
+        self.native_requirements
+            .get(&ordinal)
+            .map_or(&[], Vec::as_slice)
+    }
+
     #[cfg(test)]
     pub(crate) fn original(
         producer: [u8; 32],
@@ -536,7 +575,7 @@ impl ArtifactEntry {
             payload: ArtifactPayload::Original(product),
             requirements,
             interface_seals,
-            native_requirements: native_requirements.artifact_edges,
+            native_requirements: index_native_requirements(native_requirements.artifact_edges)?,
             native_owners,
             native_group_ordinals: native_requirements.group_ordinals,
             retained_packages: native_requirements.retained_packages,
@@ -599,7 +638,7 @@ impl ArtifactEntry {
             payload: ArtifactPayload::Canonical(interface),
             requirements: interface_seals.keys().cloned().collect(),
             interface_seals,
-            native_requirements: Vec::new(),
+            native_requirements: BTreeMap::new(),
             native_owners: BTreeMap::new(),
             native_group_ordinals: BTreeSet::new(),
             retained_packages: Vec::new(),
@@ -634,7 +673,7 @@ impl ArtifactEntry {
             payload: ArtifactPayload::Interface(interface, role),
             requirements,
             interface_seals: BTreeMap::new(),
-            native_requirements: Vec::new(),
+            native_requirements: BTreeMap::new(),
             native_owners: BTreeMap::new(),
             native_group_ordinals: BTreeSet::new(),
             retained_packages: Vec::new(),
@@ -801,6 +840,8 @@ struct InventoryState {
     view_queries: AtomicU64,
     entry_handle_copies: AtomicU64,
     admission_owner_lookups: AtomicU64,
+    #[cfg(test)]
+    native_requirement_rows_examined: AtomicU64,
     reclamation_runs: u64,
     reclamation_candidate_nodes: u64,
     reclaimed_nodes: u64,
@@ -901,21 +942,11 @@ impl SelectedOwners {
                 InventoryNodeKey::Artifact(key.artifact),
                 ArtifactDependency::Interface,
             )]);
-            for (owner, dependency) in &entry.native_requirements {
-                let ordinal = match dependency {
-                    ArtifactDependency::NativeGroup {
-                        dependent_ordinal, ..
-                    }
-                    | ArtifactDependency::NativeBinding {
-                        dependent_ordinal, ..
-                    } => *dependent_ordinal,
-                    ArtifactDependency::Interface => {
-                        return Err(failure("interface edge in native group witness"))
-                    }
-                };
-                if ordinal != key.original_ordinal {
-                    continue;
-                }
+            for (owner, dependency) in entry.native_requirements_for(key.original_ordinal) {
+                #[cfg(test)]
+                state
+                    .native_requirement_rows_examined
+                    .fetch_add(1, Ordering::Relaxed);
                 state
                     .admission_owner_lookups
                     .fetch_add(1, Ordering::Relaxed);
@@ -1145,8 +1176,10 @@ impl ArtifactInventory {
             .map(|mut entry| {
                 entry.requirements.sort();
                 entry.requirements.dedup();
-                entry.native_requirements.sort();
-                entry.native_requirements.dedup();
+                for requirements in entry.native_requirements.values_mut() {
+                    requirements.sort();
+                    requirements.dedup();
+                }
                 entry.retained_packages.sort();
                 entry.retained_packages.dedup();
                 Arc::new(entry)
@@ -1745,31 +1778,35 @@ impl ArtifactView {
         let mut requirements = BTreeSet::new();
         for group in groups {
             state.graph_visits.fetch_add(1, Ordering::Relaxed);
-            for (owner, dependency) in &entries[&group.artifact].native_requirements {
+            for (owner, dependency) in
+                entries[&group.artifact].native_requirements_for(group.original_ordinal)
+            {
+                #[cfg(test)]
+                state
+                    .native_requirement_rows_examined
+                    .fetch_add(1, Ordering::Relaxed);
                 if let ArtifactDependency::NativeBinding {
-                    dependent_ordinal,
                     generation,
                     namespace,
                     occurrence,
                     record_parent,
+                    ..
                 } = dependency
                 {
-                    if *dependent_ordinal == group.original_ordinal {
-                        let id = owners.interfaces.get(owner).copied().ok_or_else(|| {
-                            failure("validated native binding lacks its interface owner")
-                        })?;
-                        requirements.insert(NativeBindingRequirement {
-                            artifact_id: id,
-                            identity: tidepool_repr::execution_schema::SymbolIdentity {
-                                unit: owner.unit.clone(),
-                                module: owner.module.clone(),
-                                namespace: namespace.clone(),
-                                occurrence: occurrence.clone(),
-                                record_parent: record_parent.clone(),
-                            },
-                            generation: *generation,
-                        });
-                    }
+                    let id = owners.interfaces.get(owner).copied().ok_or_else(|| {
+                        failure("validated native binding lacks its interface owner")
+                    })?;
+                    requirements.insert(NativeBindingRequirement {
+                        artifact_id: id,
+                        identity: tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: owner.unit.clone(),
+                            module: owner.module.clone(),
+                            namespace: namespace.clone(),
+                            occurrence: occurrence.clone(),
+                            record_parent: record_parent.clone(),
+                        },
+                        generation: *generation,
+                    });
                 }
             }
         }
@@ -2096,6 +2133,111 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_requirement_index_refuses_interface_edges() {
+        assert!(index_native_requirements(vec![(
+            module("Support"),
+            ArtifactDependency::Interface
+        )])
+        .is_err());
+    }
+
+    #[test]
+    fn native_requirement_index_preserves_empty_sparse_and_overlapping_edges() {
+        assert!(index_native_requirements(Vec::new()).unwrap().is_empty());
+        let edge = (
+            module("Helper"),
+            ArtifactDependency::NativeGroup {
+                dependent_ordinal: u32::MAX,
+                required_ordinal: 7,
+            },
+        );
+        let overlapping = (module("OtherHelper"), edge.1.clone());
+        let indexed =
+            index_native_requirements(vec![edge.clone(), overlapping.clone(), edge.clone()])
+                .unwrap();
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(
+            indexed[&u32::MAX].iter().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([edge, overlapping])
+        );
+        assert_eq!(indexed[&u32::MAX].len(), 2);
+    }
+
+    #[test]
+    fn native_requirement_planning_visits_only_selected_group_edges() {
+        for count in [8u32, 64, 512] {
+            let inventory = ArtifactInventory::default();
+            let helper =
+                issued_native_groups("Helper", vec![(7, Vec::new())], &[], &BTreeMap::new());
+            let consumer = issued_native_groups(
+                "Consumer",
+                (0..count)
+                    .map(|i| (3 + 8 * i, vec![issued_source(&helper, 7)]))
+                    .collect(),
+                &[&helper],
+                &BTreeMap::new(),
+            );
+            let consumer_id = consumer.descriptor.id;
+            let helper_key = NativeGroupKey {
+                artifact: helper.descriptor.id,
+                original_ordinal: 7,
+            };
+            let entries = vec![Arc::new(helper), Arc::new(consumer)];
+            let selected = BTreeSet::from([
+                helper_key,
+                NativeGroupKey {
+                    artifact: consumer_id,
+                    original_ordinal: 3,
+                },
+            ]);
+            let view = inventory
+                .admit_recovery_selection(&inventory.empty_view(), entries, &selected)
+                .unwrap();
+            assert_eq!(view.selected_native_groups(), selected);
+            let examined = || {
+                inventory
+                    .0
+                    .lock()
+                    .unwrap()
+                    .native_requirement_rows_examined
+                    .load(Ordering::Relaxed)
+            };
+            assert_eq!(
+                examined(),
+                1,
+                "unused groups must not add edge scans at count={count}"
+            );
+            let all = (0..count)
+                .map(|i| NativeGroupKey {
+                    artifact: consumer_id,
+                    original_ordinal: 3 + 8 * i,
+                })
+                .chain([helper_key])
+                .collect::<BTreeSet<_>>();
+            let before = examined();
+            let expanded = inventory
+                .admit_recovery_selection(&view, Vec::new(), &all)
+                .unwrap();
+            assert_eq!(expanded.selected_native_groups(), all);
+            assert_eq!(
+                examined() - before,
+                u64::from(count),
+                "whole selection visits each edge once"
+            );
+            let before = examined();
+            let repeated = inventory
+                .admit_recovery_selection(&expanded, Vec::new(), &all)
+                .unwrap();
+            assert_eq!(repeated, expanded);
+            assert_eq!(
+                examined() - before,
+                u64::from(count),
+                "known nodes still validate every selected edge"
+            );
+        }
+    }
+
+    #[test]
     fn cold_original_admission_distinguishes_supplied_rows_from_retained_vertices() {
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
@@ -2365,13 +2507,17 @@ mod tests {
         let mut conflicting_bytes = cold.clone();
         conflicting_bytes.payload = ArtifactPayload::Original(altered);
         let mut conflicting_edges = cold.clone();
-        conflicting_edges.native_requirements.push((
-            module("Original"),
-            ArtifactDependency::NativeGroup {
-                dependent_ordinal: 0,
-                required_ordinal: 0,
-            },
-        ));
+        conflicting_edges
+            .native_requirements
+            .entry(0)
+            .or_default()
+            .push((
+                module("Original"),
+                ArtifactDependency::NativeGroup {
+                    dependent_ordinal: 0,
+                    required_ordinal: 0,
+                },
+            ));
         for incoming in [conflicting_bytes, conflicting_edges] {
             assert!(matches!(
                 cold_inventory.admit(&cold_view, vec![incoming]),
@@ -3467,7 +3613,7 @@ mod tests {
         supplied_native.push((
             consumer.descriptor.id,
             original.descriptor.id,
-            consumer.native_requirements[0].1.clone(),
+            consumer.native_requirements[&2][0].1.clone(),
         ));
         assert!(restore_recovery_interface_dependencies(
             &mut entries,
