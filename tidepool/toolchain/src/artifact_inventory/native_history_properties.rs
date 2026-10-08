@@ -725,9 +725,10 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                     let result = actual[*from]
                         .as_ref()
                         .unwrap()
-                        .native_requirements_from_roots(&[root]);
+                        .native_requirements_with_groups_from_roots(&[root]);
                     prop_assert_eq!(result.is_ok(), expected, "step {}: {:?}", step, op);
-                    if let Ok(result) = result {
+                    if let Ok((result, selected)) = result {
+                        prop_assert_eq!(selected, catalog.selection(&catalog.group_closure(&roots)), "exact requested closure excludes unrelated available groups at step {}", step);
                         prop_assert_eq!(result.bindings, catalog.bindings_for(&roots));
                         prop_assert!(result.packages.is_empty());
                         coverage.reads += 1;

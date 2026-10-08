@@ -1026,6 +1026,7 @@ struct GroupGraphFixture {
     view: ArtifactView,
     reversed_view: ArtifactView,
     binding_ids: Vec<ArtifactId>,
+    native_ids: Vec<ArtifactId>,
     root_id: ArtifactId,
 }
 
@@ -1143,6 +1144,7 @@ fn group_graph_fixture(extra_edges: &[u8], generations: &[u64]) -> GroupGraphFix
             .unwrap()
         })
         .collect();
+    let native_ids = entries.iter().map(|entry| entry.descriptor.id).collect();
     let value_ids: Vec<_> = (0..GROUP_NODES)
         .map(|node| {
             let owner = ExactModuleIdentity {
@@ -1179,6 +1181,7 @@ fn group_graph_fixture(extra_edges: &[u8], generations: &[u64]) -> GroupGraphFix
         view,
         reversed_view,
         binding_ids: value_ids,
+        native_ids,
         root_id,
     }
 }
@@ -1316,7 +1319,7 @@ proptest! {
                 }
             }
         }
-        let GroupGraphFixture { view, reversed_view, binding_ids, root_id } = group_graph_fixture(&extra_edges, &generations);
+        let GroupGraphFixture { view, reversed_view, binding_ids, native_ids, root_id } = group_graph_fixture(&extra_edges, &generations);
         let roots = [NativeRequirementRoot::Group {
             artifact: root_id,
             original_ordinal: 7,
@@ -1324,7 +1327,14 @@ proptest! {
         let expected_groups = selected_group_closure(&edges, &BTreeSet::from([(0, 7)]));
         let expected_bindings =
             bindings_for_selected_groups(&expected_groups, &binding_ids, &generations);
-        let actual = view.native_requirements_from_roots(&roots).unwrap();
+        let (actual, actual_groups) = view.native_requirements_with_groups_from_roots(&roots).unwrap();
+        let expected_keys = expected_groups.iter().map(|(node, ordinal)| NativeGroupKey {
+            artifact: native_ids[*node],
+            original_ordinal: *ordinal,
+        }).collect::<BTreeSet<_>>();
+        prop_assert_eq!(&actual_groups, &expected_keys);
+        prop_assert_eq!(&actual_groups, &reversed_view.native_requirements_with_groups_from_roots(&roots).unwrap().1);
+        prop_assert!(actual_groups.len() < view.selected_native_groups().len(), "available groups must not become executable roots");
         prop_assert_eq!(&actual, &reversed_view.native_requirements_from_roots(&roots).unwrap());
         prop_assert_eq!(
             actual.bindings.iter().cloned().collect::<BTreeSet<_>>(),
@@ -1339,7 +1349,11 @@ proptest! {
             &edges,
             &BTreeSet::from([(0, 7), (0, 11)]),
         );
-        let all_requirements = view.native_requirements_from_roots(&all_groups).unwrap();
+        let (all_requirements, all_selected) = view.native_requirements_with_groups_from_roots(&all_groups).unwrap();
+        prop_assert_eq!(all_selected, expected_all.iter().map(|(node, ordinal)| NativeGroupKey {
+            artifact: native_ids[*node],
+            original_ordinal: *ordinal,
+        }).collect::<BTreeSet<_>>());
         prop_assert_eq!(&all_requirements, &reversed_view.native_requirements_from_roots(&all_groups).unwrap());
         prop_assert_eq!(
             all_requirements.bindings.iter().cloned().collect::<BTreeSet<_>>(),

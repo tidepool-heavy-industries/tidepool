@@ -1972,6 +1972,21 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         local_sites.clone(),
         std::collections::BTreeSet::new(),
     ];
+    assert!(
+        outputs[2]
+            .certification
+            .as_ref()
+            .unwrap()
+            .groups
+            .iter()
+            .flat_map(|group| group.group().definitions().sites())
+            .any(|site| shared_sites.contains(&site.site)),
+        "the later unrelated target retains earlier installed native custody"
+    );
+    let reobserved = outputs
+        .iter()
+        .map(|output| source.provenance_for(&output.code()).unwrap())
+        .collect::<Vec<_>>();
     let mut observed_unselected_request = false;
     for (index, (value, output)) in values.iter().zip(&outputs).enumerate() {
         assert_eq!(
@@ -1983,6 +1998,27 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                 .collect::<std::collections::BTreeSet<_>>(),
             expected[index],
             "item {index}: available originals do not select an executable site"
+        );
+        let selected = output
+            .certification
+            .as_ref()
+            .unwrap()
+            .checked_execution()
+            .unwrap()
+            .selected_native_sites()
+            .expect("typed entries carry their sealed native-site selection");
+        assert_eq!(
+            selected
+                .iter()
+                .copied()
+                .filter(|site| shared_sites.contains(site) || local_sites.contains(site))
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected[index],
+            "issued selection follows the authored target, independently of installed custody"
+        );
+        assert_eq!(
+            reobserved[index].authenticated_inputs, value.provenance.authenticated_inputs,
+            "later native installation preserves the earlier target's exact authority"
         );
         // Each item retains its own compiler-issued census. Available native
         // owners and later items need not contribute metadata to every item.
@@ -2018,30 +2054,38 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     ));
     let mut runner = TestRunner::new(config);
     runner
-        .run(&prop::collection::vec(0_usize..4, 0..48), |history| {
-            let mut composed = (*values[0].provenance).clone();
-            let mut oracle = std::collections::BTreeSet::new();
-            for index in history {
-                composed.merge(&values[index].provenance).unwrap();
-                oracle.extend(expected[index].iter().copied());
-                prop_assert_eq!(
-                    composed
-                        .authenticated_inputs
-                        .keys()
-                        .copied()
-                        .collect::<std::collections::BTreeSet<_>>(),
-                    oracle.clone()
-                );
-                for site in &oracle {
-                    let owner = if shared_sites.contains(site) { 1 } else { 2 };
+        .run(
+            &prop::collection::vec((0_usize..4, any::<bool>()), 0..48),
+            |history| {
+                let mut composed = (*values[0].provenance).clone();
+                let mut oracle = std::collections::BTreeSet::new();
+                for (index, after_installation) in history {
+                    let observed = if after_installation {
+                        &reobserved[index]
+                    } else {
+                        &values[index].provenance
+                    };
+                    composed.merge(observed).unwrap();
+                    oracle.extend(expected[index].iter().copied());
                     prop_assert_eq!(
-                        &composed.authenticated_inputs[site],
-                        &values[owner].provenance.authenticated_inputs[site]
+                        composed
+                            .authenticated_inputs
+                            .keys()
+                            .copied()
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        oracle.clone()
                     );
+                    for site in &oracle {
+                        let owner = if shared_sites.contains(site) { 1 } else { 2 };
+                        prop_assert_eq!(
+                            &composed.authenticated_inputs[site],
+                            &values[owner].provenance.authenticated_inputs[site]
+                        );
+                    }
                 }
-            }
-            Ok(())
-        })
+                Ok(())
+            },
+        )
         .unwrap();
 
     let receiver_parcel = source.export_custody(values.remove(0)).unwrap();
