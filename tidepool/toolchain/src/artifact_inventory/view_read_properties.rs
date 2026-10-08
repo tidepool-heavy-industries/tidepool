@@ -83,18 +83,18 @@ struct Oracle {
 /// facts. It does not call the production closure, index, or cached projection.
 fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
     let mut result = Oracle::default();
-    let mut pending = vec![view];
-    let mut seen_views = BTreeSet::new();
-    while let Some(view) = pending.pop() {
-        let address = Arc::as_ptr(&view.0) as usize;
-        if !seen_views.insert(address) {
+    let mut pending = vec![&view.lease];
+    let mut seen_leases = BTreeSet::new();
+    while let Some(lease) = pending.pop() {
+        let address = Arc::as_ptr(lease) as usize;
+        if !seen_leases.insert(address) {
             continue;
         }
-        result.roots.extend(view.0.roots.iter().copied());
-        pending.extend(view.0.parents.iter());
+        result.roots.extend(lease.roots.iter().copied());
+        pending.extend(lease.parents.iter());
     }
 
-    let state = view.0.inventory.0.lock().expect("inventory lock");
+    let state = view.lease.inventory.0.lock().expect("inventory lock");
     let mut adjacency = BTreeMap::<InventoryNodeKey, BTreeSet<InventoryNodeKey>>::new();
     let mut edge_facts = Vec::new();
     for source in state.graph.node_indices() {
@@ -353,13 +353,13 @@ proptest! {
             interface.metadata_snapshot().selected_native_groups.is_empty(),
             "projected metadata has no selected native groups"
         );
-        prop_assert!(interface.0.parents.is_empty(), "projection has no view parents");
+        prop_assert!(interface.lease.parents.is_empty(), "projection has no custody parents");
         prop_assert!(
-            interface.0.materialization_parents.is_empty(),
+            interface.lease.materialization_parents.is_empty(),
             "projection has no materialization parents"
         );
         prop_assert!(
-            interface.0.materialization.lock().unwrap().is_empty(),
+            interface.lease.materialization.lock().unwrap().is_empty(),
             "projection has no retained materializations"
         );
         let projected_entries = interface.entries();
@@ -448,7 +448,7 @@ fn warmed_read_getters_do_not_visit_graph_nodes() {
         .unwrap()
         .dependency_graph_visits
         .load(Ordering::Relaxed);
-    let root_walk_before = view.0.root_parent_visits.load(Ordering::Relaxed);
+    let root_walk_before = view.reads.root_parent_visits.load(Ordering::Relaxed);
     for _ in 0..12 {
         let _ = view.entries();
         let _ = view.descriptors();
@@ -470,7 +470,7 @@ fn warmed_read_getters_do_not_visit_graph_nodes() {
         dependency_before
     );
     assert_eq!(
-        view.0.root_parent_visits.load(Ordering::Relaxed),
+        view.reads.root_parent_visits.load(Ordering::Relaxed),
         root_walk_before
     );
     check_read_projection(&view).unwrap();
@@ -566,9 +566,78 @@ fn zero_mask_empty_selection_boundary_releases_valid_fixture_views() {
     assert!(state.roots.is_empty());
 }
 
+#[test]
+fn cloned_view_shares_only_its_explicit_read_cache_lifetime() {
+    let inventory = ArtifactInventory::default();
+    let empty = inventory.empty_view();
+    let view = inventory
+        .admit(&empty, Catalog::new(&[0; OWNERS], 1).entries)
+        .expect("valid interface and native fixtures admit");
+    check_read_projection(&view).unwrap();
+
+    let clone = view.clone();
+    assert!(Arc::ptr_eq(&view.lease, &clone.lease));
+    assert!(Arc::ptr_eq(&view.reads, &clone.reads));
+    let reads = Arc::downgrade(&view.reads);
+    let lease = Arc::downgrade(&view.lease);
+    drop(view);
+    assert!(reads.upgrade().is_some());
+    drop(clone);
+    assert!(reads.upgrade().is_none());
+    assert!(lease.upgrade().is_none());
+
+    drop(empty);
+    assert_eq!(inventory.node_count(), 0);
+}
+
+#[test]
+fn same_inventory_merge_keeps_custody_after_peer_read_caches_drop() {
+    let inventory = ArtifactInventory::default();
+    let empty = inventory.empty_view();
+    let all = inventory
+        .admit(&empty, Catalog::new(&[0; OWNERS], 1).entries)
+        .expect("valid interface and native fixtures admit");
+    let entries = all.entries();
+    let left = all
+        .select_roots(vec![entries[0].descriptor.id])
+        .expect("left selected root belongs to the view");
+    let right = all
+        .select_roots(vec![entries[1].descriptor.id])
+        .expect("right selected root belongs to the view");
+    check_read_projection(&left).unwrap();
+    check_read_projection(&right).unwrap();
+
+    let left_reads = Arc::downgrade(&left.reads);
+    let right_reads = Arc::downgrade(&right.reads);
+    let left_lease = Arc::downgrade(&left.lease);
+    let right_lease = Arc::downgrade(&right.lease);
+    let merged = left.merge(&right).expect("same-inventory merge succeeds");
+    check_read_projection(&merged).unwrap();
+    assert!(!Arc::ptr_eq(&merged.reads, &left.reads));
+    assert!(!Arc::ptr_eq(&merged.reads, &right.reads));
+
+    drop(left);
+    drop(right);
+    assert!(left_reads.upgrade().is_none());
+    assert!(right_reads.upgrade().is_none());
+    assert!(left_lease.upgrade().is_some());
+    assert!(right_lease.upgrade().is_some());
+
+    drop(all);
+    drop(empty);
+    assert_eq!(inventory.node_count(), exhaustive_oracle(&merged).closure.len());
+    check_read_projection(&merged).unwrap();
+    drop(merged);
+    assert_eq!(inventory.node_count(), 0);
+    let state = inventory.0.lock().expect("inventory lock");
+    assert!(state.payloads.is_empty());
+    assert!(state.roots.is_empty());
+}
+
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct ReadHistoryCensus {
-    live_view_leases: usize,
+    custody_view_leases: usize,
+    explicit_read_cache_arcs: usize,
     initialized_canonical_root_views: usize,
     canonical_root_items: usize,
     canonical_root_capacity_items: usize,
@@ -603,24 +672,37 @@ struct ReadHistoryCensus {
     size_inventory_node_key: usize,
     size_arc_artifact_entry: usize,
     size_dependency_row: usize,
-    size_artifact_view: usize,
+    size_arc_view_lease: usize,
     size_materialization_arc: usize,
 }
 
-fn read_history_census(latest: &ArtifactView) -> ReadHistoryCensus {
-    let mut pending = vec![latest];
-    let mut views = Vec::new();
-    let mut seen = BTreeSet::new();
-    while let Some(view) = pending.pop() {
-        if seen.insert(Arc::as_ptr(&view.0) as usize) {
-            views.push(view);
-            pending.extend(view.0.parents.iter());
+fn read_history_census(
+    latest: &ArtifactView,
+    explicitly_held_views: &[ArtifactView],
+) -> ReadHistoryCensus {
+    let mut pending = vec![&latest.lease];
+    pending.extend(explicitly_held_views.iter().map(|view| &view.lease));
+    let mut leases = Vec::new();
+    let mut seen_leases = BTreeSet::new();
+    while let Some(lease) = pending.pop() {
+        if seen_leases.insert(Arc::as_ptr(lease) as usize) {
+            leases.push(lease.as_ref());
+            pending.extend(lease.parents.iter());
         }
     }
 
-    let inventory = latest.0.inventory.0.lock().expect("inventory lock");
+    let mut read_caches = Vec::new();
+    let mut seen_read_caches = BTreeSet::new();
+    for view in std::iter::once(latest).chain(explicitly_held_views.iter()) {
+        if seen_read_caches.insert(Arc::as_ptr(&view.reads) as usize) {
+            read_caches.push(view.reads.as_ref());
+        }
+    }
+
+    let inventory = latest.lease.inventory.0.lock().expect("inventory lock");
     let mut census = ReadHistoryCensus {
-        live_view_leases: views.len(),
+        custody_view_leases: leases.len(),
+        explicit_read_cache_arcs: read_caches.len(),
         initialized_canonical_root_views: 0,
         canonical_root_items: 0,
         canonical_root_capacity_items: 0,
@@ -657,35 +739,37 @@ fn read_history_census(latest: &ArtifactView) -> ReadHistoryCensus {
         size_inventory_node_key: std::mem::size_of::<InventoryNodeKey>(),
         size_arc_artifact_entry: std::mem::size_of::<Arc<ArtifactEntry>>(),
         size_dependency_row: std::mem::size_of::<(ArtifactId, ArtifactId, ArtifactDependency)>(),
-        size_artifact_view: std::mem::size_of::<ArtifactView>(),
+        size_arc_view_lease: std::mem::size_of::<Arc<ViewLease>>(),
         size_materialization_arc: std::mem::size_of::<
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >(),
     };
-    for view in views {
-        census.local_root_items += view.0.roots.len();
-        census.local_root_capacity_items += view.0.roots.capacity();
+    for lease in leases {
+        census.local_root_items += lease.roots.len();
+        census.local_root_capacity_items += lease.roots.capacity();
         census.local_root_vec_reserved_bytes +=
-            view.0.roots.capacity() * std::mem::size_of::<InventoryNodeKey>();
-        census.lease_parent_links += view.0.parents.len();
-        census.lease_parent_capacity_items += view.0.parents.capacity();
+            lease.roots.capacity() * std::mem::size_of::<InventoryNodeKey>();
+        census.lease_parent_links += lease.parents.len();
+        census.lease_parent_capacity_items += lease.parents.capacity();
         census.parent_link_vec_reserved_bytes +=
-            view.0.parents.capacity() * std::mem::size_of::<ArtifactView>();
-        census.materialization_parent_links += view.0.materialization_parents.len();
-        census.materialization_parent_capacity_items += view.0.materialization_parents.capacity();
+            lease.parents.capacity() * std::mem::size_of::<Arc<ViewLease>>();
+        census.materialization_parent_links += lease.materialization_parents.len();
+        census.materialization_parent_capacity_items += lease.materialization_parents.capacity();
         census.materialization_parent_vec_reserved_bytes +=
-            view.0.materialization_parents.capacity()
+            lease.materialization_parents.capacity()
                 * std::mem::size_of::<
                     Arc<crate::declaration_context::RetainedArtifactMaterialization>,
                 >();
-        if let Some(roots) = view.0.canonical_roots.get() {
+    }
+    for reads in read_caches {
+        if let Some(roots) = reads.canonical_roots.get() {
             census.initialized_canonical_root_views += 1;
             census.canonical_root_items += roots.len();
             census.canonical_root_capacity_items += roots.capacity();
             census.canonical_root_vec_reserved_bytes +=
                 roots.capacity() * std::mem::size_of::<InventoryNodeKey>();
         }
-        if let Some(projection) = view.0.read_projection.get() {
+        if let Some(projection) = reads.read_projection.get() {
             census.initialized_read_projection_views += 1;
             census.projection_node_items += projection.nodes.len();
             census.projection_node_key_payload_bytes +=
@@ -736,6 +820,8 @@ fn linear_view_history_reports_retained_read_projection_cost() {
 
     let inventory = ArtifactInventory::default();
     let mut latest = inventory.empty_view();
+    let mut prior_read_caches = Vec::with_capacity(length);
+    let mut prior_leases = Vec::with_capacity(length);
     let mut previous: Option<ArtifactDescriptor> = None;
     for index in 0..length {
         let unit = "retained-history".to_owned();
@@ -756,6 +842,8 @@ fn linear_view_history_reports_retained_read_projection_cost() {
             requirements,
         ));
         previous = Some(entry.descriptor.clone());
+        prior_read_caches.push(Arc::downgrade(&latest.reads));
+        prior_leases.push(Arc::downgrade(&latest.lease));
         latest = inventory
             .admit(&latest, vec![entry])
             .expect("linear interface dependency admits");
@@ -763,37 +851,61 @@ fn linear_view_history_reports_retained_read_projection_cost() {
         drop(latest.entries());
         drop(latest.interface_owners());
     }
+    assert!(prior_read_caches.iter().all(|reads| reads.upgrade().is_none()));
+    assert!(prior_leases.iter().all(|lease| lease.upgrade().is_some()));
 
-    let expected_triangular = length * (length + 1) / 2;
-    let expected_dependency_rows = length * (length - 1) / 2;
-    let before = read_history_census(&latest);
-    assert_eq!(before.live_view_leases, length + 1);
-    assert_eq!(before.initialized_canonical_root_views, length + 1);
-    assert_eq!(before.canonical_root_items, expected_triangular);
+    let before = read_history_census(&latest, &[]);
+    assert_eq!(before.custody_view_leases, length + 1);
+    assert_eq!(before.explicit_read_cache_arcs, 1);
+    assert_eq!(before.initialized_canonical_root_views, 1);
+    assert_eq!(before.canonical_root_items, length);
     assert_eq!(before.local_root_items, length);
     assert_eq!(before.lease_parent_links, length);
     assert_eq!(before.materialization_parent_links, 0);
-    assert_eq!(before.initialized_read_projection_views, length + 1);
-    assert_eq!(before.projection_node_items, expected_triangular);
-    assert_eq!(before.projection_entry_items, expected_triangular);
-    assert_eq!(before.initialized_dependency_vectors, length);
-    assert_eq!(before.dependency_rows, expected_dependency_rows);
+    assert_eq!(before.initialized_read_projection_views, 1);
+    assert_eq!(before.projection_node_items, length);
+    assert_eq!(before.projection_entry_items, length);
+    assert_eq!(before.initialized_dependency_vectors, 1);
+    assert_eq!(before.dependency_rows, length - 1);
     assert_eq!(before.graph_nodes, length);
     assert_eq!(before.payload_entries, length);
     assert_eq!(before.root_registry_entries, length);
     assert_eq!(before.root_registry_references, length);
 
+    let graph_visits_before = inventory.metrics().graph_visits;
+    let dependency_visits_before = inventory
+        .0
+        .lock()
+        .expect("inventory lock")
+        .dependency_graph_visits
+        .load(Ordering::Relaxed);
+    let root_parent_visits_before = latest.reads.root_parent_visits.load(Ordering::Relaxed);
     drop(latest.metadata_snapshot());
     drop(latest.entries());
     drop(latest.interface_owners());
-    let after_repeated_warm_read = read_history_census(&latest);
+    assert_eq!(inventory.metrics().graph_visits, graph_visits_before);
+    assert_eq!(
+        inventory
+            .0
+            .lock()
+            .expect("inventory lock")
+            .dependency_graph_visits
+            .load(Ordering::Relaxed),
+        dependency_visits_before
+    );
+    assert_eq!(
+        latest.reads.root_parent_visits.load(Ordering::Relaxed),
+        root_parent_visits_before
+    );
+    let after_repeated_warm_read = read_history_census(&latest, &[]);
     assert_eq!(after_repeated_warm_read, before);
     eprintln!(
         "{}",
         serde_json::json!({
-            "kind": "artifact_view_read_history_census",
+            "kind": "artifact_view_tip_read_history_census",
             "pid": std::process::id(),
             "history_length": length,
+            "retention_mode": "latest_public_view_only",
             "census": before,
             "after_repeated_warm_read": after_repeated_warm_read,
             "retained_btree_key_payload_bytes_excludes_node_overhead": true,
@@ -805,6 +917,79 @@ fn linear_view_history_reports_retained_read_projection_cost() {
     );
 
     drop(latest);
+    assert_eq!(inventory.node_count(), 0);
+    let state = inventory.0.lock().expect("inventory lock");
+    assert!(state.payloads.is_empty());
+    assert!(state.roots.is_empty());
+}
+
+#[test]
+fn explicitly_held_view_reads_report_triangular_capture_retention() {
+    const LENGTH: usize = 32;
+    let inventory = ArtifactInventory::default();
+    let mut latest = inventory.empty_view();
+    drop(latest.metadata_snapshot());
+    drop(latest.entries());
+    drop(latest.interface_owners());
+    let mut captured = vec![latest.clone()];
+    let mut previous: Option<ArtifactDescriptor> = None;
+    for index in 0..LENGTH {
+        let unit = "retained-capture".to_owned();
+        let module = format!("Capture{index}");
+        let requirements = previous
+            .take()
+            .map(|descriptor| {
+                BTreeMap::from([(
+                    (descriptor.owner.unit, descriptor.owner.module),
+                    descriptor.interface_sha256,
+                )])
+            })
+            .unwrap_or_default();
+        let entry = ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+            [0x59; 32],
+            &unit,
+            &module,
+            requirements,
+        ));
+        previous = Some(entry.descriptor.clone());
+        latest = inventory
+            .admit(&latest, vec![entry])
+            .expect("linear capture interface dependency admits");
+        drop(latest.metadata_snapshot());
+        drop(latest.entries());
+        drop(latest.interface_owners());
+        captured.push(latest.clone());
+    }
+
+    let expected_triangular = LENGTH * (LENGTH + 1) / 2;
+    let expected_dependency_rows = LENGTH * (LENGTH - 1) / 2;
+    let census = read_history_census(&latest, &captured);
+    assert_eq!(census.custody_view_leases, LENGTH + 1);
+    assert_eq!(census.explicit_read_cache_arcs, LENGTH + 1);
+    assert_eq!(census.initialized_canonical_root_views, LENGTH + 1);
+    assert_eq!(census.canonical_root_items, expected_triangular);
+    assert_eq!(census.initialized_read_projection_views, LENGTH + 1);
+    assert_eq!(census.projection_node_items, expected_triangular);
+    assert_eq!(census.projection_entry_items, expected_triangular);
+    assert_eq!(census.initialized_dependency_vectors, LENGTH + 1);
+    assert_eq!(census.dependency_rows, expected_dependency_rows);
+    assert_eq!(census.graph_nodes, LENGTH);
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "kind": "artifact_view_explicit_capture_census",
+            "pid": std::process::id(),
+            "history_length": LENGTH,
+            "retention_mode": "all_public_views_explicitly_held",
+            "census": census,
+            "btree_allocation_overhead_included": false,
+            "dependency_owned_strings_included": false,
+            "entry_payload_allocations_included": false,
+        })
+    );
+
+    drop(latest);
+    drop(captured);
     assert_eq!(inventory.node_count(), 0);
     let state = inventory.0.lock().expect("inventory lock");
     assert!(state.payloads.is_empty());
