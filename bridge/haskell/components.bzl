@@ -7593,6 +7593,7 @@ def declare_haskell_components():
         "Tidepool/Inspection/Display.hs": "lib/Tidepool/Inspection/Display.hs",
         "Tidepool/Inspection/Tree.hs": "lib/Tidepool/Inspection/Tree.hs",
         "Tidepool/View/Types.hs": "lib/Tidepool/View/Types.hs",
+        "Tidepool/Internal/ActorProfiles.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ActorProfiles_hs]",
         "Tidepool/Internal/ActorRef.hs": "lib/Tidepool/Internal/ActorRef.hs",
         "Tidepool/Internal/ExitCell.hs": "lib/Tidepool/Internal/ExitCell.hs",
         "Tidepool/Internal/RequestSite.hs": "lib/Tidepool/Internal/RequestSite.hs",
