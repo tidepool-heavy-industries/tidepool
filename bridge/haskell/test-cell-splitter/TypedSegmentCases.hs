@@ -311,7 +311,7 @@ typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive 
           ++ "\n  finalized exports:\n    "
           ++ intercalate "\n    " (map renderNameIdentity (Set.toAscList (Set.fromList exportedNames)))
           ++ "\n  issued root Ids:\n    "
-          ++ intercalate "\n    " (map renderIdIdentity issued))
+          ++ intercalate "\n    " (map renderIdIdentity issued)))
   putStrLn ("typed record metadata: " ++ show (length recordMetadataCases)
     ++ " serial generated requests; record/newtype/multi-constructor, used/unused, "
     ++ "Generic/no-Generic, NoFieldSelectors, existential fields, duplicate selector "
