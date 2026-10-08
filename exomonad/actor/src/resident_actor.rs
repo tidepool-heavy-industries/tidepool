@@ -25,6 +25,8 @@ mod commands;
 mod display_settlement;
 mod drain_wait;
 #[cfg(test)]
+mod forest_shutdown_tests;
+#[cfg(test)]
 mod inherited_host_tests;
 mod inspection_wait;
 pub(crate) mod invocation_work;
@@ -12250,7 +12252,7 @@ where
                     bound_worktree: self.launch_worktrees.first().cloned(),
                     terminal: None,
                     runtime_observation: self.runtime_observation.clone(),
-                    scheduler_root: kernel.supervisor_identity().is_none(),
+                    scheduler_root: kernel.spawn_ownership().is_independent(),
                     displays: Default::default(),
                 },
             );
@@ -14950,10 +14952,12 @@ where
         {
             Ok(actor) => Ok(actor),
             Err(error) => {
-                self.environment
-                    .runner
-                    .retire_root_placement(placement)
-                    .await?;
+                if crate::local_actor::startup_cleanup(&error).is_none() {
+                    self.environment
+                        .runner
+                        .retire_root_placement(placement)
+                        .await?;
+                }
                 Err(Box::new(error))
             }
         }
@@ -15068,27 +15072,26 @@ where
         {
             Ok(root) => Ok(root),
             Err(error) => {
-                self.environment
-                    .runner
-                    .retire_root_placement(placement)
-                    .await?;
+                if crate::local_actor::startup_cleanup(&error).is_none() {
+                    self.environment
+                        .runner
+                        .retire_root_placement(placement)
+                        .await?;
+                }
                 Err(Box::new(error))
             }
         }
     }
 
-    /// Close root admission and retain each root's actor-owned cleanup evidence.
+    /// Cancel admitted members before draining staging and root-owned cleanup.
     /// A forced actor stop remains unconfirmed even after its scheduler task exits.
     pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
+        let retirement = self.directory.seal().cancel_all(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "forest host shutdown",
+        ));
         *self.environment.root_admission_closed.write().await = true;
-        let roots = self
-            .environment
-            .actors
-            .lock()
-            .iter()
-            .filter(|(_, record)| record.scheduler_root)
-            .filter_map(|(actor, _)| self.directory.resolve(*actor))
-            .collect::<Vec<_>>();
+        let roots = retirement.into_roots();
         let mut outcomes = Vec::with_capacity(roots.len());
         for root in roots {
             outcomes.push(shutdown_forest_root(&root, std::time::Duration::from_secs(30)).await);
@@ -15129,10 +15132,12 @@ where
         {
             Ok((actor, _task)) => Ok(actor),
             Err(error) => {
-                self.environment
-                    .runner
-                    .retire_root_placement(placement)
-                    .await?;
+                if crate::local_actor::startup_cleanup(&error).is_none() {
+                    self.environment
+                        .runner
+                        .retire_root_placement(placement)
+                        .await?;
+                }
                 Err(Box::new(error))
             }
         }
