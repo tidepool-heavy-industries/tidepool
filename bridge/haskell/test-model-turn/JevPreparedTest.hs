@@ -97,10 +97,10 @@ observeWithoutConsole = do
 
 usageDisplay :: IO ()
 usageDisplay = do
-  let unknown = displayTree (J.Usage Nothing Nothing)
-      zero = displayTree (J.Usage (Just 0) (Just 0))
+  let unknown = displayWith 8192 (J.Usage Nothing Nothing)
+      zero = displayWith 8192 (J.Usage (Just 0) (Just 0))
   assertBool "unknown usage remains distinct in the tree" (unknown /= zero)
-  case zero of
+  case displayTree (J.Usage (Just 0) (Just 0)) of
     Constructor "Jev.Usage" fields -> assertEqual "named structured usage fields"
       ["inputTokens", "outputTokens"] (map fst fields)
     _ -> error "usage was rendered as unstructured text"
