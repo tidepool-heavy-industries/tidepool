@@ -627,6 +627,7 @@ fn recovery_validation_error(
         | CertificationError::DuplicateSourceBinder(_)
         | CertificationError::OriginalGroupConflict(_)
         | CertificationError::OriginalSelectionConflict(_)
+        | CertificationError::OriginalMembership(_)
         | CertificationError::OriginalClosure(_)
         | CertificationError::FinalizedInterfaceRequirement { .. }
         | CertificationError::OriginalInterfaceClosure { .. }
