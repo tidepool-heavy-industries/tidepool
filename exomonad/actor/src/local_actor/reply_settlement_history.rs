@@ -554,6 +554,61 @@ fn fixed_reply_delivery_histories_preserve_pending_until_continuation_settles() 
     eprintln!("reply deterministic coverage: {coverage:?}");
 }
 
+// Expected failure policy follows the registration API chosen by the
+// consumer. A sibling collect-all mode cannot define a success-required watch.
+#[test]
+fn singleton_reply_watches_distinguish_required_success_from_allowed_failure() {
+    for stopped in [false, true] {
+        let registry = RequestRegistry::default();
+        let owner = ActorRef::first(crate::ActorId(101));
+        let target = ActorRef::first(crate::ActorId(102));
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (required, _) = registry.register_watch(owner, vec![request]).unwrap();
+        let (collect, _) = registry
+            .register_watch_labeled(owner, "collect failure".into(), vec![(request, true)])
+            .unwrap();
+        assert_ne!(required, collect, "distinct registration identities");
+        for watch in [required, collect] {
+            assert!(matches!(
+                registry.observe_watch(owner, watch).unwrap(),
+                WatchObservation::Pending(_)
+            ));
+        }
+        registry.begin_reply(target, request).unwrap();
+        let failure = if stopped {
+            registry.actor_stopped(
+                target,
+                &ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "paired shutdown".into(),
+                    diagnostic: None,
+                },
+            );
+            ResponseFailure::TargetCancelled("paired shutdown".into())
+        } else {
+            registry.fail_reply_settlement(request, "paired continuation failure");
+            ResponseFailure::SettlementFailed("paired continuation failure".into())
+        };
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Unavailable(failure.clone()))
+        );
+        assert_eq!(
+            registry.observe_watch(owner, required),
+            Ok(WatchObservation::Unavailable {
+                request,
+                failure: failure.clone()
+            })
+        );
+        assert_eq!(
+            registry.observe_watch(owner, collect),
+            Ok(WatchObservation::Ready(vec![(request, failure)]))
+        );
+    }
+}
+
 #[test]
 fn generated_reply_delivery_histories_match_acknowledged_settlement() {
     let mut config = Config::default();
