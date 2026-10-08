@@ -57,6 +57,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:ciborium",
         "//tidepool/repr:tidepool_repr",
     ],
+    required_test_modules = [
+        "bridge/test-data/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 

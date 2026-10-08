@@ -68,6 +68,9 @@ tidepool_rust_isolated_test(
         "//tidepool/bridge:tidepool_bridge",
         "//tidepool/repr:tidepool_repr",
     ],
+    required_test_modules = [
+        "tidepool/effect/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -96,6 +99,9 @@ tidepool_rust_isolated_test(
         "//tidepool/bridge:tidepool_bridge",
         "//tidepool/repr:tidepool_repr",
         ":tidepool_effect",
+    ],
+    required_test_modules = [
+        "tidepool/effect/tests/proptest_effect.rs",
     ],
     visibility = ["PUBLIC"],
 )

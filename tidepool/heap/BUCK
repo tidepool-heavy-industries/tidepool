@@ -73,6 +73,10 @@ tidepool_rust_isolated_test(
         "//third-party/rust:thiserror",
         "//tidepool/repr:tidepool_repr",
     ],
+    required_test_modules = [
+        "tidepool/heap/src/lib.rs",
+        "tidepool/heap/src/static_region/properties.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -99,6 +103,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":tidepool_heap",
     ],
+    required_test_modules = [
+        "tidepool/heap/tests/gc_unit.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -124,6 +131,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:thiserror",
         "//tidepool/repr:tidepool_repr",
         ":tidepool_heap",
+    ],
+    required_test_modules = [
+        "tidepool/heap/tests/raw_scan_validation.rs",
     ],
     visibility = ["PUBLIC"],
 )

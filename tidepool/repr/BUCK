@@ -109,6 +109,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:serde_json",
         "//third-party/rust:thiserror",
     ],
+    required_test_modules = [
+        "tidepool/repr/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -147,6 +150,16 @@ tidepool_rust_isolated_test(
         "//third-party/rust:serde_json",
         "//third-party/rust:thiserror",
         ":tidepool_repr",
+    ],
+    required_test_modules = [
+        "tidepool/repr/tests/execution_schema_codec.rs",
+        "tidepool/repr/tests/execution_schema_contract.rs",
+        "tidepool/repr/tests/extend_checked_equivalence.rs",
+        "tidepool/repr/tests/inventory_limits.rs",
+        "tidepool/repr/tests/metadata_strictness.rs",
+        "tidepool/repr/tests/projected_groups.rs",
+        "tidepool/repr/tests/strict_jsonl_directory.rs",
+        "tidepool/repr/tests/suites/repr.rs",
     ],
     env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location //bridge/atomic-write:directory_fault_shared)"},
     visibility = ["PUBLIC"],

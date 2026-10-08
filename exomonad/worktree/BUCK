@@ -105,6 +105,10 @@ tidepool_rust_isolated_test(
         "//third-party/rust:walkdir",
         "//tidepool/repr:tidepool_repr",
     ],
+    required_test_modules = [
+        "exomonad/worktree/src/journal_properties.rs",
+        "exomonad/worktree/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -156,6 +160,25 @@ tidepool_rust_isolated_test(
         "//third-party/rust:walkdir",
         "//tidepool/repr:tidepool_repr",
         ":exomonad_worktree",
+    ],
+    required_test_modules = [
+        "exomonad/worktree/tests/binding_uncertainty.rs",
+        "exomonad/worktree/tests/dirty_snapshot.rs",
+        "exomonad/worktree/tests/durable_formats.rs",
+        "exomonad/worktree/tests/event_monitor.rs",
+        "exomonad/worktree/tests/journal_uncertainty.rs",
+        "exomonad/worktree/tests/merge.rs",
+        "exomonad/worktree/tests/mount_namespace.rs",
+        "exomonad/worktree/tests/retained_storage.rs",
+        "exomonad/worktree/tests/scaffold_smoke.rs",
+        "exomonad/worktree/tests/source_build_fork.rs",
+        "exomonad/worktree/tests/source_checkpoint.rs",
+        "exomonad/worktree/tests/storage_errors.rs",
+        "exomonad/worktree/tests/submission_observation.rs",
+        "exomonad/worktree/tests/suites/worktree.rs",
+        "exomonad/worktree/tests/workspace_membership_properties.rs",
+        "exomonad/worktree/tests/worktree_core.rs",
+        "exomonad/worktree/tests/worktree_head.rs",
     ],
     resources = [
         ":binding_directory_fault_shared",

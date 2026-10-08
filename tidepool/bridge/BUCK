@@ -78,6 +78,9 @@ tidepool_rust_isolated_test(
         "//tidepool/bridge-derive:tidepool_bridge_derive",
         "//tidepool/repr:tidepool_repr",
     ],
+    required_test_modules = [
+        "tidepool/bridge/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -114,6 +117,15 @@ tidepool_rust_isolated_test(
         "//tidepool/bridge-derive:tidepool_bridge_derive",
         "//tidepool/repr:tidepool_repr",
         ":tidepool_bridge",
+    ],
+    required_test_modules = [
+        "tidepool/bridge/tests/constructor_authority.rs",
+        "tidepool/bridge/tests/error_cases.rs",
+        "tidepool/bridge/tests/haskell_record.rs",
+        "tidepool/bridge/tests/proptest_text.rs",
+        "tidepool/bridge/tests/roundtrip.rs",
+        "tidepool/bridge/tests/suites/bridge.rs",
+        "tidepool/bridge/tests/support/mod.rs",
     ],
     visibility = ["PUBLIC"],
 )

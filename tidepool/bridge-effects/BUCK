@@ -85,6 +85,9 @@ tidepool_rust_isolated_test(
         "//tidepool/bridge:tidepool_bridge",
         "//tidepool/repr:tidepool_repr",
     ],
+    required_test_modules = [
+        "tidepool/bridge-effects/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 

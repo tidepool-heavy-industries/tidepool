@@ -103,6 +103,9 @@ tidepool_rust_isolated_test(
         "//tidepool/toolchain:tidepool_toolchain",
         ":tidepool_prepared_corpus",
     ],
+    required_test_modules = [
+        "tidepool/prepared-corpus/src/bin/prepared-corpus.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -136,6 +139,9 @@ tidepool_rust_isolated_test(
         "//tidepool/heap:tidepool_heap",
         "//tidepool/repr:tidepool_repr",
         "//tidepool/toolchain:tidepool_toolchain",
+    ],
+    required_test_modules = [
+        "tidepool/prepared-corpus/src/lib.rs",
     ],
     visibility = ["PUBLIC"],
 )

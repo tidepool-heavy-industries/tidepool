@@ -79,6 +79,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tempfile",
         "//third-party/rust:tokio",
     ],
+    required_test_modules = [
+        "exomonad/jev-integration/src/main.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 

@@ -59,6 +59,10 @@ tidepool_rust_isolated_test(
         "//third-party/rust:serde",
         "//third-party/rust:serde_json",
     ],
+    required_test_modules = [
+        "exomonad/tool/src/lib.rs",
+        "exomonad/tool/src/surface/properties.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 

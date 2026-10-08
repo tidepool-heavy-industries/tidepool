@@ -49,6 +49,9 @@ tidepool_rust_isolated_test(
     deps = [
         "//third-party/rust:tempfile",
     ],
+    required_test_modules = [
+        "bridge/atomic-write/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -72,6 +75,9 @@ tidepool_rust_isolated_test(
     deps = [
         "//third-party/rust:tempfile",
         ":tidepool_atomic_write",
+    ],
+    required_test_modules = [
+        "bridge/atomic-write/tests/strict_directory.rs",
     ],
     env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},
     visibility = ["PUBLIC"],

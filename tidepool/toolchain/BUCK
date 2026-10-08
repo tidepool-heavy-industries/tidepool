@@ -448,6 +448,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":tidepool_toolchain",
     ],
+    required_test_modules = [
+        "tidepool/toolchain/src/bin/prepared-fixture.rs",
+    ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -600,6 +603,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":tidepool_toolchain",
     ],
+    required_test_modules = [
+        "tidepool/toolchain/src/bin/tidepool-module-package.rs",
+    ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -750,6 +756,37 @@ tidepool_rust_isolated_test(
         "//tidepool/extract-report:tidepool_extract_report",
         "//tidepool/repr:tidepool_repr",
     ],
+    required_test_modules = [
+        "tidepool/toolchain/src/artifact_inventory/view_read_properties.rs",
+        "tidepool/toolchain/src/artifacts/tests/private_package_input_history.rs",
+        "tidepool/toolchain/src/cache/source_manifest_properties.rs",
+        "tidepool/toolchain/src/certified_products/home_self_issuer_tests.rs",
+        "tidepool/toolchain/src/certified_products/planned_original_history_tests.rs",
+        "tidepool/toolchain/src/certified_products/retained_core/properties.rs",
+        "tidepool/toolchain/src/certified_products/tests/artifact_view_group_index_properties.rs",
+        "tidepool/toolchain/src/certified_products/tests/issued_interface_selection_history.rs",
+        "tidepool/toolchain/src/certified_products/tests/promotion_import_history.rs",
+        "tidepool/toolchain/src/certified_products/tests/sparse_interface_selection_properties.rs",
+        "tidepool/toolchain/src/declaration_context/native_availability_tests.rs",
+        "tidepool/toolchain/src/lib.rs",
+        "tidepool/toolchain/src/module_candidates/codec_measurement.rs",
+        "tidepool/toolchain/src/module_candidates/deployment/tests/product_carry.rs",
+        "tidepool/toolchain/src/module_candidates/fixture_packets.rs",
+        "tidepool/toolchain/src/module_candidates/fixture_packets/codec.rs",
+        "tidepool/toolchain/src/module_candidates/product_decode_observer.rs",
+        "tidepool/toolchain/src/module_candidates/protected_native_availability_tests.rs",
+        "tidepool/toolchain/src/module_candidates/tests/product_carry.rs",
+    ],
+    test_fixtures = [
+        "tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs",
+        "tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelf.hs",
+        "tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelfCapture.hs",
+        "tidepool/toolchain/tests/fixtures/materialization-fault.c",
+        "tidepool/toolchain/tests/fixtures/owned-declaration/ExactConsumer.hs",
+        "tidepool/toolchain/tests/fixtures/owned-declaration/G1.hs",
+        "tidepool/toolchain/tests/fixtures/owned-declaration/G3.hs",
+        "tidepool/toolchain/tests/fixtures/typeable-tuple/G1.hs",
+    ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -899,6 +936,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":tidepool_toolchain",
     ],
+    required_test_modules = [
+        "tidepool/toolchain/tests/check_source_worker.rs",
+    ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -971,6 +1011,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":tidepool_toolchain",
     ],
+    required_test_modules = [
+        "tidepool/toolchain/tests/declaration_join_worker.rs",
+    ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -1029,6 +1072,9 @@ tidepool_rust_isolated_test(
         "//tidepool/extract-report:tidepool_extract_report",
         "//tidepool/repr:tidepool_repr",
         ":tidepool_toolchain",
+    ],
+    required_test_modules = [
+        "tidepool/toolchain/tests/prepared_fixture.rs",
     ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",

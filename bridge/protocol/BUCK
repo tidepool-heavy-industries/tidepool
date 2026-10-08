@@ -202,6 +202,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:insta",
         ":tidepool_protocol",
     ],
+    required_test_modules = [
+        "bridge/protocol/src/bin/tidepool-protocol-gen.rs",
+    ],
     resources = [
         "toolchains//:rustfmt",
     ],
@@ -370,6 +373,9 @@ tidepool_rust_isolated_test(
     deps = [
         "//third-party/rust:insta",
     ],
+    required_test_modules = [
+        "bridge/protocol/src/lib.rs",
+    ],
     resources = [
         "toolchains//:rustfmt",
     ],
@@ -409,6 +415,19 @@ tidepool_rust_isolated_test(
     deps = [
         "//third-party/rust:insta",
         ":tidepool_protocol",
+    ],
+    required_test_modules = [
+        "bridge/protocol/tests/emitted_rust_is_rustfmt_stable.rs",
+        "bridge/protocol/tests/event_haskell_contract.rs",
+        "bridge/protocol/tests/event_wire_rust.rs",
+        "bridge/protocol/tests/exomonad_control_contract.rs",
+        "bridge/protocol/tests/external_references.rs",
+        "bridge/protocol/tests/polymorphism_validation.rs",
+        "bridge/protocol/tests/schema_validation.rs",
+        "bridge/protocol/tests/suites/protocol.rs",
+        "bridge/protocol/tests/worktree_adapters.rs",
+        "bridge/protocol/tests/worktree_haskell_contract.rs",
+        "bridge/protocol/tests/worktree_wire_rust.rs",
     ],
     resources = [
         "toolchains//:rustfmt",

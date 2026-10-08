@@ -176,6 +176,9 @@ tidepool_rust_isolated_test(
         "//tidepool/runtime:tidepool_runtime",
         "//tidepool/toolchain:tidepool_toolchain",
     ],
+    required_test_modules = [
+        "bridge/handlers/src/lib.rs",
+    ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -262,6 +265,9 @@ tidepool_rust_isolated_test(
         "//tidepool/runtime:tidepool_runtime",
         "//tidepool/toolchain:tidepool_toolchain",
         ":tidepool_handlers",
+    ],
+    required_test_modules = [
+        "bridge/handlers/tests/bridged_records.rs",
     ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",

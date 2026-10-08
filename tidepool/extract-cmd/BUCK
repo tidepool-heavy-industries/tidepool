@@ -130,6 +130,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tracing-subscriber",
         ":tidepool_extract_cmd",
     ],
+    required_test_modules = [
+        "tidepool/extract-cmd/src/main.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -178,6 +181,14 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tracing-appender",
         "//third-party/rust:tracing-subscriber",
     ],
+    required_test_modules = [
+        "tidepool/extract-cmd/src/diagnostics_tests.rs",
+        "tidepool/extract-cmd/src/lib.rs",
+        "tidepool/extract-cmd/src/response_properties.rs",
+    ],
+    test_fixtures = [
+        "tidepool/extract-cmd/src/fixtures/build_products_worker.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -211,6 +222,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tracing-subscriber",
         ":tidepool_extract_cmd",
     ],
+    required_test_modules = [
+        "tidepool/extract-cmd/tests/build_products_frontend.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -242,6 +256,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tracing-appender",
         "//third-party/rust:tracing-subscriber",
         ":tidepool_extract_cmd",
+    ],
+    required_test_modules = [
+        "tidepool/extract-cmd/tests/build_products_ownership.rs",
     ],
     visibility = ["PUBLIC"],
 )
@@ -280,6 +297,11 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tracing-appender",
         "//third-party/rust:tracing-subscriber",
         ":tidepool_extract_cmd",
+    ],
+    required_test_modules = [
+        "tidepool/extract-cmd/tests/daemon_integration.rs",
+        "tidepool/extract-cmd/tests/daemon_integration/native_fairness.rs",
+        "tidepool/extract-cmd/tests/support/compiler_inputs.rs",
     ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
@@ -332,6 +354,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tracing-subscriber",
         ":tidepool_extract_cmd",
     ],
+    required_test_modules = [
+        "tidepool/extract-cmd/tests/no_open_coded_extract_spawns.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -365,6 +390,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tracing-subscriber",
         ":tidepool_extract_cmd",
     ],
+    required_test_modules = [
+        "tidepool/extract-cmd/tests/response_cleanup.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -396,6 +424,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tracing-appender",
         "//third-party/rust:tracing-subscriber",
         ":tidepool_extract_cmd",
+    ],
+    required_test_modules = [
+        "tidepool/extract-cmd/tests/retained_fingerprint.rs",
     ],
     visibility = ["PUBLIC"],
 )
@@ -429,6 +460,10 @@ tidepool_rust_isolated_test(
         "//third-party/rust:tracing-appender",
         "//third-party/rust:tracing-subscriber",
         ":tidepool_extract_cmd",
+    ],
+    required_test_modules = [
+        "tidepool/extract-cmd/tests/support/compiler_inputs.rs",
+        "tidepool/extract-cmd/tests/transaction_integration.rs",
     ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",

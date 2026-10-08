@@ -76,6 +76,9 @@ tidepool_rust_isolated_test(
         "//tidepool/runtime:tidepool_runtime",
         "//tidepool/toolchain:tidepool_toolchain",
     ],
+    required_test_modules = [
+        "bridge/testing/src/lib.rs",
+    ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },

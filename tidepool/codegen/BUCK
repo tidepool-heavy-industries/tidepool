@@ -267,6 +267,22 @@ tidepool_rust_isolated_test(
     named_deps = {
         "prepared_md5_native": ":prepared_md5_native",
     },
+    required_test_modules = [
+        "tidepool/codegen/src/lib.rs",
+        "tidepool/codegen/src/prepared_program/apply_tests.rs",
+        "tidepool/codegen/src/prepared_program/bytes_tests.rs",
+        "tidepool/codegen/src/prepared_program/caller_result_tests.rs",
+        "tidepool/codegen/src/prepared_program/double_to_int_tests.rs",
+        "tidepool/codegen/src/prepared_program/entry_tests.rs",
+        "tidepool/codegen/src/prepared_program/foreign_apply_tests.rs",
+        "tidepool/codegen/src/prepared_program/freer_boundary_tests.rs",
+        "tidepool/codegen/src/prepared_program/lifetime_tests.rs",
+        "tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs",
+        "tidepool/codegen/src/prepared_program/no_success_tests.rs",
+        "tidepool/codegen/src/prepared_program/retention_tests.rs",
+        "tidepool/codegen/src/prepared_program/settlement_tests.rs",
+        "tidepool/codegen/src/prepared_program/tests.rs",
+    ],
     resources = [
         "//bridge/haskell:freer_resume_prepared",
         "//bridge/haskell:freer_retention_prepared",
@@ -324,6 +340,9 @@ tidepool_rust_isolated_test(
     named_deps = {
         "prepared_md5_native": ":prepared_md5_native",
     },
+    required_test_modules = [
+        "tidepool/codegen/tests/native_md5_link.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -374,6 +393,10 @@ tidepool_rust_isolated_test(
     named_deps = {
         "prepared_md5_native": ":prepared_md5_native",
     },
+    required_test_modules = [
+        "tidepool/codegen/src/prepared_control.rs",
+        "tidepool/codegen/tests/prepared_control.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 

@@ -49,6 +49,9 @@ tidepool_rust_isolated_test(
     deps = [
         "//third-party/rust:num-bigint",
     ],
+    required_test_modules = [
+        "tidepool/bignum/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -72,6 +75,9 @@ tidepool_rust_isolated_test(
     deps = [
         "//third-party/rust:num-bigint",
         ":tidepool_bignum",
+    ],
+    required_test_modules = [
+        "tidepool/bignum/tests/show_double_oracle.rs",
     ],
     visibility = ["PUBLIC"],
 )

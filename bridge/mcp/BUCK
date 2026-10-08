@@ -228,6 +228,9 @@ tidepool_rust_isolated_test(
         "//tidepool/toolchain:tidepool_toolchain",
         ":tidepool_mcp",
     ],
+    required_test_modules = [
+        "bridge/mcp/src/bin/tidepool-effects-gen.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -317,6 +320,9 @@ tidepool_rust_isolated_test(
         "//tidepool/runtime:tidepool_runtime",
         "//tidepool/toolchain:tidepool_toolchain",
     ],
+    required_test_modules = [
+        "bridge/mcp/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -402,6 +408,16 @@ tidepool_rust_isolated_test(
         "//tidepool/runtime:tidepool_runtime",
         "//tidepool/toolchain:tidepool_toolchain",
         ":tidepool_mcp",
+    ],
+    required_test_modules = [
+        "bridge/mcp/tests/effect_roster_sentinel.rs",
+        "bridge/mcp/tests/generated_surface_contracts.rs",
+        "bridge/mcp/tests/pragma_set_consistency.rs",
+        "bridge/mcp/tests/protocol_goldens.rs",
+        "bridge/mcp/tests/protocol_schema_equivalence.rs",
+        "bridge/mcp/tests/repro_print_unresolved.rs",
+        "bridge/mcp/tests/selected_effects.rs",
+        "bridge/mcp/tests/suites/mcp.rs",
     ],
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",

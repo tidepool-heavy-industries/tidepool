@@ -130,6 +130,10 @@ tidepool_rust_isolated_test(
         "//third-party/rust:uuid",
         "//tidepool/repr:tidepool_repr",
     ],
+    required_test_modules = [
+        "exomonad/node/src/inbox/history_properties.rs",
+        "exomonad/node/src/lib.rs",
+    ],
     resources = [
         ":inbox_directory_fault_shared",
     ],
@@ -173,6 +177,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":exomonad_node",
     ],
+    required_test_modules = [
+        "exomonad/node/tests/command_resources.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -212,6 +219,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":exomonad_node",
     ],
+    required_test_modules = [
+        "exomonad/node/tests/overlay_rotation.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -248,6 +258,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:uuid",
         "//tidepool/repr:tidepool_repr",
         ":exomonad_node",
+    ],
+    required_test_modules = [
+        "exomonad/node/tests/process_boundary.rs",
     ],
     visibility = ["PUBLIC"],
 )

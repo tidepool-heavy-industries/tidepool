@@ -832,6 +832,9 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    required_test_modules = [
+        "bridge/facade/src/main.rs",
+    ],
     env = {
         "EXOMONAD_NIX_OFFLINE": "1",
     },
@@ -984,6 +987,9 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    required_test_modules = [
+        "bridge/facade/src/bin/exomonad.rs",
+    ],
     env = {
         "EXOMONAD_NIX_OFFLINE": "1",
     },
@@ -1136,6 +1142,9 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    required_test_modules = [
+        "bridge/facade/src/bin/exomonad-view-helper.rs",
+    ],
     env = {
         "EXOMONAD_NIX_OFFLINE": "1",
     },
@@ -1288,6 +1297,9 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    required_test_modules = [
+        "bridge/facade/src/bin/tidepool-compile-report.rs",
+    ],
     env = {
         "EXOMONAD_NIX_OFFLINE": "1",
     },
@@ -1511,6 +1523,49 @@ tidepool_rust_binary(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    required_test_modules = [
+        "bridge/facade/src/actor_host/embedded_agent_spec_tests.rs",
+        "bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs",
+        "bridge/facade/src/actor_host/embedded_operation_settlement_tests.rs",
+        "bridge/facade/src/actor_host/m1_cancel_performance.rs",
+        "bridge/facade/src/actor_host/m1_compiler_attribution_tests.rs",
+        "bridge/facade/src/actor_host/m1_eight_actor_performance.rs",
+        "bridge/facade/src/actor_host/m1_request_reload_tests.rs",
+        "bridge/facade/src/actor_host/m1_warm_cell_performance.rs",
+        "bridge/facade/src/actor_host/native_prefix_publication_tests.rs",
+        "bridge/facade/src/actor_host/prepared_display_tests.rs",
+        "bridge/facade/src/actor_host/prepared_runtime_acceptance.rs",
+        "bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs",
+        "bridge/facade/src/actor_host/workspace_admission_tests.rs",
+        "bridge/facade/src/exomonad/source/publication_fault_tests.rs",
+        "bridge/facade/src/exomonad/workspace/source_capture_tests.rs",
+        "bridge/facade/src/lib.rs",
+    ],
+    test_fixtures = [
+        "bridge/facade/src/actor_host/cargo_report_contract.hs",
+        "bridge/facade/src/actor_host/command_tool_facts_gate.hs",
+        "bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs",
+        "bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs",
+        "bridge/facade/src/actor_host/fixtures/request_reload_agent_spec.hs",
+        "bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs",
+        "bridge/facade/src/actor_host/fixtures/retained_handler_tools.hs",
+        "bridge/facade/src/actor_host/fixtures/unconstrained_spec_later_helper.hs",
+        "bridge/facade/src/actor_host/m1_cancel_cell.hs",
+        "bridge/facade/src/actor_host/m1_eight_actor_launch.hs",
+        "bridge/facade/src/actor_host/m1_warm_cell_workloads.json",
+        "bridge/facade/src/actor_host/notebook_explicit_display_budget_failure.hs",
+        "bridge/facade/src/actor_host/notebook_explicit_display_siblings.hs",
+        "bridge/facade/src/actor_host/notebook_explicit_display_untrusted_callback.hs",
+        "bridge/facade/src/actor_host/notebook_prefix_baseline.hs",
+        "bridge/facade/src/actor_host/notebook_prefix_failure.hs",
+        "bridge/facade/src/actor_host/prepared_display_failure.hs",
+        "bridge/facade/src/actor_host/prepared_display_success.hs",
+        "bridge/facade/src/actor_host/prepared_runtime_children.hs",
+        "bridge/facade/src/actor_host/prepared_runtime_spec.hs",
+        "bridge/facade/src/actor_host/recipe_checks/prepared_contract_expression.hs",
+        "bridge/facade/src/actor_host/restart_effect_once.hs",
+        "bridge/facade/src/exomonad/source/publication_fault_driver.hs",
+    ],
     env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
     rustc_flags = ["--test"],
     visibility = ["PUBLIC"],
@@ -1995,6 +2050,9 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    required_test_modules = [
+        "bridge/facade/tests/bridge_decl_guard.rs",
+    ],
     env = {
         "EXOMONAD_NIX_OFFLINE": "1",
     },
@@ -2094,6 +2152,9 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    required_test_modules = [
+        "bridge/facade/tests/exomonad_action_surface.rs",
+    ],
     env = {
         "EXOMONAD_NIX_OFFLINE": "1",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
@@ -2191,6 +2252,9 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    required_test_modules = [
+        "bridge/facade/tests/exomonad_namespace_entry.rs",
+    ],
     env = {
         "EXOMONAD_NIX_OFFLINE": "1",
     },
@@ -2276,6 +2340,9 @@ tidepool_rust_isolated_test(
     named_deps = {
         "harness": "//third-party/rust:harness",
     },
+    required_test_modules = [
+        "bridge/facade/tests/exomonad_workspace_check.rs",
+    ],
     env = {
         "EXOMONAD_NIX_OFFLINE": "1",
     },

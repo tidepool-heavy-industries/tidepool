@@ -43,6 +43,9 @@ tidepool_rust_isolated_test(
     crate_root = "exomonad/model-output/src/lib.rs",
     edition = "2021",
     srcs_filegroup = ":exomonad_model_output_unit_tests_sources",
+    required_test_modules = [
+        "exomonad/model-output/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 

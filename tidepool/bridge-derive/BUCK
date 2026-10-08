@@ -63,6 +63,9 @@ tidepool_rust_isolated_test(
         "//tidepool/bridge:tidepool_bridge",
         "//tidepool/repr:tidepool_repr",
     ],
+    required_test_modules = [
+        "tidepool/bridge-derive/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -91,6 +94,9 @@ tidepool_rust_isolated_test(
         "//tidepool/bridge:tidepool_bridge",
         "//tidepool/repr:tidepool_repr",
         ":tidepool_bridge_derive",
+    ],
+    required_test_modules = [
+        "tidepool/bridge-derive/tests/arity_disambiguation.rs",
     ],
     visibility = ["PUBLIC"],
 )
@@ -121,6 +127,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":tidepool_bridge_derive",
     ],
+    required_test_modules = [
+        "tidepool/bridge-derive/tests/derive_tests.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -150,6 +159,9 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
         ":tidepool_bridge_derive",
     ],
+    required_test_modules = [
+        "tidepool/bridge-derive/tests/module_qualification.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
@@ -178,6 +190,9 @@ tidepool_rust_isolated_test(
         "//tidepool/bridge:tidepool_bridge",
         "//tidepool/repr:tidepool_repr",
         ":tidepool_bridge_derive",
+    ],
+    required_test_modules = [
+        "tidepool/bridge-derive/tests/phantom_data.rs",
     ],
     visibility = ["PUBLIC"],
 )

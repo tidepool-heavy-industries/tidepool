@@ -55,6 +55,9 @@ tidepool_rust_isolated_test(
         "//third-party/rust:thiserror",
         "//third-party/rust:tokio",
     ],
+    required_test_modules = [
+        "exomonad/model/src/lib.rs",
+    ],
     visibility = ["PUBLIC"],
 )
 
