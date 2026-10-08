@@ -406,7 +406,7 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
         .await
         .unwrap();
     let tools = vec![HostedTool::Function(exomonad_tool::ToolDeclaration {
-        schedule: Default::default(),
+        schedule: exomonad_tool::ToolScheduling::BeforeNextInference,
         implementation: Default::default(),
         effect_keys: Vec::new(),
         name: "lookup".into(),
