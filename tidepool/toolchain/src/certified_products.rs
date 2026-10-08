@@ -398,6 +398,7 @@ pub(crate) struct OriginalNativeWitness {
     execution_source_sha256: Option<[u8; 32]>,
     anchors: [Arc<[u8]>; 4],
     groups: Arc<[AuthenticatedOriginalGroup]>,
+    group_positions: BTreeMap<u32, usize>,
     sources: Vec<CachedHomeOwner>,
     interface_requirements: BTreeMap<(String, String), [u8; 32]>,
     packages: BTreeMap<(String, String), PackageInterfaceWitness>,
@@ -405,6 +406,12 @@ pub(crate) struct OriginalNativeWitness {
 }
 
 impl OriginalNativeWitness {
+    fn group(&self, original_ordinal: u32) -> Option<&AuthenticatedOriginalGroup> {
+        self.group_positions
+            .get(&original_ordinal)
+            .map(|position| &self.groups[*position])
+    }
+
     fn validate_promoted_groups(
         &self,
         current: &[(&ProjectedGroup, Vec<PendingImportOwner>)],
@@ -428,18 +435,14 @@ impl OriginalNativeWitness {
                     },
                 ));
             }
-            let original = self
-                .groups
-                .iter()
-                .find(|original| original.group.original_ordinal() == group.original_ordinal())
-                .ok_or_else(|| {
-                    original_group_conflict(
-                        &self.owner,
-                        OriginalGroupFailure::PromotionMissingOrdinal {
-                            ordinal: group.original_ordinal(),
-                        },
-                    )
-                })?;
+            let original = self.group(group.original_ordinal()).ok_or_else(|| {
+                original_group_conflict(
+                    &self.owner,
+                    OriginalGroupFailure::PromotionMissingOrdinal {
+                        ordinal: group.original_ordinal(),
+                    },
+                )
+            })?;
             if original.group() != *group {
                 return Err(original_group_conflict(
                     &self.owner,
@@ -484,10 +487,9 @@ pub(crate) fn authenticates_original_native_entry(
         witness.matches_original(product)
             && binder.unit == witness.owner.unit
             && binder.module == witness.owner.module
-            && witness.groups.iter().any(|group| {
-                group.group.original_ordinal() == original_ordinal
-                    && group.group.binders().contains(binder)
-            })
+            && witness
+                .group(original_ordinal)
+                .is_some_and(|group| group.group.binders().contains(binder))
     })
 }
 
@@ -522,12 +524,24 @@ fn retain_authenticated_original_native(
             "original native witness owner",
         ));
     }
+    let mut group_positions = BTreeMap::new();
+    for (position, group) in groups.iter().enumerate() {
+        if group_positions
+            .insert(group.group.original_ordinal(), position)
+            .is_some()
+        {
+            return Err(CertificationError::Mismatch(
+                "duplicate original native ordinal",
+            ));
+        }
+    }
     let native_requirements = native_requirements_from_witness(&witness);
     let facts = Arc::new(OriginalNativeWitness {
         owner: witness.owner,
         execution_source_sha256: witness.execution_source_sha256,
         anchors: product.original_byte_anchors().map(Arc::clone),
         groups: groups.into(),
+        group_positions,
         sources: witness.sources.into_values().collect(),
         interface_requirements: witness.interface_requirements,
         packages: witness.packages,
@@ -4451,9 +4465,7 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
             ));
         }
         let group = witness
-            .groups
-            .iter()
-            .find(|group| group.group().original_ordinal() == key.original_ordinal)
+            .group(key.original_ordinal)
             .ok_or(CertificationError::Mismatch("selected original group"))?;
         if originals.insert(*key, (group, witness)).is_some() {
             return Err(CertificationError::Mismatch(
@@ -8313,6 +8325,211 @@ pub(crate) mod tests {
         )])
         .remove(0)
         .product
+    }
+
+    fn check_original_native_index_against_linear_scan(raw: &[(u32, bool, bool)], query: u32) {
+        use crate::artifact_inventory::{ArtifactId, NativeGroupKey};
+        let original = full_native_fixture(
+            "Indexed",
+            raw.iter()
+                .map(|(ordinal, has_import, _)| {
+                    let imports = has_import
+                        .then(|| PendingImportOwner::Retained {
+                            identity: testing::identity("Captured", &format!("value_{ordinal}")),
+                            generation: u64::from(*ordinal) + 1,
+                        })
+                        .into_iter()
+                        .collect();
+                    (*ordinal, imports)
+                })
+                .collect(),
+            7,
+        );
+        let native = original.original_native().unwrap();
+        assert_eq!(
+            native
+                .groups
+                .iter()
+                .map(|group| group.group.original_ordinal())
+                .collect::<Vec<_>>(),
+            raw.iter()
+                .map(|(ordinal, _, _)| *ordinal)
+                .collect::<Vec<_>>(),
+            "issuance preserves authenticated group order",
+        );
+        for ordinal in raw.iter().map(|(ordinal, _, _)| *ordinal).chain([query]) {
+            let expected = native
+                .groups
+                .iter()
+                .find(|group| group.group.original_ordinal() == ordinal);
+            let actual = native.group(ordinal);
+            assert_eq!(actual.is_some(), expected.is_some());
+            if let (Some(actual), Some(expected)) = (actual, expected) {
+                assert!(std::ptr::eq(actual, expected));
+                assert!(Arc::ptr_eq(&actual.group, &expected.group));
+                assert!(Arc::ptr_eq(&actual.imports, &expected.imports));
+            }
+            let binder = testing::identity("Indexed", &format!("entry_{ordinal}"));
+            // The existing one-group fixture has a special binder for ordinal 7.
+            let binder = if raw.len() == 1 && ordinal == 7 {
+                testing::identity("Indexed", "entry")
+            } else {
+                binder
+            };
+            assert_eq!(
+                authenticates_original_native_entry(&original, ordinal, &binder),
+                expected.is_some_and(|group| group.group.binders().contains(&binder)),
+            );
+            let mut wrong_owner = binder.clone();
+            wrong_owner.module = "Other".into();
+            assert!(!authenticates_original_native_entry(
+                &original,
+                ordinal,
+                &wrong_owner
+            ));
+            wrong_owner = binder.clone();
+            wrong_owner.unit = "other-unit".into();
+            assert!(!authenticates_original_native_entry(
+                &original,
+                ordinal,
+                &wrong_owner
+            ));
+            let mut missing_binder = binder;
+            missing_binder.occurrence = "missing".into();
+            assert!(!authenticates_original_native_entry(
+                &original,
+                ordinal,
+                &missing_binder
+            ));
+        }
+        let current = native
+            .groups
+            .iter()
+            .rev()
+            .map(|group| (group.group(), group.imports().to_vec()))
+            .collect::<Vec<_>>();
+        native.validate_promoted_groups(&current).unwrap();
+
+        let artifact = ArtifactId([3; 32]);
+        let available = BTreeMap::from([(artifact, &original)]);
+        let selected = raw
+            .iter()
+            .filter(|(_, _, select)| *select)
+            .map(|(ordinal, _, _)| NativeGroupKey {
+                artifact,
+                original_ordinal: *ordinal,
+            })
+            .collect::<BTreeSet<_>>();
+        let admitted = certify_selected_owned_products_in_context_with_validation(
+            &available,
+            &[],
+            &selected,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert_eq!(admitted.len(), selected.len());
+        for (actual, key) in admitted.iter().zip(&selected) {
+            let expected = native
+                .groups
+                .iter()
+                .find(|group| group.group.original_ordinal() == key.original_ordinal)
+                .unwrap();
+            assert_eq!(actual.owner(), &expected.owner);
+            assert!(Arc::ptr_eq(&actual.group, &expected.group));
+            assert!(Arc::ptr_eq(&actual.imports, &expected.imports));
+        }
+        assert!(certify_selected_owned_products_in_context_with_validation(
+            &available,
+            &admitted,
+            &selected,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .is_empty());
+        if !raw.iter().any(|(ordinal, _, _)| *ordinal == query) {
+            assert!(matches!(
+                certify_selected_owned_products_in_context_with_validation(
+                    &available,
+                    &[],
+                    &BTreeSet::from([NativeGroupKey {
+                        artifact,
+                        original_ordinal: query
+                    }]),
+                    &mut PackageInterfaceValidation::default(),
+                ),
+                Err(CertificationError::Mismatch("selected original group"))
+            ));
+        }
+    }
+
+    #[test]
+    fn original_native_index_preserves_sparse_order_and_selected_identity() {
+        check_original_native_index_against_linear_scan(
+            &[(u32::MAX, true, true), (0, false, false), (29, true, true)],
+            1,
+        );
+        check_original_native_index_against_linear_scan(&[], u32::MAX);
+        check_original_native_index_against_linear_scan(&[(7, false, true)], 7);
+    }
+
+    #[test]
+    fn original_native_index_issuer_rejects_duplicate_ordinals_and_wrong_owners() {
+        let original = full_native_fixture("Indexed", vec![(29, vec![]), (3, vec![])], 7);
+        let native = original.original_native().unwrap();
+        let witness =
+            || verify_home_witness(original.certification_bytes(), original.owner()).unwrap();
+        let mut duplicate = native.groups.to_vec();
+        duplicate.push(duplicate[0].clone());
+        assert!(matches!(
+            retain_authenticated_original_native(original.clone(), duplicate, witness()),
+            Err(CertificationError::Mismatch(
+                "duplicate original native ordinal"
+            )),
+        ));
+        let mut wrong_owner = native.groups.to_vec();
+        wrong_owner[0].owner.module_version = ModuleVersion([8; 32]);
+        assert!(matches!(
+            retain_authenticated_original_native(original.clone(), wrong_owner, witness()),
+            Err(CertificationError::Mismatch(
+                "original native witness owner"
+            )),
+        ));
+        let mut wrong_witness = witness();
+        wrong_witness.owner.module_version = ModuleVersion([8; 32]);
+        assert!(matches!(
+            retain_authenticated_original_native(
+                original.clone(),
+                native.groups.to_vec(),
+                wrong_witness
+            ),
+            Err(CertificationError::Mismatch(
+                "original native witness owner"
+            )),
+        ));
+    }
+
+    fn original_native_index_property_config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
+    proptest::proptest! {
+        #![proptest_config(original_native_index_property_config())]
+        #[test]
+        fn original_native_index_matches_linear_scan_for_generated_sparse_groups(
+            groups in proptest::collection::vec((proptest::prelude::any::<u32>(),
+                proptest::prelude::any::<bool>(), proptest::prelude::any::<bool>()), 0..48),
+            query in proptest::prelude::any::<u32>(),
+        ) {
+            let mut seen = BTreeSet::new();
+            let groups = groups.into_iter().filter(|(ordinal, _, _)| seen.insert(*ordinal)).collect::<Vec<_>>();
+            check_original_native_index_against_linear_scan(&groups, query);
+        }
     }
 
     #[test]
