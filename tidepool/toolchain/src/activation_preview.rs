@@ -238,6 +238,54 @@ pub(crate) fn validate_original_display_context(
     ))
 }
 
+/// Authored instance implementations are retained native originals, rather
+/// than source originals that the compiler may lower again from Core. Offer
+/// only carriers matching the original request's selected canonical interface.
+/// Their complete census adds availability, never lexical or heap authority.
+pub(crate) fn original_native_declaration_inputs(
+    context: &ExactDeclarationContext,
+    producer: &[u8],
+) -> Result<Option<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
+    use crate::artifact_inventory::{ArtifactPayload, CanonicalProducerIdentity};
+    use crate::certified_products::CanonicalOrigin;
+
+    context.original_instance_target()?;
+    let selected = context.compiler_metadata_snapshot()?;
+    let products = context
+        .artifact_view()
+        .entries()
+        .into_iter()
+        .filter_map(|entry| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return None;
+            };
+            let interface = product.module_interface()?;
+            if !matches!(
+                interface.origin(),
+                CanonicalOrigin::NativeAuthoredDeclaration { .. }
+            ) {
+                return None;
+            }
+            let selected = selected.entries.get(&entry.descriptor.owner)?;
+            match &selected.payload {
+                ArtifactPayload::Canonical(canonical) if canonical == interface => {
+                    Some(product.clone())
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    if products.is_empty() {
+        return Ok(None);
+    }
+    crate::declaration_context::OriginalCompilerInputs::from_native_availability(
+        context,
+        CanonicalProducerIdentity::from_producer_bytes(producer),
+        &products,
+    )
+    .map(Some)
+}
+
 #[derive(Debug)]
 pub struct ExactCompiledActivationPreview {
     input: Arc<ExactHostBindingInterface>,
@@ -342,3 +390,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "activation_preview/native_declaration_input_tests.rs"]
+mod native_declaration_input_tests;

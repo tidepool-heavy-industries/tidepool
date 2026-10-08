@@ -2883,7 +2883,7 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
         row: fixture.recipe.row.clone(),
         include: fixture.recipe.include.clone(),
     });
-    publish_fixture_declaration(
+    let display_owner = publish_fixture_declaration(
         &mut resident,
         &recipe,
         include_str!("fixtures/activation-input-later-display.hs"),
@@ -2916,6 +2916,17 @@ fn activation_preview_earlier_output_ignores_later_display_instance() {
     let later = resident
         .capture_activation_input(&hole, RealmId::ROOT, site)
         .unwrap();
+    assert!(earlier
+        .original_execution
+        .recovery_products()
+        .iter()
+        .all(|product| product.owner().module != display_owner));
+    assert!(later
+        .original_execution
+        .recovery_products()
+        .iter()
+        .any(|product| product.owner().module == display_owner),
+        "the original instance environment retains its defining native declaration, even when the request did not call Display");
     let earlier_identity = earlier.original_execution.semantic_sha256();
     let later_identity = later.original_execution.semantic_sha256();
     assert_ne!(earlier_identity, later_identity);

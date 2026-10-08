@@ -3878,7 +3878,7 @@ pub(crate) fn fixture_finalized_product_with_requirements(
     producer: [u8; 32],
     requirements: Option<BTreeMap<(String, String), [u8; 32]>>,
 ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
-    fixture_finalized_product_inner(product, producer, requirements, None)
+    fixture_finalized_product_inner(product, producer, requirements, None, None)
 }
 
 #[cfg(test)]
@@ -3887,7 +3887,22 @@ pub(crate) fn fixture_source_finalized_product(
     producer: [u8; 32],
     imports: Vec<CanonicalSourceImport>,
 ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
-    fixture_finalized_product_inner(product, producer, None, Some(imports))
+    fixture_finalized_product_inner(product, producer, None, Some(imports), None)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_native_declaration_product(
+    product: crate::recovery_artifacts::CertifiedRecoveryProduct,
+    producer: [u8; 32],
+    generation: u64,
+) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+    fixture_finalized_product_inner(
+        product,
+        producer,
+        None,
+        None,
+        Some(CanonicalOrigin::NativeAuthoredDeclaration { generation }),
+    )
 }
 
 #[cfg(test)]
@@ -3896,6 +3911,7 @@ fn fixture_finalized_product_inner(
     producer: [u8; 32],
     requirements: Option<BTreeMap<(String, String), [u8; 32]>>,
     imports: Option<Vec<CanonicalSourceImport>>,
+    origin: Option<CanonicalOrigin>,
 ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
     let mut witness = decode_home_witness(product.certification_bytes()).unwrap();
     if let Some(requirements) = requirements {
@@ -3931,6 +3947,10 @@ fn fixture_finalized_product_inner(
     );
     let interface = match imports {
         Some(imports) => finalized_module::fixture_source_imports(interface, imports),
+        None => interface,
+    };
+    let interface = match origin {
+        Some(origin) => finalized_module::fixture_origin(interface, origin),
         None => interface,
     };
     witness.finalized_module_sha256 = Some(sha(interface.certificate_bytes()));

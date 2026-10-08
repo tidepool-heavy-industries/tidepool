@@ -21,6 +21,10 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   native dependencies through exact artifact/group edges, including historical
   children, rather than flattening custody into a module map. History tests
   must carry certification through the production consumer that needs selection.
+- Pure activation previews preserve the original instance graph separately from
+  native availability. Authored dictionary bodies use retained originals matching
+  that capture's canonical interfaces; type custody alone cannot replace native
+  bytes, and source-original Core recovery must not replay authored declarations.
 - `tidepool-extract-cmd` stays the small invocation builder. Do not move cache
   or runtime policy into that dependency leaf.
 - Cache tests must cover invalidation, relocation, warnings, and uncacheable

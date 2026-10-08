@@ -1246,6 +1246,14 @@ pub(super) fn fixture_source_imports(
             .collect::<Vec<_>>()
             .into(),
     };
+    fixture_origin(interface, origin)
+}
+
+#[cfg(test)]
+pub(super) fn fixture_origin(
+    interface: CertifiedModuleInterface,
+    origin: CanonicalOrigin,
+) -> CertifiedModuleInterface {
     let envelope = FinalizationEnvelope {
         profile: FINALIZATION_ENVELOPE_PROFILE.into(),
         value_interfaces: BTreeMap::new(),

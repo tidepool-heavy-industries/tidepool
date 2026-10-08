@@ -1399,13 +1399,18 @@ impl ModuleCandidateOffer {
         );
         let authorization =
             checked_search_authorization(offer.authorization(original_interfaces)?, include)?;
+        let private = crate::activation_preview::original_native_declaration_inputs(
+            &offer.original_execution,
+            producer,
+        )?;
         let exact = (*context)
             .clone()
             .with_declarations(declarations)
-            .prepare_compilation_with_authorization(
+            .prepare_compilation_with_private_input(
                 &scratch.join("exact-scope"),
                 producer,
                 Some(authorization),
+                private,
             )?
             .with_source_search_context(include)
             .with_checked_value_imports(values.import_authority());
