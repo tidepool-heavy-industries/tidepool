@@ -4669,11 +4669,7 @@ tidepool-reuse-error: witness failed\n";
                 compile_request = "request-filter",
                 "compiler request started"
             );
-            log_compile_timing(
-                "run-filter",
-                "request-filter",
-                worker_stderr,
-            );
+            log_compile_timing("run-filter", "request-filter", worker_stderr);
             tracing::error!(
                 target: "tidepool_extract_cmd::daemon",
                 run_id = "run-filter",
