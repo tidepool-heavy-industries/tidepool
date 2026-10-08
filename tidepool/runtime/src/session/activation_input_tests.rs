@@ -280,11 +280,7 @@ impl InputFixture {
         reservation: ResidentHole,
         request: i64,
     ) -> (ResidentHole, ResidentHole) {
-        let submission = suspended(
-            resident
-                .resume(reservation, request)
-                .expect("settle native request reservation"),
-        );
+        let submission = settle_request_reservation(resident, reservation, request);
         // SubmitRequestWith carries request id at field0 and protocol payload at field1.
         let payload = resident
             .live_payload_handle(submission.cont_id())
@@ -476,6 +472,27 @@ fn suspended(outcome: ResidentOutcome) -> ResidentHole {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("expected native request suspension, got {other:?}"),
     }
+}
+
+// These fixtures exercise the admitted branch of Replies' Either answers.
+// The unused error type supplies no value; native reply evidence validates
+// Right and its payload against the compiler-issued reply type.
+fn settle_request_reservation(
+    resident: &mut TestSession,
+    hole: ResidentHole,
+    request: i64,
+) -> ResidentHole {
+    suspended(
+        resident
+            .resume(hole, Ok::<i64, ()>(request))
+            .expect("settle ReserveRequestWith with Right request ID"),
+    )
+}
+
+fn settle_request_submission(resident: &mut TestSession, hole: ResidentHole) -> ResidentOutcome {
+    resident
+        .resume(hole, Ok::<(), ()>(()))
+        .expect("settle SubmitRequestWith with Right Unit")
 }
 
 type InputInterface = Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>;
@@ -1275,7 +1292,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     );
     let mut source = fixture.fresh();
     let reservation = fixture.start(&mut source);
-    let submission = suspended(source.resume(reservation, 1).unwrap());
+    let submission = settle_request_reservation(&mut source, reservation, 1);
     let payload = source
         .live_payload_handle(submission.cont_id())
         .unwrap()
@@ -1535,7 +1552,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
     };
     let mut source = fixture.fresh();
     let reservation = fixture.start(&mut source);
-    let submission = suspended(source.resume(reservation, 1).unwrap());
+    let submission = settle_request_reservation(&mut source, reservation, 1);
     let payload = source
         .live_payload_handle(submission.cont_id())
         .unwrap()
@@ -1922,7 +1939,28 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             .run_rooted_entry("selectedAction", action, 1, RealmId::ROOT, None)
             .unwrap(),
     );
-    let submission = suspended(source.resume(reservation, 1).unwrap());
+    let holes_before_answer = source
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let handles_before_answer = source.value_handle_count();
+    assert!(matches!(
+        source.resume(reservation.clone(), 1_i64),
+        Err(ResidentError::Prepared(
+            PreparedRuntimeError::AnswerConstructor { .. }
+        ))
+    ));
+    assert_eq!(
+        source
+            .parked_holes()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        holes_before_answer
+    );
+    assert_eq!(source.value_handle_count(), handles_before_answer);
+    let submission = settle_request_reservation(&mut source, reservation, 1);
     let payload = source
         .live_payload_handle(submission.cont_id())
         .unwrap()
@@ -1975,7 +2013,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         ResidentOutcome::Completed { .. }
     ));
     assert!(matches!(
-        source.resume(submission, ()).unwrap(),
+        settle_request_submission(&mut source, submission),
         ResidentOutcome::Completed { .. }
     ));
     drop(receiver);
@@ -2042,9 +2080,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
         previous_hole = Some(hole.clone());
         let outcome = fixture.resume_activation(&mut resident, hole);
         assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
-        let caller = resident
-            .resume(submission, ())
-            .expect("settle original native submission");
+        let caller = settle_request_submission(&mut resident, submission);
         if request == 1 {
             reservation = suspended(caller);
         } else {
@@ -2241,7 +2277,7 @@ fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
         ResidentOutcome::Completed { .. }
     ));
     assert!(matches!(
-        resident.resume(submission, ()).unwrap(),
+        settle_request_submission(&mut resident, submission),
         ResidentOutcome::Completed { .. }
     ));
     resident.retire_scope(execution.private_scope());
@@ -3138,7 +3174,7 @@ fn activation_task_input_preserves_parent_action_row_across_child_facade() {
         ResidentOutcome::Completed { .. }
     ));
     assert!(matches!(
-        resident.resume(submission, ()).unwrap(),
+        settle_request_submission(&mut resident, submission),
         ResidentOutcome::Completed { .. }
     ));
     resident.retire_scope(execution.private_scope());
@@ -3399,7 +3435,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         ResidentOutcome::Completed { .. }
     ));
     assert!(matches!(
-        resident.resume(submission, ()).unwrap(),
+        settle_request_submission(&mut resident, submission),
         ResidentOutcome::Completed { .. }
     ));
     resident.set_run_context(public_context).unwrap();
