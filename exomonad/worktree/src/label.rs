@@ -107,6 +107,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    use proptest::collection;
     use proptest::prelude::*;
     use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
 
