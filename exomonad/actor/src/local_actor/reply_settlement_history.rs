@@ -231,7 +231,7 @@ fn histories() -> impl Strategy<Value = History> {
 
 #[derive(Default, Debug)]
 struct Coverage {
-    histories: usize,
+    replay_callbacks: usize,
     observations: usize,
     subscriptions: usize,
     duplicates: usize,
@@ -289,7 +289,7 @@ fn check_observation(
 }
 
 async fn run_history(history: &History, coverage: &mut Coverage) {
-    coverage.histories += 1;
+    coverage.replay_callbacks += 1;
     let registry = Arc::new(RequestRegistry::default());
     let request_slot = Arc::new(parking_lot::Mutex::new(None));
     let (release, continuation) = oneshot::channel();
@@ -392,8 +392,19 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         let observed = subscription.wait().await.unwrap();
         match history.completion {
             Completion::Success => assert_eq!(observed, WatchObservation::Ready(Vec::new())),
-            Completion::Failure | Completion::Shutdown => assert!(
-                matches!(observed, WatchObservation::Ready(failures) if failures.len() == 1)
+            Completion::Failure => assert_eq!(
+                observed,
+                WatchObservation::Ready(vec![(
+                    request,
+                    ResponseFailure::SettlementFailed("controlled continuation failure".into())
+                )])
+            ),
+            Completion::Shutdown => assert_eq!(
+                observed,
+                WatchObservation::Ready(vec![(
+                    request,
+                    ResponseFailure::TargetCancelled("controlled shutdown".into())
+                )])
             ),
         }
     }
