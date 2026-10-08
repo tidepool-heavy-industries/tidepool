@@ -129,6 +129,7 @@ if [[ $test_toolchain == true ]]; then
 fi
 cc="$(output_path cc)"
 lld="$(output_path lld)"
+[[ -x $lld/bin/ld.lld ]] || { echo 'Prepared pinned LLD executable is unavailable' >&2; exit 1; }
 binutils="$(output_path binutils)"
 node="$(output_path node)"
 npm_cache="$(output_path npm-cache)"
