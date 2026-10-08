@@ -607,8 +607,13 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
         Some(harness::turn::JobOutput::Completed(Err(_)))
     ));
     assert!(matches!(
+        actor.admit_transaction(),
+        Err(exomonad_actor::KernelCallFailure::MailboxClosed(target))
+            if target == actor.identity()
+    ));
+    assert!(matches!(
         host.inner.tool_surface(),
-        Err(harness::embedding::EmbeddedError::AdmissionClosed)
+        Err(harness::embedding::EmbeddedError::Host(_))
     ));
     // Engine reports the exact settled frontier; the outer driver owns its CAS.
     assert_eq!(store.embedded_agent_head(host.identity()).unwrap(), None);
