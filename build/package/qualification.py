@@ -321,15 +321,21 @@ def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path, *
 
 def verify_registered_gc_roots(tools: Path, pins: list[dict]) -> None:
     """A symlink alone does not establish registration with the Nix collector."""
+    expected = set()
     for pinned in pins:
         target = Path(pinned["path"])
         if not target.is_absolute() or target.resolve(strict=True) != Path(pinned["store_path"]):
             raise ValueError("deployment Nix GC root was removed or changed")
-        registered = subprocess.check_output(
-            [str(tools / "bin/nix-store"), "--query", "--roots", pinned["store_path"]],
-            text=True, timeout=60).splitlines()
-        if str(target) not in {line.split(" -> ", 1)[0] for line in registered}:
-            raise ValueError("deployment Nix GC root is not registered")
+        expected.add((str(target), pinned["store_path"]))
+    if not expected:
+        return
+    registered = subprocess.check_output(
+        [str(tools / "bin/nix-store"), "--query", "--roots",
+         *sorted({store_path for _, store_path in expected})],
+        text=True, timeout=60).splitlines()
+    pairs = {tuple(line.split(" -> ", 1)) for line in registered}
+    if not expected <= pairs:
+        raise ValueError("deployment Nix GC root is not registered")
 
 def native_catalog_selection(catalog: Path, original: Path) -> dict:
     value = json.loads(catalog.read_text())
