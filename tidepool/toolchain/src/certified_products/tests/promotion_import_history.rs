@@ -642,6 +642,79 @@ fn retained_core_promotion_rekeys_nonempty_source_import_history() {
         matches!(&g.imports[..], [PendingImportOwner::Source { owner, original_ordinal, binder: imported }] if owner == current_b.owner() && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
 
+    // A segment's later item receipts repeat the same native module facts.
+    // They retain their own target and value admission; completed native proof
+    // custody is shared after all current promotion checks run again.
+    for item in 1..14 {
+        let repeated = certify_products(
+            None,
+            &promoted_packet,
+            &promoted,
+            &evidence_bytes,
+            &input,
+            root.path(),
+            &normalized,
+            target_source,
+            &producer,
+            &include,
+            Some(&exact),
+            None,
+        )
+        .unwrap();
+        for original in [current_a, current_b] {
+            let observed = repeated
+                .recovery_products
+                .iter()
+                .find(|product| product.owner() == original.owner())
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(
+                    original.original_native().unwrap(),
+                    observed.original_native().unwrap()
+                ),
+                "item {item} reuses completed native proof"
+            );
+            assert_eq!(observed, original);
+        }
+        assert_eq!(
+            repeated
+                .source_selection
+                .selected_original_owners()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            selected_owners
+        );
+    }
+    let independent = ParsedModuleProducts::decode(&promoted_bytes, &package_bundle()).unwrap();
+    let independent_result = certify_products(
+        None,
+        &promoted_packet,
+        &independent,
+        &evidence_bytes,
+        &input,
+        root.path(),
+        &normalized,
+        target_source,
+        &producer,
+        &include,
+        Some(&exact),
+        None,
+    )
+    .unwrap();
+    let independent_a = independent_result
+        .recovery_products
+        .iter()
+        .find(|product| product.owner() == current_a.owner())
+        .unwrap();
+    assert_eq!(independent_a, current_a);
+    assert!(
+        !Arc::ptr_eq(
+            independent_a.original_native().unwrap(),
+            current_a.original_native().unwrap()
+        ),
+        "another admission issues its own proof"
+    );
+
     let mut changed_import = promoted_packet.clone();
     let a_receipt = changed_import
         .modules

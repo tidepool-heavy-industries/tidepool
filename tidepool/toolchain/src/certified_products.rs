@@ -416,6 +416,17 @@ impl OriginalNativeWitness {
         &self,
         current: &[(&ProjectedGroup, Vec<PendingImportOwner>)],
     ) -> CertResult<()> {
+        self.validate_groups(
+            current
+                .iter()
+                .map(|(group, imports)| (*group, imports.as_slice())),
+        )
+    }
+
+    fn validate_groups<'a>(
+        &self,
+        current: impl ExactSizeIterator<Item = (&'a ProjectedGroup, &'a [PendingImportOwner])>,
+    ) -> CertResult<()> {
         if current.len() != self.groups.len() {
             return Err(original_group_conflict(
                 &self.owner,
@@ -443,7 +454,7 @@ impl OriginalNativeWitness {
                     },
                 )
             })?;
-            if original.group() != *group {
+            if original.group() != group {
                 return Err(original_group_conflict(
                     &self.owner,
                     OriginalGroupFailure::PromotionBody {
@@ -5497,6 +5508,76 @@ pub(crate) struct ParsedModuleProducts {
     products: Vec<RawModuleProduct>,
     sidecars: Vec<Vec<u8>>,
     package_imports: Option<BTreeMap<(String, String), Vec<u8>>>,
+    // Completed output proofs remain separate from the physical request's
+    // inherited inventory. They can only reuse final custody after current
+    // receipt, promotion, source and selected dependency checks have passed.
+    certified_originals: std::sync::Mutex<
+        BTreeMap<CachedHomeOwner, crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    >,
+}
+
+struct OriginalCertificationObservation<'a> {
+    owner: &'a CachedHomeOwner,
+    source_sha256: [u8; 32],
+    interface: &'a CertifiedModuleInterface,
+    interface_bytes: &'a [u8],
+    product_bytes: &'a [u8],
+    package_bytes: &'a [u8],
+    groups: &'a [PendingCertifiedGroup],
+    interface_requirements: &'a BTreeMap<(String, String), [u8; 32]>,
+    packages: &'a BTreeMap<(String, String), PackageInterfaceWitness>,
+    execution_source: Option<&'a Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+}
+
+fn validate_certified_original_observation(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    observation: &OriginalCertificationObservation<'_>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<()> {
+    let native = product
+        .original_native()
+        .filter(|native| native.matches_original(product))
+        .ok_or(CertificationError::Mismatch(
+            "segment original native anchors",
+        ))?;
+    if product.owner() != observation.owner
+        || product.source_sha256() != Some(observation.source_sha256)
+        || product.interface_bytes() != observation.interface_bytes
+        || product.product_bytes() != observation.product_bytes
+        || product.package_imports_bytes() != observation.package_bytes
+        || product.module_interface() != Some(observation.interface)
+        || native.interface_requirements != *observation.interface_requirements
+        || native.execution_source_sha256
+            != observation.execution_source.map(|graph| graph.digest())
+        || product.execution_source() != observation.execution_source
+        || observation
+            .groups
+            .iter()
+            .any(|group| group.owner() != observation.owner)
+    {
+        return Err(CertificationError::Mismatch(
+            "segment original certification changed",
+        ));
+    }
+    validation.inventory.charge(native.groups.len())?;
+    for group in observation.groups {
+        validation.inventory.charge(group.imports().len())?;
+    }
+    native.validate_groups(
+        observation
+            .groups
+            .iter()
+            .map(|group| (group.group(), group.imports())),
+    )?;
+    for (owner, package) in &native.packages {
+        if observation.packages.get(owner) != Some(package) {
+            return Err(CertificationError::Mismatch(
+                "segment original package selection",
+            ));
+        }
+        verify_package_interface(validation, package)?;
+    }
+    Ok(())
 }
 
 impl ParsedModuleProducts {
@@ -5533,11 +5614,91 @@ impl ParsedModuleProducts {
             products,
             sidecars,
             package_imports,
+            certified_originals: Default::default(),
         })
     }
 
-    /// Reuse is representation-only: every consumer still supplies and checks
-    /// its physical bytes under the same admission's accounting owner.
+    fn reused_certified_original(
+        &self,
+        observation: OriginalCertificationObservation<'_>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<Option<crate::recovery_artifacts::CertifiedRecoveryProduct>> {
+        if !Arc::ptr_eq(&self.operation, &validation.inventory) {
+            return Err(CertificationError::Mismatch("inventory accounting owner"));
+        }
+        let retained = self
+            .certified_originals
+            .lock()
+            .map_err(|_| CertificationError::Mismatch("segment certification owner"))?;
+        let Some(product) = retained.get(observation.owner) else {
+            return Ok(None);
+        };
+        validate_certified_original_observation(product, &observation, validation)?;
+        self.operation
+            .charge(observation.owner.unit.len() + observation.owner.module.len())?;
+        Ok(Some(product.clone()))
+    }
+
+    fn retain_completed_promotions(
+        &self,
+        receipt: &CertifiedReceipt,
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    ) -> CertResult<()> {
+        let mut retained = self
+            .certified_originals
+            .lock()
+            .map_err(|_| CertificationError::Mismatch("segment certification owner"))?;
+        for accepted in receipt
+            .modules
+            .iter()
+            .filter(|module| module.origin == ProductOrigin::RetainedCore)
+        {
+            let product = products
+                .iter()
+                .find(|product| {
+                    product.owner().unit == accepted.unit
+                        && product.owner().module == accepted.module
+                })
+                .ok_or(CertificationError::Mismatch(
+                    "completed segment promotion absent",
+                ))?;
+            if let Some(previous) = retained.get(product.owner()) {
+                if previous != product {
+                    return Err(CertificationError::Mismatch(
+                        "completed segment promotion changed",
+                    ));
+                }
+                continue;
+            }
+            self.operation.reserve::<(
+                CachedHomeOwner,
+                crate::recovery_artifacts::CertifiedRecoveryProduct,
+                [usize; 4],
+            )>(1)?;
+            self.operation
+                .charge(2 * (product.owner().unit.len() + product.owner().module.len()))?;
+        }
+        for accepted in receipt
+            .modules
+            .iter()
+            .filter(|module| module.origin == ProductOrigin::RetainedCore)
+        {
+            let product = products
+                .iter()
+                .find(|product| {
+                    product.owner().unit == accepted.unit
+                        && product.owner().module == accepted.module
+                })
+                .expect("completed promotions validated above");
+            if !retained.contains_key(product.owner()) {
+                retained.insert(product.owner().clone(), product.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Every consumer supplies and checks its physical bytes under the same
+    /// admission's accounting owner before reusing decoded or certified facts.
     pub(crate) fn validate_observation(
         &self,
         bytes: &[u8],
@@ -5591,6 +5752,7 @@ impl ParsedModuleProducts {
             products: self.products.clone(),
             sidecars: self.sidecars.clone(),
             package_imports: self.package_imports.clone(),
+            certified_originals: Default::default(),
         })
     }
 
@@ -7198,6 +7360,11 @@ pub(crate) fn certify_products_with_validation(
             .as_ref()
             .map_or(0, |graph| graph.bytes().len() as u64),
     );
+    crate::timing::record_inventory_work(
+        "products.native_proofs.before",
+        captured_payload_root,
+        &validation.inventory,
+    );
     let mut recovery_products: Vec<_> = module_bytes
         .into_iter()
         .map(
@@ -7242,6 +7409,20 @@ pub(crate) fn certify_products_with_validation(
                         .map(|proof| &proof.graph),
                     ProductOrigin::RetainedCore => None,
                 };
+                if origin == ProductOrigin::RetainedCore {
+                    if let Some(product) = fresh_products.reused_certified_original(
+                        OriginalCertificationObservation {
+                            owner: &owner, source_sha256: source_sha,
+                            interface: canonical_interface, interface_bytes: interface,
+                            product_bytes, package_bytes, groups: &original,
+                            interface_requirements: &accepted.interface_requirements,
+                            packages: &receipt.packages, execution_source,
+                        },
+                        validation,
+                    )? {
+                        return Ok(product);
+                    }
+                }
                 let witness = issue_home_certification_with_validation(
                     &owner,
                     &original,
@@ -7267,6 +7448,11 @@ pub(crate) fn certify_products_with_validation(
             },
         )
         .collect::<CertResult<Vec<_>>>()?;
+    crate::timing::record_inventory_work(
+        "products.native_proofs.after",
+        captured_payload_root,
+        &validation.inventory,
+    );
     if std::env::var(crate::timing::TIMING_ENV).as_deref() == Ok("1") {
         for (accepted, product) in receipt.modules.iter().zip(&recovery_products) {
             tracing::debug!(target: "tidepool_toolchain::module_candidates",
@@ -7326,6 +7512,7 @@ pub(crate) fn certify_products_with_validation(
         fresh_modules = origin_counts[0][0], fresh_group_rows = origin_counts[0][1], fresh_original_bytes = origin_counts[0][2],
         cached_modules = origin_counts[1][0], cached_group_rows = origin_counts[1][1], cached_original_bytes = origin_counts[1][2],
         retained_core_modules = origin_counts[2][0], retained_core_group_rows = origin_counts[2][1], retained_core_original_bytes = origin_counts[2][2]);
+    fresh_products.retain_completed_promotions(receipt, &recovery_products)?;
     Ok(CertifiedProducts {
         groups,
         recovery_products,
@@ -8882,6 +9069,75 @@ pub(crate) mod tests {
         )])
         .remove(0)
         .product
+    }
+
+    fn observe_native_fixture<'a>(
+        product: &'a crate::recovery_artifacts::CertifiedRecoveryProduct,
+        groups: &'a [PendingCertifiedGroup],
+        packages: &'a BTreeMap<(String, String), PackageInterfaceWitness>,
+    ) -> OriginalCertificationObservation<'a> {
+        OriginalCertificationObservation {
+            owner: product.owner(),
+            source_sha256: product.source_sha256().unwrap(),
+            interface: product.module_interface().unwrap(),
+            interface_bytes: product.interface_bytes(),
+            product_bytes: product.product_bytes(),
+            package_bytes: product.package_imports_bytes(),
+            groups,
+            interface_requirements: &product.original_native().unwrap().interface_requirements,
+            packages,
+            execution_source: product.execution_source(),
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(original_native_index_property_config())]
+        #[test]
+        fn retained_native_observation_preserves_full_proof_facts(
+            generation in 1_u64..100,
+            extra_ordinal in 8_u32..30,
+            change in 0_u8..9,
+        ) {
+            let product = full_native_fixture("Memoized", vec![
+                (7, vec![PendingImportOwner::Retained {
+                    identity: testing::identity("Captured", "value"), generation,
+                }]), (extra_ordinal, vec![]),
+            ], 9);
+            let source_sha = product.module_interface().unwrap().source_sha256();
+            let product = product.with_source_sha256(source_sha);
+            let mut groups = product.original_native().unwrap().groups.iter()
+                .map(AuthenticatedOriginalGroup::admitted).collect::<Vec<_>>();
+            let packages = BTreeMap::new();
+            let mut validation = PackageInterfaceValidation::default();
+            validate_certified_original_observation(&product,
+                &observe_native_fixture(&product, &groups, &packages), &mut validation).unwrap();
+            let mut observation = observe_native_fixture(&product, &groups, &packages);
+            let mut changed_owner = product.owner().clone();
+            let mut changed_source = source_sha;
+            let changed_interface = [0xFF];
+            let changed_products = [0xFE];
+            let changed_packages = [0xFD];
+            let changed_requirements = BTreeMap::from([(("fixture".into(), "Other".into()), [7; 32])]);
+            match change {
+                0 => {},
+                1 => { changed_owner.module_version.0[0] ^= 1; observation.owner = &changed_owner; },
+                2 => { changed_source[0] ^= 1; observation.source_sha256 = changed_source; },
+                3 => observation.interface_bytes = &changed_interface,
+                4 => observation.product_bytes = &changed_products,
+                5 => observation.package_bytes = &changed_packages,
+                6 => observation.interface_requirements = &changed_requirements,
+                7 => { groups.pop(); observation = observe_native_fixture(&product, &groups, &packages); },
+                _ => {
+                    let mut imports = groups[0].imports().to_vec();
+                    let PendingImportOwner::Retained { generation, .. } = &mut imports[0] else { unreachable!() };
+                    *generation += 1;
+                    groups[0].imports = imports.into();
+                    observation = observe_native_fixture(&product, &groups, &packages);
+                },
+            }
+            let result = validate_certified_original_observation(&product, &observation, &mut validation);
+            proptest::prop_assert_eq!(result.is_ok(), change == 0, "change={} result={:?}", change, result);
+        }
     }
 
     fn check_original_native_index_against_linear_scan(raw: &[(u32, bool, bool)], query: u32) {
@@ -15152,10 +15408,16 @@ pub(crate) mod tests {
         ));
         let mut trailing = encoded;
         trailing.push(0);
-        assert!(matches!(
-            decode_receipt(&trailing),
-            Err(CertificationError::Receipt("trailing bytes"))
-        ));
+        let refusal = decode_receipt(&trailing);
+        assert!(
+            matches!(
+                &refusal,
+                Err(CertificationError::Product(
+                    tidepool_repr::execution_schema::ParseError::TrailingBytes
+                ))
+            ),
+            "typed trailing-byte refusal: {refusal:?}"
+        );
         for reference in [
             Value::Integer(1.into()),
             Value::Integer((-1).into()),
