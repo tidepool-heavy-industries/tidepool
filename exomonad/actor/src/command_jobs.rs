@@ -27,11 +27,9 @@ type CompletionSink = dyn Fn(CommandResult) -> bool + Send + Sync;
 /// Every backend call reachable from inside an actor's one active turn goes
 /// through this wrapper, so a raw, unbounded call on the backend is not
 /// expressible from `Shared` or `JobActor`: both hold only a `BoundedBackend`.
-/// `control`, `output`, `read`, and `cleanup` are bounded by
-/// `BACKEND_CALL_TIMEOUT` and map an expired call to the same error/cleanup
-/// variants the two already-bounded call sites used before this wrapper
-/// existed. `execute` is the one exception: it is the long-running command
-/// future itself, legitimately unbounded, and passes straight through.
+/// Calls are bounded by `BACKEND_CALL_TIMEOUT`. Cleanup preserves timeout as a
+/// separate observation so its owner can retain stronger existing proof.
+/// `execute` is the long-running command future and passes straight through.
 struct BoundedBackend(Arc<dyn CommandBackend>);
 
 impl BoundedBackend {
@@ -79,18 +77,10 @@ impl BoundedBackend {
             })
     }
 
-    /// `Err` carries the same `CommandCleanupUnknown` sentinel `Shared::cleanup`
-    /// used to return directly on timeout; it lets that caller keep leaving
-    /// phase untouched on an unconfirmed call (so the next poll retries the
-    /// backend) while still centralizing the bound and the mapping here.
-    async fn cleanup(&self, id: &str) -> Result<CommandCleanup, CommandCleanup> {
-        tokio::time::timeout(BACKEND_CALL_TIMEOUT, self.0.cleanup(id))
-            .await
-            .map_err(|_| {
-                CommandCleanup::CommandCleanupUnknown(format!(
-                    "cleanup was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
-                ))
-            })
+    /// A timeout does not publish unconfirmed state. The caller preserves any
+    /// existing confirmation and can retry an unresolved backend observation.
+    async fn cleanup(&self, id: &str) -> Result<CommandCleanup, tokio::time::error::Elapsed> {
+        tokio::time::timeout(BACKEND_CALL_TIMEOUT, self.0.cleanup(id)).await
     }
 }
 
@@ -281,16 +271,31 @@ impl Shared {
         let Some(backend) = backend else {
             return result.cleanup;
         };
-        let cleanup = match backend.cleanup(id).await {
+        let mut cleanup = match backend.cleanup(id).await {
             Ok(cleanup) => cleanup,
             // Unconfirmed within the bound: leave phase untouched so the next
             // poll retries the backend instead of latching an unconfirmed
             // cleanup into settled state.
-            Err(cleanup) => return cleanup,
+            Err(_) => {
+                return if self.cleanup_is_confirmed() {
+                    CommandCleanup::CommandClean
+                } else {
+                    CommandCleanup::CommandCleanupUnknown(format!(
+                        "cleanup was not confirmed within {BACKEND_CALL_TIMEOUT:?}"
+                    ))
+                };
+            }
         };
         self.phase.send_modify(|phase| {
             if let CommandStatus::CommandFinished(result) = phase {
-                result.cleanup = cleanup.clone();
+                // Settlement, owner status and retirement can probe concurrently.
+                // Confirmation is retained proof; a slower unclean observation
+                // must neither overwrite it nor return weaker evidence.
+                if result.cleanup == CommandCleanup::CommandClean {
+                    cleanup = CommandCleanup::CommandClean;
+                } else {
+                    result.cleanup = cleanup.clone();
+                }
             }
         });
         cleanup
@@ -1556,6 +1561,12 @@ mod bounded_backend_tests {
         cleanup: watch::Sender<CommandCleanup>,
         cancellations: std::sync::atomic::AtomicUsize,
         probes: std::sync::atomic::AtomicUsize,
+        queued_probes: Mutex<VecDeque<CleanupProbe>>,
+    }
+
+    struct CleanupProbe {
+        entered: oneshot::Sender<()>,
+        answer: oneshot::Receiver<CommandCleanup>,
     }
 
     impl RetirementBackend {
@@ -1566,6 +1577,7 @@ mod bounded_backend_tests {
                 cleanup: watch::channel(cleanup).0,
                 cancellations: 0.into(),
                 probes: 0.into(),
+                queued_probes: Mutex::new(VecDeque::new()),
             })
         }
 
@@ -1575,6 +1587,16 @@ mod bounded_backend_tests {
 
         fn probes(&self) -> usize {
             self.probes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn queue_probe(&self) -> (oneshot::Receiver<()>, oneshot::Sender<CommandCleanup>) {
+            let (entered, arrival) = oneshot::channel();
+            let (answer, response) = oneshot::channel();
+            self.queued_probes.lock().push_back(CleanupProbe {
+                entered,
+                answer: response,
+            });
+            (arrival, answer)
         }
     }
 
@@ -1616,6 +1638,11 @@ mod bounded_backend_tests {
             Box::pin(async move {
                 self.probes
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let probe = self.queued_probes.lock().pop_front();
+                if let Some(probe) = probe {
+                    probe.entered.send(()).unwrap();
+                    return probe.answer.await.unwrap();
+                }
                 self.cleanup.borrow().clone()
             })
         }
@@ -1821,12 +1848,147 @@ mod bounded_backend_tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_cleanup_probes_preserve_confirmation_in_both_completion_orders() {
+        use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
+        for unclean in [
+            Some(CommandCleanup::CommandRetained),
+            Some(CommandCleanup::CommandCleanupUnknown(
+                "external cleanup unknown".into(),
+            )),
+            None,
+        ] {
+            for confirm_first in [false, true] {
+                let backend = RetirementBackend::new(CommandCleanup::CommandRetained);
+                let shared = Arc::new(test_shared(
+                    CommandStatus::CommandFinished(CommandResult {
+                        outcome: CommandOutcome::CommandExited(0),
+                        cleanup: CommandCleanup::CommandRetained,
+                    }),
+                    Some(backend.clone()),
+                ));
+                let (unclean_entered, unclean_answer) = backend.queue_probe();
+                let unclean_probe = tokio::spawn({
+                    let shared = shared.clone();
+                    async move {
+                        shared
+                            .resource_cleanup(
+                                "race-job",
+                                crate::local_actor::ResourceCleanup::Observe,
+                            )
+                            .await
+                    }
+                });
+                unclean_entered.await.unwrap();
+                // Distinct deadlines let the first probe time out while the
+                // second remains admitted and can still confirm cleanup.
+                tokio::time::advance(Duration::from_secs(1)).await;
+                let (clean_entered, clean_answer) = backend.queue_probe();
+                let clean_probe = tokio::spawn({
+                    let shared = shared.clone();
+                    async move { shared.status(shared.owner(), "race-job").await }
+                });
+                clean_entered.await.unwrap();
+                assert_eq!(backend.probes(), 2, "both real owner probes are in flight");
+                if confirm_first {
+                    clean_answer.send(CommandCleanup::CommandClean).unwrap();
+                    assert!(
+                        matches!(clean_probe.await.unwrap(), CommandStatus::CommandFinished(result) if result.cleanup == CommandCleanup::CommandClean)
+                    );
+                    if let Some(unclean) = unclean.clone() {
+                        unclean_answer.send(unclean).unwrap();
+                    }
+                    assert_eq!(
+                        unclean_probe.await.unwrap(),
+                        Confirmed,
+                        "a late unclean answer or timeout cannot weaken returned evidence"
+                    );
+                } else {
+                    if let Some(unclean) = unclean.clone() {
+                        unclean_answer.send(unclean).unwrap();
+                    }
+                    assert!(matches!(unclean_probe.await.unwrap(), Unconfirmed(_)));
+                    assert!(
+                        !shared.cleanup_is_confirmed(),
+                        "uncertainty before confirmation remains visible"
+                    );
+                    clean_answer.send(CommandCleanup::CommandClean).unwrap();
+                    assert!(
+                        matches!(clean_probe.await.unwrap(), CommandStatus::CommandFinished(result) if result.cleanup == CommandCleanup::CommandClean)
+                    );
+                }
+                assert!(
+                    shared.cleanup_is_confirmed(),
+                    "confirmation is absorbing in stored state"
+                );
+                assert_eq!(
+                    shared
+                        .resource_cleanup("race-job", crate::local_actor::ResourceCleanup::Observe)
+                        .await,
+                    Confirmed
+                );
+                assert_eq!(
+                    backend.probes(),
+                    2,
+                    "retained proof avoids another backend probe"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unconfirmed_cleanup_probes_remain_retryable_before_confirmation() {
+        for unclean in [
+            Some(CommandCleanup::CommandRetained),
+            Some(CommandCleanup::CommandCleanupUnknown(
+                "external cleanup unknown".into(),
+            )),
+            None,
+        ] {
+            let backend = RetirementBackend::new(CommandCleanup::CommandRetained);
+            let shared = Arc::new(test_shared(
+                CommandStatus::CommandFinished(CommandResult {
+                    outcome: CommandOutcome::CommandExited(0),
+                    cleanup: CommandCleanup::CommandRetained,
+                }),
+                Some(backend.clone()),
+            ));
+            let (entered, answer) = backend.queue_probe();
+            let probe = tokio::spawn({
+                let shared = shared.clone();
+                async move { shared.cleanup("retry-job").await }
+            });
+            entered.await.unwrap();
+            if let Some(unclean) = unclean.clone() {
+                answer.send(unclean).unwrap();
+            }
+            assert_ne!(probe.await.unwrap(), CommandCleanup::CommandClean);
+            let CommandStatus::CommandFinished(result) = shared.phase.borrow().clone() else {
+                panic!("cleanup probing preserves the terminal job");
+            };
+            assert_eq!(
+                result.cleanup,
+                unclean.unwrap_or(CommandCleanup::CommandRetained),
+                "a timeout leaves stored state untouched"
+            );
+            backend.cleanup.send_replace(CommandCleanup::CommandClean);
+            assert_eq!(
+                shared.cleanup("retry-job").await,
+                CommandCleanup::CommandClean
+            );
+            assert!(shared.cleanup_is_confirmed());
+            assert_eq!(
+                backend.probes(),
+                2,
+                "unconfirmed evidence permits a fresh probe"
+            );
+        }
+    }
+
     /// `Shared::cleanup` is reached from `status`, the retire cleanup closure,
-    /// and the `Cancel`-after-finished branch of `CommandJobs::control` — all
-    /// inside an actor's one active turn. It calls the backend only through
-    /// `BoundedBackend`, so a backend whose `cleanup` never resolves must not
-    /// hang any of those callers: the call returns within `BACKEND_CALL_TIMEOUT`
-    /// with an unconfirmed cleanup instead of blocking forever.
+    /// and cancellation of a finished job. Each backend probe is bounded even
+    /// when the command-settlement worker overlaps an actor-owned observation.
+    /// An unresolved backend returns uncertainty within `BACKEND_CALL_TIMEOUT`.
     #[tokio::test(start_paused = true)]
     async fn shared_cleanup_is_bounded_when_the_backend_never_confirms() {
         let shared = finished_shared_with_hanging_backend();
