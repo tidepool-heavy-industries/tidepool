@@ -881,6 +881,8 @@ fn require_complete_cohort<'a>(
 
 #[cfg(test)]
 mod tests {
+    mod product_carry;
+
     use super::super::tests::{package_bundle, product_bytes};
     use super::*;
     use crate::cache::{DependencyEvidence, ModuleEvidence, ProductAvailability, SourceEvidence};
@@ -1932,7 +1934,7 @@ fn export_under(
         return Err(ModulePackageError::Format("catalog already exists"));
     }
     let records = &prepared.records;
-    require_complete_cohort(&records, evidence)?;
+    require_complete_cohort(records, evidence)?;
     if records.is_empty() {
         return Err(ModulePackageError::Bounds);
     }

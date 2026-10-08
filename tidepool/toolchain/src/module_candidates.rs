@@ -2913,6 +2913,8 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod product_carry;
+
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
     use proptest::prelude::*;
