@@ -16,15 +16,10 @@ determines what to observe next. Compose these stages as functions, reuse packet
 as values, and retain results for later projections. Measure latency and usage
 for the workload you are building.
 
-Everything named in this skill is **shipped**: `J.ask`, `J.ask1`, `J.askWith`,
-`J.choice`, `J.noul`, `J.score`, `J.each`, `J.optional`, `J.alt`, `J..|`,
-`J.many`, `J.level`, `J.state`, `J.rawState`, `J.field`, `J.settle`,
-`J.takenUnder`, `J.judge`, `J.holds`, `J.grade`, `J.graded`, `J.handle`,
-`J.taken`, `J.contenders`, `J.explain`, `J.massAtOrAbove`, `J.answers`,
-`J.resolvedModel`, `J.lenient`, `J.careful`, `J.strict`. The one exception is
-the **effect type** `Jev`, which a record actor's row must name and which is not
-re-exported by the workbench surface: `import Tidepool.Effects.Core (Jev)`.
-Nothing from `.exomonad/workspace/Project` appears here.
+`Jev.Operators` is the public interface for both notebook cells and authored
+modules. An explicit effect signature imports the effect type with
+`import Tidepool.Effects.Core (Jev)`. These compositions require no Project
+workflow helpers.
 
 `import qualified Jev.Operators as J` is in scope; `:=` and `:&` read
 unqualified.
@@ -39,15 +34,21 @@ Call errors retain preparation, typed host cause, and response decoding as
 separate cases. A circuit-open result includes its retry delay; client setup
 failure remains distinct from an unconfigured endpoint. Usage counts are
 optional: unknown or malformed usage stays unknown, and measured zero is
-`Just 0`. `J.mapResponse` projects the answer while preserving model, usage,
-diagnostics and preview facts.
+`Just 0`. `fmap` and `J.mapResponse` transform the answer payload while preserving
+model, usage, diagnostics and the original answer evidence. A response's
+`originalAnswerEvidence` display describes that original judgment, even when
+its current payload is a function or an action. Displaying it does not inspect
+or run that payload.
 
-For recording, execution and replay, retain `J.prepare model state packet`
-once. `J.executePrepared prepared` calls the same production host as `J.ask`
+To inspect a call before sending it, retain `J.prepare model state packet`.
+`J.executePrepared prepared` calls the same production host as `J.ask`
 and uses that original decoder and payloads. `display prepared` inspects its
 validated model, input and questions without demanding captured action payloads.
 `J.request prepared` reads the wire body for transport or recording;
-`J.decode prepared body` decodes a retained response through the original call.
+`J.decode prepared body` decodes a recorded response through the original call
+without contacting Jev or running any selected continuation. Each explicit
+`J.executePrepared` sends a new request; retaining a prepared call does not
+cache a service response.
 
 A prepared call fixes its model and input. Reuse a question value across
 contrasting inputs, preparing each input separately; the existing prepared
@@ -59,6 +60,13 @@ after displaying small projections, then bind that result in the notebook.
 `fmap J.usage result` observes metadata later; `fmap J.answers result` projects
 the answers explicitly. Ending with only `display` retains the display handle,
 not the response.
+
+Keep observation functions independent of presentation: return their typed
+response and require only `Member Jev effects` when that is their only effect.
+The caller can display it, apply several policies, or pass it to another
+function. Those operations reuse the same judgment. A new call belongs after
+changed evidence or a changed question, or when another service observation is
+deliberately wanted.
 
 ## Compose the questions
 
@@ -323,6 +331,37 @@ When the answer resolves nothing useful, return to ordinary reasoning with the
 packet's evidence still bound in the cell. Nothing is recomputed, and a
 recurring handback is the signal to write that branch by hand. The `doc jev`
 topic points back to this skill as its canonical reference.
+
+## Compose a human dialogue
+
+Define the domain choices once when both Jev and a person can select them.
+A `NonEmpty` collection can retain each choice's semantic key and condition,
+human-facing `View`, and original typed payload. Build `J.many` from the
+conditions and rows; build `F.option` from their views and the same rows.
+The form's occurrence identities belong to the form, and neither continuation
+needs to reconstruct a payload from the selected key or its rendered label.
+
+The semantic condition explains when a choice applies; the human view explains
+what choosing it means. They can be different presentations of the same domain
+value. Constructing an option, preparing its request, and inspecting the
+response leave its action unevaluated. Sequencing the chosen action runs it;
+sequencing it twice runs it twice.
+
+Use ordinary `case` to distinguish a Jev call failure, a policy doubt, and a
+settled alternative that asks for more information. Each can have its own
+continuation. A human question is an authored decision in that continuation:
+handle `F.Submitted`, `F.Dismissed` and `F.FormUnavailable` explicitly. Keep
+the original response when human input changes what the program does next.
+Independent fields compose applicatively inside one form; a later form can
+depend on the submitted value in the same `Eff` program. Answered forms remain
+in chat as the next question is appended.
+
+The shared modules `Examples.JevPreparedWorkflow` and
+`Examples.JevFormWorkflow` are compiled examples. The first separates a
+Jev-only observation from its notebook presentation. The second shares domain
+choices across Jev and human forms, retains the original response, and selects
+an original continuation with a structured preview. Import them through the
+ordinary shared source root, or adapt their functions to your domain.
 
 ## Reusable working patterns
 

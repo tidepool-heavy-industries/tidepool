@@ -238,6 +238,10 @@ exact facts such as exit status, membership and lifecycle.
 Include a read-more or unresolved branch when the alternatives may miss the
 case. A settled choice selects its payload; confidence cannot supply missing
 evidence. Inspect decisions and outcomes when improving the interpreter.
+Retain the typed response for later inspection or a different policy. These
+pure projections reuse its judgment; explicitly running a selected action is
+a separate step. Human clarification can be the selected continuation, using
+the same original domain alternatives as the semantic choice.
 
 Retain complete evidence or recoverable references with source identities and
 excerpt scope. Display truncation is not evidence selection. Never replace failed

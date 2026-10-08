@@ -64,6 +64,19 @@ same `Eff` program. Independent blocking forms can use `concurrently` from
 `Tidepool.Async` when the row admits `Green`; a Jev-selected branch can return a
 continuation that performs the next form.
 
+Keep a Jev response as a typed value: inspecting it, mapping its payload, or
+applying another policy uses the original judgment without another service
+call. `J.prepare` retains one checked request and its original decoder;
+each `J.executePrepared` explicitly sends that request again. The Jev skill
+owns the complete calling and settlement interface.
+
+For a choice that Jev or a person may make, define its domain alternatives
+once. Each alternative can carry its semantic condition, human-facing `View`
+and original value or action. Project those rows into `J.many` and `F.option`;
+both paths return the original row. Ordinary `case` and `do` then choose when
+to run it. The compiled shared module `Examples.JevFormWorkflow` demonstrates
+that composition, including retained responses and dependent forms.
+
 ## Compose the program
 
 Compose effectful functions with `>=>` or `do`; use the notebook's `&&&`, `***`
