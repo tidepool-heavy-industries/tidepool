@@ -438,6 +438,12 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('--setenv=DECLARED_FIXTURE=/declared/fixture', command)
         self.assertFalse(any('UNDECLARED_FIXTURE' in word for word in command))
 
+    def test_actor_layout_diagnostics_cross_delegation_explicitly(self):
+        command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {},
+            environment={'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS': '1', 'UNDECLARED_TRACE': '1'})
+        self.assertIn('--setenv=TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS=1', command)
+        self.assertFalse(any('UNDECLARED_TRACE' in word for word in command))
+
     def test_success_retains_physical_timing_and_outcome_before_scratch_deletion(self):
         root = Path(self.tmp.name) / 'timing-artifacts'
         def run(args, timeout, environment=None):
