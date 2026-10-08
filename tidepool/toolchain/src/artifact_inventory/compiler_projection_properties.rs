@@ -798,6 +798,31 @@ enum Op {
         version: usize,
         ordinal: u32,
     },
+    IssueSegment {
+        domain: usize,
+    },
+    PublishPrefix {
+        domain: usize,
+    },
+    Demand {
+        domain: usize,
+        module: usize,
+        version: usize,
+        ordinal: u32,
+        whole: bool,
+    },
+    RecoverDemand {
+        domain: usize,
+        mutation: u8,
+    },
+    ReleaseSegment {
+        domain: usize,
+    },
+    DeclarationOriginal {
+        domain: usize,
+        module: usize,
+        version: usize,
+    },
 }
 
 fn operation() -> impl Strategy<Value = Op> {
@@ -814,6 +839,31 @@ fn operation() -> impl Strategy<Value = Op> {
         (0usize..4, 0u8..8).prop_map(|(domain, owners)| Op::SourceSurface { domain, owners }),
         (0usize..4, 0usize..4).prop_map(|(target, source)| Op::Clone { target, source }),
         (0usize..4).prop_map(|domain| Op::Restore { domain }),
+        (0usize..4).prop_map(|domain| Op::IssueSegment { domain }),
+        (0usize..4).prop_map(|domain| Op::PublishPrefix { domain }),
+        (
+            0usize..4,
+            0usize..MODULES,
+            0usize..VERSIONS,
+            prop::sample::select(ORDINALS.to_vec()),
+            any::<bool>()
+        )
+            .prop_map(|(domain, module, version, ordinal, whole)| Op::Demand {
+                domain,
+                module,
+                version,
+                ordinal,
+                whole,
+            }),
+        (0usize..4, 0u8..3).prop_map(|(domain, mutation)| Op::RecoverDemand { domain, mutation }),
+        (0usize..4).prop_map(|domain| Op::ReleaseSegment { domain }),
+        (0usize..4, 0usize..MODULES, 0usize..VERSIONS).prop_map(|(domain, module, version)| {
+            Op::DeclarationOriginal {
+                domain,
+                module,
+                version,
+            }
+        }),
         (
             0usize..4,
             0usize..MODULES,
@@ -834,7 +884,10 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
     let baseline = view.descriptors();
     let mut actual = std::array::from_fn::<_, 4, _>(|_| catalog.projection(&view, [None; MODULES]));
     let mut model = [[None; MODULES]; 4];
-    let mut coverage = [0usize; 7];
+    let mut segments: [Option<ArtifactView>; 4] = std::array::from_fn(|_| None);
+    let mut published = [false; 4];
+    let mut selected: [BTreeSet<RawGroup>; 4] = std::array::from_fn(|_| BTreeSet::new());
+    let mut coverage = [0usize; 13];
     let mut refusals = 0;
     for operation in operations {
         match *operation {
@@ -909,6 +962,205 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                 catalog.assert_target(&view, &[(module, version, ordinal)]);
                 catalog.assert_projection(&view, &actual[domain], model[domain]);
             }
+            Op::IssueSegment { domain } => {
+                coverage[7] += 1;
+                let inventory = ArtifactInventory::default();
+                segments[domain] = Some(
+                    inventory
+                        .admit_shared_with_demand(
+                            &inventory.empty_view(),
+                            catalog.originals.clone(),
+                            NativeArtifactDemand::ScopeInterfaces,
+                        )
+                        .unwrap(),
+                );
+                published[domain] = false;
+                selected[domain].clear();
+            }
+            Op::PublishPrefix { domain } => {
+                coverage[8] += 1;
+                if let Some(previous) = &segments[domain] {
+                    let next = previous
+                        .inventory()
+                        .admit_shared_with_demand(
+                            previous,
+                            vec![Arc::clone(&catalog.capture)],
+                            NativeArtifactDemand::ScopeInterfaces,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        next.selected_native_groups(),
+                        previous.selected_native_groups()
+                    );
+                    segments[domain] = Some(next);
+                    published[domain] = true;
+                } else {
+                    refusals += 1;
+                }
+            }
+            Op::Demand {
+                domain,
+                module,
+                version,
+                ordinal,
+                whole,
+            } => {
+                coverage[9] += 1;
+                if let Some(available) = &segments[domain] {
+                    let roots = if whole {
+                        ORDINALS
+                            .into_iter()
+                            .map(|ordinal| (module, version, ordinal))
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![(module, version, ordinal)]
+                    };
+                    let wanted = catalog.closure(roots);
+                    let requires_capture = wanted.iter().any(|group| group.2 == 11);
+                    let expected_refusal = requires_capture && !published[domain];
+                    let result = if whole {
+                        available.inventory().admit_shared(
+                            available,
+                            vec![Arc::clone(catalog.original(module, version))],
+                        )
+                    } else {
+                        let ArtifactPayload::Original(product) =
+                            &catalog.original(module, version).payload
+                        else {
+                            unreachable!()
+                        };
+                        let imports = [PendingImportOwner::Source {
+                            owner: product.owner().clone(),
+                            original_ordinal: ordinal,
+                            binder: binder(module, ordinal),
+                        }];
+                        available.inventory().admit_shared_with_demand(
+                            available,
+                            available.entries(),
+                            NativeArtifactDemand::CertifiedTargetImports(&imports),
+                        )
+                    };
+                    if expected_refusal {
+                        assert!(
+                            result.is_err(),
+                            "withheld prefix capture must refuse only demanded groups"
+                        );
+                        refusals += 1;
+                    } else {
+                        let next = result.unwrap();
+                        selected[domain].extend(wanted);
+                        assert_eq!(
+                            next.selected_native_groups(),
+                            selected[domain]
+                                .iter()
+                                .map(|group| catalog.key(*group))
+                                .collect(),
+                            "target admission must match both missing and extra oracle groups"
+                        );
+                        segments[domain] = Some(next);
+                    }
+                } else {
+                    refusals += 1;
+                }
+            }
+            Op::RecoverDemand { domain, mutation } => {
+                coverage[10] += 1;
+                if let Some(previous) = &segments[domain] {
+                    let mut offered = selected[domain].clone();
+                    if mutation == 1 {
+                        if let Some(group) = offered.iter().next().copied() {
+                            offered.remove(&group);
+                        }
+                    } else if mutation == 2 {
+                        offered.insert((0, 0, 29));
+                    }
+                    let closed = catalog.closure(offered.iter().copied());
+                    let keys = offered.iter().map(|group| catalog.key(*group)).collect();
+                    let inventory = ArtifactInventory::default();
+                    let result = inventory.admit_recovery_selection(
+                        &inventory.empty_view(),
+                        previous.entries(),
+                        &keys,
+                    );
+                    if closed != offered
+                        || (!published[domain] && closed.iter().any(|group| group.2 == 11))
+                    {
+                        assert!(
+                            result.is_err(),
+                            "recovery must refuse incomplete exact closure"
+                        );
+                        refusals += 1;
+                    } else {
+                        let recovered = result.unwrap();
+                        assert_eq!(recovered.selected_native_groups(), keys);
+                        assert_eq!(
+                            previous.selected_native_groups(),
+                            selected[domain]
+                                .iter()
+                                .map(|group| catalog.key(*group))
+                                .collect(),
+                            "recovery cannot mutate the live source view"
+                        );
+                        selected[domain] = offered;
+                        segments[domain] = Some(recovered);
+                    }
+                } else {
+                    refusals += 1;
+                }
+            }
+            Op::DeclarationOriginal {
+                domain,
+                module,
+                version,
+            } => {
+                coverage[12] += 1;
+                if let Some(available) = &segments[domain] {
+                    let projection = CompilerInputProjection::from_issued_entries(&[Arc::clone(
+                        catalog.original(module, version),
+                    )])
+                    .unwrap()
+                    .merge(&CompilerInputProjection::from_interface_view(available).unwrap())
+                    .unwrap();
+                    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &projection, &available.metadata_snapshot(),
+                        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    ).unwrap();
+                    let result = selection.selected_original_closure(available);
+                    if published[domain] {
+                        let original = result.unwrap();
+                        assert_eq!(original.products().len(), 1);
+                        let ArtifactPayload::Original(expected) =
+                            &catalog.original(module, version).payload
+                        else {
+                            unreachable!()
+                        };
+                        assert_eq!(original.products()[0].owner(), expected.owner(),
+                            "whole-original consumers preserve issued roles rather than custody variants");
+                    } else {
+                        assert!(
+                            result.is_err(),
+                            "whole-original consumers require unavailable captured groups"
+                        );
+                        refusals += 1;
+                    }
+                } else {
+                    refusals += 1;
+                }
+            }
+            Op::ReleaseSegment { domain } => {
+                coverage[11] += 1;
+                if let Some(previous) = segments[domain].take() {
+                    let inventory = previous.inventory().clone();
+                    drop(previous);
+                    assert_eq!(
+                        inventory.node_count(),
+                        0,
+                        "last segment owner must release all retained vertices"
+                    );
+                }
+                selected[domain].clear();
+                published[domain] = false;
+            }
         }
         for domain in 0..4 {
             catalog.assert_projection(&view, &actual[domain], model[domain]);
@@ -946,6 +1198,16 @@ proptest! {
             Op::SourceSurface { domain: 2, owners: 6 },
             Op::Demote { domain: 1 },
             Op::Merge { target: 1, source: 0 },
+            Op::IssueSegment { domain: 3 },
+            Op::DeclarationOriginal { domain: 3, module: 0, version: 0 },
+            Op::Demand { domain: 3, module: 0, version: 0, ordinal: 3, whole: false },
+            Op::Demand { domain: 3, module: 0, version: 0, ordinal: 11, whole: true },
+            Op::RecoverDemand { domain: 3, mutation: 1 },
+            Op::PublishPrefix { domain: 3 },
+            Op::DeclarationOriginal { domain: 3, module: 0, version: 1 },
+            Op::Demand { domain: 3, module: 0, version: 0, ordinal: 11, whole: false },
+            Op::RecoverDemand { domain: 3, mutation: 2 },
+            Op::ReleaseSegment { domain: 3 },
         ];
         operations.extend(tail);
         replay(&catalog, &operations);
