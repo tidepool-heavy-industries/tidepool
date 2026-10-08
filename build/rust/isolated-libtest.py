@@ -260,20 +260,27 @@ def stop_delegated_service(unit, record):
 def execute(args, timeout, service_slice=None, service_record=None, environment=None, declared_resources=()):
     """Run a command in its own process group, reaping it even after timeout."""
     if INTERRUPT_SIGNAL is not None:
-        raise RunnerInterrupted(INTERRUPT_SIGNAL)
+        error = RunnerInterrupted(INTERRUPT_SIGNAL)
+        error.process_cleanup_status = 'not_started'
+        raise error
     command, unit = args, None
-    if service_slice is not None:
-        command, unit = delegated_command(args, timeout, service_slice, service_record, environment, declared_resources)
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-        env=environment,
-    )
+    try:
+        if service_slice is not None:
+            command, unit = delegated_command(args, timeout, service_slice, service_record, environment, declared_resources)
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            env=environment,
+        )
+    except OSError as error:
+        error.process_cleanup_status = 'not_started'
+        raise
     process._tidepool_delegated = unit is not None
     observer, observer_finished = None, threading.Event()
+    failure = None
     try:
         _register_process(process)
         if unit is not None:
@@ -290,12 +297,12 @@ def execute(args, timeout, service_slice=None, service_record=None, environment=
                                   manager_wait_success=process.returncode == 0)
     except subprocess.TimeoutExpired as error:
         stdout, stderr = _kill_and_reap(process)
-        raise subprocess.TimeoutExpired(
+        failure = subprocess.TimeoutExpired(
             args, timeout, output=stdout or error.output, stderr=stderr or error.stderr
-        ) from None
-    except BaseException:
+        )
+    except BaseException as error:
         _kill_and_reap(process)
-        raise
+        failure = error
     finally:
         _unregister_process(process)
         if unit is not None:
@@ -315,6 +322,9 @@ def execute(args, timeout, service_slice=None, service_record=None, environment=
     # result. The process group remains the cleanup owner through this point.
     cleanup_confirmed = (confirm_process_group_cleanup(process.pid) if unit is None
                          else service_record.get('cleanup_confirmed') is True)
+    if failure is not None:
+        failure.cleanup_confirmed = cleanup_confirmed
+        raise failure
     result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
     result.cleanup_confirmed = cleanup_confirmed
     return result
@@ -509,19 +519,39 @@ def diagnostic_summaries(artifact_root):
         return value
 
     summaries = {'transactions': [], 'issues': []}
-    transactions = sorted(artifact_root.glob('compiler-transactions/*/transaction.json'))
+    transaction_root = artifact_root / 'compiler-transactions'
+    if transaction_root.is_symlink():
+        summaries['issues'].append('compiler transaction directory must not be a symlink')
+        transactions = []
+    else:
+        transactions = sorted(path / 'transaction.json' for path in transaction_root.glob('*')
+                              if path.is_dir() or path.is_symlink())
     summaries['transaction_count'] = len(transactions)
     for path in transactions[:256]:
         try:
+            if path.is_symlink() or path.parent.is_symlink():
+                raise ValueError('compiler transaction marker must not be a symlink')
             report = read_json(path)
             summary = {key: report.get(key) for key in (
                 'phase', 'compiler_process_success', 'original_directory',
                 'artifact_bytes', 'artifact_byte_limit', 'artifact_entry_limit')}
             summary['path'] = str(path)
-            summary['file_count'] = len(report.get('files', []))
-            summary['issues'] = [str(issue)[:2048] for issue in report.get('issues', [])[:8]]
+            if report.get('phase') != 'compiler_completed':
+                summaries['issues'].append(f'{path}: compiler transaction capture is not completed')
+            files = report['files']
+            if not isinstance(files, list):
+                raise ValueError('compiler diagnostic files are not an array')
+            summary['file_count'] = len(files)
+            issues = report['issues']
+            if not isinstance(issues, list) or any(not isinstance(issue, str) for issue in issues):
+                raise ValueError('compiler diagnostic issues are not an array')
+            summary['issues'] = [str(issue)[:2048] for issue in issues[:8]]
+            summary['issue_count'] = len(issues)
+            summary['issues_truncated'] = len(issues) > len(summary['issues'])
+            if issues:
+                summaries['issues'].append(f'{path}: compiler artifact capture has {len(issues)} issue(s)')
             summaries['transactions'].append(summary)
-        except (OSError, ValueError, TypeError, AttributeError) as error:
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
             summaries['issues'].append(f'{path}: {error}')
     summaries['transactions_truncated'] = len(transactions) > 256
     def summarize_compiler(compiler):
@@ -538,6 +568,9 @@ def diagnostic_summaries(artifact_root):
                         cleanup = result[key].get('cleanup')
                         result['owned_cleanup_status'] = (cleanup.get('status', 'unknown')
                             if isinstance(cleanup, dict) else 'unknown')
+                        if not isinstance(result['owned_cleanup_status'], str):
+                            result['owned_cleanup_status'] = 'unknown'
+                            raise ValueError('owned compiler cleanup status is not a string')
                 except (OSError, ValueError, TypeError, AttributeError) as error:
                     result['issues'].append(f'{path}: {error}')
         if ('owned_compiler_outcome' in result) != ('owned_compiler_lifecycle' in result):
@@ -727,112 +760,40 @@ def capture_launch_inputs(binary, environment, declared_resources):
     return result
 
 
-def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
-            artifact_root=None, compiler_mode='direct', declared_resources=()):
-    args = [binary, '--exact', name, '--nocapture']
-    if ignored:
-        args.append('--ignored')
-    environment = None
-    startup_diagnostic_seconds = os.environ.get('TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS')
-    if record is not None and startup_diagnostic_seconds is not None:
-        record['startup_diagnostic_seconds'] = startup_diagnostic_seconds
-    if artifact_root is not None:
-        artifact_root = Path(artifact_root).absolute()
-        artifact_root.mkdir(parents=True, exist_ok=False, mode=0o700)
-        environment = dict(os.environ)
-        environment.update(TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
-                           TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1')
-        (artifact_root / 'case.json').write_text(json.dumps({
-            'test': name, 'scenario': 'running', 'cleanup': 'unconfirmed',
-            'compiler_mode': compiler_mode,
-        }, indent=2) + '\n')
-    if compiler_mode == 'owned-resident':
-        frontend = (environment or os.environ).get('TIDEPOOL_EXTRACT')
-        if artifact_root is None or not frontend:
-            raise RuntimeError('owned-resident requires a declared compiler and per-case artifact root')
-        args = [frontend, '--owned-daemon-run', str(artifact_root / 'compiler'), '--', *args]
-    started = time.monotonic_ns()
-    if record is not None:
-        record.update(command=args, started_ns=started, exit_code=None,
-                      timeout_seconds=timeout,
-                      executed_test_count=None, passed_test_count=None,
-                      failed_test_count=None, process_execution_count=0)
-        record.update(artifact_root=str(artifact_root) if artifact_root is not None else None,
-                      compiler_mode=compiler_mode)
-    service_record = {} if service_slice is not None else None
-    if record is not None and service_record is not None:
-        record['delegated_service'] = service_record
-    launch_inputs = capture_launch_inputs(binary, environment or os.environ, declared_resources)
-    if record is not None:
-        record['launch_inputs'] = launch_inputs
-    if artifact_root is not None:
-        (artifact_root / 'launch-inputs.json').write_text(json.dumps(launch_inputs, indent=2) + '\n')
-    if launch_inputs['status'] == 'UNKNOWN':
-        if record is not None:
-            record.update(status='launch_identity_failed', elapsed_ns=time.monotonic_ns() - started)
-        return False, f"could not capture launch inputs: {launch_inputs['error']}", ''
-    try:
-        if record is not None:
-            record['execution_started_ns'] = time.monotonic_ns()
-        execution_kwargs = {'environment': environment} if environment is not None else {}
-        if service_slice is not None and declared_resources:
-            execution_kwargs['declared_resources'] = declared_resources
-        result = (execute(args, timeout, service_slice, service_record, **execution_kwargs)
-                  if service_slice is not None else execute(args, timeout, **execution_kwargs))
-    except subprocess.TimeoutExpired as error:
-        if record is not None:
-            record.update(status='timeout', process_execution_count=(None if service_record is not None else 1),
-                          elapsed_ns=time.monotonic_ns() - started)
-        stdout = error.output or ''
-        stderr = error.stderr or ''
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode(errors='replace')
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode(errors='replace')
-        record_actual_counts(record, stdout, service_record is not None)
-        detail = f'timed out after {timeout:g}s'
-        if stdout:
-            detail += f'\n{stdout}'
-        return False, detail, stderr
-    except RunnerInterrupted as error:
-        if record is not None:
-            record.update(status='interrupted', interrupt_signal=error.signum,
-                          process_execution_count=None, elapsed_ns=time.monotonic_ns() - started)
-        return False, f'interrupted by signal {error.signum}', ''
-    except OSError as error:
-        if record is not None:
-            record.update(status='spawn_failed', elapsed_ns=time.monotonic_ns() - started)
-        return False, f'could not start test process: {error}', ''
-    if record is not None:
-        record.update(status='finished', process_execution_count=(None if service_record is not None else 1),
-                      exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started,
-                      cleanup_confirmed=getattr(result, 'cleanup_confirmed', False))
-    record_actual_counts(record, result.stdout, service_record is not None)
-    summaries = list(RESULT.finditer(result.stdout))
-    summary = summaries[-1] if summaries else None
-    passed = (
-        result.returncode == 0
-        and summary is not None
-        and summary.groups() == ('1', '0', '0')
-        and getattr(result, 'cleanup_confirmed', False)
-        and (service_record is None or service_record.get('cleanup_confirmed') is True)
-    )
-    stderr = result.stderr
-    if service_record is not None and not service_record.get('cleanup_confirmed'):
-        stderr += '\n' + service_record.get('cleanup_error', 'delegated cleanup is unconfirmed')
-    if not getattr(result, 'cleanup_confirmed', False):
-        stderr += '\nisolated process cleanup is unconfirmed'
+def process_cleanup_status(result, service_record=None):
+    status = getattr(result, 'process_cleanup_status', None)
+    if status in ('not_started', 'confirmed', 'unconfirmed', 'unknown'):
+        return status
+    confirmed = getattr(result, 'cleanup_confirmed', None)
+    if service_record is not None:
+        service_confirmed = service_record.get('cleanup_confirmed')
+        if confirmed is False or service_confirmed is False:
+            return 'unconfirmed'
+        if confirmed is not True or service_confirmed is not True:
+            return 'unknown'
+    return 'confirmed' if confirmed is True else 'unconfirmed' if confirmed is False else 'unknown'
+
+
+def case_artifact_evidence(artifact_root, compiler_mode, record):
+    """Capture diagnostic completeness and each resource owner on every exit path."""
+    cleanup_complete = True
+    stderr = ""
     hosted_runtime_not_started = False
     if artifact_root is not None:
-        reports = sorted(artifact_root.glob('hosted-campaign-*/hosted-outcome.json'))
+        reports = sorted(path / 'hosted-outcome.json' for path in artifact_root.glob('hosted-campaign-*')
+                         if path.is_dir() or path.is_symlink())
         if compiler_mode == 'owned-resident':
             reports.append(artifact_root / 'compiler/owned-compiler-outcome.json')
         cleanup_reports = []
         for report in reports:
             outcome = {}
             try:
+                if report.is_symlink() or report.parent.is_symlink():
+                    raise ValueError('cleanup marker must not be a symlink')
                 outcome = json.loads(report.read_text())
                 status = outcome['cleanup']['status']
+                if not isinstance(status, str):
+                    raise ValueError('cleanup status is not a string')
                 # This is a host-runtime admission fact, not a teardown receipt.
                 # The passing libtest and enclosing process/service cleanup are
                 # still mandatory; retain the original refusal evidence below.
@@ -853,19 +814,35 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                 not_started = False
                 stderr += f'\ncleanup report unavailable: {report}: {error}'
             cleanup_reports.append({'path': str(report), 'status': status,
+                                    'domain': ('host_runtime' if report.name == 'hosted-outcome.json'
+                                               else 'compiler_runtime'),
                                     'host_runtime_not_started': not_started,
                                     'startup': outcome.get('startup') if isinstance(outcome, dict) else None})
             hosted_runtime_not_started |= not_started
             if status != 'confirmed' and not not_started:
-                passed = False
+                cleanup_complete = False
                 stderr += f'\ncleanup remains {status}: {report}'
-        if record is not None:
-            record['cleanup_reports'] = cleanup_reports
-            try:
-                record['diagnostic_summaries'] = diagnostic_summaries(artifact_root)
-            except (OSError, ValueError, TypeError) as error:
-                record['diagnostic_summaries'] = {'issues': [str(error)]}
-    summaries = record.get('diagnostic_summaries', {}) if record is not None else {}
+        record['cleanup_reports'] = cleanup_reports
+        for domain, key in (('host_runtime', 'hosted_cleanup_status'),
+                            ('compiler_runtime', 'compiler_cleanup_status')):
+            reports = [report for report in cleanup_reports if report['domain'] == domain]
+            statuses = set('not_started' if report['host_runtime_not_started'] else
+                           'unconfirmed' if report['status'] == 'not_started' else report['status']
+                           for report in reports)
+            record[key] = ('not_observed' if not reports else
+                           next(iter(statuses)) if len(statuses) == 1 else 'mixed')
+        try:
+            record['diagnostic_summaries'] = diagnostic_summaries(artifact_root)
+        except (OSError, ValueError, TypeError) as error:
+            record['diagnostic_summaries'] = {'issues': [str(error)]}
+    summaries = record.get('diagnostic_summaries', {})
+    compiler_statuses = {root['owned_cleanup_status'] for root in summaries.get('owned_compiler_roots', [])
+                         if 'owned_cleanup_status' in root}
+    if record['compiler_cleanup_status'] != 'not_observed':
+        compiler_statuses.add(record['compiler_cleanup_status'])
+    if compiler_statuses:
+        record['compiler_cleanup_status'] = (next(iter(compiler_statuses))
+                                             if len(compiler_statuses) == 1 else 'mixed')
     evidence_complete = (not summaries.get('issues')
                          and not summaries.get('transactions_truncated')
                          and summaries.get('physical_compiler_timing', {}).get('complete', True)
@@ -874,14 +851,121 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                                  and (not root.get('compiler_job_queue', {}).get('physical_job_count')
                                       or root['compiler_job_queue'].get('complete', False))
                                  for root in summaries.get('owned_compiler_roots', [])))
-    if (passed and artifact_root is not None and evidence_complete
-            and not hosted_runtime_not_started and startup_diagnostic_seconds is None):
-        # Successful scenarios have completed their own acknowledged teardown.
-        # The runner additionally confirms its enclosing process/service cleanup.
-        shutil.rmtree(artifact_root)
-        if record is not None:
+    record['diagnostic_evidence_complete'] = evidence_complete if artifact_root is not None else None
+    return cleanup_complete, hosted_runtime_not_started, evidence_complete, stderr
+
+
+def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
+            artifact_root=None, compiler_mode='direct', declared_resources=()):
+    if record is None:
+        record = {}
+    record.update(schema=1, process_cleanup_status='not_started', hosted_cleanup_status='not_observed',
+                  compiler_cleanup_status='not_observed', diagnostic_evidence_complete=None)
+    record['process_cleanup_scope'] = 'delegated_service' if service_slice is not None else 'process_group'
+    args = [binary, '--exact', name, '--nocapture']
+    if ignored:
+        args.append('--ignored')
+    environment = None
+    startup_diagnostic_seconds = os.environ.get('TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS')
+    if startup_diagnostic_seconds is not None:
+        record['startup_diagnostic_seconds'] = startup_diagnostic_seconds
+    if artifact_root is not None:
+        artifact_root = Path(artifact_root).absolute()
+        artifact_root.mkdir(parents=True, exist_ok=False, mode=0o700)
+        environment = dict(os.environ)
+        environment.update(TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
+                           TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1')
+        (artifact_root / 'case.json').write_text(json.dumps({
+            'schema': 1, 'test': name, 'scenario': 'running', 'process_cleanup_status': 'not_started',
+            'hosted_cleanup_status': 'not_observed', 'compiler_cleanup_status': 'not_observed',
+            'compiler_mode': compiler_mode,
+        }, indent=2) + '\n')
+    if compiler_mode == 'owned-resident':
+        frontend = (environment or os.environ).get('TIDEPOOL_EXTRACT')
+        if artifact_root is None or not frontend:
+            raise RuntimeError('owned-resident requires a declared compiler and per-case artifact root')
+        args = [frontend, '--owned-daemon-run', str(artifact_root / 'compiler'), '--', *args]
+    started = time.monotonic_ns()
+    record.update(command=args, started_ns=started, exit_code=None,
+                  timeout_seconds=timeout,
+                  executed_test_count=None, passed_test_count=None,
+                  failed_test_count=None, process_execution_count=0)
+    record.update(artifact_root=str(artifact_root) if artifact_root is not None else None,
+                  compiler_mode=compiler_mode)
+    service_record = {} if service_slice is not None else None
+    if service_record is not None:
+        record['delegated_service'] = service_record
+    launch_inputs = capture_launch_inputs(binary, environment or os.environ, declared_resources)
+    record['launch_inputs'] = launch_inputs
+    if artifact_root is not None:
+        (artifact_root / 'launch-inputs.json').write_text(json.dumps(launch_inputs, indent=2) + '\n')
+    def finish(passed, stdout, stderr):
+        cleanup_complete, hosted_runtime_not_started, evidence_complete, errors = case_artifact_evidence(
+            artifact_root, compiler_mode, record)
+        passed = passed and cleanup_complete
+        stderr += errors
+        if (passed and artifact_root is not None and evidence_complete
+                and not hosted_runtime_not_started and startup_diagnostic_seconds is None):
+            # Successful scenarios have completed their own acknowledged teardown.
+            # The runner additionally confirms its enclosing process/service cleanup.
+            shutil.rmtree(artifact_root)
             record['artifacts_removed_after_success'] = True
-    return passed, result.stdout, stderr
+        return passed, stdout, stderr
+
+    if launch_inputs['status'] == 'UNKNOWN':
+        record.update(status='launch_identity_failed', elapsed_ns=time.monotonic_ns() - started)
+        return finish(False, f"could not capture launch inputs: {launch_inputs['error']}", '')
+    try:
+        record['process_cleanup_status'] = 'unknown'
+        record['execution_started_ns'] = time.monotonic_ns()
+        execution_kwargs = {'environment': environment} if environment is not None else {}
+        if service_slice is not None and declared_resources:
+            execution_kwargs['declared_resources'] = declared_resources
+        result = (execute(args, timeout, service_slice, service_record, **execution_kwargs)
+                  if service_slice is not None else execute(args, timeout, **execution_kwargs))
+    except subprocess.TimeoutExpired as error:
+        record['process_cleanup_status'] = process_cleanup_status(error, service_record)
+        record.update(status='timeout', process_execution_count=(None if service_record is not None else 1),
+                      elapsed_ns=time.monotonic_ns() - started)
+        stdout = error.output or ''
+        stderr = error.stderr or ''
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors='replace')
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors='replace')
+        record_actual_counts(record, stdout, service_record is not None)
+        detail = f'timed out after {timeout:g}s'
+        if stdout:
+            detail += f'\n{stdout}'
+        return finish(False, detail, stderr)
+    except RunnerInterrupted as error:
+        record['process_cleanup_status'] = process_cleanup_status(error, service_record)
+        record.update(status='interrupted', interrupt_signal=error.signum,
+                      process_execution_count=None, elapsed_ns=time.monotonic_ns() - started)
+        return finish(False, f'interrupted by signal {error.signum}', '')
+    except OSError as error:
+        record['process_cleanup_status'] = process_cleanup_status(error, service_record)
+        record.update(status='spawn_failed', elapsed_ns=time.monotonic_ns() - started)
+        return finish(False, f'could not start test process: {error}', '')
+    record.update(status='finished', process_execution_count=(None if service_record is not None else 1),
+                  exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started,
+                  process_cleanup_status=process_cleanup_status(result, service_record))
+    record_actual_counts(record, result.stdout, service_record is not None)
+    summaries = list(RESULT.finditer(result.stdout))
+    summary = summaries[-1] if summaries else None
+    passed = (
+        result.returncode == 0
+        and summary is not None
+        and summary.groups() == ('1', '0', '0')
+        and record['process_cleanup_status'] == 'confirmed'
+        and (service_record is None or service_record.get('cleanup_confirmed') is True)
+    )
+    stderr = result.stderr
+    if service_record is not None and not service_record.get('cleanup_confirmed'):
+        stderr += '\n' + service_record.get('cleanup_error', 'delegated cleanup is unconfirmed')
+    if record['process_cleanup_status'] != 'confirmed':
+        stderr += '\nisolated process cleanup is unconfirmed'
+    return finish(passed, result.stdout, stderr)
 
 
 

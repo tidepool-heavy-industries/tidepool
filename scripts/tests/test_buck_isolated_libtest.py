@@ -58,6 +58,136 @@ class IsolatedLibtestTests(unittest.TestCase):
                 self.assertEqual((root / 'completed-compile.txt').read_text(), 'retained before execution')
                 self.assertEqual(record['status'], 'timeout' if timed_out else 'finished')
                 self.assertEqual(record['executed_test_count'], None if timed_out else 1)
+                self.assertEqual(record['process_cleanup_status'], 'confirmed')
+                self.assertEqual(record['hosted_cleanup_status'], 'not_observed')
+                self.assertNotIn('cleanup_confirmed', record)
+
+    def test_transaction_capture_failures_retain_passing_scratch_with_or_without_record(self):
+        controls = {
+            'artifact capture issue': {'phase': 'compiler_completed', 'files': [],
+                                       'issues': ['source grew beyond diagnostic bound']},
+            'issue array corrupt': {'phase': 'compiler_completed', 'files': [], 'issues': 'lost'},
+            'file array corrupt': {'phase': 'compiler_completed', 'files': None, 'issues': []},
+            'incomplete phase': {'phase': 'compiler_started', 'files': [], 'issues': []},
+            'invalid json': '{',
+            'missing marker': None,
+        }
+        for index, (label, report) in enumerate(controls.items()):
+            for returned_record in (False, True):
+                with self.subTest(label=label, returned_record=returned_record):
+                    root = Path(self.tmp.name) / f'capture-{index}-{returned_record}'
+                    record = {} if returned_record else None
+                    def run(args, timeout, environment=None):
+                        transaction = root / 'compiler-transactions/one'
+                        transaction.mkdir(parents=True)
+                        if report is not None:
+                            (transaction / 'transaction.json').write_text(
+                                report if isinstance(report, str) else json.dumps(report))
+                        return completed_process(args, 0,
+                            'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                    with patch.object(runner, 'execute', side_effect=run):
+                        passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                            10, record, artifact_root=root)
+                    self.assertTrue(passed)
+                    self.assertTrue(root.exists())
+                    if returned_record:
+                        self.assertFalse(record['diagnostic_evidence_complete'])
+                        self.assertTrue(record['diagnostic_summaries']['issues'])
+                        self.assertNotIn('artifacts_removed_after_success', record)
+
+    def test_transaction_capture_issue_summary_preserves_total_and_truncation(self):
+        root = Path(self.tmp.name) / 'capture-issues'
+        transaction = root / 'compiler-transactions/one'
+        transaction.mkdir(parents=True)
+        (transaction / 'transaction.json').write_text(json.dumps({
+            'phase': 'compiler_completed', 'files': [], 'issues': ['x' * 3000] * 12}))
+        summary = runner.diagnostic_summaries(root)
+        self.assertTrue(summary['issues'])
+        transaction = summary['transactions'][0]
+        self.assertEqual(transaction['issue_count'], 12)
+        self.assertTrue(transaction['issues_truncated'])
+        self.assertEqual(len(transaction['issues']), 8)
+        self.assertEqual(len(transaction['issues'][0]), 2048)
+
+    def test_exception_paths_capture_hosted_cleanup_and_keep_process_fact_separate(self):
+        for index, error in enumerate((subprocess.TimeoutExpired([], 1),
+                                      runner.RunnerInterrupted(signal.SIGTERM), OSError('spawn failed'))):
+            with self.subTest(exception=type(error).__name__):
+                root = Path(self.tmp.name) / f'exception-cleanup-{index}'
+                record = {}
+                error.cleanup_confirmed = True
+                def run(args, timeout, environment=None):
+                    campaign = root / 'hosted-campaign-1'
+                    campaign.mkdir()
+                    (campaign / 'hosted-outcome.json').write_text(json.dumps({
+                        'scenario': {'status': 'failed'}, 'cleanup': {'status': 'unknown'}}))
+                    raise error
+                with patch.object(runner, 'execute', side_effect=run):
+                    passed, _, errors = runner.run_one(str(self.binary), 'suite::works', False,
+                        10, record, artifact_root=root)
+                self.assertFalse(passed)
+                self.assertTrue(root.exists())
+                self.assertEqual(record['process_cleanup_status'], 'confirmed')
+                self.assertEqual(record['hosted_cleanup_status'], 'unknown')
+                self.assertEqual(record['compiler_cleanup_status'], 'not_observed')
+                self.assertIn('cleanup remains unknown', errors)
+                self.assertNotIn('cleanup_confirmed', record)
+
+    def test_missing_or_corrupt_hosted_cleanup_never_becomes_process_cleanup(self):
+        for index, report in enumerate((None, '{', {'cleanup': {'status': []}})):
+            with self.subTest(report=report):
+                root = Path(self.tmp.name) / f'corrupt-hosted-{index}'
+                record = {}
+                def run(args, timeout, environment=None):
+                    campaign = root / 'hosted-campaign-1'
+                    campaign.mkdir()
+                    if report is not None:
+                        (campaign / 'hosted-outcome.json').write_text(
+                            report if isinstance(report, str) else json.dumps(report))
+                    return completed_process(args, 0,
+                        'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                with patch.object(runner, 'execute', side_effect=run):
+                    passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                        10, record, artifact_root=root)
+                self.assertFalse(passed)
+                self.assertTrue(root.exists())
+                self.assertEqual(record['process_cleanup_status'], 'confirmed')
+                self.assertEqual(record['hosted_cleanup_status'], 'unknown')
+
+    def test_failed_process_creation_and_prelaunch_interruption_are_not_teardown_receipts(self):
+        with patch.object(runner.subprocess, 'Popen', side_effect=OSError('creation refused')):
+            record = {}
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False, 10, record)
+        self.assertFalse(passed)
+        self.assertEqual(record['process_cleanup_status'], 'not_started')
+        self.assertEqual(record['hosted_cleanup_status'], 'not_observed')
+        self.assertEqual(record['compiler_cleanup_status'], 'not_observed')
+        with patch.object(runner, 'INTERRUPT_SIGNAL', signal.SIGTERM), \
+             patch.object(runner.subprocess, 'Popen') as launch:
+            record = {}
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False, 10, record)
+        self.assertFalse(passed)
+        launch.assert_not_called()
+        self.assertEqual(record['process_cleanup_status'], 'not_started')
+
+    def test_corrupt_owned_compiler_cleanup_cannot_certify_evidence(self):
+        root = Path(self.tmp.name) / 'corrupt-compiler-cleanup'
+        record = {}
+        def run(args, timeout, environment=None):
+            compiler = root / 'compiler'
+            compiler.mkdir()
+            (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': []}}))
+            (compiler / 'lifecycle.json').write_text('{}')
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                10, record, artifact_root=root)
+        self.assertTrue(passed)
+        self.assertTrue(root.exists())
+        self.assertFalse(record['diagnostic_evidence_complete'])
+        self.assertEqual(record['process_cleanup_status'], 'confirmed')
+        self.assertEqual(record['compiler_cleanup_status'], 'unknown')
 
     def test_case_environment_isolated_and_success_removes_diagnostics(self):
         root = Path(self.tmp.name) / 'successful-artifacts'
@@ -248,6 +378,11 @@ class IsolatedLibtestTests(unittest.TestCase):
                         10, record, artifact_root=root)
                 self.assertEqual(passed, expected)
                 self.assertTrue(root.exists())
+                self.assertEqual(record['process_cleanup_status'],
+                                 'confirmed' if process_cleanup else 'unconfirmed')
+                self.assertEqual(record['hosted_cleanup_status'],
+                    'not_started' if record['cleanup_reports'][0]['host_runtime_not_started'] else
+                    'unknown' if changes.get('status') == 'unknown' else 'unconfirmed')
                 self.assertNotIn('artifacts_removed_after_success', record)
                 self.assertEqual(record['cleanup_reports'][0]['status'], outcome['cleanup']['status'])
 
@@ -661,6 +796,8 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(record['executed_test_count'], 1)
         self.assertEqual(record['process_execution_count'], 1)
         self.assertIn('service still active', errors)
+        self.assertEqual(record['process_cleanup_scope'], 'delegated_service')
+        self.assertEqual(record['process_cleanup_status'], 'unconfirmed')
 
     def test_declared_manager_tools_launch_observe_and_cleanup_with_poisoned_path(self):
         tools = Path(self.tmp.name) / 'declared-tools'
