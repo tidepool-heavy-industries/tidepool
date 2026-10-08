@@ -663,6 +663,8 @@ fn known_phase(raw: &str) -> Option<&str> {
             | "compiler_transaction_response"
             | "compiler_preflight"
             | "compiler_service"
+            | "compiler_diagnostic_processing"
+            | "compiler_response_handoff"
             | "compiler_transaction_admission"
     )
     .then_some(raw)
@@ -955,6 +957,8 @@ mod tests {
             serde_json::json!({"timestamp":"2026-09-23T10:00:07.000Z","target":"tidepool::actor_host","fields":{"message":"interactive application launched","actor":"ActorRef { id: ActorId(2), incarnation: Incarnation(1) }"}}),
             serde_json::json!({"timestamp":"2026-09-23T10:00:08.000Z","target":"tidepool::host_dynamic_tools","fields":{"message":"close","time.busy":"10s","time.idle":"0ms"},"span":{"name":"tool_call","tool":"bash"}}),
             serde_json::json!({"timestamp":"2026-09-23T10:00:07.500Z","target":"tidepool_extract_cmd::daemon","fields":{"message":"compiler request finished","phase":"compiler_service","elapsed_ms":830,"worker_source":"secret"},"span":{"name":"compile_request","compile_request":"compile-1"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:07.600Z","target":"tidepool_extract_cmd::daemon","fields":{"message":"compiler diagnostics processed","phase":"compiler_diagnostic_processing","elapsed_ms":21},"span":{"name":"compile_request","compile_request":"compile-1"}}),
+            serde_json::json!({"timestamp":"2026-09-23T10:00:07.700Z","target":"tidepool_extract_cmd::daemon","fields":{"message":"compiler response handoff finished","phase":"compiler_response_handoff","elapsed_ms":4},"span":{"name":"compile_request","compile_request":"compile-1"}}),
         ];
         fs::write(
             &path,
@@ -977,6 +981,8 @@ mod tests {
         );
         assert_eq!(summary.phases["compiler_service"].count, 1);
         assert_eq!(summary.phases["compiler_service"].total_ms, 830);
+        assert_eq!(summary.phases["compiler_diagnostic_processing"].total_ms, 21);
+        assert_eq!(summary.phases["compiler_response_handoff"].total_ms, 4);
         assert_eq!(summary.host_tools["haskell"].total_ms, 2000);
         assert_eq!(summary.compile_requests.total_ms, 122);
         assert_eq!(summary.prepared_compiles.count, 1);
@@ -984,7 +990,7 @@ mod tests {
         assert_eq!(summary.input_units["Rejected"], 1);
         assert_eq!(summary.typed_refusals["reply_unauthorized"], 1);
         assert_eq!(summary.unclassified_dispatch_failures, 1);
-        assert_eq!(summary.timing_links.len(), 4);
+        assert_eq!(summary.timing_links.len(), 6);
         assert_eq!(summary.timing_links[0].id, "call-1");
         assert_eq!(summary.timing_links[1].id, "compile-1");
         assert_eq!(summary.timing_links[2].id, "exec-1");

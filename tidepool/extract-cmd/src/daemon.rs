@@ -274,6 +274,7 @@ impl CapacityRefusal {
     }
 }
 const BUSY_RETRY_DELAY: Duration = Duration::from_millis(25);
+const RAW_COMPILER_DETAIL_TARGET: &str = "tidepool_extract_cmd::daemon::compiler_detail";
 type WorkerResponse = (i32, Vec<u8>, Vec<u8>);
 
 fn pane_filter() -> tracing_subscriber::EnvFilter {
@@ -285,6 +286,50 @@ fn tracing_subscriber<D, P, J>(
     pane_writer: P,
     trace_writer: J,
     detailed_filter: tracing_subscriber::EnvFilter,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    D: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+    P: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+    J: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
+    tracing_subscriber_with_trace_filter(
+        detailed_writer,
+        pane_writer,
+        trace_writer,
+        detailed_filter,
+        compiler_trace_filter(std::env::var("RUST_LOG").ok().as_deref()),
+    )
+}
+
+fn compiler_trace_filter(raw_filter: Option<&str>) -> tracing_subscriber::EnvFilter {
+    let mut filter = tracing_subscriber::EnvFilter::new("info,tidepool_extract_cmd=debug");
+    // The structured trace intentionally has its own stable defaults. Honor
+    // only the standard RUST_LOG directive for this one high-volume target so
+    // a matched A/B can disable raw compiler detail without losing request,
+    // error, summary, or reuse events.
+    for directive in raw_filter
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|directive| {
+            directive
+                .split_once('=')
+                .is_some_and(|(target, _)| target.trim() == RAW_COMPILER_DETAIL_TARGET)
+        })
+    {
+        if let Ok(directive) = directive.parse() {
+            filter = filter.add_directive(directive);
+        }
+    }
+    filter
+}
+
+fn tracing_subscriber_with_trace_filter<D, P, J>(
+    detailed_writer: D,
+    pane_writer: P,
+    trace_writer: J,
+    detailed_filter: tracing_subscriber::EnvFilter,
+    trace_filter: tracing_subscriber::EnvFilter,
 ) -> impl tracing::Subscriber + Send + Sync
 where
     D: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
@@ -312,9 +357,7 @@ where
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_ansi(false)
         .with_writer(trace_writer)
-        .with_filter(tracing_subscriber::EnvFilter::new(
-            "info,tidepool_extract_cmd=debug",
-        ));
+        .with_filter(trace_filter);
     tracing_subscriber::registry()
         .with(detailed)
         .with(pane)
@@ -1210,31 +1253,65 @@ fn service_transaction(
                 match worker.request_while_connected(&connection, &cwd, &argv, request_deadline) {
                     Ok((code, stdout, stderr)) => {
                         *served += 1;
-                        let elapsed_ms =
-                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        log_compile_timing(run_id, &compile_request, &stderr);
-                        let stderr = diagnostic_stderr(&stderr);
+                        // Keep worker service separate from host-side parsing
+                        // and trace formatting: the first duration stops when
+                        // the complete worker response arrives.
+                        let service_elapsed_ns = started.elapsed().as_nanos();
+                        let worker_rss_mb = worker_rss_mb_logged(run_id, worker.child.id());
                         tracing::info!(
                             run_id,
                             %compile_request,
-                            elapsed_ms,
+                            elapsed_ns = u64::try_from(service_elapsed_ns).unwrap_or(u64::MAX),
+                            elapsed_ms = u64::try_from(service_elapsed_ns / 1_000_000)
+                                .unwrap_or(u64::MAX),
                             phase = "compiler_service",
                             exit_code = code,
-                            worker_rss_mb = worker_rss_mb_logged(run_id, worker.child.id()),
+                            worker_rss_mb,
                             stdout_bytes = stdout.len() as u64,
                             stderr_bytes = stderr.len() as u64,
                             transaction,
                             "compiler request finished"
                         );
+                        let diagnostic_started = Instant::now();
+                        let stderr_bytes = stderr.len() as u64;
+                        log_compile_timing(run_id, &compile_request, &stderr);
+                        let stderr = diagnostic_stderr(&stderr);
+                        let diagnostic_elapsed_ns = diagnostic_started.elapsed().as_nanos();
+                        tracing::info!(
+                            run_id,
+                            %compile_request,
+                            elapsed_ns = u64::try_from(diagnostic_elapsed_ns).unwrap_or(u64::MAX),
+                            elapsed_ms = u64::try_from(diagnostic_elapsed_ns / 1_000_000)
+                                .unwrap_or(u64::MAX),
+                            stderr_bytes,
+                            retained_stderr_bytes = stderr.len() as u64,
+                            phase = "compiler_diagnostic_processing",
+                            "compiler diagnostics processed"
+                        );
                         if transaction {
-                            if write_response(&mut connection, code, &stdout, &stderr).is_err() {
+                            if write_response_with_timing(
+                                &mut connection,
+                                code,
+                                &stdout,
+                                &stderr,
+                                run_id,
+                                &compile_request,
+                            )
+                            .is_err()
+                            {
                                 break;
                             }
                         } else {
                             // The client may close and release its request inputs as
                             // soon as it receives this response. Keep it waiting
                             // until the worker finishes transaction cleanup.
-                            one_shot_response = Some((code, stdout, stderr));
+                            one_shot_response = Some((
+                                code,
+                                stdout,
+                                stderr,
+                                compile_request.clone(),
+                                request_span.clone(),
+                            ));
                         }
                     }
                     Err(error) => {
@@ -1298,8 +1375,16 @@ fn service_transaction(
         );
         log_send_failure(run_id, "transaction accepted flush", connection.flush());
     }
-    if let Some((code, stdout, stderr)) = one_shot_response {
-        if let Err(error) = write_response(&mut connection, code, &stdout, &stderr) {
+    if let Some((code, stdout, stderr, compile_request, request_span)) = one_shot_response {
+        let _entered = request_span.enter();
+        if let Err(error) = write_response_with_timing(
+            &mut connection,
+            code,
+            &stdout,
+            &stderr,
+            run_id,
+            &compile_request,
+        ) {
             tracing::debug!(run_id, %error, "compiler response delivery failed after cleanup");
         }
     }
@@ -2280,11 +2365,59 @@ fn diagnostic_stderr(stderr: &[u8]) -> Vec<u8> {
         .into_bytes()
 }
 
+fn write_response_with_timing(
+    stream: impl Write,
+    code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+    run_id: &str,
+    compile_request: &str,
+) -> Result<(), FrontendError> {
+    let started = Instant::now();
+    let result = write_response(stream, code, stdout, stderr);
+    let elapsed_ns = started.elapsed().as_nanos();
+    tracing::info!(
+        run_id,
+        %compile_request,
+        elapsed_ns = u64::try_from(elapsed_ns).unwrap_or(u64::MAX),
+        elapsed_ms = u64::try_from(elapsed_ns / 1_000_000).unwrap_or(u64::MAX),
+        stdout_bytes = stdout.len() as u64,
+        stderr_bytes = stderr.len() as u64,
+        delivered = result.is_ok(),
+        phase = "compiler_response_handoff",
+        "compiler response handoff finished"
+    );
+    result
+}
+
+fn is_raw_compiler_detail(line: &str) -> bool {
+    matches!(
+        line.split_ascii_whitespace().next(),
+        Some("tidepool-timing-detail" | "tidepool-timing-module-detail" | "tidepool-count")
+    )
+}
+
 fn log_compile_timing(run_id: &str, compile_request: &str, stderr: &[u8]) {
     for line in String::from_utf8_lossy(stderr).lines() {
         let line = line.trim();
         if crate::diagnostics::is_machine_stderr_line(line) {
-            tracing::debug!(run_id, %compile_request, line, "compiler timing");
+            if is_raw_compiler_detail(line) {
+                tracing::debug!(
+                    target: RAW_COMPILER_DETAIL_TARGET,
+                    run_id,
+                    %compile_request,
+                    line,
+                    "compiler timing"
+                );
+            } else {
+                tracing::debug!(
+                    target: "tidepool_extract_cmd::daemon",
+                    run_id,
+                    %compile_request,
+                    line,
+                    "compiler timing"
+                );
+            }
         }
     }
 }
@@ -4445,11 +4578,12 @@ mod tests {
     fn compiler_timings_and_structure_are_forwarded_to_the_daemon_trace() {
         let reuse = r#"tidepool-reuse {"schema":1,"cycle":621890506509752,"purpose":"general","stage":"source_frontend","decision":"hit","reason":"matched","items":1,"bytes":null,"observed_ns":621890512307275,"unit":"main","module":"CompilerWidthLeaf00","version_kind":"source_fingerprint","version":"cb94c89252fb7ccb94e11ddcdd6331e6"}"#;
         let trace = CapturedWriter::default();
-        let subscriber = tracing_subscriber(
+        let subscriber = tracing_subscriber_with_trace_filter(
             CapturedWriter::default(),
             CapturedWriter::default(),
             trace.clone(),
             tracing_subscriber::EnvFilter::new("debug"),
+            compiler_trace_filter(None),
         );
 
         tracing::subscriber::with_default(subscriber, || {
@@ -4507,6 +4641,79 @@ tidepool-target phase=desugar module=Execute\n",
                 reuse,
             ]
         );
+    }
+
+    #[test]
+    fn raw_compiler_detail_filter_preserves_request_errors_and_reuse_rows() {
+        let detailed = CapturedWriter::default();
+        let trace = CapturedWriter::default();
+        let raw_filter =
+            "debug,tidepool_extract_cmd::daemon::compiler_detail=off";
+        let subscriber = tracing_subscriber_with_trace_filter(
+            detailed.clone(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new(raw_filter),
+            compiler_trace_filter(Some(raw_filter)),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                target: "tidepool_extract_cmd::daemon",
+                run_id = "run-filter",
+                compile_request = "request-filter",
+                "compiler request started"
+            );
+            log_compile_timing(
+                "run-filter",
+                "request-filter",
+                b"tidepool-timing phase=cycle_modules_wall ms=7\n\
+tidepool-timing-detail parent=prepared_recover phase=lookup ms=1\n\
+tidepool-timing-module-detail module=Execute phase=interface ms=1\n\
+tidepool-count name=prepared_recover_rounds count=2\n\
+tidepool-reuse {\"decision\":\"hit\"}\n\
+tidepool-reuse-error: witness failed\n",
+            );
+            tracing::error!(
+                target: "tidepool_extract_cmd::daemon",
+                run_id = "run-filter",
+                compile_request = "request-filter",
+                "compiler request failed"
+            );
+        });
+
+        let events = trace
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let retained_lines = events
+            .iter()
+            .filter(|event| event["fields"]["message"] == "compiler timing")
+            .map(|event| event["fields"]["line"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(retained_lines.contains(&"tidepool-timing phase=cycle_modules_wall ms=7"));
+        assert!(retained_lines.contains(&"tidepool-reuse {\"decision\":\"hit\"}"));
+        assert!(retained_lines.contains(&"tidepool-reuse-error: witness failed"));
+        assert!(retained_lines.iter().all(|line| !is_raw_compiler_detail(line)));
+        assert!(events.iter().any(|event| {
+            event["fields"]["message"] == "compiler request started"
+                && event["fields"]["run_id"] == "run-filter"
+                && event["fields"]["compile_request"] == "request-filter"
+        }));
+        assert!(events.iter().any(|event| {
+            event["fields"]["message"] == "compiler request failed"
+                && event["fields"]["run_id"] == "run-filter"
+                && event["fields"]["compile_request"] == "request-filter"
+        }));
+
+        let detailed_text = detailed.text();
+        assert!(detailed_text.contains("compiler request started"));
+        assert!(detailed_text.contains("tidepool-reuse-error: witness failed"));
+        assert!(detailed_text.contains("compiler request failed"));
+        assert!(!detailed_text.contains("tidepool-timing-detail"));
+        assert!(!detailed_text.contains("tidepool-timing-module-detail"));
+        assert!(!detailed_text.contains("tidepool-count"));
     }
 
     #[test]
