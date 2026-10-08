@@ -2123,7 +2123,8 @@ impl ModuleCandidateOffer {
             module,
             source,
             &self.producer,
-            &sealed,
+            &sealed.selected_originals,
+            &sealed.artifact_view,
             &crate::declaration_context::ExactProductAdmission {
                 request: exact,
                 source: &admission,
@@ -2317,6 +2318,7 @@ pub struct SealedTurnProducts {
     original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
     pub(crate) source_selection: certified_products::CertifiedSourceSelection,
+    pub(crate) selected_originals: certified_products::SelectedOriginalClosure,
     pub target_native_selection: crate::artifact_inventory::TargetNativeSelection,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
@@ -2973,6 +2975,10 @@ fn seal_turn_outputs_with_validation(
     if publication == OriginalOutputPublication::Transaction {
         module_candidates::record_deployment_acceptance(offer.selected.as_deref(), &receipt);
     }
+    let selected_originals = certified
+        .source_selection
+        .selected_original_closure(&artifact_view)
+        .map_err(compiler_evidence_failure)?;
     Ok(Some(SealedTurnProducts {
         artifact_view,
         typed_entry,
@@ -2984,6 +2990,7 @@ fn seal_turn_outputs_with_validation(
         recovery_products: certified.recovery_products,
         retained_core_products: certified.retained_core_products,
         source_selection: certified.source_selection,
+        selected_originals,
         target_native_selection,
         package_interfaces,
     }))

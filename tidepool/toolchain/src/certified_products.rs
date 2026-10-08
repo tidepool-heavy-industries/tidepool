@@ -643,6 +643,12 @@ pub struct OriginalGroupConflict {
     pub failure: OriginalGroupFailure,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OriginalSelectionConflict {
+    pub selected: CachedHomeOwner,
+    pub artifacts: Vec<crate::artifact_inventory::ArtifactId>,
+}
+
 fn original_group_conflict(
     owner: &CachedHomeOwner,
     failure: OriginalGroupFailure,
@@ -675,6 +681,8 @@ pub enum CertificationError {
     DuplicateSourceBinder(Box<SourceBinderConflict>),
     #[error("compiler product original group conflict: {0:?}")]
     OriginalGroupConflict(Box<OriginalGroupConflict>),
+    #[error("compiler product original selection conflict: {0:?}")]
+    OriginalSelectionConflict(Box<OriginalSelectionConflict>),
     #[error("finalized module payload capture failed: {0}")]
     CapturedModulePayload(#[source] crate::recovery_artifacts::RecoveryArtifactError),
     #[error("finalized interface {unit}:{module} requires {required_unit}:{required_module} seal {expected_sha256}; selected seal {selected_sha256:?}")]
@@ -1668,6 +1676,19 @@ pub(crate) struct CertifiedSourceSelection {
     modules: BTreeMap<(String, String), ReceiptSourceSelection>,
 }
 
+/// Native originals selected by one certified compiler namespace. Historical
+/// custody stays in the artifact view and cannot issue this unique selection.
+#[derive(Clone, Debug)]
+pub(crate) struct SelectedOriginalClosure {
+    products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+}
+
+impl SelectedOriginalClosure {
+    pub(crate) fn products(&self) -> &[crate::recovery_artifacts::CertifiedRecoveryProduct] {
+        &self.products
+    }
+}
+
 #[derive(Clone, Debug)]
 enum ReceiptSourceSelection {
     InterfaceOnly {
@@ -1707,6 +1728,27 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn selected_original_closure(
+        &self,
+        view: &crate::artifact_inventory::ArtifactView,
+    ) -> CertResult<SelectedOriginalClosure> {
+        let projection = self.compiler_projection(view)?;
+        let selected = projection
+            .entries_from_metadata(&view.metadata_snapshot())
+            .map_err(|_| CertificationError::Mismatch("selected compiler original closure"))?;
+        Ok(SelectedOriginalClosure {
+            products: selected
+                .values()
+                .filter_map(|entry| match &entry.payload {
+                    crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                        Some(product.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+        })
+    }
+
     /// Resolve already issued compiler roles against their authenticated custody.
     /// Merely retaining a native artifact does not grant an original offer.
     pub(crate) fn from_compiler_projection(
@@ -1778,9 +1820,12 @@ impl CertifiedSourceSelection {
                     matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == &native.owner)
                 }).collect::<Vec<_>>();
                 let [entry] = matching.as_slice() else {
-                    return Err(CertificationError::Mismatch(
-                        "issued compiler original artifact",
-                    ));
+                    return Err(CertificationError::OriginalSelectionConflict(Box::new(
+                        OriginalSelectionConflict {
+                            selected: native.owner.clone(),
+                            artifacts: matching.iter().map(|entry| entry.descriptor.id).collect(),
+                        },
+                    )));
                 };
                 entries.push(Arc::clone(entry));
             }

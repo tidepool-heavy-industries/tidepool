@@ -2,7 +2,6 @@
 //! worker inventory to its request, final source, and sealed interface bytes.
 
 use super::*;
-use crate::artifacts::SealedTurnProducts;
 use crate::declaration_context::{ExactProductAdmission, ExactSourceAdmission};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -659,7 +658,8 @@ pub(crate) fn certify_same_offer_planned_declaration(
     module: SessionModule,
     normalized_source: &str,
     producer_identity: &[u8],
-    sealed: &SealedTurnProducts,
+    originals: &crate::certified_products::SelectedOriginalClosure,
+    sealed_artifacts: &crate::artifact_inventory::ArtifactView,
     admission: &ExactProductAdmission<'_>,
     includes: &[PathBuf],
     baseline: Option<&Arc<ExactDeclarationContext>>,
@@ -718,36 +718,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
         unit: candidates[0].unit.clone(),
         module: module_name,
     };
-    // Keep the original graph, its admitted baseline, and native originals
-    // promoted from that request's retained canonical Core. Promotions have no
-    // fresh source row or selected native offer; the same native original may
-    // already be in full custody. The issuer retains the exact proved product.
-    let products = sealed
-        .recovery_products
-        .iter()
-        .filter(|product| {
-            evidence.iter().any(|row| {
-                !row.boot
-                    && row.unit == product.owner().unit
-                    && row.module == product.owner().module
-            }) || baseline.is_some_and(|context| {
-                context
-                    .recovery_products()
-                    .iter()
-                    .any(|retained| retained.owner() == product.owner())
-            }) || sealed.retained_core_products.contains_original(product)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut owners = BTreeSet::new();
-    if products
-        .iter()
-        .any(|product| !owners.insert((&product.owner().unit, &product.owner().module)))
-    {
-        return Err(contract(
-            "planned original closure has duplicate product owners",
-        ));
-    }
+    let products = originals.products();
     let selected = products
         .iter()
         .find(|product| {
@@ -775,7 +746,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
     }
     let artifact_context = authored_interface_context(
         baseline,
-        &sealed.artifact_view,
+        sealed_artifacts,
         products.iter().map(|product| ExactModuleIdentity {
             unit: product.owner().unit.clone(),
             module: product.owner().module.clone(),
@@ -784,7 +755,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
     )?;
     let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
         admit_authored_artifact_closure(
-            &products,
+            products,
             &original_owner,
             toolchain_identity_sha256,
             evidence,
@@ -814,10 +785,10 @@ pub(crate) fn certify_same_offer_planned_declaration(
     inventory.validate(&original_owner, &interfaces)?;
     let artifacts = crate::declaration_context::certified_artifact_view(
         toolchain_identity_sha256,
-        &products,
+        products,
         &interfaces,
         &joined_interfaces,
-        &sealed.artifact_view,
+        sealed_artifacts,
         Some(artifact_context.as_ref()),
     )?;
     let compiler_projection =
