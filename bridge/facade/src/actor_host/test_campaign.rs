@@ -1606,4 +1606,44 @@ mod tests {
             })
             .await;
     }
+
+    #[tokio::test]
+    async fn unfinished_campaign_guard_rejects_scope_exit_without_replacing_an_assertion_panic() {
+        for original in [None, Some(73_u32)] {
+            let mut campaign = TestCampaign::start().await;
+            let forest = campaign.forest.clone();
+            // This guard test keeps executor custody outside the owner being
+            // deliberately dropped, then settles those real resources below.
+            let executor = std::mem::replace(
+                &mut campaign.executor,
+                CampaignExecutor::Settled(CampaignHostedJoin::TimedOut),
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _campaign = campaign;
+                if let Some(payload) = original {
+                    std::panic::panic_any(payload);
+                }
+            }));
+            let outcomes = forest.shutdown().await;
+            let CampaignExecutor::Running(mut task) = executor else {
+                panic!("the guard fixture owns its live executor");
+            };
+            tokio::time::timeout(Duration::from_secs(30), &mut task)
+                .await
+                .expect("guard fixture cleanup joins")
+                .unwrap();
+            assert!(outcomes
+                .iter()
+                .all(exomonad_actor::ForestRootShutdown::is_confirmed));
+            let panic = result.expect_err("an unfinished campaign cannot leave scope successfully");
+            if let Some(original) = original {
+                assert_eq!(panic.downcast_ref::<u32>(), Some(&original));
+            } else {
+                assert!(
+                    panic.downcast_ref::<String>().is_some()
+                        || panic.downcast_ref::<&str>().is_some()
+                );
+            }
+        }
+    }
 }
