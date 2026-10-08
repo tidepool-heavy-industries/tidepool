@@ -274,7 +274,9 @@ proptest! {
     #[test]
     fn cached_read_projection_matches_exhaustive_graph_after_view_histories(
         left_masks in any::<[u8; OWNERS]>(),
-        seed in any::<u8>(),
+        // Zero is reserved by the certificate decoder and cannot represent a
+        // well-formed fixture producer identity.
+        seed in 1u8..=u8::MAX,
         choices in proptest::collection::vec(0usize..OWNERS, 0..12),
     ) {
         let mut masks = left_masks;
@@ -521,6 +523,47 @@ fn first_read_and_inventory_extension_settle_without_lock_recursion() {
     reader.join().unwrap();
     admission.join().unwrap();
     check_read_projection(&view).unwrap();
+}
+
+#[test]
+fn zero_mask_empty_selection_boundary_releases_valid_fixture_views() {
+    let catalog = Catalog::new(&[0; OWNERS], 1);
+    let inventory = ArtifactInventory::default();
+    let empty = inventory.empty_view();
+    let all = inventory
+        .admit(&empty, catalog.entries[..OWNERS].to_vec())
+        .unwrap();
+    let extended = inventory
+        .admit(&all, vec![catalog.entries[OWNERS].clone()])
+        .unwrap();
+
+    check_read_projection(&all).unwrap();
+    check_read_projection(&extended).unwrap();
+    let snapshot = extended.metadata_snapshot();
+    assert!(!snapshot.selected_native_groups.is_empty());
+    let selected_empty = all.select_roots(Vec::new()).unwrap();
+    assert!(selected_empty.is_empty());
+    check_read_projection(&selected_empty).unwrap();
+
+    let native_interface = extended
+        .interface_projection(&[catalog.owner(OWNERS)])
+        .unwrap();
+    assert!(native_interface.selected_native_groups().is_empty());
+    assert!(native_interface
+        .entries()
+        .iter()
+        .all(|entry| !entry.is_native()));
+    check_read_projection(&native_interface).unwrap();
+
+    drop(all);
+    drop(extended);
+    drop(selected_empty);
+    drop(native_interface);
+    drop(empty);
+    assert_eq!(inventory.node_count(), 0);
+    let state = inventory.0.lock().expect("inventory lock");
+    assert!(state.payloads.is_empty());
+    assert!(state.roots.is_empty());
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
