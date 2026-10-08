@@ -169,104 +169,141 @@ fn same_interface_with_different_core_is_refused_by_full_selection() {
     assert_empty_offer(select(scratch.path(), vec![record], &context).unwrap());
 }
 
+fn property_config(
+    cases: u32,
+    seed: u64,
+    test_name: &'static str,
+) -> proptest::test_runner::Config {
+    use proptest::test_runner::{Config, FileFailurePersistence, RngSeed};
+    let mut config = Config::default();
+    config.cases = cases;
+    config.rng_seed = RngSeed::Fixed(seed);
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+    }
+    let mut config = proptest::test_runner::contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(test_name);
+    config
+}
+
 #[test]
 fn generated_protected_native_refusals_match_complete_canonical_and_owner_facts() {
     use proptest::prelude::*;
-    use proptest::test_runner::{Config, FileFailurePersistence, RngSeed, TestRunner};
+    use proptest::test_runner::TestRunner;
 
     // Re-finalizing the original product keeps its interface, package bytes,
     // and Core fixed while independently perturbing producer, source, or
     // canonical requirements. The candidate crosses the complete selector.
-    let mut config = Config::default();
-    config.cases = 64;
-    config.rng_seed = RngSeed::Fixed(2026100808);
-    config.failure_persistence = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS").map(|path| {
-        Box::new(FileFailurePersistence::Direct(path))
-            as Box<dyn proptest::test_runner::FailurePersistence>
-    });
+    let config = property_config(
+        64,
+        2026100808,
+        concat!(
+            module_path!(),
+            "::generated_protected_native_refusals_match_complete_canonical_and_owner_facts"
+        ),
+    );
+    let configuration = format!("{config:?}");
+    let configured_cases = config.cases;
     let mut runner = TestRunner::new(config);
-    runner
-        .run(&(0u8..7), |variant| {
-            let sources = tempfile::tempdir().unwrap();
-            let scratch = tempfile::tempdir().unwrap();
-            let record = super::tests::candidate_fixture(sources.path(), "Protected");
-            let key = (record.unit.clone(), record.module.clone());
-            let canonical = record.module_interface_proof.as_ref().unwrap().clone();
-            let producer = canonical.producer_sha256();
-            let base_product = original_product(&record);
-            let required = |canonical| {
-                ExactCandidateContext::new(BTreeSet::from([key.clone()]), BTreeSet::new())
-                    .with_originals(vec![original_product(&record)])
-                    .with_canonical_interfaces(
-                        BTreeMap::from([(key.clone(), canonical)]),
-                        BTreeSet::new(),
-                    )
-            };
+    let callbacks = std::cell::Cell::new(0usize);
+    let completed = std::cell::Cell::new(0usize);
+    let partitions = std::cell::RefCell::new([0usize; 7]);
+    let result = runner.run(&(0u8..7), |variant| {
+        callbacks.set(callbacks.get() + 1);
+        partitions.borrow_mut()[usize::from(variant)] += 1;
+        let sources = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let record = super::tests::candidate_fixture(sources.path(), "Protected");
+        let key = (record.unit.clone(), record.module.clone());
+        let canonical = record.module_interface_proof.as_ref().unwrap().clone();
+        let producer = canonical.producer_sha256();
+        let base_product = original_product(&record);
+        let required = |canonical| {
+            ExactCandidateContext::new(BTreeSet::from([key.clone()]), BTreeSet::new())
+                .with_originals(vec![original_product(&record)])
+                .with_canonical_interfaces(
+                    BTreeMap::from([(key.clone(), canonical)]),
+                    BTreeSet::new(),
+                )
+        };
 
-            let context = match variant {
-                0 => required(canonical.clone()),
-                1 => required(
-                    crate::certified_products::fixture_finalized_product(
-                        base_product.clone().with_source_sha256([0x53; 32]),
-                        producer,
-                    )
-                    .module_interface()
-                    .unwrap()
-                    .clone(),
-                ),
-                2 => required(
-                    crate::certified_products::fixture_finalized_product(
-                        base_product.clone(),
-                        [0xa7; 32],
-                    )
-                    .module_interface()
-                    .unwrap()
-                    .clone(),
-                ),
-                3 => required(
-                    crate::certified_products::fixture_finalized_product_with_requirements(
-                        base_product.clone(),
-                        producer,
-                        Some(BTreeMap::from([(
-                            ("u".into(), "Dependency".into()),
-                            [0x42; 32],
-                        )])),
-                    )
-                    .module_interface()
-                    .unwrap()
-                    .clone(),
-                ),
-                4 => required(crate::certified_products::fixture_module_core(
-                    &canonical,
-                    b"changed-core".to_vec(),
-                )),
-                5 => required(crate::certified_products::fixture_source_module_interface(
-                    canonical.producer_sha256(),
-                    "other-unit",
-                    "OtherOwner",
-                    canonical.source_sha256(),
-                    canonical.requirements().clone(),
-                    None,
-                )),
-                6 => ExactCandidateContext::new(BTreeSet::from([key.clone()]), BTreeSet::new()),
-                _ => unreachable!(),
-            };
+        let context = match variant {
+            0 => required(canonical.clone()),
+            1 => required(
+                crate::certified_products::fixture_finalized_product(
+                    base_product.clone().with_source_sha256([0x53; 32]),
+                    producer,
+                )
+                .module_interface()
+                .unwrap()
+                .clone(),
+            ),
+            2 => required(
+                crate::certified_products::fixture_finalized_product(
+                    base_product.clone(),
+                    [0xa7; 32],
+                )
+                .module_interface()
+                .unwrap()
+                .clone(),
+            ),
+            3 => required(
+                crate::certified_products::fixture_finalized_product_with_requirements(
+                    base_product.clone(),
+                    producer,
+                    Some(BTreeMap::from([(
+                        ("u".into(), "Dependency".into()),
+                        [0x42; 32],
+                    )])),
+                )
+                .module_interface()
+                .unwrap()
+                .clone(),
+            ),
+            4 => required(crate::certified_products::fixture_module_core(
+                &canonical,
+                b"changed-core".to_vec(),
+            )),
+            5 => required(crate::certified_products::fixture_source_module_interface(
+                canonical.producer_sha256(),
+                "other-unit",
+                "OtherOwner",
+                canonical.source_sha256(),
+                canonical.requirements().clone(),
+                None,
+            )),
+            6 => ExactCandidateContext::new(BTreeSet::from([key.clone()]), BTreeSet::new()),
+            _ => unreachable!(),
+        };
 
-            let expected = match context.canonical_interfaces.get(&key) {
-                Some(selected) => same_canonical_facts(selected, &canonical),
-                None => false,
-            };
-            let selected = select(scratch.path(), vec![record], &context).unwrap();
-            if expected {
-                prop_assert_eq!(selected.native_availability.len(), 1);
-                prop_assert!(selected.by_owner.is_empty());
-            } else {
-                prop_assert!(selected.native_availability.is_empty());
-                prop_assert!(selected.by_owner.is_empty());
-            }
-            Ok(())
+        let expected = match context.canonical_interfaces.get(&key) {
+            Some(selected) => same_canonical_facts(selected, &canonical),
+            None => false,
+        };
+        let selected = select(scratch.path(), vec![record], &context).unwrap();
+        if expected {
+            prop_assert_eq!(selected.native_availability.len(), 1);
+            prop_assert!(selected.by_owner.is_empty());
+        } else {
+            prop_assert!(selected.native_availability.is_empty());
+            prop_assert!(selected.by_owner.is_empty());
+        }
+        completed.set(completed.get() + 1);
+        Ok(())
+    });
+    eprintln!(
+        "protected_native_refusal_campaign={}",
+        serde_json::json!({
+            "configured_fresh_cases": configured_cases,
+            "configuration": configuration,
+            "callbacks": callbacks.get(),
+            "completed_callbacks": completed.get(),
+            "variant_callbacks": *partitions.borrow(),
+            "variant_order": ["compatible", "source", "producer", "requirements", "Core", "owner", "missing_canonical"],
         })
-        .unwrap();
+    );
+    result.unwrap();
 }
 
 #[test]
@@ -305,73 +342,106 @@ fn protected_original_owner_version_must_match_the_selected_candidate() {
 #[test]
 fn protected_root_selection_matches_a_full_scan_oracle() {
     use proptest::prelude::*;
-    use proptest::test_runner::{Config, FileFailurePersistence, RngSeed, TestRunner};
+    use proptest::test_runner::TestRunner;
 
-    let mut config = Config::default();
-    config.cases = 32;
-    config.rng_seed = RngSeed::Fixed(2026100809);
-    config.failure_persistence = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS").map(|path| {
-        Box::new(FileFailurePersistence::Direct(path))
-            as Box<dyn proptest::test_runner::FailurePersistence>
-    });
+    let config = property_config(
+        32,
+        2026100809,
+        concat!(
+            module_path!(),
+            "::protected_root_selection_matches_a_full_scan_oracle"
+        ),
+    );
+    let configuration = format!("{config:?}");
+    let configured_cases = config.cases;
     let mut runner = TestRunner::new(config);
+    let callbacks = std::cell::Cell::new(0usize);
+    let completed = std::cell::Cell::new(0usize);
+    // all protected, all unprotected, mixed; generated owner order changed/unchanged.
+    let partitions = std::cell::RefCell::new([0usize; 5]);
     let strategy = proptest::collection::vec((any::<bool>(), any::<u8>()), 1..7);
-    runner
-        .run(&strategy, |history| {
-            let selected = history
-                .iter()
-                .map(|(selected, _)| *selected)
-                .collect::<Vec<_>>();
-            let order = history.iter().map(|(_, order)| *order).collect::<Vec<_>>();
-            let sources = tempfile::tempdir().unwrap();
-            let scratch = tempfile::tempdir().unwrap();
-            let records = (0..selected.len())
-                .map(|index| super::tests::candidate_fixture(sources.path(), &format!("M{index}")))
-                .collect::<Vec<_>>();
-            let protected = selected
-                .iter()
-                .enumerate()
-                .filter(|(_, selected)| **selected)
-                .map(|(index, _)| ("u".to_owned(), format!("M{index}")))
-                .collect::<BTreeSet<_>>();
+    let result = runner.run(&strategy, |history| {
+        callbacks.set(callbacks.get() + 1);
+        let private_count = history.iter().filter(|(private, _)| *private).count();
+        let partition = if private_count == history.len() {
+            0
+        } else if private_count == 0 {
+            1
+        } else {
+            2
+        };
+        partitions.borrow_mut()[partition] += 1;
+        let selected = history
+            .iter()
+            .map(|(selected, _)| *selected)
+            .collect::<Vec<_>>();
+        let order = history.iter().map(|(_, order)| *order).collect::<Vec<_>>();
+        let sources = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let records = (0..selected.len())
+            .map(|index| super::tests::candidate_fixture(sources.path(), &format!("M{index}")))
+            .collect::<Vec<_>>();
+        let protected = selected
+            .iter()
+            .enumerate()
+            .filter(|(_, selected)| **selected)
+            .map(|(index, _)| ("u".to_owned(), format!("M{index}")))
+            .collect::<BTreeSet<_>>();
 
-            // The oracle scans the primary selection bits. It does not reuse
-            // the production closure's traversal or retained availability.
-            let expected_private = records
-                .iter()
-                .filter(|record| protected.contains(&(record.unit.clone(), record.module.clone())))
-                .map(|record| computed_owner(record))
-                .collect::<BTreeSet<_>>();
-            let expected_manifest = records
-                .iter()
-                .map(|record| computed_owner(record))
-                .filter(|owner| !protected.contains(&(owner.unit.clone(), owner.module.clone())))
-                .collect::<BTreeSet<_>>();
+        // The oracle scans the primary selection bits. It does not reuse
+        // the production closure's traversal or retained availability.
+        let expected_private = records
+            .iter()
+            .filter(|record| protected.contains(&(record.unit.clone(), record.module.clone())))
+            .map(|record| computed_owner(record))
+            .collect::<BTreeSet<_>>();
+        let expected_manifest = records
+            .iter()
+            .map(|record| computed_owner(record))
+            .filter(|owner| !protected.contains(&(owner.unit.clone(), owner.module.clone())))
+            .collect::<BTreeSet<_>>();
 
-            let context = context_for(&records, &protected);
-            let mut indices = (0..records.len()).collect::<Vec<_>>();
-            indices.sort_by_key(|index| order[*index]);
-            let arranged = indices
-                .into_iter()
-                .map(|index| records[index].clone())
-                .collect::<Vec<_>>();
-            let selected = select(scratch.path(), arranged, &context).unwrap();
-            let actual_private = selected
-                .native_availability
-                .iter()
-                .map(|product| product.owner().clone())
-                .collect::<BTreeSet<_>>();
-            let actual_manifest = selected
-                .by_owner
-                .values()
-                .map(|candidate| candidate.owner.clone())
-                .collect::<BTreeSet<_>>();
+        let context = context_for(&records, &protected);
+        let mut indices = (0..records.len()).collect::<Vec<_>>();
+        indices.sort_by_key(|index| order[*index]);
+        let changed_order = indices
+            .iter()
+            .enumerate()
+            .any(|(position, index)| position != *index);
+        partitions.borrow_mut()[if changed_order { 3 } else { 4 }] += 1;
+        let arranged = indices
+            .into_iter()
+            .map(|index| records[index].clone())
+            .collect::<Vec<_>>();
+        let selected = select(scratch.path(), arranged, &context).unwrap();
+        let actual_private = selected
+            .native_availability
+            .iter()
+            .map(|product| product.owner().clone())
+            .collect::<BTreeSet<_>>();
+        let actual_manifest = selected
+            .by_owner
+            .values()
+            .map(|candidate| candidate.owner.clone())
+            .collect::<BTreeSet<_>>();
 
-            prop_assert_eq!(actual_private, expected_private);
-            prop_assert_eq!(actual_manifest, expected_manifest);
-            Ok(())
+        prop_assert_eq!(actual_private, expected_private);
+        prop_assert_eq!(actual_manifest, expected_manifest);
+        completed.set(completed.get() + 1);
+        Ok(())
+    });
+    eprintln!(
+        "protected_native_root_campaign={}",
+        serde_json::json!({
+            "configured_fresh_cases": configured_cases,
+            "configuration": configuration,
+            "callbacks": callbacks.get(),
+            "completed_callbacks": completed.get(),
+            "partition_callbacks": *partitions.borrow(),
+            "partition_order": ["all_protected", "all_unprotected", "mixed", "reordered", "unchanged_order"],
         })
-        .unwrap();
+    );
+    result.unwrap();
 }
 
 #[test]
@@ -436,9 +506,7 @@ fn protected_native_closure_issues_missing_type_dependencies_privately() {
     dependent.module_interface_proof = canonical.module_interface().cloned();
     dependent.module_interface = Some(
         crate::recovery_artifacts::materialize_module_interface(
-            super::tests::fixture_record_dir(sources.path())
-                .parent()
-                .unwrap(),
+            sources.path(),
             canonical.module_interface().unwrap(),
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             crate::recovery_artifacts::MaterializationMode::Durable,

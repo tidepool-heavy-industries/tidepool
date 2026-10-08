@@ -178,7 +178,7 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
         .map(|product| {
             Arc::new(
                 ArtifactEntry::original_with_validation(
-                    CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
+                    CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
                     product.clone(),
                     &mut PackageInterfaceValidation::default(),
                 )

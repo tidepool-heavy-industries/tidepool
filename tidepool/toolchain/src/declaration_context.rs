@@ -182,7 +182,7 @@ impl OriginalCompilerInputs {
                 ));
             }
             entries.push(Arc::new(ArtifactEntry::original_with_validation(
-                producer,
+                producer.sha256(),
                 product.clone(),
                 &mut validation,
             )?));
@@ -5505,16 +5505,10 @@ impl ExactDeclarationContext {
                                         Value::Array(vec![
                                             Value::Integer(group.original_ordinal().into()),
                                             Value::Array(
-                                                group
-                                                    .group()
-                                                    .binders()
-                                                    .iter()
-                                                    .map(symbol_value)
-                                                    .collect(),
+                                                group.binders().iter().map(symbol_value).collect(),
                                             ),
                                             Value::Array(
                                                 group
-                                                    .group()
                                                     .globals()
                                                     .iter()
                                                     .map(|global| {
