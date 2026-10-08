@@ -5651,10 +5651,15 @@ pub(crate) fn certified_product_artifact_view_with_validation(
             value.requirements().to_vec(),
         )));
     }
+    let mut reused_originals = 0;
+    let original_entry_work_start = validation.inventory.work_usage().ok().map(|work| work.0);
     for product in products {
         let entry =
             match view.retained_original_entry_with_validation(producer, product, validation)? {
-                Some(entry) => entry,
+                Some(entry) => {
+                    reused_originals += 1;
+                    entry
+                }
                 None => Arc::new(ArtifactEntry::original_with_validation(
                     producer,
                     product.clone(),
@@ -5662,6 +5667,13 @@ pub(crate) fn certified_product_artifact_view_with_validation(
                 )?),
             };
         entries.push(entry);
+    }
+    if let (Some(before), Ok((after, _))) =
+        (original_entry_work_start, validation.inventory.work_usage())
+    {
+        tracing::debug!(target: "exomonad_harness::timing", phase = "products.original_entry_custody",
+            originals = products.len(), reused_originals, original_entry_work = after - before,
+            "original artifact entry custody");
     }
     view.inventory()
         .admit_shared_with_demand(&view, entries, demand)
