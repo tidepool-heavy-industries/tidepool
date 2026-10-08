@@ -3734,6 +3734,20 @@ pub(crate) fn validate_canonical_native_bytes_with_operation(
     .map(|_| ())
 }
 
+/// Availability census borrows the authenticated complete original. It does
+/// not select an executable group or resolve a live binding for a target.
+pub(crate) fn original_available_groups(
+    product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+) -> CertResult<impl Iterator<Item = &ProjectedGroup> + '_> {
+    let witness = product
+        .original_native()
+        .filter(|witness| witness.matches_original(product))
+        .ok_or(CertificationError::Mismatch(
+            "native availability lacks authenticated census",
+        ))?;
+    Ok(witness.groups.iter().map(|group| group.group()))
+}
+
 pub(crate) fn original_native_requirements(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
 ) -> CertResult<CertifiedNativeRequirements> {
@@ -4251,6 +4265,42 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
     available: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
+    validate_owned_originals_with_validation(
+        products,
+        current_groups,
+        available,
+        validation,
+        OriginalNativeUse::SelectedGroups,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OriginalNativeUse {
+    SelectedGroups,
+    Availability,
+}
+
+pub(crate) fn validate_available_originals_with_validation(
+    products: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<()> {
+    validate_owned_originals_with_validation(
+        products,
+        &[],
+        products,
+        validation,
+        OriginalNativeUse::Availability,
+    )
+    .map(|_| ())
+}
+
+fn validate_owned_originals_with_validation(
+    products: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
+    current_groups: &[PendingCertifiedGroup],
+    available: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
+    validation: &mut PackageInterfaceValidation,
+    native_use: OriginalNativeUse,
+) -> CertResult<Vec<PendingCertifiedGroup>> {
     if products.is_empty() {
         return Ok(Vec::new());
     }
@@ -4328,7 +4378,10 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
                 }
             }
         }
-        return Ok(result);
+        return Ok(match native_use {
+            OriginalNativeUse::SelectedGroups => result,
+            OriginalNativeUse::Availability => Vec::new(),
+        });
     }
     let mut sources = certified_source_map(current_groups)?;
     let mut seen = BTreeSet::new();
@@ -4444,7 +4497,9 @@ pub(crate) fn certify_owned_products_in_context_with_validation(
                 }
             }
         }
-        if !shared.contains(&(witness.owner.unit.clone(), witness.owner.module.clone())) {
+        if native_use == OriginalNativeUse::SelectedGroups
+            && !shared.contains(&(witness.owner.unit.clone(), witness.owner.module.clone()))
+        {
             result.extend(
                 witness
                     .groups

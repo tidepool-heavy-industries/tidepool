@@ -116,7 +116,11 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
             .collect::<Vec<_>>(),
         vec![Value::Integer(7.into()), Value::Integer(9001.into())]
     );
-    assert_eq!(request.groups.len(), 2);
+    assert!(request.groups.is_empty());
+    assert_eq!(
+        request.compiler_inputs().metadata.selected_native_groups,
+        baseline.compiler_inputs().metadata.selected_native_groups
+    );
     let mut command = tidepool_extract_cmd::ExtractCmd::with_bin(
         tidepool_extract_cmd::ResolvedExtractBin::assume_resolved(
             "/request-construction-only/compiler",
@@ -212,6 +216,55 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
         &ambiguous,
         CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
         std::slice::from_ref(&second),
+    )
+    .is_err());
+}
+
+#[test]
+fn availability_refuses_wrong_external_group_before_advertising_binders() {
+    use crate::certified_products::{
+        certify_candidate_original_with_validation, OriginalNativeCandidate, PendingImportOwner,
+    };
+    let required = product("RequiredNative", 30);
+    let wrong = fixture_finalized_product(
+        original_groups_fixture_with_interface(
+            "DependentNative",
+            vec![(
+                7,
+                vec![PendingImportOwner::Source {
+                    owner: required.owner().clone(),
+                    original_ordinal: 999,
+                    binder: tidepool_repr::execution_schema::testing::identity(
+                        "RequiredNative",
+                        "entry_7",
+                    ),
+                }],
+            )],
+            31,
+            &BTreeMap::new(),
+            b"DependentNative".to_vec(),
+        ),
+        CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+    );
+    let wrong = certify_candidate_original_with_validation(
+        OriginalNativeCandidate {
+            owner: wrong.owner().clone(),
+            product: crate::module_candidates::CandidateProduct::decode(
+                wrong.product_bytes().to_vec(),
+            )
+            .unwrap(),
+            certification_bytes: wrong.certification_bytes().to_vec(),
+            module_interface: wrong.module_interface().unwrap().clone(),
+            execution_source: None,
+        },
+        &mut PackageInterfaceValidation::default(),
+    )
+    .unwrap();
+    let context = type_context(&[wrong.clone(), required.clone()]);
+    assert!(OriginalCompilerInputs::from_native_availability(
+        &context,
+        CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
+        &[wrong, required],
     )
     .is_err());
 }

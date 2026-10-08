@@ -65,6 +65,9 @@ pub struct NativeGroupKey {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum NativeArtifactDemand<'a> {
     AllGroups,
+    /// Checked imports retain original byte custody and interface authority.
+    /// They have no executable target that could demand a native group.
+    ScopeInterfaces,
     /// A checked authored entry and its same compiled executable wrapper have
     /// distinct native dependencies. Neither implies whole-carrier demand.
     VerifiedTarget {
@@ -1205,6 +1208,7 @@ impl ArtifactInventory {
         demand: NativeArtifactDemand<'_>,
     ) -> Result<ArtifactView, CompileError> {
         let groups = match demand {
+            NativeArtifactDemand::ScopeInterfaces => BTreeSet::new(),
             NativeArtifactDemand::AllGroups => entries
                 .iter()
                 .flat_map(|entry| {

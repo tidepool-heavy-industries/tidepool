@@ -156,6 +156,8 @@ impl OriginalCompilerInputs {
         let mut validation = PackageInterfaceValidation::default();
         let mut entries = Vec::new();
         for product in products {
+            let _ = crate::certified_products::original_available_groups(product)
+                .map_err(compiler_evidence_failure)?;
             let owner = identity(&product.owner().unit, &product.owner().module);
             if let Some(previous) = selected.entries.get(&owner) {
                 if canonical_source_interface(previous) != product.module_interface() {
@@ -186,15 +188,27 @@ impl OriginalCompilerInputs {
             )?));
         }
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        // All groups constitute the availability census, not target demand.
-        let artifacts = context
-            .inventory
-            .inventory()
-            .admit_shared(&context.inventory, entries)?;
-        context
-            .compiler_projection
-            .merge(&projection)?
-            .validate(&artifacts)?;
+        // Available code retains custody without selecting executable groups.
+        let artifacts = context.inventory.inventory().admit_shared_with_demand(
+            &context.inventory,
+            entries,
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )?;
+        let effective = context.compiler_projection.merge(&projection)?;
+        let metadata = effective.project_metadata(artifacts.metadata_snapshot())?;
+        let originals = metadata
+            .entries
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some(product),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        crate::certified_products::validate_available_originals_with_validation(
+            &originals,
+            &mut validation,
+        )
+        .map_err(compiler_evidence_failure)?;
         Ok(Self {
             projection,
             artifacts,
@@ -5390,6 +5404,12 @@ impl ExactDeclarationContext {
             })
             .collect::<BTreeMap<_, _>>();
         let execution_scope = retained.execution_scope.clone();
+        let private_originals = private
+            .as_ref()
+            .into_iter()
+            .flat_map(|input| input.projection.roles())
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>();
         let fields = vec![
             text("TPEXACTSCOPE"),
             text("2"),
@@ -5457,6 +5477,20 @@ impl ExactDeclarationContext {
                             .get(&(owner.unit.as_str(), owner.module.as_str()))
                             .and_then(|artifact| artifact.product.as_ref())
                             .ok_or_else(|| failure("original product anchor is missing"))?;
+                        let selected = metadata.entries[&identity(&owner.unit, &owner.module)]
+                            .descriptor
+                            .id;
+                        let census = if private_originals.contains(&selected) {
+                            crate::certified_products::original_available_groups(product)
+                                .map_err(compiler_evidence_failure)?
+                                .collect::<Vec<_>>()
+                        } else {
+                            groups
+                                .iter()
+                                .filter(|group| group.owner() == owner)
+                                .map(PendingCertifiedGroup::group)
+                                .collect()
+                        };
                         Ok(Value::Array(vec![
                             text(&owner.unit),
                             text(&owner.module),
@@ -5465,12 +5499,11 @@ impl ExactDeclarationContext {
                             text(hex(&owner.product_sha256)),
                             path_value(&artifact.path)?,
                             Value::Array(
-                                groups
-                                    .iter()
-                                    .filter(|group| group.owner() == owner)
+                                census
+                                    .into_iter()
                                     .map(|group| {
                                         Value::Array(vec![
-                                            Value::Integer(group.group().original_ordinal().into()),
+                                            Value::Integer(group.original_ordinal().into()),
                                             Value::Array(
                                                 group
                                                     .group()
