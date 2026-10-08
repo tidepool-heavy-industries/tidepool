@@ -19394,7 +19394,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let (checked, prepared) = workbench
             .prepare_checked_cell(
                 context.clone(),
-                source.into(),
+                source,
                 workbench.compilation_authority.clone().unwrap(),
                 workbench.private_execution.clone(),
                 Some(input),
@@ -19696,7 +19696,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         } = tidepool_runtime::session::turn::run_turn(TurnRequest {
             exact_context: None,
             session_id: None,
-            turn_text: tidepool_testing::fixture_source(
+            turn_text: &tidepool_testing::fixture_source(
                 "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
             ),
             templates: &templates,
@@ -19755,7 +19755,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
             admission_digest: [0; 32],
-            cell_source: receiver_text.into(),
+            cell_source: receiver_text.clone(),
             template_source: template.clone(),
             turn_templates: templates
                 .iter()
@@ -19801,7 +19801,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             tidepool_runtime::session::CellCheckRequest {
                 exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
-                cell_text: receiver_text,
+                cell_text: &receiver_text,
                 template: &template,
                 include: &include,
                 session_root: view.session_root(),
