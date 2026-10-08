@@ -67,6 +67,7 @@ TEST_ONLY_SOURCES = {
         'bridge/facade/src/actor_host/m1_warm_cell_workloads.json',
     }),
     'exomonad-actor': frozenset({
+        'exomonad/actor/src/resident_actor/forest_shutdown_tests.rs',
         'exomonad/actor/src/local_actor/reply_settlement_history.rs',
         'exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs',
         'exomonad/actor/src/fixtures/prepared-instance-provider.hs',

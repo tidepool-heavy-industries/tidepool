@@ -796,9 +796,34 @@ def compile_fail_cases(package, library):
 
 def actor_observation_test_cases(binary):
     groups = [
+        ("actor_forest_shutdown_tests", "", (
+            'termination::tests::shutdown_batch_holds_every_fence_before_admission_wake',
+            'termination::tests::overlapping_shutdown_batches_preserve_one_intent_in_opposite_input_orders',
+            'termination::tests::shutdown_batch_preserves_completed_exit_prior_intent_and_unsettled_work',
+            'local_actor::tests::startup_ownership_precedes_live_link_and_survives_reparenting',
+            'local_actor::tests::admitted_pre_start_is_included_in_sealed_retirement_snapshot',
+            'local_actor::tests::owned_child_teardown_fences_siblings_before_resource_cleanup',
+            'local_actor::tests::cancelled_prepared_replacement_accepts_custody_without_running_backlog',
+            'resident_actor::forest_shutdown_tests::forest_cancels_linked_members_before_staging_and_drains_only_roots',
+            'resident_actor::forest_shutdown_tests::sealed_forest_refuses_provisioned_workbench_with_actual_startup_cleanup',
+            'resident_actor::child_launch::tests::closed_parent_refusal_retires_prepared_shared_scope',
+            'resident_actor::child_launch::tests::startup_reservation_refusal_awaits_prepared_shared_scope_cleanup',
+            'resident_actor::child_launch::tests::scheduler_refusal_awaits_scope_cleanup_without_upgrading_uncertainty',
+            'resident_actor::child_launch::tests::unavailable_refusal_cleanup_remains_unconfirmed',
+            'resident_actor::request_wait::tests::issued_sibling_retirement_beats_ready_watch_in_both_cleanup_orders',
+            'resident_actor::forest_shutdown_tests::provider_abort_refuses_nested_only_before_releasing_source_or_settlement',
+            'local_actor::tests::prepared_replacement_defers_shutdown_until_activation',
+            'local_actor::tests::replacement_activation_preserves_backlog_order_and_drain_intent',
+            'local_actor::tests::prepared_replacement_abort_cleans_only_an_unactivated_actor',
+            'local_actor::tests::replacement_fence_publishes_through_finish_actor',
+            'local_actor::tests::forest_shutdown_preserves_confirmed_and_unconfirmed_component_evidence',
+            'local_actor::tests::forest_shutdown_timeout_remains_unconfirmed_after_forced_actor_exit',
+            'local_actor::tests::unconfirmed_cleanup_preserves_requested_exit_kind',
+        )),
         ("actor_reply_settlement_history_tests", "local_actor::reply_settlement_history::", (
             "fixed_reply_delivery_histories_preserve_pending_until_continuation_settles",
             "generated_reply_delivery_histories_match_acknowledged_settlement",
+            "singleton_reply_watches_distinguish_required_success_from_allowed_failure",
         )),
         ("actor_runtime_observation_lease_tests", "runtime_observation::provider_health_tests::", (
             "owned_provider_round_authorizes_idle_only_after_success",
