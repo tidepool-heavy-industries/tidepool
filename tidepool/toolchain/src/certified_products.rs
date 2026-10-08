@@ -2148,10 +2148,12 @@ impl AvailableOriginalSources {
         authenticate_original_source_membership(products, operation).map(Arc::new)
     }
 
-    pub(crate) fn validate_observation(
+    fn validate_observation(
         &self,
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        operation: &InventoryOperation,
     ) -> CertResult<()> {
+        operation.reserve::<(&CachedHomeOwner, usize, usize)>(products.len())?;
         let failure = |reason| CertificationError::OriginalMembership(Box::new(reason));
         let mut seen = BTreeSet::new();
         for product in products {
@@ -2249,7 +2251,7 @@ impl RetainedOriginalSources {
                 .upgrade()
                 .is_some_and(|previous| Arc::ptr_eq(&previous, operation))
             {
-                sources.validate_observation(products)?;
+                sources.validate_observation(products, operation)?;
                 return Ok(Arc::clone(sources));
             }
         }
@@ -9289,7 +9291,15 @@ pub(crate) mod tests {
             .admit(std::slice::from_ref(&product), &operation)
             .unwrap();
         assert!(Arc::ptr_eq(&first, &repeated));
-        assert_eq!(operation.work_usage().unwrap(), charged);
+        let observed = operation.work_usage().unwrap();
+        assert!(
+            observed.0 > charged.0,
+            "the small borrowed owner census remains charged"
+        );
+        assert!(
+            observed.0 - charged.0 < charged.0,
+            "reuse must not rebuild the full binder membership"
+        );
         let independently_recovered = recovered_witness_fixtures(std::slice::from_ref(&product))
             .remove(0)
             .product;
