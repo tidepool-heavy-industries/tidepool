@@ -7,6 +7,26 @@
 use super::*;
 use std::time::Instant;
 
+fn prepare_performance_traces() -> (std::path::PathBuf, std::path::PathBuf, Value) {
+    let artifact_root = std::path::PathBuf::from(
+        std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+            .expect("owned-resident counted runner supplies per-case artifacts"),
+    );
+    assert!(artifact_root.is_absolute(), "per-case artifact root is absolute");
+    let host_trace = artifact_root.join("host.jsonl");
+    let compiler_trace = artifact_root.join("compiler/compiler.jsonl");
+    let lifecycle: Value = serde_json::from_slice(
+        &std::fs::read(artifact_root.join("compiler/lifecycle.json"))
+            .expect("owned compiler runner records its live daemon identity before the test"),
+    )
+    .expect("owned compiler lifecycle record is JSON");
+    assert_eq!(lifecycle["cleanup_confirmed"], false, "daemon is live for the case");
+    assert!(compiler_trace.is_file(), "owned daemon created its JSONL trace");
+    std::env::set_var("TIDEPOOL_TEST_TRACE", &host_trace);
+    std::env::set_var("TIDEPOOL_PERFORMANCE_COMPILER_TRACE", &compiler_trace);
+    (host_trace, compiler_trace, lifecycle)
+}
+
 struct Phase {
     name: &'static str,
     source: &'static str,
@@ -40,6 +60,7 @@ fn has_output(round: &RequestedRound, call_id: &str) -> bool {
 #[tokio::test]
 #[ignore = "requires exclusive matched compiler daemon and retained host/daemon traces"]
 async fn production_harness_notebook_usecase_phases() {
+    let (host_trace, compiler_trace, compiler_lifecycle) = prepare_performance_traces();
     assert!(std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some(),
         "measure resident production compilation, not per-request worker spawning");
     assert!(std::env::var_os("TIDEPOOL_TEST_TRACE").is_some(),
@@ -47,6 +68,9 @@ async fn production_harness_notebook_usecase_phases() {
     assert!(std::env::var_os("TIDEPOOL_PERFORMANCE_COMPILER_TRACE").is_some(),
         "retain owning daemon queue/service evidence; host durations alone cannot establish it");
     let deployment: BTreeMap<_, _> = [
+        "TIDEPOOL_TEST_ARTIFACT_ROOT",
+        "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT",
+        "TIDEPOOL_TEST_TRACE",
         "TIDEPOOL_PREPARED_ROOT_ENTRY",
         "TIDEPOOL_COMPILER_DEPLOYMENT",
         "TIDEPOOL_COMPILER_MODULES",
@@ -71,6 +95,9 @@ async fn production_harness_notebook_usecase_phases() {
             "schema": 1,
             "phase": "environment",
             "prepared_root_entry_supplied": deployment["TIDEPOOL_PREPARED_ROOT_ENTRY"].is_some(),
+            "host_trace": host_trace,
+            "compiler_trace": compiler_trace,
+            "owned_compiler_lifecycle": compiler_lifecycle,
             "deployment": deployment,
         })
     );

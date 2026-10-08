@@ -399,11 +399,15 @@ def parse_args(argv):
                         help='delegated user service slice (default: app.slice)')
     parser.add_argument('--output-dir', type=Path,
                         help='retain bounded stdout/stderr and outcome records for every test')
+    parser.add_argument('--retain-artifacts', action='store_true',
+                        help='preserve per-case artifact roots after passing tests')
     parser.add_argument('--compiler-mode', choices=('direct', 'owned-resident'), default='direct',
                         help='select an explicitly owned compiler for each isolated test')
     options = parser.parse_args(argv)
     if options.compiler_mode == 'owned-resident' and options.output_dir is None:
         parser.error('--compiler-mode owned-resident requires --output-dir')
+    if options.retain_artifacts and options.output_dir is None:
+        parser.error('--retain-artifacts requires --output-dir')
     if (len(options.resource_env) != len(set(options.resource_env))
             or any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name)
                    for name in options.resource_env)):
@@ -886,7 +890,8 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
 
 
 def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
-            artifact_root=None, compiler_mode='direct', declared_resources=()):
+            artifact_root=None, compiler_mode='direct', declared_resources=(),
+            retain_artifacts=False):
     if record is None:
         record = {}
     record.update(schema=1, process_cleanup_status='not_started', hosted_cleanup_status='not_observed',
@@ -939,8 +944,11 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                 and not hosted_runtime_not_started and startup_diagnostic_seconds is None):
             # Successful scenarios have completed their own acknowledged teardown.
             # The runner additionally confirms its enclosing process/service cleanup.
-            shutil.rmtree(artifact_root)
-            record['artifacts_removed_after_success'] = True
+            if retain_artifacts:
+                record['artifacts_retained_after_success'] = True
+            else:
+                shutil.rmtree(artifact_root)
+                record['artifacts_removed_after_success'] = True
         return passed, stdout, stderr
 
     if launch_inputs['status'] == 'UNKNOWN':
@@ -1074,6 +1082,7 @@ def main(argv=None):
                 options.case_timeouts.get(name, options.timeout), record,
                 options.service_slice if options.delegated_service else None,
                 artifact_root, options.compiler_mode, options.resource_env,
+                options.retain_artifacts,
             )
             return name, outcome, record
 
