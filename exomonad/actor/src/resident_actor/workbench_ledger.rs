@@ -38,6 +38,7 @@ pub(super) async fn settle_provider_child_owner(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn settle_provider_children(
     journal: &Arc<Mutex<WorkbenchExecutions>>,
     kernel: &KernelContext,
