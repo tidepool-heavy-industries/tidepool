@@ -3164,6 +3164,9 @@ mod tests {
         let unrelated = inventory
             .admit(&empty, vec![entry("Unrelated", &[])])
             .unwrap();
+        // A warm read projection cannot replace reused-edge validation during
+        // admission. The corrupted edge below violates the live-view invariant.
+        retained.metadata_snapshot();
         // Exercise the owning admission guard against a corrupted reused graph.
         let mut state = inventory.0.lock().unwrap();
         let source = state.indices[&InventoryNodeKey::Artifact(consumer.descriptor.id)];
@@ -3172,7 +3175,12 @@ mod tests {
             .graph
             .add_edge(source, target, ArtifactDependency::Interface);
         drop(state);
-        assert!(inventory.admit(&empty, vec![consumer]).is_err());
+        assert!(matches!(
+            inventory.admit(&retained, vec![consumer.clone()]),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { artifact }
+                    if artifact == consumer.descriptor.id)
+        ));
         assert_eq!(inventory.node_count(), 3);
         drop(retained);
         drop(unrelated);
