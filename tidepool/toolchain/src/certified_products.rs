@@ -12317,6 +12317,8 @@ pub(crate) mod tests {
     fn repeated_retained_core_promotion_preserves_exact_original_membership() {
         use crate::artifact_inventory::CanonicalProducerIdentity;
         use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
+        use crate::recovery_artifacts::CertifiedRecoveryProduct;
+        use tidepool_repr::{Generation, SessionModule};
         let root = tempfile::tempdir().unwrap();
         let source = "module Target where";
         let support_source = "module Fresh where";
@@ -12324,7 +12326,7 @@ pub(crate) mod tests {
         std::fs::write(&support, support_source).unwrap();
         let mut admitted = evidence(support_source);
         admitted.sources[0].path = support.clone();
-        admitted.modules[0].source = support;
+        admitted.modules[0].source = support.clone();
         admitted.sources.push(SourceEvidence {
             path: "@generated-source".into(),
             sha256: hex(&sha(source.as_bytes())),
@@ -12441,7 +12443,9 @@ pub(crate) mod tests {
         current_evidence.modules[0].module = "Target".into();
         let normalized =
             CompletedSourceEvidence::from_normalized(current_evidence.clone(), source).unwrap();
-        for (index, body_tag) in [0, 0, 1, 0].into_iter().enumerate() {
+        let mut historical_child = None;
+        let mut current_child = None;
+        for (index, body_tag) in [0, 0, 1, 0, 2].into_iter().enumerate() {
             let projection = context.compiler_input_projection().interface_only();
             context = context.with_compiler_input_projection(projection).unwrap();
             let directory = root.path().join(format!("promotion-{index}"));
@@ -12539,6 +12543,11 @@ pub(crate) mod tests {
                 }
             } else {
                 assert_ne!(Some(&owner), first_promoted.as_ref());
+            }
+            match body_tag {
+                1 => historical_child = Some(owner.clone()),
+                2 => current_child = Some(owner.clone()),
+                _ => {}
             }
             let issued = certify_products(
                 None,
@@ -12687,7 +12696,319 @@ pub(crate) mod tests {
                 .unwrap();
             prior = context.recovery_products();
         }
-        assert_eq!(expected_owners.len(), 3);
+        assert_eq!(expected_owners.len(), 4);
+
+        // A new planned module can retain an exact historical native edge
+        // while the compiler projection selects the current Fresh original.
+        let historical_child = historical_child.unwrap();
+        let current_child = current_child.unwrap();
+        assert_ne!(historical_child, current_child);
+        let child = prior
+            .iter()
+            .find(|product| product.owner() == &historical_child)
+            .unwrap();
+        let current = prior
+            .iter()
+            .find(|product| product.owner() == &current_child)
+            .unwrap();
+        assert_eq!(child.module_interface(), current.module_interface());
+        assert!(prior
+            .iter()
+            .any(|product| product.owner() == &current_child));
+
+        let make_projection = |products: &[CertifiedRecoveryProduct]| {
+            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
+                &products
+                    .iter()
+                    .cloned()
+                    .map(|product| {
+                        Arc::new(
+                            crate::artifact_inventory::ArtifactEntry::original(
+                                canonical_producer,
+                                product,
+                            )
+                            .unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let historical_projection = make_projection(std::slice::from_ref(child)).unwrap();
+        let historical_context = context
+            .compiler_input_projection()
+            .interface_only()
+            .merge(&historical_projection)
+            .and_then(|projection| context.clone().with_compiler_input_projection(projection))
+            .unwrap();
+        let prior_module = SessionModule::lib(Generation(6));
+        let prior_source = format!(
+            "module {} where\nimport Fresh (entry_7)\nancestor_7 = entry_7\nentry_11 = 4\n",
+            prior_module.module_name()
+        );
+        let prior_source_path = root.path().join(format!(
+            "planned-with-child-{}/module.hs",
+            prior_module.module_name()
+        ));
+        let prior_planned =
+            planned_original_history_tests::issue_planned_original_with_historical_child(
+                root.path(),
+                &historical_context,
+                prior_module,
+                &producer,
+                &include,
+                "ancestor_7",
+                &historical_child,
+                "entry_7",
+                &support,
+                support_source,
+            )
+            .unwrap();
+        assert_eq!(
+            prior_planned.request.compiler_original_products().unwrap()[0].owner(),
+            &historical_child,
+            "the existing A original was issued while the old Fresh version was selected"
+        );
+        let prior_module_product = prior_planned.certified.recovery_products[0].clone();
+        let planned_context = context
+            .clone()
+            .extend_checked_original_products(
+                canonical_producer,
+                std::slice::from_ref(&prior_module_product),
+            )
+            .unwrap();
+        let current_projection =
+            make_projection(&[current.clone(), prior_module_product.clone()]).unwrap();
+        let planned_context = planned_context
+            .compiler_input_projection()
+            .interface_only()
+            .merge(&current_projection)
+            .and_then(|projection| planned_context.with_compiler_input_projection(projection))
+            .unwrap();
+        let stale_fresh =
+            planned_original_history_tests::issue_planned_original_with_historical_child(
+                root.path(),
+                &planned_context,
+                SessionModule::lib(Generation(8)),
+                &producer,
+                &include,
+                "fresh_copy_7",
+                &historical_child,
+                "entry_7",
+                &support,
+                support_source,
+            );
+        assert!(
+            matches!(
+                stale_fresh,
+                Err(crate::CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), CertificationError::Mismatch("source module version"))
+            ),
+            "a new Fresh import cannot bypass the current compiler-selected version"
+        );
+        let planned_module = SessionModule::lib(Generation(7));
+        let planned_source = format!(
+            "module {} where\nimport {} (ancestor_7)\nlocal_7 = ancestor_7\nentry_11 = 4\n",
+            planned_module.module_name(),
+            prior_module.module_name()
+        );
+        let planned = planned_original_history_tests::issue_planned_original_with_historical_child(
+            root.path(),
+            &planned_context,
+            planned_module,
+            &producer,
+            &include,
+            "local_7",
+            prior_module_product.owner(),
+            "ancestor_7",
+            &prior_source_path,
+            &prior_source,
+        )
+        .unwrap();
+        let compiler_originals = planned.request.compiler_original_products().unwrap();
+        assert!(compiler_originals
+            .iter()
+            .any(|product| product.owner() == &current_child));
+        assert!(compiler_originals
+            .iter()
+            .any(|product| product.owner() == prior_module_product.owner()));
+        let planned_product = &planned.certified.recovery_products[0];
+        let native = planned_product.original_native().unwrap();
+        let historical_group = native
+            .groups
+            .iter()
+            .find(|group| group.group.original_ordinal() == 7)
+            .unwrap();
+        assert!(historical_group.imports.iter().any(|import| matches!(
+            import,
+            PendingImportOwner::Source { owner, .. } if owner == prior_module_product.owner()
+        )));
+        let prior_native = prior_module_product.original_native().unwrap();
+        assert!(prior_native.groups.iter().any(|group| {
+            group.group.original_ordinal() == 7
+                && group.group.binders().iter().any(|binder| {
+                    binder.occurrence == "ancestor_7" && binder.module == prior_module.module_name()
+                })
+                && group.imports.iter().any(|import| {
+                    matches!(
+                        import,
+                        PendingImportOwner::Source { owner, .. } if owner == &historical_child
+                    )
+                })
+        }));
+
+        let custody = prior
+            .iter()
+            .cloned()
+            .chain(prior_planned.certified.recovery_products.iter().cloned())
+            .chain(planned.certified.recovery_products.iter().cloned())
+            .collect::<Vec<_>>();
+        let view =
+            certified_product_artifact_view(canonical_producer, &custody, &[], None).unwrap();
+        let incompatible_source =
+            planned_original_history_tests::issue_planned_original_with_source_value(
+                root.path(),
+                planned_module,
+                &producer,
+                &include,
+                250,
+                250,
+                5,
+            );
+        assert!(
+            certified_product_artifact_view(
+                canonical_producer,
+                &custody
+                    .iter()
+                    .cloned()
+                    .chain(
+                        incompatible_source
+                            .certified
+                            .recovery_products
+                            .iter()
+                            .cloned()
+                    )
+                    .collect::<Vec<_>>(),
+                &[],
+                None,
+            )
+            .is_err(),
+            "same-owner products with incompatible canonical source identities must refuse"
+        );
+        let planned_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            planned_product,
+        );
+        let historical_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            child,
+        );
+        let prior_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
+            canonical_producer,
+            &prior_module_product,
+        );
+        assert!(
+            view.dependencies().iter().any(|(source, target, edge)| {
+                *source == prior_id
+                    && *target == historical_id
+                    && matches!(
+                        edge,
+                        crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                            dependent_ordinal: 7,
+                            required_ordinal: 7
+                        }
+                    )
+            }),
+            "retained custody must preserve the exact A-to-historical-Fresh group edge"
+        );
+        assert!(
+            view.dependencies().iter().any(|(source, target, edge)| {
+                *source == planned_id
+                    && *target == prior_id
+                    && matches!(
+                        edge,
+                        crate::artifact_inventory::ArtifactDependency::NativeGroup {
+                            dependent_ordinal: 7,
+                            required_ordinal: 7
+                        }
+                    )
+            }),
+            "the new G7 declaration imports the existing A original"
+        );
+        let selected = planned
+            .certified
+            .source_selection
+            .selected_original_closure(&view)
+            .unwrap();
+        let selected_fresh = selected
+            .products()
+            .iter()
+            .filter(|product| product.owner().module == "Fresh")
+            .map(|product| product.owner().clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(selected_fresh, BTreeSet::from([current_child]));
+        assert!(!selected_fresh.contains(&historical_child));
+        assert!(selected
+            .products()
+            .iter()
+            .any(|product| product.owner() == prior_module_product.owner()));
+        let exports = ["local_7", "entry_11"].map(|occurrence| {
+            serde_json::json!({
+                "kind": "value",
+                "head": {
+                    "unit": "main",
+                    "module": planned_module.module_name(),
+                    "namespace": "value",
+                    "occurrence": occurrence,
+                    "record_parent": null
+                },
+                "children": []
+            })
+        });
+        let inventory = serde_json::json!({
+            "original_unit": "main",
+            "original_module": planned_module.module_name(),
+            "interface_fingerprint": "1234567890abcdef1234567890abcdef",
+            "selection": {
+                "exports": exports,
+                "instances": { "classes": [], "families": [] },
+                "family_closure": []
+            }
+        });
+        let exact = ExactProductAdmission {
+            request: &planned.request,
+            source: &planned.source,
+        };
+        let baseline = Arc::new(planned_context.clone());
+        let joined = crate::declaration_join::certify_same_offer_planned_declaration(
+            planned_module,
+            &planned_source,
+            &producer,
+            &selected,
+            &view,
+            &exact,
+            &include,
+            Some(&baseline),
+            &serde_json::to_vec(&inventory).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(joined.product().owner(), planned_product.owner());
+        let joined_products = joined.recovery_products();
+        for prior_product in planned_context.recovery_products() {
+            let retained = joined_products
+                .iter()
+                .find(|product| product.owner() == prior_product.owner())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "planned context dropped prior owner {:?}",
+                        prior_product.owner()
+                    )
+                });
+            assert!(retained
+                .original_byte_anchors()
+                .iter()
+                .zip(prior_product.original_byte_anchors())
+                .all(|(actual, expected)| Arc::ptr_eq(actual, expected)));
+        }
     }
 
     fn exact_current_original_history(nonempty: bool) {
