@@ -1,4 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Tidepool.TypedSegment
@@ -51,7 +50,6 @@ import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Basic (Boxity(..))
 import GHC.Builtin.Types (zonkAnyTyCon, unitTy, unitDataCon, manyDataConTy, intDataCon)
 import GHC.Builtin.Types.Prim (intPrimTy)
-import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
 import GHC.Core (Expr(..), Bind(..), Alt(..), AltCon(..), CoreExpr, CoreBind, bindersOf, mkApps, mkLams, collectArgs)
 import GHC.Core.Type
@@ -77,29 +75,20 @@ import GHC.Types.Var (TyVar, isId, varUnique)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface, hm_details)
-import GHC.Unit.Module (mkModuleName, moduleName)
+import GHC.Unit.Module (mkModuleName)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModIface (mi_module, mi_exports)
 import GHC.Unit.Module.ModGuts (ModGuts(..))
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), Generation(..), sessionModuleString)
 import GHC.Unit.Info (PackageName(..))
 import GHC.Unit.State (lookupPackageName)
-import Language.Haskell.TH.Syntax (addDependentFile, lift, loc_filename, location, runIO)
-import System.FilePath (takeDirectory, (</>))
 import System.IO (hPutStrLn, stderr)
-import Tidepool.ExactScope (CanonicalInterfaceAdmission, resolveShippedHomeModule)
+import Tidepool.ResumePackage (resolveResumeInterface)
+import GHC.IfaceToCore (typecheckIface)
+import GHC.Tc.Utils.Monad (initIfaceCheck)
 import Tidepool.Timing (readTimingEnabled)
 import Tidepool.Json (jsonString)
 import GHC.Utils.Outputable (ppr)
-
--- The source comparison and the actual exported Ids authenticate the operation
--- owner once. Extraction never resolves an operator from authored scope.
-shippedResumeSource :: BS.ByteString
-shippedResumeSource = BS.pack $(do
-  here <- loc_filename <$> location
-  let source = takeDirectory here </> ".." </> ".." </> "lib" </> "Tidepool" </> "Internal" </> "Resume.hs"
-  addDependentFile source
-  lift . BS.unpack =<< runIO (BS.readFile source))
 
 data SegmentOperations = SegmentOperations
   { segmentPureId :: Id
@@ -119,17 +108,14 @@ data SegmentOperations = SegmentOperations
   , segmentResumeId :: Id
   }
 
-resolveSegmentOperations :: HscEnv
-  -> Map.Map (String,String) CanonicalInterfaceAdmission -> IO SegmentOperations
-resolveSegmentOperations environment admitted = do
-  owner <- resolveShippedHomeModule environment admitted "Tidepool.Internal.Resume" shippedResumeSource
-    >>= maybe (throwIO UnprovedSegmentOperations) pure
-  home <- maybe (throwIO UnprovedSegmentOperations) pure
-    (lookupHpt (hsc_HPT environment) (moduleName owner))
-  unless (mi_module (hm_iface home) == owner) (throwIO UnprovedSegmentOperations)
-  let exports = concatMap availNames (mi_exports (hm_iface home))
+resolveSegmentOperations :: HscEnv -> IO SegmentOperations
+resolveSegmentOperations environment = do
+  iface <- resolveResumeInterface environment >>= either (const (throwIO UnprovedSegmentOperations)) pure
+  details <- initIfaceCheck (ppr (mi_module iface)) environment (typecheckIface iface)
+  let owner = mi_module iface
+      exports = concatMap availNames (mi_exports iface)
       select name = unique UnprovedSegmentOperations UnprovedSegmentOperations
-        [identifier | identifier <- typeEnvIds (md_types (hm_details home))
+        [identifier | identifier <- typeEnvIds (md_types details)
           , idName identifier `elem` exports, nameModule_maybe (idName identifier) == Just owner
           , occurrence identifier == name]
   pureId <- select "segmentPure"
@@ -227,10 +213,9 @@ settleCore operations row action = case splitTyConApp_maybe (exprType action) of
 
 -- GHC has checked the complete fixed-unit root once. All types below come
 -- from that successful environment; only genuine local lets carry sigma types.
-captureTypedSegment :: TypedSegmentPlan -> HscEnv
-  -> Map.Map (String,String) CanonicalInterfaceAdmission -> TcGblEnv -> IO PendingTypedSegment
-captureTypedSegment plan environment admitted checked = do
-  operations <- resolveSegmentOperations environment admitted
+captureTypedSegment :: TypedSegmentPlan -> HscEnv -> TcGblEnv -> IO PendingTypedSegment
+captureTypedSegment plan environment checked = do
+  operations <- resolveSegmentOperations environment
   original <- unique MissingCaptureRoot AmbiguousCaptureRoot
     [identifier | identifier <- typeEnvIds (tcg_type_env checked)
       , occurrence identifier == typedSegmentPlanRoot plan

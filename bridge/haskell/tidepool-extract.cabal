@@ -129,6 +129,7 @@ library tidepool-extract-internal
     Tidepool.TypedSegment.Source
     Tidepool.TurnSource
   other-modules:   Tidepool.LocalNativeDeclaration
+                   Tidepool.ResumePackage
                    Tidepool.TypedSegment.Types
                    Tidepool.NativeOriginalCensus
   build-depends:

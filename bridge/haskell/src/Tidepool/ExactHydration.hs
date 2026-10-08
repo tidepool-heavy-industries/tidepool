@@ -71,7 +71,7 @@ import GHC.Driver.Config.Parser (initParserOpts)
 import qualified GHC.Parser as Parser (parseImport)
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
 import GHC.Data.StringBuffer (stringToStringBuffer)
-import GHC.Data.FastString (mkFastString)
+import GHC.Data.FastString (mkFastString, fsLit)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef', atomicModifyIORef')
 import GHC.IfaceToCore (typecheckIface)
 import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLoad)
@@ -84,6 +84,7 @@ import GHC.Unit.Module.Location
   , ml_hs_file, ml_hi_file, ml_dyn_hi_file, ml_obj_file, ml_dyn_obj_file, ml_hie_file )
 import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.SourceFile (HscSource(..))
+import GHC.Types.SourceText (sl_fs)
 import GHC.Types.PkgQual (PkgQual(..), RawPkgQual(..))
 import GHC.Types.SrcLoc (Located, unLoc, getLoc, SrcSpan(..), srcSpanStartLine, mkRealSrcLoc)
 import GHC.Types.Avail (availNames)
@@ -110,7 +111,8 @@ import GHC.Utils.Fingerprint (fingerprint0, fingerprintByteString, fingerprintSt
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts, mi_decls)
 import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
-import GHC.Unit.Types (unitString, stringToUnit, toUnitId)
+import Tidepool.ResumePackage (resolveResumeInterface)
+import GHC.Unit.Types (unitString, stringToUnit, toUnitId, GenUnit(RealUnit), Definite(Definite))
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import qualified GHC.Data.Maybe as MErr
 import GHC.Utils.Outputable (text, ppr, showSDocOneLine, defaultSDocContext)
@@ -374,7 +376,7 @@ generatedScaffoldRecipeWithProtectedImportsFor :: GeneratedScaffoldPurpose -> Dy
 generatedScaffoldRecipeWithProtectedImportsFor purpose flags
     (CheckedTemplateImports roots interfaces) mapped protectedTemplate rendered path name = do
   canonical <- canonicalizePath path
-  let compilerImport = "import qualified Tidepool.Internal.Resume as "
+  let compilerImport = "import qualified \"tidepool-resume\" Tidepool.Internal.Resume as "
         ++ moduleNameString (generatedScaffoldQualifier purpose)
       bytes = TextEncoding.encodeUtf8 (Text.pack rendered)
       renderedLines = zip [1..] (lines rendered)
@@ -487,6 +489,9 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
   targetPaths <- forM [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph
       , moduleNameString (moduleName (ms_mod summary)) == target] $ \summary ->
     traverse canonicalizePath (ml_hs_file (ms_location summary))
+  supportInterface <- if purpose == CheckingCellTemplate
+    then pure (Right Nothing)
+    else fmap Just <$> resolveResumeInterface env
   pure $ do
     _ <- checked
     unless (dependencySourceSha256 source == hexBytes (SHA256.hash expected))
@@ -498,56 +503,38 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           && ms_mod (pm_mod_summary parsed) == ms_mod summary
           && ms_hs_hash (pm_mod_summary parsed) == fingerprint -> Right summary
       _ -> Left "generated scaffold target summary differs from its protected source"
-    let support = mkModule (stringToUnit (unitString (homeUnitId (hsc_home_unit env))))
-          (mkModuleName "Tidepool.Internal.Resume")
-        key = (unitString (moduleUnit support),moduleNameString (moduleName support))
-    resume <- if purpose == CheckingCellTemplate
-      then Right noGeneratedScaffoldImports
-      else if any (\case ModuleNode _ loaded -> ms_mod loaded == support; _ -> False)
-        (mgModSummaries' sourceGraph)
-      then Right noGeneratedScaffoldImports
-      else do
-        (artifact,iface,_) <- maybe (Left "generated scaffold lacks its verified support interface") Right
-          (Map.lookup key captured)
-        native <- case [owner | owner <- nativeOwners,
-            (executionUnit owner,executionModule owner) == key
-            && executionIfaceSha256 owner == exactSha256 artifact] of
-          [owner] -> Right owner
-          _ -> Left "generated scaffold lacks one paired original native owner"
-        unless (mi_module iface == support)
-          (Left "generated scaffold lacks a paired original native owner")
-        let hiddenHomeWitnesses = filter (isHomeUnit (hsc_home_unit env) . moduleUnit)
-              (dep_orphs (mi_deps iface) ++ dep_finsts (mi_deps iface))
-        -- Same-owner requirements preserve custody of native references between
-        -- groups. They introduce no additional interface or lexical owner.
-        unless (all (== key) (exactRequirements artifact))
-          (Left "generated scaffold support requires another home implementation owner")
-        unless (null (mi_insts iface))
-          (Left "generated scaffold support defines class instances")
-        unless (null (mi_fam_insts iface))
-          (Left "generated scaffold support defines family instances")
-        unless (null hiddenHomeWitnesses)
-          (Left "generated scaffold support imports home orphan or family witnesses")
-        let exports = concatMap availNames (mi_exports iface)
-        unless (all (\occurrence -> any (\name -> nameModule_maybe name == Just support
-            && occNameString (nameOccName name) == occurrence) exports) (if isTypedSegmentPurpose purpose
-            then ["segmentPure", "segmentBind", "segmentFail"] else ["settle","resumeLifted"]))
-          (Left "generated scaffold support has another export owner")
-        imported <- case [name | (NoPkgQual,name) <- ms_textual_imps summary
-            , unLoc name == moduleName support
-            , case getLoc name of RealSrcSpan span' _ -> srcSpanStartLine span' == line; _ -> False] of
-          [name] -> Right name
-          _ -> Left "generated scaffold import occurrence differs from its protected recipe"
-        declaration <- case [unLoc located | located <- hsmodImports (unLoc (pm_parsed_source parsed))
-            , getLocA (ideclName (unLoc located)) == getLoc imported] of
-          [declaration] -> Right declaration
-          _ -> Left "generated scaffold parsed import differs from its captured occurrence"
-        unless (ideclQualified declaration == QualifiedPre
-            && fmap unLoc (ideclAs declaration) == Just (generatedScaffoldQualifier purpose)
-            && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
-            && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
-          (Left "generated scaffold parsed import differs from its protected shape")
-        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])] [] [])
+    support <- supportInterface
+    forM_ support $ \iface -> do
+      let owner = mi_module iface
+          hiddenHomeWitnesses = filter (isHomeUnit (hsc_home_unit env) . moduleUnit)
+            (dep_orphs (mi_deps iface) ++ dep_finsts (mi_deps iface))
+      unless (null (mi_insts iface))
+        (Left "generated scaffold support defines class instances")
+      unless (null (mi_fam_insts iface))
+        (Left "generated scaffold support defines family instances")
+      unless (null hiddenHomeWitnesses)
+        (Left "generated scaffold support imports home orphan or family witnesses")
+      let exports = concatMap availNames (mi_exports iface)
+      unless (all (\occurrence -> any (\name -> nameModule_maybe name == Just owner
+          && occNameString (nameOccName name) == occurrence) exports) (if isTypedSegmentPurpose purpose
+          then ["segmentPure", "segmentBind", "segmentFail", "settle", "resumeLifted"] else ["settle","resumeLifted"]))
+        (Left "generated scaffold support has another export owner")
+      imported <- case [name | (OtherPkg package,name) <- ms_textual_imps summary
+          , RealUnit (Definite package) == moduleUnit owner, unLoc name == moduleName owner
+          , case getLoc name of RealSrcSpan span' _ -> srcSpanStartLine span' == line; _ -> False] of
+        [name] -> Right name
+        _ -> Left "generated scaffold package import occurrence differs from its protected recipe"
+      declaration <- case [unLoc located | located <- hsmodImports (unLoc (pm_parsed_source parsed))
+          , getLocA (ideclName (unLoc located)) == getLoc imported] of
+        [declaration] -> Right declaration
+        _ -> Left "generated scaffold parsed import differs from its captured occurrence"
+      unless (ideclQualified declaration == QualifiedPre
+          && fmap unLoc (ideclAs declaration) == Just (generatedScaffoldQualifier purpose)
+          && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
+          && case ideclPkgQual declaration of RawPkgQual package -> sl_fs package == fsLit "tidepool-resume"; _ -> False)
+        (Left "generated scaffold parsed import differs from its protected shape")
+      -- This remains an ordinary external import. Package witnesses and the
+      -- defining fat interface own its type and executable body evidence.
     originals <- case planned of
       Nothing -> Right noGeneratedScaffoldImports
       Just (owner,expectedFingerprint) -> do
@@ -636,14 +623,13 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
               `Map.member` captured)
             (Left "activation preview original orphan interface is not retained")
         pure [OriginalPreviewOrphans (ms_mod summary) fingerprint orphans]
-    let GeneratedScaffoldImportAuthority resumeEdges resumeNodes _ _ = resume
-        GeneratedScaffoldImportAuthority originalEdges originalNodes _ _ = originals
+    let GeneratedScaffoldImportAuthority originalEdges originalNodes _ _ = originals
         instanceEdges = case instanceScope of
           ImportedTemplateInstances -> []
           OriginalPreviewInstances _ -> [(ms_mod summary,fingerprint,
             [(exactUnit artifact,exactModule artifact) | (artifact,_) <- templateNodes])]
-    pure (GeneratedScaffoldImportAuthority (resumeEdges ++ originalEdges ++ templateEdges)
-      (resumeNodes ++ originalNodes ++ templateNodes) instanceEdges orphanScopes)
+    pure (GeneratedScaffoldImportAuthority (originalEdges ++ templateEdges)
+      (originalNodes ++ templateNodes) instanceEdges orphanScopes)
 
 readCheckedValueImportAuthority
   :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String CheckedValueImportAuthority)

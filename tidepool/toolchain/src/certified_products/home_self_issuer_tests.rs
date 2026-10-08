@@ -1,31 +1,27 @@
 use super::*;
 
 #[test]
-fn ghc_resume_issues_home_self_owner_and_refuses_substituted_requirements() {
-    let library = crate::toolchain::locate_stdlib(&crate::toolchain::StdlibFallbacks::default())
-        .expect("matched Haskell library for the live compiler fixture");
+fn ghc_home_self_owner_refuses_substituted_requirements() {
     let root = tempfile::tempdir().unwrap();
-    let support = root.path().join("Tidepool/Internal");
-    std::fs::create_dir_all(&support).unwrap();
-    std::fs::copy(
-        library.dir.join("Tidepool/Internal/Resume.hs"),
-        support.join("Resume.hs"),
+    std::fs::write(
+        root.path().join("HomeSelf.hs"),
+        include_str!("../../tests/fixtures/home-self-issuer/HomeSelf.hs"),
     )
     .unwrap();
-    let source = include_str!("../../tests/fixtures/resume-issuer/ResumeCapture.hs");
+    let source = include_str!("../../tests/fixtures/home-self-issuer/HomeSelfCapture.hs");
     let compiled = crate::artifacts::compile_targets(
         source,
         &["result"],
         &[root.path().to_owned()],
         |_, _, _| {},
     )
-    .expect("compile the shipped Resume through the production issuer");
+    .expect("compile the independent HomeSelf through the production issuer");
     assert!(compiled.producer_identity.is_some());
     let original = compiled
         .recovery_products
         .iter()
-        .find(|product| product.owner().module == "Tidepool.Internal.Resume")
-        .expect("the actual GHC Resume original product");
+        .find(|product| product.owner().module == "HomeSelf")
+        .expect("the actual GHC HomeSelf original product");
     let owner = original.owner();
     assert_eq!(owner.unit, "main");
     let bytes = original.certification_bytes();

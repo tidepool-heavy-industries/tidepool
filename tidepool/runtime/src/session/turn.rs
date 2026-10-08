@@ -722,7 +722,7 @@ pub fn prepared_resume_apply_binding() -> String {
 #[must_use]
 pub fn resume_import_targets() -> String {
     format!(
-        "qualified Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
+        "qualified \"tidepool-resume\" Tidepool.Internal.Resume as {RESUME_ALIAS}\n\
          qualified Data.Text as {TEXT_ALIAS}\n\
          qualified GHC.Exts as {SCAFFOLD_EXTS_ALIAS}"
     )
@@ -734,6 +734,7 @@ pub fn resume_import_targets() -> String {
 #[must_use]
 pub fn with_resume_import(preamble_with_imports: &str) -> String {
     let preamble_with_imports = with_magic_hash(preamble_with_imports);
+    let preamble_with_imports = with_package_imports(&preamble_with_imports);
     insert_preamble_imports(&preamble_with_imports, &resume_import_targets())
 }
 
@@ -750,6 +751,23 @@ fn with_magic_hash(preamble: &str) -> String {
         return preamble.to_string();
     }
     format!("{{-# LANGUAGE MagicHash #-}}\n{preamble}")
+}
+
+/// The generated scaffold owns this syntax requirement. Place its pragma
+/// after the preamble's pragmas so an earlier NoPackageImports cannot disable
+/// the package-qualified import. The preamble owner supplies the module header.
+fn with_package_imports(preamble: &str) -> String {
+    let mut offset = 0;
+    let module_start = preamble
+        .split_inclusive('\n')
+        .find_map(|line| {
+            let start = offset;
+            offset += line.len();
+            line.trim_start().starts_with("module ").then_some(start)
+        })
+        .unwrap_or(0);
+    let (header, module) = preamble.split_at(module_start);
+    format!("{header}{{-# LANGUAGE PackageImports #-}}\n{module}")
 }
 
 /// Failure from the shared resident-turn boundary.
@@ -2759,6 +2777,7 @@ fn compile_cell_program_admitted_work_controls(
     )
 }
 
+#[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = req.cell_text.len()))]
 fn compile_cell_program_admitted_inner(
     req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
@@ -2771,6 +2790,8 @@ fn compile_cell_program_admitted_inner(
     ),
     CellCheckFailure,
 > {
+    let setup_span =
+        tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.setup").entered();
     validate_cell_admitted_request(&req, &admission)?;
     let planned = admission.plan_reservation().ok_or_else(|| {
         CompileError::ExtractFailed(
@@ -2804,7 +2825,10 @@ fn compile_cell_program_admitted_inner(
     for (identity, generation) in admission.admitted_retained_imports() {
         command.retained_generation(extract_identity(identity), *generation);
     }
-    let endpoint = bind_extract_cmd(&command)?;
+    drop(setup_span);
+    let endpoint = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.bind")
+        .in_scope(|| bind_extract_cmd(&command))?;
+    let offer_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.offer", inclusive = true).entered();
     let specification = CheckedCellSpecification {
         admission_digest: admission.digest(),
         cell_source: req.cell_text.to_owned(),
@@ -2856,9 +2880,12 @@ fn compile_cell_program_admitted_inner(
     offer.apply_to(&mut command)?;
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
     let diagnostics = CompilerDiagnosticCapture::start(scratch.path(), &command);
-    let run = endpoint.execute(&command).map_err(|error| {
+    drop(offer_span);
+    let run = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.execute", inclusive = true)
+        .in_scope(|| endpoint.execute(&command)).map_err(|error| {
         offer.retain_execution_failure(scratch.path(), &command, map_notfound(error))
     })?;
+    let admission_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.admit", inclusive = true).entered();
     diagnostics.completed(scratch.path(), &command, run.success(), &run.output.stderr);
     let report =
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
@@ -2887,8 +2914,9 @@ fn compile_cell_program_admitted_inner(
         req.compile_view_evidence,
     )?;
     checked.warnings = report.diagnostics;
-    admission
-        .prepare_declaration_projections(program.checked_cell())
+    drop(admission_span);
+    tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.declaration_projections", inclusive = true)
+        .in_scope(|| admission.prepare_declaration_projections(program.checked_cell()))
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     checked.authority = Some(program.checked_cell().clone());
     checked.admission = Some(admission);
@@ -8653,6 +8681,32 @@ mod tests {
         assert_eq!(PREAMBLE_DEFAULT_DECL, tidepool_mcp::PREAMBLE_DEFAULT_DECL);
         assert_eq!(PREAMBLE_IMPORT_MARKER, tidepool_mcp::PREAMBLE_IMPORT_MARKER);
         assert!(PREAMBLE_DEFAULT_DECL.starts_with(PREAMBLE_IMPORT_MARKER));
+    }
+
+    #[test]
+    fn prepared_resume_import_is_package_qualified_and_enables_its_syntax() {
+        let preamble = format!("module Expr where\n{PREAMBLE_IMPORT_MARKER}\n");
+        let source = with_resume_import(&preamble);
+        assert_eq!(source.matches("{-# LANGUAGE PackageImports #-}").count(), 1);
+        assert_eq!(source.matches("{-# LANGUAGE MagicHash #-}").count(), 1);
+        assert!(source.contains(
+            "import qualified \"tidepool-resume\" Tidepool.Internal.Resume as TidepoolResume\n"
+        ));
+        assert!(!source
+            .lines()
+            .any(|line| line == "import qualified Tidepool.Internal.Resume as TidepoolResume"));
+        for header in [
+            "-- PackageImports is mentioned only in this comment\n",
+            "{-# LANGUAGE NoPackageImports #-}\n",
+            "{-# LANGUAGE PackageImports, MagicHash #-}\n",
+        ] {
+            let source = with_resume_import(&format!("{header}{preamble}"));
+            assert!(source.contains("{-# LANGUAGE PackageImports #-}\nmodule Expr where"));
+            assert!(
+                source.find(header).unwrap()
+                    < source.rfind("{-# LANGUAGE PackageImports #-}").unwrap()
+            );
+        }
     }
 
     #[test]

@@ -111,6 +111,126 @@ impl RequestAnnotations {
 pub struct ExactCompileContext {
     declarations: Arc<ExactDeclarationContext>,
     request_annotations: Option<RequestAnnotations>,
+    protected_scaffold: ProtectedScaffoldRequirements,
+}
+
+/// Exact implementation inputs owned by a protected compiler recipe. These
+/// roles never enter persistent declarations or grant authored lexical imports.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ProtectedScaffoldRequirements {
+    projection: CompilerInputProjection,
+    native: Vec<(Arc<CertifiedAuthoredDeclaration>, Arc<[String]>)>,
+}
+
+/// Complete private compiler inputs from one already certified output.
+/// This retains exact native roles and their custody without publishing either
+/// authored lexical rights or persistent source-reuse roles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OriginalCompilerInputs {
+    projection: CompilerInputProjection,
+    artifacts: ArtifactView,
+}
+
+impl OriginalCompilerInputs {
+    pub(crate) fn from_selection(
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        artifacts: &ArtifactView,
+    ) -> Result<Self, CompileError> {
+        Ok(Self {
+            projection: selection
+                .compiler_projection(artifacts)
+                .map_err(compiler_evidence_failure)?,
+            artifacts: artifacts.clone(),
+        })
+    }
+
+    pub(crate) fn for_program_continuation(
+        &self,
+        support: &ArtifactView,
+        admissions: &[ExactSourceAdmission],
+        source: &str,
+    ) -> Result<Self, CompileError> {
+        let generated = ExactSourceAdmission::matching_generated_source_owner(admissions, source)?;
+        let metadata = support.metadata_snapshot();
+        let original = self.artifacts.metadata_snapshot();
+        for role in self.projection.roles() {
+            let owner = &original
+                .artifacts
+                .get(&role.interface())
+                .ok_or_else(|| failure("private compiler input lost its issued interface"))?
+                .descriptor
+                .owner;
+            if owner != &generated
+                && (!metadata.artifacts.contains_key(&role.interface())
+                    || role
+                        .original()
+                        .is_some_and(|id| !metadata.artifacts.contains_key(&id)))
+            {
+                return Err(failure(
+                    "private compiler continuation omitted a selected original",
+                ));
+            }
+        }
+        let projection = self.projection.within_view(support);
+        projection.validate(support)?;
+        Ok(Self {
+            projection,
+            artifacts: support.clone(),
+        })
+    }
+
+    fn merge(&self, other: &Self) -> Result<Self, CompileError> {
+        let projection = self.projection.merge(&other.projection)?;
+        let artifacts = self.artifacts.merge(&other.artifacts)?;
+        projection.validate(&artifacts)?;
+        Ok(Self {
+            projection,
+            artifacts,
+        })
+    }
+}
+
+pub(crate) struct RequestCompilerInputs {
+    pub(crate) projection: CompilerInputProjection,
+    pub(crate) metadata: ArtifactMetadataSnapshot,
+    pub(crate) artifacts: ArtifactView,
+    declaration_semantic_sha256: [u8; 32],
+}
+
+impl ProtectedScaffoldRequirements {
+    #[tracing::instrument(target = "exomonad_harness::timing", name = "exact.compiler_inputs", level = "debug", skip_all, fields(inclusive = true, private = private.is_some()))]
+    fn compiler_inputs(
+        &self,
+        context: &ExactDeclarationContext,
+        private: Option<&OriginalCompilerInputs>,
+    ) -> Result<RequestCompilerInputs, CompileError> {
+        let baseline = tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.baseline")
+            .in_scope(|| context.compiler_metadata_snapshot())?;
+        let declaration_semantic_sha256 = tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.declaration_hash")
+            .in_scope(|| context.semantic_sha256_from_metadata(&baseline));
+        let merge_span =
+            tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.merge")
+                .entered();
+        let mut projection = context.compiler_projection.merge(&self.projection)?;
+        let (artifacts, metadata) = match private {
+            Some(private) => {
+                projection = projection.merge(&private.projection)?;
+                let artifacts = context.artifact_view().merge(&private.artifacts)?;
+                let metadata = artifacts.metadata_snapshot();
+                (artifacts, metadata)
+            }
+            None => (context.artifact_view().clone(), baseline),
+        };
+        drop(merge_span);
+        let metadata = tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.project")
+            .in_scope(|| projection.project_metadata(metadata))?;
+        Ok(RequestCompilerInputs {
+            projection,
+            metadata,
+            artifacts,
+            declaration_semantic_sha256,
+        })
+    }
 }
 
 impl ExactCompileContext {
@@ -118,6 +238,7 @@ impl ExactCompileContext {
         Self {
             declarations,
             request_annotations: None,
+            protected_scaffold: Default::default(),
         }
     }
 
@@ -174,6 +295,87 @@ impl ExactCompileContext {
         self
     }
 
+    pub(crate) fn with_generated_planned_imports<'a>(
+        self,
+        certificate: Option<&Arc<CertifiedAuthoredDeclaration>>,
+        templates: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, CompileError> {
+        let Some(certificate) = certificate else {
+            return Ok(self);
+        };
+        if certificate.toolchain_identity_sha256() != self.declarations.producer {
+            return Err(failure(
+                "checked recipe original differs from its admitted certificate",
+            ));
+        }
+        let metadata = self.declarations.compiler_metadata_snapshot()?;
+        let matching = metadata
+            .artifacts
+            .values()
+            .filter(|entry| {
+                matches!(&entry.payload, ArtifactPayload::Original(product)
+                if product == certificate.product())
+            })
+            .collect::<Vec<_>>();
+        let [original] = matching.as_slice() else {
+            return Err(failure(
+                "checked recipe original differs from its admitted certificate",
+            ));
+        };
+        let original = Arc::clone(original);
+        let templates = templates
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+            .into();
+        self.with_planned_scaffold_role(original, Arc::clone(certificate), templates, &metadata)
+    }
+
+    /// Issue one compiler-only role against the selected canonical interface.
+    /// Validate the complete request projection so sealed home dependencies use
+    /// the same already issued roles as materialization and the compiler.
+    fn with_planned_scaffold_role(
+        mut self,
+        original: Arc<ArtifactEntry>,
+        certificate: Arc<CertifiedAuthoredDeclaration>,
+        templates: Arc<[String]>,
+        metadata: &ArtifactMetadataSnapshot,
+    ) -> Result<Self, CompileError> {
+        let ArtifactPayload::Original(product) = &original.payload else {
+            return Err(failure(
+                "protected scaffold lacks an original native carrier",
+            ));
+        };
+        let selected = metadata
+            .entries
+            .get(&identity(&product.owner().unit, &product.owner().module))
+            .ok_or_else(|| failure("protected scaffold lacks a selected canonical interface"))?;
+        if canonical_source_interface(selected) != product.module_interface()
+            || certificate.product().owner() != product.owner()
+        {
+            return Err(failure(
+                "protected scaffold differs from its selected canonical interface",
+            ));
+        }
+        let projection = CompilerInputProjection::from_issued_entries(&[Arc::clone(&original)])?;
+        let protected_projection = self.protected_scaffold.projection.merge(&projection)?;
+        let effective = self
+            .declarations
+            .compiler_projection
+            .merge(&protected_projection)?;
+        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &effective,
+            metadata,
+            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        )
+        .map_err(compiler_evidence_failure)?;
+        self.protected_scaffold.projection = protected_projection;
+        self.protected_scaffold
+            .native
+            .push((certificate, templates));
+        Ok(self)
+    }
+
     fn authorization(&self, purpose: Option<Value>) -> Option<Value> {
         match &self.request_annotations {
             Some(annotations) => Some(encode_request_authorization(
@@ -199,10 +401,11 @@ impl ExactCompileContext {
         producer: &[u8],
         authorization: Option<Value>,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        self.declarations.prepare_compilation_with_authorization(
+        self.declarations.prepare_compilation_with_scaffold(
             root,
             producer,
             self.authorization(authorization),
+            &self.protected_scaffold,
         )
     }
 
@@ -213,11 +416,16 @@ impl ExactCompileContext {
         authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
     ) -> Result<ExactCompilationRequest, CompileError> {
         self.declarations
-            .prepare_compilation_authorizing(root, producer, |semantic| {
-                Ok(self
-                    .authorization(Some(authorize(semantic)?))
-                    .expect("purpose authorization"))
-            })
+            .prepare_compilation_authorizing_with_scaffold(
+                root,
+                producer,
+                &self.protected_scaffold,
+                |semantic| {
+                    Ok(self
+                        .authorization(Some(authorize(semantic)?))
+                        .expect("purpose authorization"))
+                },
+            )
     }
 }
 
@@ -1007,6 +1215,8 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) context: Arc<ExactDeclarationContext>,
     pub(crate) manifest: PathBuf,
     pub(crate) request_sha256: String,
+    // Checked-prefix identity is the persistent declaration baseline. The
+    // encoded manifest/request hash additionally binds protected native roles.
     pub(crate) semantic_sha256: [u8; 32],
     pub(crate) producer_sha256: [u8; 32],
     pub(crate) artifacts: Vec<DeclarationArtifact>,
@@ -1019,6 +1229,8 @@ pub(crate) struct ExactCompilationRequest {
     source_search_include: Option<Arc<[PathBuf]>>,
     checked_value_imports: crate::checked_cell::CheckedValueImportAuthority,
     generated_scaffold_imports: Vec<GeneratedScaffoldImportAuthority>,
+    protected_scaffold: ProtectedScaffoldRequirements,
+    private_compiler_input: Option<OriginalCompilerInputs>,
 }
 
 /// Same-offer support keeps the consumed import graph with its exact custody.
@@ -1208,7 +1420,6 @@ impl RetainedTemplateImports {
             .filter(|node| {
                 canonical.contains_key(&node.owner)
                     && !node.owner.module.starts_with("Tidepool.Session.")
-                    && node.owner.module != "Tidepool.Internal.Resume"
                     && template_selects_owner(templates, &node.owner)
             })
             .map(|node| node.owner.clone())
@@ -1335,7 +1546,7 @@ struct GeneratedScaffoldImportAuthority {
 
 #[derive(Clone)]
 enum GeneratedScaffoldRole {
-    Native(NativeScaffoldRole),
+    PlannedDeclaration(Arc<CertifiedAuthoredDeclaration>),
     InitialTemplateInterfaces {
         producer: [u8; 32],
         roots: BTreeSet<ExactModuleIdentity>,
@@ -1343,26 +1554,13 @@ enum GeneratedScaffoldRole {
     },
 }
 
-#[derive(Clone)]
-enum NativeScaffoldRole {
-    Resume(tidepool_repr::execution_schema::CachedHomeOwner),
-    PlannedDeclaration(Arc<CertifiedAuthoredDeclaration>),
-}
-
-const GENERATED_RESUME_IMPORT: &str = "import qualified Tidepool.Internal.Resume as TidepoolResume";
-
 impl GeneratedScaffoldImportAuthority {
     /// Match the virtual graph installed by the compiler from this protected
     /// recipe. This is implementation/instance evidence, not authored imports.
     fn original_instance_graph(&self) -> Vec<ExactLexicalNode> {
         match &self.role {
-            GeneratedScaffoldRole::Native(native) => {
-                let owner = match native {
-                    NativeScaffoldRole::Resume(owner) => owner,
-                    NativeScaffoldRole::PlannedDeclaration(certificate) => {
-                        certificate.product().owner()
-                    }
-                };
+            GeneratedScaffoldRole::PlannedDeclaration(certificate) => {
+                let owner = certificate.product().owner();
                 vec![ExactLexicalNode {
                     owner: identity(&owner.unit, &owner.module),
                     imports: Vec::new(),
@@ -1389,8 +1587,8 @@ impl GeneratedScaffoldImportAuthority {
         qualifier: &str,
         boot: bool,
     ) -> bool {
-        let native = match &self.role {
-            GeneratedScaffoldRole::Native(native) => native,
+        let certificate = match &self.role {
+            GeneratedScaffoldRole::PlannedDeclaration(certificate) => certificate,
             GeneratedScaffoldRole::InitialTemplateInterfaces {
                 producer,
                 roots,
@@ -1432,10 +1630,7 @@ impl GeneratedScaffoldImportAuthority {
                     });
             }
         };
-        let owner = match native {
-            NativeScaffoldRole::Resume(owner) => owner,
-            NativeScaffoldRole::PlannedDeclaration(certificate) => certificate.product().owner(),
-        };
+        let owner = certificate.product().owner();
         if target != module_source
             || boot
             || qualifier != "none"
@@ -1444,10 +1639,7 @@ impl GeneratedScaffoldImportAuthority {
         {
             return false;
         }
-        let compiler_import = match native {
-            NativeScaffoldRole::Resume(_) => GENERATED_RESUME_IMPORT.to_owned(),
-            NativeScaffoldRole::PlannedDeclaration(_) => format!("import {}", owner.module),
-        };
+        let compiler_import = format!("import {}", owner.module);
         if source
             .lines()
             .filter(|line| *line == compiler_import)
@@ -1456,36 +1648,19 @@ impl GeneratedScaffoldImportAuthority {
         {
             return false;
         }
-        if !self
-            .protected_templates
-            .iter()
-            .any(|template| match native {
-                NativeScaffoldRole::Resume(_) => {
-                    template
-                        .lines()
-                        .filter(|line| *line == GENERATED_RESUME_IMPORT)
-                        .count()
-                        == 1
-                }
-                NativeScaffoldRole::PlannedDeclaration(_) => {
-                    template
-                        .lines()
-                        .filter(|line| *line == "-- tidepool-preamble-imports-v1")
-                        .count()
-                        == 1
-                }
-            })
-        {
+        if !self.protected_templates.iter().any(|template| {
+            template
+                .lines()
+                .filter(|line| *line == "-- tidepool-preamble-imports-v1")
+                .count()
+                == 1
+        }) {
             return false;
         }
         context.artifact_view().entries().iter().any(|entry| {
-            matches!(&entry.payload, ArtifactPayload::Original(product) if
-            match native {
-                NativeScaffoldRole::Resume(owner) => product.owner() == owner,
-                NativeScaffoldRole::PlannedDeclaration(certificate) =>
-                    product == certificate.product()
-                    && certificate.toolchain_identity_sha256() == context.producer,
-            })
+            matches!(&entry.payload, ArtifactPayload::Original(product)
+                if product == certificate.product()
+                    && certificate.toolchain_identity_sha256() == context.producer)
         })
     }
 }
@@ -1781,12 +1956,51 @@ impl ExactSourceAdmission {
 }
 
 impl ExactProductAdmission<'_> {
-    /// Retain the full consumed original interface graph before native support
-    /// selection. Generated owners remain in this private execution evidence.
-    pub(crate) fn original_execution_context(
+    // Fixture roles are explicit request/support roles plus the authenticated
+    // generated target. They enter the same native issuer as production output.
+    #[cfg(test)]
+    pub(crate) fn original_execution_fixture(
         &self,
         artifacts: &ArtifactView,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let generated = self.source.generated_source_owner()?;
+        let entries = artifacts
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                entry.descriptor.owner == generated
+                    && matches!(entry.payload, ArtifactPayload::Original(_))
+            })
+            .collect::<Vec<_>>();
+        let mut projection = self
+            .request
+            .compiler_inputs()?
+            .projection
+            .within_view(artifacts)
+            .merge(&CompilerInputProjection::from_interface_view(artifacts)?)?
+            .merge(&CompilerInputProjection::from_issued_entries(&entries)?)?;
+        if let Some(support) = &self.request.program_support {
+            projection = projection.merge(&support.compiler_projection.within_view(artifacts))?;
+        }
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &artifacts.metadata_snapshot(),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .map_err(compiler_evidence_failure)?;
+        self.original_execution_context(&OriginalCompilerInputs::from_selection(
+            &selection, artifacts,
+        )?)
+    }
+
+    /// Retain the complete original compiler selection before publication.
+    /// The output issuer owns every exact native role, including cached support.
+    pub(crate) fn original_execution_context(
+        &self,
+        inputs: &OriginalCompilerInputs,
+    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let artifacts = &inputs.artifacts;
         let imports = self.source.home_imports()?;
         let inherited = self.request.context.as_ref();
         let exact_roots = self
@@ -1917,42 +2131,54 @@ impl ExactProductAdmission<'_> {
             self.source.generated_source_owner()?,
             &required.into_iter().collect::<Vec<_>>(),
         )?;
-        let generated = self.source.generated_source_owner()?;
-        let generated_entries = artifacts
-            .entries()
-            .into_iter()
-            .filter(|entry| {
-                entry.descriptor.owner == generated
-                    && matches!(entry.payload, ArtifactPayload::Original(_))
-            })
-            .collect::<Vec<_>>();
-        if generated_entries.len() > 1 {
-            return Err(failure(
-                "original execution has conflicting generated originals",
-            ));
-        }
-        let mut projection = inherited
-            .compiler_projection
+        let projection = self
+            .request
+            .compiler_inputs()?
+            .projection
             .within_view(artifacts)
-            .merge(&CompilerInputProjection::from_interface_view(artifacts)?)?;
-        if let Some(support) = &self.request.program_support {
-            projection = projection.merge(&support.compiler_projection.within_view(artifacts))?;
-        }
-        projection = projection.merge(&CompilerInputProjection::from_issued_entries(
-            &generated_entries,
-        )?)?;
+            .merge(&inputs.projection)?;
         let context = context.with_compiler_input_projection(projection)?;
         Ok(Arc::new(context))
     }
 }
 
 impl ExactCompilationRequest {
+    pub(crate) fn compiler_inputs(&self) -> Result<RequestCompilerInputs, CompileError> {
+        self.protected_scaffold
+            .compiler_inputs(&self.context, self.private_compiler_input.as_ref())
+    }
+    /// Grow a same-offer request from its already certified private selection.
+    /// New roles materialize in the same atomic transition as declaration growth.
+    pub(crate) fn in_program_context_with_private_input(
+        &self,
+        root: &Path,
+        context: Arc<ExactDeclarationContext>,
+        input: &OriginalCompilerInputs,
+    ) -> Result<Self, CompileError> {
+        let private_span = tracing::debug_span!(target: "exomonad_harness::timing", "exact.program_context.private_input", inclusive = true).entered();
+        let private = match &self.private_compiler_input {
+            Some(previous) => previous.merge(input)?,
+            None => input.clone(),
+        };
+        drop(private_span);
+        self.in_program_context_with_inputs(root, context, Some(private))
+    }
+
     /// Original offers authenticated by this request's compiler namespace.
     /// Full retained recovery custody is deliberately a separate inventory.
     pub(crate) fn compiler_original_products(
         &self,
     ) -> Result<Vec<CertifiedRecoveryProduct>, CompileError> {
-        self.context.compiler_original_products()
+        Ok(self
+            .compiler_inputs()?
+            .metadata
+            .entries
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some(product.clone()),
+                _ => None,
+            })
+            .collect())
     }
     /// Capture metadata from this still-live offer, never from reconstructed
     /// source or current cache state. The copy is diagnostic, not authority.
@@ -2073,47 +2299,6 @@ impl ExactCompilationRequest {
         self.checked_value_imports = authority;
         self
     }
-    pub(crate) fn with_generated_scaffold_imports<'a>(
-        mut self,
-        templates: impl IntoIterator<Item = &'a str>,
-    ) -> Self {
-        let protected_templates = templates
-            .into_iter()
-            .filter(|template| {
-                template
-                    .lines()
-                    .filter(|line| *line == GENERATED_RESUME_IMPORT)
-                    .count()
-                    == 1
-            })
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        if !protected_templates.is_empty() {
-            let originals = self.context.artifact_view().entries();
-            let owners = originals
-                .iter()
-                .filter_map(|entry| match &entry.payload {
-                    ArtifactPayload::Original(product)
-                        if product.owner().unit == "main"
-                            && product.owner().module == "Tidepool.Internal.Resume" =>
-                    {
-                        Some(product.owner())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if let [owner] = owners.as_slice() {
-                self.generated_scaffold_imports
-                    .push(GeneratedScaffoldImportAuthority {
-                        role: GeneratedScaffoldRole::Native(NativeScaffoldRole::Resume(
-                            (*owner).clone(),
-                        )),
-                        protected_templates: protected_templates.into(),
-                    });
-            }
-        }
-        self
-    }
     pub(crate) fn with_initial_template_interfaces(
         mut self,
         initial: Arc<ExactDeclarationContext>,
@@ -2168,40 +2353,28 @@ impl ExactCompilationRequest {
         Ok(self)
     }
 
-    pub(crate) fn with_generated_planned_imports<'a>(
-        mut self,
-        certificate: Option<&Arc<CertifiedAuthoredDeclaration>>,
-        templates: impl IntoIterator<Item = &'a str>,
-    ) -> Result<Self, CompileError> {
-        if let Some(certificate) = certificate {
-            if certificate.toolchain_identity_sha256() != self.producer_sha256
-                || !self
-                    .context
-                    .recovery_products()
-                    .iter()
-                    .any(|product| product == certificate.product())
-            {
-                return Err(failure(
-                    "checked recipe original differs from its admitted certificate",
-                ));
-            }
-            let protected_templates = templates.into_iter().map(str::to_owned).collect::<Vec<_>>();
-            self.generated_scaffold_imports
-                .push(GeneratedScaffoldImportAuthority {
-                    role: GeneratedScaffoldRole::Native(NativeScaffoldRole::PlannedDeclaration(
-                        certificate.clone(),
-                    )),
-                    protected_templates: protected_templates.into(),
-                });
-        }
-        Ok(self)
-    }
-
     pub(crate) fn in_program_context(
         &self,
         root: &Path,
         context: Arc<ExactDeclarationContext>,
     ) -> Result<Self, CompileError> {
+        self.in_program_context_with_inputs(root, context, self.private_compiler_input.clone())
+    }
+
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "exact.program_context",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
+    fn in_program_context_with_inputs(
+        &self,
+        root: &Path,
+        context: Arc<ExactDeclarationContext>,
+        private: Option<OriginalCompilerInputs>,
+    ) -> Result<Self, CompileError> {
+        let preparation_span = tracing::debug_span!(target: "exomonad_harness::timing", "exact.program_context.prepare", inclusive = true).entered();
         if context.toolchain_identity_sha256() != self.producer_sha256
             && !(context.toolchain_identity_sha256() == [0; 32]
                 && context.artifact_view().is_empty())
@@ -2211,8 +2384,18 @@ impl ExactCompilationRequest {
         // Inventory custody grows by immutable artifact ID, but materialized
         // inputs follow its selected owner projection. An original product can
         // become available for an already retained canonical interface.
-        let baseline = self.context.compiler_metadata_snapshot()?;
-        let current = context.compiler_metadata_snapshot()?;
+        let baseline = self.compiler_inputs()?.metadata;
+        let current = self
+            .protected_scaffold
+            .compiler_inputs(&context, private.as_ref())?
+            .metadata;
+        if current
+            .entries
+            .values()
+            .any(|entry| entry.descriptor.producer_sha256 != self.producer_sha256)
+        {
+            return Err(failure("private compiler input has another producer"));
+        }
         if self
             .context
             .compiler_projection
@@ -2260,9 +2443,12 @@ impl ExactCompilationRequest {
         if !new_entries.is_empty() {
             std::fs::create_dir_all(root)?;
         }
+        drop(preparation_span);
         let delta_start = std::time::Instant::now();
         let mut validation = PackageInterfaceValidation::default();
-        let (mut materialized, _) = context.materialize_entries_with_validation(
+        let mut materializer = (*context).clone();
+        materializer.admit_producer(self.producer_sha256)?;
+        let (mut materialized, _) = materializer.materialize_entries_with_validation(
             root,
             &new_entries,
             &mut validation,
@@ -2332,6 +2518,8 @@ impl ExactCompilationRequest {
             source_search_include: self.source_search_include.clone(),
             checked_value_imports: self.checked_value_imports.clone(),
             generated_scaffold_imports: self.generated_scaffold_imports.clone(),
+            protected_scaffold: self.protected_scaffold.clone(),
+            private_compiler_input: private,
         })
     }
 
@@ -2519,7 +2707,17 @@ impl ExactCompilationRequest {
         for descriptor in support.descriptors() {
             context.admit_producer(descriptor.producer_sha256)?;
         }
-        let compiler_projection = context.compiler_projection.merge(&issued)?;
+        // Only authenticated current source owners publish Original roles.
+        // Private compiler inputs keep exact custody independently; merging
+        // preserves every legitimate Original already issued persistently.
+        let persistent_owners = imports
+            .keys()
+            .chain(selected_originals.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let compiler_projection = context
+            .compiler_projection
+            .merge(&issued.for_source_owners(&persistent_owners))?;
         context.inventory = context.inventory.merge(support)?;
         context.compiler_projection = compiler_projection;
         context.normalize()?;
@@ -2551,9 +2749,6 @@ impl ExactCompilationRequest {
         let roots = fresh
             .iter()
             .cloned()
-            // This helper is selected by executable scaffolding. Its native
-            // custody does not introduce an authored import into later cells.
-            .filter(|owner| owner.unit != "main" || owner.module != "Tidepool.Internal.Resume")
             // Selected originals may be source roots without any fresh product;
             // their adjacency comes from the validated current-source receipt.
             .chain(selected_originals.keys().cloned())
@@ -2671,11 +2866,17 @@ impl ExactCompilationRequest {
     pub(crate) fn validate_outputs_with_planned(
         &self,
         root: &Path,
-        planned: Option<&CertifiedAuthoredDeclaration>,
+        planned: Option<&crate::checked_cell::PlannedCheckedDeclaration>,
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
         let Some(planned) = planned else {
             return self.validate_outputs_selected(root, None, &self.context);
         };
+        let mut request = self.in_program_context_with_private_input(
+            &root.join("private-compiler-inputs"),
+            self.context.clone(),
+            &planned.compiler_input,
+        )?;
+        let planned = &planned.certificate;
         if planned.toolchain_identity_sha256() != self.producer_sha256 {
             return Err(failure("planned source support has another producer"));
         }
@@ -2698,7 +2899,6 @@ impl ExactCompilationRequest {
             .collect::<BTreeMap<_, _>>();
         let support =
             view.select_roots(entries.values().map(|entry| entry.descriptor.id).collect())?;
-        let mut request = self.clone();
         request.program_support = Some(ProgramSourceSupport::extend(
             self.program_support.as_ref(),
             support.clone(),
@@ -2741,7 +2941,8 @@ impl ExactCompilationRequest {
         validation: &mut PackageInterfaceValidation,
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
         let context_validate_start = std::time::Instant::now();
-        self.context.validate_artifacts(&self.artifacts)?;
+        self.context
+            .validate_artifacts_from_metadata(&self.artifacts, &self.compiler_inputs()?.metadata)?;
         self.checked_value_imports.validate()?;
         if sha256(
             &crate::certified_products::read_bounded_with_operation(
@@ -4776,6 +4977,7 @@ impl ExactDeclarationContext {
             None,
             &metadata,
             self.semantic_sha256_from_metadata(&metadata),
+            &ProtectedScaffoldRequirements::default(),
         )
     }
 
@@ -4785,36 +4987,67 @@ impl ExactDeclarationContext {
         producer: &[u8],
         authorization: Option<Value>,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        let metadata = self.compiler_metadata_snapshot()?;
-        metadata.validate_native_selection()?;
-        let semantic_sha256 = self.semantic_sha256_from_metadata(&metadata);
+        self.prepare_compilation_with_scaffold(
+            root,
+            producer,
+            authorization,
+            &ProtectedScaffoldRequirements::default(),
+        )
+    }
+
+    fn prepare_compilation_with_scaffold(
+        self: &Arc<Self>,
+        root: &Path,
+        producer: &[u8],
+        authorization: Option<Value>,
+        scaffold: &ProtectedScaffoldRequirements,
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        let inputs = scaffold.compiler_inputs(self, None)?;
+        inputs.metadata.validate_native_selection()?;
         self.prepare_compilation_from_metadata(
             root,
             producer,
             authorization,
-            &metadata,
-            semantic_sha256,
+            &inputs.metadata,
+            inputs.declaration_semantic_sha256,
+            scaffold,
         )
     }
 
     /// Bind authorization and the request to one observation of this immutable
     /// context. The caller cannot supply an unrelated semantic identity.
+    #[cfg(test)]
     pub(crate) fn prepare_compilation_authorizing(
         self: &Arc<Self>,
         root: &Path,
         producer: &[u8],
         authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        let metadata = self.compiler_metadata_snapshot()?;
-        metadata.validate_native_selection()?;
-        let semantic_sha256 = self.semantic_sha256_from_metadata(&metadata);
-        let authorization = authorize(semantic_sha256)?;
+        self.prepare_compilation_authorizing_with_scaffold(
+            root,
+            producer,
+            &ProtectedScaffoldRequirements::default(),
+            authorize,
+        )
+    }
+
+    fn prepare_compilation_authorizing_with_scaffold(
+        self: &Arc<Self>,
+        root: &Path,
+        producer: &[u8],
+        scaffold: &ProtectedScaffoldRequirements,
+        authorize: impl FnOnce([u8; 32]) -> Result<Value, CompileError>,
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        let inputs = scaffold.compiler_inputs(self, None)?;
+        inputs.metadata.validate_native_selection()?;
+        let authorization = authorize(inputs.declaration_semantic_sha256)?;
         self.prepare_compilation_from_metadata(
             root,
             producer,
             Some(authorization),
-            &metadata,
-            semantic_sha256,
+            &inputs.metadata,
+            inputs.declaration_semantic_sha256,
+            scaffold,
         )
     }
 
@@ -4970,6 +5203,7 @@ impl ExactDeclarationContext {
         authorization: Option<Value>,
         metadata: &ArtifactMetadataSnapshot,
         semantic_sha256: [u8; 32],
+        scaffold: &ProtectedScaffoldRequirements,
     ) -> Result<ExactCompilationRequest, CompileError> {
         let admitted_empty = authorization.is_some()
             && self.producer == [0; 32]
@@ -5165,7 +5399,16 @@ impl ExactDeclarationContext {
             source_selected_support: BTreeSet::new(),
             source_search_include: None,
             checked_value_imports: Default::default(),
-            generated_scaffold_imports: Vec::new(),
+            generated_scaffold_imports: scaffold
+                .native
+                .iter()
+                .map(|(role, templates)| GeneratedScaffoldImportAuthority {
+                    role: GeneratedScaffoldRole::PlannedDeclaration(Arc::clone(role)),
+                    protected_templates: Arc::clone(templates),
+                })
+                .collect(),
+            protected_scaffold: scaffold.clone(),
+            private_compiler_input: None,
         })
     }
 }
@@ -5182,7 +5425,7 @@ pub(crate) fn certified_product_artifact_view(
         products,
         interfaces,
         &[],
-        baseline,
+        baseline.map(ExactDeclarationContext::artifact_view),
         crate::artifact_inventory::NativeArtifactDemand::AllGroups,
         &mut PackageInterfaceValidation::default(),
     )
@@ -5196,14 +5439,11 @@ pub(crate) fn certified_product_artifact_view_with_validation(
     products: &[CertifiedRecoveryProduct],
     interfaces: &[crate::certified_products::CertifiedModuleInterface],
     values: &[CertifiedValueInterface],
-    baseline: Option<&ExactDeclarationContext>,
+    baseline: Option<&ArtifactView>,
     demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ArtifactView, CompileError> {
-    let view = baseline.map_or_else(
-        || ArtifactInventory::default().empty_view(),
-        |context| context.artifact_view().clone(),
-    );
+    let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
     let mut entries = interfaces
         .iter()
         .cloned()
@@ -5705,6 +5945,32 @@ mod tests {
 
     fn support_product_in_unit(unit: &str, module: &str) -> CertifiedRecoveryProduct {
         support_product_with_interface(unit, module, format!("{module} interface").into_bytes())
+    }
+
+    fn scaffold_native_fixture(
+        producer: [u8; 32],
+        unit: &str,
+        module: &str,
+        version: u8,
+    ) -> CertifiedRecoveryProduct {
+        let product = support_product_in_unit(unit, module);
+        let mut owner = product.owner().clone();
+        owner.module_version = ModuleVersion([version; 32]);
+        let certification =
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap();
+        let product = CertifiedRecoveryProduct::from_certification(
+            owner,
+            product.interface_bytes().to_vec(),
+            product.product_bytes().to_vec(),
+            product.package_imports_bytes().to_vec(),
+            certification,
+        );
+        crate::certified_products::tests::recovered_witness_fixtures(&[
+            crate::certified_products::fixture_finalized_product(product, producer),
+        ])
+        .remove(0)
+        .product
     }
 
     fn support_product_with_interface(
@@ -7173,6 +7439,8 @@ mod tests {
             source_search_include: None,
             checked_value_imports: Default::default(),
             generated_scaffold_imports: Vec::new(),
+            protected_scaffold: Default::default(),
+            private_compiler_input: None,
         }
     }
 
@@ -8361,7 +8629,7 @@ mod tests {
             request: &effective,
             source: &admission,
         }
-        .original_execution_context(&artifacts)
+        .original_execution_fixture(&artifacts)
         .unwrap();
         assert!(matches!(original.original_instance_environment(),
             OriginalInstanceEnvironment::Complete { target }
@@ -8391,7 +8659,7 @@ mod tests {
             request: &incomplete,
             source: &admission,
         }
-        .original_execution_context(&artifacts)
+        .original_execution_fixture(&artifacts)
         .unwrap();
         assert!(
             matches!(incomplete.original_instance_environment(),
@@ -8956,7 +9224,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_value_source_surface_does_not_promote_compiler_scaffold_support() {
+    fn authenticated_home_resume_source_surface_follows_ordinary_source_policy() {
         let directory = tempfile::tempdir().unwrap();
         let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(directory.path(), baseline.clone());
@@ -8980,14 +9248,20 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert!(request.program_source_lexical().is_empty());
+        assert_eq!(request.program_source_lexical().len(), 1);
+        assert_eq!(
+            request.program_source_lexical()[0].owner,
+            identity("main", "Tidepool.Internal.Resume")
+        );
         let native = &request.program_support.as_ref().unwrap().artifacts;
         assert_eq!(native.descriptors().len(), 2);
-        assert!(context
-            .retain_value_source_surface(native, request.program_source_lexical())
-            .unwrap()
-            .1
-            .is_empty());
+        assert_eq!(
+            context
+                .retain_value_source_surface(native, request.program_source_lexical())
+                .unwrap()
+                .1,
+            request.program_source_lexical()
+        );
         let current = request
             .in_program_context(&directory.path().join("program-inputs"), context.clone())
             .unwrap();
@@ -9008,7 +9282,7 @@ mod tests {
             request: &current,
             source: &admission,
         }
-        .original_execution_context(&artifacts)
+        .original_execution_fixture(&artifacts)
         .unwrap();
         assert!(matches!(
             original.original_instance_environment(),
@@ -9207,6 +9481,8 @@ mod tests {
             source_search_include: None,
             checked_value_imports: Default::default(),
             generated_scaffold_imports: Vec::new(),
+            protected_scaffold: Default::default(),
+            private_compiler_input: None,
         };
         let root = directory.path().join("program-inputs");
         assert!(!root.exists());
@@ -9268,6 +9544,8 @@ mod tests {
             source_search_include: None,
             checked_value_imports: Default::default(),
             generated_scaffold_imports: Vec::new(),
+            protected_scaffold: Default::default(),
+            private_compiler_input: None,
         };
         let support = request
             .artifacts
@@ -9409,6 +9687,8 @@ mod tests {
             source_search_include: None,
             checked_value_imports: Default::default(),
             generated_scaffold_imports: Vec::new(),
+            protected_scaffold: Default::default(),
+            private_compiler_input: None,
         };
         let materialization_root = directory.path().join("program-inputs");
         let effective = request
@@ -9789,21 +10069,42 @@ mod tests {
     }
 
     #[test]
-    fn generated_scaffold_receipt_resolves_only_normalized_request_owner() {
+    fn package_resume_does_not_select_home_native_variants_or_grant_home_imports() {
         let directory = tempfile::tempdir().unwrap();
-        let source = format!("module Consumer where\n{GENERATED_RESUME_IMPORT}\n");
-        let context = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_checked_original_products(
-                    [2; 32],
-                    &[support_product_in_unit("main", "Tidepool.Internal.Resume")],
-                )
-                .unwrap(),
-        );
-        let request = program_request(directory.path(), context.clone())
-            .with_generated_scaffold_imports([source.as_str()]);
-        assert!(context.lexical_graph().is_empty());
+        let producer = b"package Resume input";
+        let producer_sha256 = Sha256::digest(producer).into();
+        let first = scaffold_native_fixture(producer_sha256, "main", "Tidepool.Internal.Resume", 1);
+        let second =
+            scaffold_native_fixture(producer_sha256, "main", "Tidepool.Internal.Resume", 2);
+        assert_eq!(first.module_interface(), second.module_interface());
+        let mut public = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products(producer_sha256, &[first])
+            .unwrap();
+        public.inventory = public.inventory.merge(&support_view(&[second])).unwrap();
+        let projection = public.compiler_input_projection().interface_only();
+        let public = Arc::new(public.with_compiler_input_projection(projection).unwrap());
+        let source = "{-# LANGUAGE PackageImports #-}\nmodule Consumer where\nimport qualified \"tidepool-resume\" Tidepool.Internal.Resume as TidepoolResume\n";
+        assert!(!template_selects_owner(
+            &[source.to_owned()],
+            &identity("main", "Tidepool.Internal.Resume")
+        ));
+        let request = ExactCompileContext::new(public.clone())
+            .prepare_compilation(&directory.path().join("scope"), producer)
+            .unwrap();
+        assert_eq!(request.semantic_sha256, public.semantic_sha256());
+        assert!(request.compiler_original_products().unwrap().is_empty());
+        assert!(request.generated_scaffold_imports.is_empty());
+        assert!(public.lexical_graph().is_empty());
+        let manifest: Value =
+            ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
+                .unwrap();
+        assert!(manifest.as_array().unwrap()[6]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        // A forged home resolution of the package import has no request-local
+        // permission, even when matching home products remain in custody.
         let receipt = import_receipt_source_owner(
             directory.path(),
             &request,
@@ -9811,41 +10112,9 @@ mod tests {
             "Tidepool.Internal.Resume",
             "none",
             false,
-            &source,
+            source,
         );
-        let admitted = request.validate_receipt(&receipt, None, &context).unwrap();
-        assert_eq!(
-            admitted.evidence.modules[0].source,
-            Path::new(crate::cache::GENERATED_SOURCE)
-        );
-        assert!(admitted
-            .witness
-            .matches_source(&directory.path().join("Consumer.hs"), &source));
-        let mut unprotected = request.clone();
-        unprotected.generated_scaffold_imports.clear();
-        assert!(unprotected
-            .validate_receipt(&receipt, None, &context)
-            .is_err());
-
-        // Identical bytes in a separate authored module do not grant the
-        // compiler scaffold's request-target authority.
-        let mut value: Value =
-            ciborium::de::from_reader(std::fs::read(&receipt).unwrap().as_slice()).unwrap();
-        let fields = value.as_array_mut().unwrap();
-        let mut evidence: crate::cache::DependencyEvidence =
-            serde_json::from_str(fields[7].as_text().unwrap()).unwrap();
-        let authored = directory.path().join("Authored.hs");
-        std::fs::write(&authored, &source).unwrap();
-        evidence.sources.push(crate::cache::SourceEvidence {
-            path: authored.clone(),
-            sha256: sha256(source.as_bytes()),
-        });
-        evidence.modules[0].source = authored;
-        fields[7] = text(serde_json::to_string(&evidence).unwrap());
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
-        std::fs::write(&receipt, bytes).unwrap();
-        assert!(request.validate_receipt(&receipt, None, &context).is_err());
+        assert!(request.validate_receipt(&receipt, None, &public).is_err());
     }
 
     pub(crate) fn assert_source_selected_receipt_pairing(
@@ -10004,21 +10273,60 @@ mod tests {
             )
             .expect("matched issuer supplies the original native and canonical carriers"),
         );
-        let context = Arc::new(
-            ExactDeclarationContext::new(std::slice::from_ref(&certificate), &[], Vec::new())
-                .unwrap(),
+        assert!(
+            crate::certified_products::original_interface_requirements(certificate.product())
+                .unwrap()
+                .contains_key(&("main".into(), "PrefixSelectedSupport".into()))
         );
+        let issued =
+            ExactDeclarationContext::new(std::slice::from_ref(&certificate), &[], Vec::new())
+                .unwrap();
+        let original_id = issued.compiler_metadata_snapshot().unwrap().entries
+            [&identity("main", &owner.module_name())]
+            .descriptor
+            .id;
+        let projection = issued.compiler_input_projection().interface_only();
+        let context = Arc::new(issued.with_compiler_input_projection(projection).unwrap());
+        let persistent_semantic = context.semantic_sha256();
+        let endpoint = tidepool_extract_cmd::ExtractCmd::new()
+            .unwrap()
+            .bind()
+            .unwrap();
+        let producer = endpoint.identity().producer_bytes();
         assert!(context.lexical_graph().is_empty());
         let source = format!(
             "module Consumer where\n-- tidepool-preamble-imports-v1\nimport {}\n",
             owner.module_name()
         );
-        let mut request = program_request(directory.path(), context.clone());
-        request.producer_sha256 = certificate.toolchain_identity_sha256();
-        let ordinary = request.clone();
-        let request = request
-            .with_generated_planned_imports(Some(&certificate), [source.as_str()])
+        let ordinary = ExactCompileContext::new(context.clone())
+            .prepare_compilation(&directory.path().join("ordinary"), producer)
             .unwrap();
+        let mut request = ExactCompileContext::new(context.clone())
+            .with_generated_planned_imports(Some(&certificate), [source.as_str()])
+            .unwrap()
+            .prepare_compilation(&directory.path().join("planned"), producer)
+            .unwrap();
+        assert_eq!(ordinary.semantic_sha256, request.semantic_sha256);
+        assert_eq!(
+            request.compiler_inputs().unwrap().metadata.entries
+                [&identity("main", &owner.module_name())]
+                .descriptor
+                .id,
+            original_id
+        );
+        let manifest: Value =
+            ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
+                .unwrap();
+        let rows = manifest.as_array().unwrap()[6].as_array().unwrap();
+        let selected = rows
+            .iter()
+            .filter(|row| row.as_array().unwrap()[1] == text(owner.module_name()))
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].as_array().unwrap()[2],
+            text(hex(&certificate.product().owner().module_version.0))
+        );
         let receipt = import_receipt_source_owner(
             directory.path(),
             &request,
@@ -10034,23 +10342,58 @@ mod tests {
             Some(&BTreeSet::from([identity("main", &owner.module_name()),])),
             "original scope records only the actual protected recipe root"
         );
+        let ordinary_receipt = import_receipt_source_owner(
+            &directory.path().join("ordinary-source"),
+            &ordinary,
+            "main",
+            &owner.module_name(),
+            "none",
+            false,
+            &source,
+        );
         let later_error = ordinary
-            .validate_receipt(&receipt, None, &context)
+            .validate_receipt(&ordinary_receipt, None, &context)
             .err()
             .expect("ordinary input lacks protected original permission");
         assert!(matches!(later_error, CompileError::ExtractFailed(detail)
             if detail.contains("exact import witness leaves selected lexical graph: source fixture:Consumer")));
-        let mut wrong_producer = ordinary.clone();
-        wrong_producer.producer_sha256 = [0; 32];
-        assert!(wrong_producer
+        let mut wrong_context = (*context).clone();
+        wrong_context.producer = [0; 32];
+        assert!(ExactCompileContext::new(Arc::new(wrong_context))
             .with_generated_planned_imports(Some(&certificate), [source.as_str()])
             .is_err());
-        let mut absent_original = ordinary;
-        absent_original.context =
-            Arc::new(ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap());
-        assert!(absent_original
+        let absent = Arc::new(ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap());
+        assert!(ExactCompileContext::new(absent)
             .with_generated_planned_imports(Some(&certificate), [source.as_str()])
             .is_err());
+        let without_certificate = ExactCompileContext::new(context.clone())
+            .with_generated_planned_imports(None, [source.as_str()])
+            .unwrap();
+        assert!(without_certificate.protected_scaffold.native.is_empty());
+        let inputs = request.compiler_inputs().unwrap();
+        let selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &inputs.projection,
+                &inputs.metadata,
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+        let published = request
+            .admit_program_support_with_selection(
+                context.clone(),
+                context.artifact_view(),
+                &[],
+                None,
+                &selection,
+            )
+            .unwrap();
+        assert_eq!(published.semantic_sha256(), persistent_semantic);
+        assert!(published.lexical_graph().is_empty());
+        assert_eq!(
+            published.compiler_input_projection(),
+            context.compiler_input_projection()
+        );
+        assert!(published.compiler_original_products().unwrap().is_empty());
 
         // The protected target remains valid; a second source copying both
         // its marker and original import cannot borrow its edge permission.
@@ -10443,126 +10786,6 @@ mod tests {
             matches!(wrong_producer, Err(CompileError::ExtractFailed(reason))
             if reason == "exact declaration context: checked template interface producer differs")
         );
-    }
-
-    #[test]
-    fn generated_scaffold_authority_preserves_target_and_original_owner() {
-        let directory = tempfile::tempdir().unwrap();
-        let (graph, owners) = crate::execution_source::test_graph(directory.path());
-        let inventory = ArtifactInventory::default();
-        let entries = vec![execution_entry(owners[0].clone(), graph)];
-        let context = ExactDeclarationContext {
-            producer: [7; 32],
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
-            template_imports: None,
-            compiler_projection: CompilerInputProjection::from_issued_entries(&entries).unwrap(),
-            inventory: inventory
-                .admit_shared(&inventory.empty_view(), entries)
-                .unwrap(),
-            lexical: vec![],
-        };
-        let authority = GeneratedScaffoldImportAuthority {
-            role: GeneratedScaffoldRole::Native(NativeScaffoldRole::Resume(owners[0].clone())),
-            protected_templates: Arc::from([format!(
-                "module Expr where\n{GENERATED_RESUME_IMPORT}\n"
-            )]),
-        };
-        let target = directory.path().join("Expr.hs");
-        let source = format!("module Expr where\n{GENERATED_RESUME_IMPORT}\n");
-        let permits = |source: &str,
-                       module_source: &Path,
-                       unit: &str,
-                       module: &str,
-                       qualifier: &str,
-                       boot| {
-            authority.permits(
-                &context,
-                source,
-                &target,
-                module_source,
-                unit,
-                module,
-                qualifier,
-                boot,
-            )
-        };
-        assert!(permits(
-            &source,
-            &target,
-            &owners[0].unit,
-            &owners[0].module,
-            "none",
-            false
-        ));
-        assert!(context.lexical_graph().is_empty());
-        assert!(!permits(
-            &source,
-            &directory.path().join("Authored.hs"),
-            &owners[0].unit,
-            &owners[0].module,
-            "none",
-            false
-        ));
-        for (unit, module, qualifier, boot) in [
-            ("foreign", owners[0].module.as_str(), "none", false),
-            (
-                owners[0].unit.as_str(),
-                owners[1].module.as_str(),
-                "none",
-                false,
-            ),
-            (
-                owners[0].unit.as_str(),
-                owners[0].module.as_str(),
-                "this:fixture",
-                false,
-            ),
-            (
-                owners[0].unit.as_str(),
-                owners[0].module.as_str(),
-                "none",
-                true,
-            ),
-        ] {
-            assert!(!permits(&source, &target, unit, module, qualifier, boot));
-        }
-        assert!(permits(
-            &format!("{{-# LANGUAGE GADTs #-}}\n{source}"),
-            &target,
-            &owners[0].unit,
-            &owners[0].module,
-            "none",
-            false
-        ));
-        for changed in [
-            format!("{source}{GENERATED_RESUME_IMPORT}\n"),
-            source.replace(" as TidepoolResume", " as Other"),
-        ] {
-            assert!(!permits(
-                &changed,
-                &target,
-                &owners[0].unit,
-                &owners[0].module,
-                "none",
-                false
-            ));
-        }
-        let mut changed = authority.clone();
-        let GeneratedScaffoldRole::Native(NativeScaffoldRole::Resume(owner)) = &mut changed.role
-        else {
-            panic!("resume scaffold authority must retain its closed role");
-        };
-        owner.module_version = ModuleVersion([99; 32]);
-        assert!(!changed.permits(
-            &context,
-            &source,
-            &target,
-            &target,
-            &owners[0].unit,
-            &owners[0].module,
-            "none",
-            false
-        ));
     }
 
     fn execution_scope_fixture(

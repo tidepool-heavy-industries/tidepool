@@ -1058,15 +1058,7 @@ impl ModuleCandidateOffer {
                     .with_initial_template_interfaces(
                         context.clone(),
                         &specification.template_sources(),
-                    )?
-                    .with_generated_scaffold_imports(
-                        std::iter::once(specification.template_source.as_str()).chain(
-                            specification
-                                .turn_templates
-                                .iter()
-                                .map(|(_, source)| source.as_str()),
-                        ),
-                    ),
+                    )?,
             ),
             checked_cell: Some(specification),
             planned_cell: None,
@@ -1156,15 +1148,7 @@ impl ModuleCandidateOffer {
                     .with_initial_template_interfaces(
                         context.clone(),
                         &specification.template_sources(),
-                    )?
-                    .with_generated_scaffold_imports(
-                        std::iter::once(specification.template_source.as_str()).chain(
-                            specification
-                                .turn_templates
-                                .iter()
-                                .map(|(_, source)| source.as_str()),
-                        ),
-                    ),
+                    )?,
             ),
             checked_cell: Some(specification),
             planned_cell: Some(planned),
@@ -1213,6 +1197,17 @@ impl ModuleCandidateOffer {
         checked_item.validate_include(include)?;
         let mut selected = None;
         let exact = compile_context_with_declarations(compile_context, context.clone())
+            .with_generated_planned_imports(
+                checked_item
+                    .prefix
+                    .planned_declaration_proof()
+                    .map(|proof| &proof.certificate),
+                checked_item
+                    .item
+                    .turn_templates()
+                    .iter()
+                    .map(|(_, source)| source.as_str()),
+            )?
             .prepare_compilation_authorizing(
                 &scratch.join("exact-scope"),
                 producer,
@@ -1253,27 +1248,9 @@ impl ModuleCandidateOffer {
                 exact
                     .with_source_search_context(include)
                     .with_checked_value_imports(checked_item.prefix.import_authority()?)
-                    .with_generated_scaffold_imports(
-                        checked_item
-                            .item
-                            .turn_templates()
-                            .iter()
-                            .map(|(_, source)| source.as_str()),
-                    )
                     .with_initial_template_interfaces(
                         checked_item.item.template_context(),
                         &checked_item.item.template_sources(),
-                    )?
-                    .with_generated_planned_imports(
-                        checked_item
-                            .prefix
-                            .planned_declaration_proof()
-                            .map(|proof| &proof.certificate),
-                        checked_item
-                            .item
-                            .turn_templates()
-                            .iter()
-                            .map(|(_, source)| source.as_str()),
                     )?,
             ),
             checked_cell: None,
@@ -1376,8 +1353,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
             )?
             .with_source_search_context(include)
-            .with_checked_value_imports(values.import_authority())
-            .with_generated_scaffold_imports(templates.iter().map(String::as_str));
+            .with_checked_value_imports(values.import_authority());
         Ok(ActivationPreviewSelection::Ready(Self {
             selected: None,
             producer: producer.to_vec(),
@@ -1491,10 +1467,7 @@ impl ModuleCandidateOffer {
             self.checked_projections.clone(),
             &exact.request_sha256,
             specification,
-            exact.validate_outputs_with_planned(
-                root,
-                planned.as_ref().map(|planned| planned.certificate.as_ref()),
-            )?,
+            exact.validate_outputs_with_planned(root, planned.as_ref())?,
             &self.include,
             planned,
             self.checked_values.clone().ok_or_else(|| {
@@ -1507,6 +1480,13 @@ impl ModuleCandidateOffer {
 
     /// Admit every prepared segment and target before issuing execution data.
     /// The runtime can consume this immutable result without compiling a prefix.
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "products.cell_program",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub fn admit_cell_program(
         &self,
         root: &Path,
@@ -1661,6 +1641,11 @@ impl ModuleCandidateOffer {
                             .collect(),
                     )?,
                 );
+                program_request = program_request.in_program_context_with_private_input(
+                    &root.join("program-inputs"),
+                    context.clone(),
+                    &original.compiler_input,
+                )?;
                 declarations.insert(index, original);
                 index += 1;
             } else {
@@ -1745,6 +1730,7 @@ impl ModuleCandidateOffer {
         };
         let mut items = Vec::with_capacity(cell.item_count());
         for index in 0..cell.item_count() {
+            let _item_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_item", index, inclusive = true).entered();
             let item = cell.item(index)?;
             let completed = prefix.as_ref().expect("nonempty program prefix");
             if item.kind() == CheckedItemKind::Declaration {
@@ -1915,7 +1901,22 @@ impl ModuleCandidateOffer {
                 .artifact_view,
             &generated,
         )?;
-        request.admit_program_segment_support_with_selection(
+        let sealed = output.products.as_ref().expect("program output was sealed");
+        let private = crate::declaration_context::OriginalCompilerInputs::from_selection(
+            &sealed.source_selection,
+            &sealed.artifact_view,
+        )?
+        .for_program_continuation(
+            &support,
+            source_segment.admissions(),
+            &output.source,
+        )?;
+        let mut continued = request.in_program_context_with_private_input(
+            &output.directory.join("private-compiler-inputs"),
+            context.clone(),
+            &private,
+        )?;
+        let published = continued.admit_program_segment_support_with_selection(
             context,
             &support,
             source_segment,
@@ -1925,7 +1926,9 @@ impl ModuleCandidateOffer {
                 .as_ref()
                 .expect("program output was sealed")
                 .source_selection,
-        )
+        )?;
+        *request = continued;
+        Ok(published)
     }
 
     fn admit_program_value(
@@ -2090,6 +2093,10 @@ impl ModuleCandidateOffer {
             interface_fingerprint,
             certificate: Arc::new(certificate),
             receipt_digest: Sha256::digest(&bytes).into(),
+            compiler_input: crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &sealed.source_selection,
+                &sealed.artifact_view,
+            )?,
         }))
     }
 
@@ -2457,6 +2464,13 @@ fn seal_turn_outputs_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    target = "exomonad_harness::timing",
+    name = "products.seal",
+    level = "debug",
+    skip_all,
+    fields(inclusive = true)
+)]
 fn seal_turn_outputs_with_validation(
     offer: &ModuleCandidateOffer,
     output_dir: &Path,
@@ -2647,8 +2661,8 @@ fn seal_turn_outputs_with_validation(
             "turn target product receipt count".into(),
         ));
     }
-    let package_closure =
-        merge_package_closure_with_validation(&receipt.packages, offer.exact.as_ref(), validation)?;
+    let package_catalog =
+        package_availability_with_validation(&receipt.packages, &certified, validation)?;
     enum TargetDemand {
         Checked {
             entry: crate::checked_cell::CheckedTypedEntry,
@@ -2682,7 +2696,7 @@ fn seal_turn_outputs_with_validation(
                 &certified.recovery_products,
                 &certified.groups,
                 &certified.source_selection,
-                &package_closure,
+                &package_catalog.interfaces,
                 validation,
             )
             .map_err(compiler_evidence_failure)?;
@@ -2695,7 +2709,7 @@ fn seal_turn_outputs_with_validation(
                 &certified.recovery_products,
                 &certified.groups,
                 &certified.source_selection,
-                &package_closure,
+                &package_catalog.interfaces,
                 validation,
             )
             .map_err(compiler_evidence_failure)?,
@@ -2709,6 +2723,11 @@ fn seal_turn_outputs_with_validation(
             crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(imports)
         }
     };
+    let compiler_inputs = offer
+        .exact
+        .as_ref()
+        .map(|request| request.compiler_inputs())
+        .transpose()?;
     let artifact_view =
         crate::declaration_context::certified_product_artifact_view_with_validation(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -2718,14 +2737,10 @@ fn seal_turn_outputs_with_validation(
             &certified.recovery_products,
             &certified.module_interfaces,
             &certified.value_interfaces,
-            offer.exact.as_ref().map(|request| request.context.as_ref()),
+            compiler_inputs.as_ref().map(|input| &input.artifacts),
             demand,
             validation,
         )?;
-    let typed_entry = match target_demand {
-        TargetDemand::Checked { entry, .. } => Some(entry),
-        TargetDemand::Ordinary(_) => None,
-    };
     certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
         &artifact_view,
         &certified.groups,
@@ -2735,6 +2750,16 @@ fn seal_turn_outputs_with_validation(
             .map_or(&[], |request| request.groups.as_ref()),
         validation,
     )?;
+    let target_imports = match &target_demand {
+        TargetDemand::Checked { imports, .. } | TargetDemand::Ordinary(imports) => {
+            imports.as_slice()
+        }
+    };
+    let package_closure = package_catalog.select(&certified.groups, target_imports)?;
+    let typed_entry = match target_demand {
+        TargetDemand::Checked { entry, .. } => Some(entry),
+        TargetDemand::Ordinary(_) => None,
+    };
     let pending_imports = certified_products::certify_target_owners_with_validation(
         prepared,
         accepted,
@@ -2760,6 +2785,7 @@ fn seal_turn_outputs_with_validation(
         0,
         receipt.targets.len(),
     );
+    let post_target_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.post_target", inclusive = true).entered();
     let certified_groups: Arc<[_]> = certified.groups.into();
     let original_compile_input =
         if let Some((table, sites)) = identity_metadata.filter(|_| offer.exact.is_none()) {
@@ -2792,12 +2818,20 @@ fn seal_turn_outputs_with_validation(
         } else {
             None
         };
+    let original_execution_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.original_execution", inclusive = true).entered();
     let original_execution = match exact.as_ref() {
-        Some(admission) => Some(admission.original_execution_context(&artifact_view)?),
+        Some(admission) => Some(admission.original_execution_context(
+            &crate::declaration_context::OriginalCompilerInputs::from_selection(
+                &certified.source_selection,
+                &artifact_view,
+            )?,
+        )?),
         None => original_compile_input
             .as_ref()
             .map(|proof| proof.issued_original_execution()),
     };
+    drop(original_execution_span);
+    let checked_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_proof", inclusive = true).entered();
     let checked = if let Some(checked) = &offer.checked {
         let (context, lexical) = checked_output_context(
             offer,
@@ -2849,6 +2883,9 @@ fn seal_turn_outputs_with_validation(
     } else {
         None
     };
+    drop(checked_span);
+    drop(post_target_span);
+    let _publication_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.publication", inclusive = true).entered();
     if publication == OriginalOutputPublication::Transaction
         && offer
             .exact
@@ -2954,30 +2991,93 @@ fn checked_output_context(
     Ok((context, request.program_source_lexical().to_vec()))
 }
 
-fn merge_package_closure_with_validation(
-    packages: &BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
-    exact: Option<&crate::declaration_context::ExactCompilationRequest>,
-    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-) -> Result<BTreeMap<(String, String), certified_products::PackageInterfaceWitness>, CompileError> {
-    let mut selected = packages.clone();
-    if let Some(request) = exact {
-        let inherited = certified_products::inherited_package_witnesses_with_validation(
-            &request.context.recovery_products(),
-            validation,
-        )
-        .map_err(compiler_evidence_failure)?;
-        for (owner, witness) in inherited {
-            if selected
-                .insert(owner, witness.clone())
-                .is_some_and(|old| old != witness)
+struct PackageInterfaceCatalog<'a> {
+    current: &'a BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
+    interfaces: BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
+}
+
+impl PackageInterfaceCatalog<'_> {
+    /// Availability supports owner admission; only authenticated target imports
+    /// and selected native imports transfer inherited package authority.
+    fn select(
+        &self,
+        groups: &[certified_products::PendingCertifiedGroup],
+        target_imports: &[certified_products::PendingImportOwner],
+    ) -> Result<BTreeMap<(String, String), certified_products::PackageInterfaceWitness>, CompileError>
+    {
+        let mut demanded = BTreeMap::new();
+        for import in groups
+            .iter()
+            .flat_map(|group| group.imports())
+            .chain(target_imports)
+        {
+            let (unit, module, digest) = match import {
+                certified_products::PendingImportOwner::Package {
+                    unit,
+                    module,
+                    interface_digest,
+                    ..
+                }
+                | certified_products::PendingImportOwner::RetainedPackage {
+                    unit,
+                    module,
+                    interface_digest,
+                    ..
+                } => (unit, module, interface_digest),
+                _ => continue,
+            };
+            let owner = (unit.clone(), module.clone());
+            if demanded
+                .insert(owner, *digest)
+                .is_some_and(|old| old != *digest)
             {
                 return Err(CompileError::ExtractFailed(
-                    "exact inherited package selection differs from current target".into(),
+                    "target package demand has conflicting interface digests".into(),
                 ));
             }
         }
+        let mut selected = self.current.clone();
+        for (owner, digest) in demanded {
+            let witness = self
+                .interfaces
+                .get(&owner)
+                .filter(|witness| witness.sha256 == digest)
+                .ok_or_else(|| {
+                    CompileError::ExtractFailed(
+                        "target package demand lacks matching available interface".into(),
+                    )
+                })?;
+            selected.insert(owner, witness.clone());
+        }
+        Ok(selected)
     }
-    Ok(selected)
+}
+
+fn package_availability_with_validation<'a>(
+    packages: &'a BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
+    certified: &certified_products::CertifiedProducts,
+    validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+) -> Result<PackageInterfaceCatalog<'a>, CompileError> {
+    let mut selected = packages.clone();
+    let inherited = certified_products::inherited_package_witnesses_with_validation(
+        &certified.recovery_products,
+        validation,
+    )
+    .map_err(compiler_evidence_failure)?;
+    for (owner, witness) in inherited {
+        if selected
+            .insert(owner, witness.clone())
+            .is_some_and(|old| old != witness)
+        {
+            return Err(CompileError::ExtractFailed(
+                "exact inherited package selection differs from current target".into(),
+            ));
+        }
+    }
+    Ok(PackageInterfaceCatalog {
+        current: packages,
+        interfaces: selected,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4032,11 +4132,8 @@ fn compile_invocation_inner(
             ));
         }
         let target_admission_start = Instant::now();
-        let package_closure = merge_package_closure_with_validation(
-            &receipt.packages,
-            exact_request.as_ref(),
-            &mut validation,
-        )?;
+        let package_catalog =
+            package_availability_with_validation(&receipt.packages, &certified, &mut validation)?;
         let mut target_imports = Vec::new();
         for (name, target) in &artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
@@ -4050,13 +4147,17 @@ fn compile_invocation_inner(
                         &certified.recovery_products,
                         &certified.groups,
                         &certified.source_selection,
-                        &package_closure,
+                        &package_catalog.interfaces,
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?,
                 );
             }
         }
+        let compiler_inputs = exact_request
+            .as_ref()
+            .map(|request| request.compiler_inputs())
+            .transpose()?;
         artifacts.artifact_view =
             crate::declaration_context::certified_product_artifact_view_with_validation(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -4066,9 +4167,7 @@ fn compile_invocation_inner(
                 &certified.recovery_products,
                 &certified.module_interfaces,
                 &certified.value_interfaces,
-                exact_request
-                    .as_ref()
-                    .map(|request| request.context.as_ref()),
+                compiler_inputs.as_ref().map(|input| &input.artifacts),
                 crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(
                     &target_imports,
                 ),
@@ -4083,6 +4182,7 @@ fn compile_invocation_inner(
                     .map_or(&[], |request| request.groups.as_ref()),
                 &mut validation,
             )?;
+        let package_closure = package_catalog.select(&certified.groups, &target_imports)?;
         for (name, target) in &mut artifacts.targets {
             let accepted = receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())
@@ -5112,6 +5212,10 @@ fn store_memo(
     }
     cache::artifacts_store(key, &artifacts, evidence, source);
 }
+
+#[cfg(test)]
+#[path = "artifacts/tests/private_package_input_history.rs"]
+mod private_package_input_history;
 
 #[cfg(test)]
 mod compiler_sidecar_tests {
@@ -6725,7 +6829,7 @@ mod module_product_tests {
                     request: &request,
                     source: admission,
                 }
-                .original_execution_context(&compiled.artifact_view)
+                .original_execution_fixture(&compiled.artifact_view)
                 .unwrap();
                 let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
                 assert!(

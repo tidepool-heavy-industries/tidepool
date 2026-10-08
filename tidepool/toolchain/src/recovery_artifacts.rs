@@ -624,6 +624,8 @@ fn recovery_validation_error(
         | CertificationError::UnsupportedVersion { .. }
         | CertificationError::Receipt(_)
         | CertificationError::Mismatch(_)
+        | CertificationError::DuplicateSourceBinder(_)
+        | CertificationError::OriginalGroupConflict(_)
         | CertificationError::FinalizedInterfaceRequirement { .. }
         | CertificationError::OriginalInterfaceClosure { .. }
         | CertificationError::StaleEvidence

@@ -720,8 +720,8 @@ pub(crate) fn certify_same_offer_planned_declaration(
     };
     // Keep the original graph, its admitted baseline, and native originals
     // promoted from that request's retained canonical Core. Promotions have no
-    // fresh source row or prior native owner; their issuer's packet retains
-    // the exact newly certified product.
+    // fresh source row or selected native offer; the same native original may
+    // already be in full custody. The issuer retains the exact proved product.
     let products = sealed
         .recovery_products
         .iter()
