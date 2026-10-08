@@ -240,6 +240,60 @@ class IsolatedLibtestTests(unittest.TestCase):
                     self.assertEqual(record['compiler_cleanup_status'], 'unknown')
                     self.assertIn('owned compiler cleanup remains unknown', errors)
 
+    def test_compiler_cleanup_discovery_bounds_and_unsafe_paths_are_not_confirmed_subsets(self):
+        def confirmed_owner(path):
+            path.mkdir(parents=True)
+            (path / 'owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+            (path / 'lifecycle.json').write_text('{}')
+        for kind in ('complete', 'root_limit', 'control_limit', 'child_limit',
+                     'unsafe_control', 'unsafe_child', 'unsafe_compiler_root'):
+            with self.subTest(kind=kind):
+                root = Path(self.tmp.name) / f'owner-discovery-{kind}'
+                record = {}
+                def run(args, timeout, environment=None):
+                    if kind in ('complete', 'root_limit'):
+                        for index in range(8 if kind == 'complete' else 9):
+                            confirmed_owner(root / f'owned-compiler-control-{index}/compiler')
+                    elif kind == 'control_limit':
+                        confirmed_owner(root / 'owned-compiler-control-0/compiler')
+                        for index in range(1, 65):
+                            (root / f'owned-compiler-control-{index}').mkdir()
+                    elif kind == 'child_limit':
+                        control = root / 'owned-compiler-control-0'
+                        confirmed_owner(control / 'compiler')
+                        for index in range(32):
+                            (control / f'empty-{index}').mkdir()
+                    else:
+                        foreign = Path(self.tmp.name) / f'foreign-{kind}'
+                        confirmed_owner(foreign / 'compiler')
+                        if kind == 'unsafe_control':
+                            (root / 'owned-compiler-control-link').symlink_to(foreign, target_is_directory=True)
+                        elif kind == 'unsafe_child':
+                            control = root / 'owned-compiler-control-0'
+                            control.mkdir()
+                            (control / 'compiler').symlink_to(foreign / 'compiler', target_is_directory=True)
+                        else:
+                            (root / 'compiler').symlink_to(foreign / 'compiler', target_is_directory=True)
+                    return completed_process(args, 0,
+                        'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                with patch.object(runner, 'execute', side_effect=run):
+                    passed, _, errors = runner.run_one(str(self.binary), 'suite::works', False,
+                        10, record, artifact_root=root)
+                self.assertEqual(passed, kind == 'complete')
+                self.assertTrue(root.exists())
+                self.assertEqual(record['executed_test_count'], 1)
+                self.assertEqual(record['process_cleanup_status'], 'confirmed')
+                self.assertEqual(record['compiler_cleanup_observation_complete'], kind == 'complete')
+                self.assertEqual(record['compiler_cleanup_status'], 'confirmed' if kind == 'complete' else 'unknown')
+                discovery = record['diagnostic_summaries']['owned_compiler_discovery']
+                self.assertEqual(discovery['complete'], kind == 'complete')
+                if kind == 'complete':
+                    self.assertEqual(len(record['diagnostic_summaries']['owned_compiler_roots']), 8)
+                    self.assertFalse(record['diagnostic_evidence_complete'], 'timing absence is independent')
+                else:
+                    self.assertIn(kind, [issue['kind'] for issue in discovery['issues']])
+                    self.assertIn('owned compiler cleanup observation is incomplete', errors)
+
     def test_invalid_utf8_native_output_keeps_counts_and_cleanup_evidence(self):
         root = Path(self.tmp.name) / 'invalid-output'
         self.binary.write_text('#!' + sys.executable + '\n' +

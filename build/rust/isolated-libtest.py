@@ -520,7 +520,11 @@ def diagnostic_summaries(artifact_root):
             raise ValueError('diagnostic JSON is not an object')
         return value
 
-    summaries = {'transactions': [], 'issues': []}
+    discovery = {'complete': True, 'issues': []}
+    summaries = {'transactions': [], 'issues': [], 'owned_compiler_discovery': discovery}
+    def incomplete_discovery(kind, path):
+        discovery['complete'] = False
+        discovery['issues'].append({'kind': kind, 'path': str(path)})
     transaction_root = artifact_root / 'compiler-transactions'
     if transaction_root.is_symlink():
         summaries['issues'].append('compiler transaction directory must not be a symlink')
@@ -666,23 +670,30 @@ def diagnostic_summaries(artifact_root):
 
     roots = []
     compiler = artifact_root / 'compiler'
-    if transactions or compiler.exists():
+    if transactions or compiler.exists() or compiler.is_symlink():
         roots.append((compiler, 'case_compiler'))
     # The native lifecycle control creates one immediate test-data directory.
     # Only its immediate marker-bearing compiler children are considered; no
     # source trees or arbitrary recursive paths become compiler roots.
     for index, control in enumerate(artifact_root.glob('owned-compiler-control-*')):
         if index >= 64:
+            incomplete_discovery('control_limit', control)
             summaries['issues'].append('owned compiler control directory bound exceeded')
             break
         if control.is_symlink() or not control.is_dir():
+            incomplete_discovery('unsafe_control', control)
             summaries['issues'].append(f'unsafe owned compiler control directory: {control}')
             continue
         for child_index, candidate in enumerate(control.iterdir()):
             if child_index >= 32:
+                incomplete_discovery('child_limit', control)
                 summaries['issues'].append(f'owned compiler control child bound exceeded: {control}')
                 break
-            if candidate.is_symlink() or not candidate.is_dir():
+            if candidate.is_symlink():
+                incomplete_discovery('unsafe_child', candidate)
+                summaries['issues'].append(f'unsafe owned compiler control child: {candidate}')
+                continue
+            if not candidate.is_dir():
                 continue
             markers = [(candidate / filename).exists() or (candidate / filename).is_symlink() for filename in
                        ('owned-compiler-outcome.json', 'lifecycle.json')]
@@ -692,10 +703,12 @@ def diagnostic_summaries(artifact_root):
                 if len(roots) < 8:
                     roots.append((candidate, 'native_test_control'))
                 else:
+                    incomplete_discovery('root_limit', candidate)
                     summaries['issues'].append('owned compiler diagnostic root bound exceeded')
     summaries['owned_compiler_roots'] = []
     for compiler, role in roots:
         if compiler.is_symlink():
+            incomplete_discovery('unsafe_compiler_root', compiler)
             summaries['issues'].append(f'unsafe compiler diagnostic directory: {compiler}')
             continue
         result = summarize_compiler(compiler)
@@ -853,6 +866,13 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
         if status is not None and status != 'confirmed':
             cleanup_complete = False
             stderr += f"\nowned compiler cleanup remains {status}: {root['path']}"
+    record['compiler_cleanup_observation_complete'] = (
+        summaries.get('owned_compiler_discovery', {}).get('complete') is True
+        if artifact_root is not None else None)
+    if record['compiler_cleanup_observation_complete'] is False:
+        record['compiler_cleanup_status'] = 'unknown'
+        cleanup_complete = False
+        stderr += '\nowned compiler cleanup observation is incomplete'
     evidence_complete = (not summaries.get('issues')
                          and not summaries.get('transactions_truncated')
                          and summaries.get('physical_compiler_timing', {}).get('complete', True)
@@ -870,7 +890,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     if record is None:
         record = {}
     record.update(schema=1, process_cleanup_status='not_started', hosted_cleanup_status='not_observed',
-                  compiler_cleanup_status='not_observed', diagnostic_evidence_complete=None)
+                  compiler_cleanup_status='not_observed', compiler_cleanup_observation_complete=None,
+                  diagnostic_evidence_complete=None)
     record['process_cleanup_scope'] = 'delegated_service' if service_slice is not None else 'process_group'
     args = [binary, '--exact', name, '--nocapture']
     if ignored:
