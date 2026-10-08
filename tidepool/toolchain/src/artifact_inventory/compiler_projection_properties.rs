@@ -304,9 +304,37 @@ impl Catalog {
                 original_ordinal: group.2,
             })
             .collect::<Vec<_>>();
-        let target = view.target_native_selection(&input).unwrap();
+        let imports = roots
+            .iter()
+            .map(|group| {
+                let ArtifactPayload::Original(product) = &self.original(group.0, group.1).payload
+                else {
+                    unreachable!("fixture original")
+                };
+                PendingImportOwner::Source {
+                    owner: product.owner().clone(),
+                    original_ordinal: group.2,
+                    binder: binder(group.0, group.2),
+                }
+            })
+            .collect::<Vec<_>>();
+        let inventory = ArtifactInventory::default();
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                view.entries(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let target = inventory
+            .admit_shared_with_demand(
+                &available,
+                view.entries(),
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+            )
+            .unwrap();
         assert_eq!(
-            *target.groups(),
+            target.selected_native_groups(),
             self.closure(roots.iter().copied())
                 .into_iter()
                 .map(|group| self.key(group))
@@ -373,18 +401,21 @@ fn exact_original_variants_are_custody_not_compiler_namespace_conflicts() {
     assert_eq!(a.merge(&a).unwrap(), a);
     catalog.assert_projection(&view, &a.interface_only(), [None; MODULES]);
     catalog.assert_target(&view, &[(0, 1, 11)]);
-    assert!(view
-        .target_native_selection(&[])
-        .unwrap()
-        .groups()
-        .is_empty());
+    let inventory = ArtifactInventory::default();
+    let empty = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            view.entries(),
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    assert!(empty.selected_native_groups().is_empty());
+    let whole = view
+        .select_roots(vec![catalog.original(0, 0).descriptor.id])
+        .unwrap();
     assert_eq!(
-        view.target_native_selection(&[NativeRequirementRoot::AllGroups(
-            catalog.original(0, 0).descriptor.id
-        )])
-        .unwrap()
-        .groups(),
-        &catalog
+        whole.selected_native_groups(),
+        catalog
             .closure(ORDINALS.map(|ordinal| (0, 0, ordinal)))
             .into_iter()
             .map(|group| catalog.key(group))
@@ -446,13 +477,13 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
     let narrowed = selected.within_view(&type_view);
     catalog.assert_projection(&type_view, &narrowed, [None; MODULES]);
     assert!(type_view
-        .target_native_selection(&[NativeRequirementRoot::Group {
+        .native_binding_requirements_from_roots(&[NativeRequirementRoot::Group {
             artifact: catalog.original(0, 0).descriptor.id,
             original_ordinal: 3
         }])
         .is_err());
     assert!(view
-        .target_native_selection(&[NativeRequirementRoot::Group {
+        .native_binding_requirements_from_roots(&[NativeRequirementRoot::Group {
             artifact: catalog.original(0, 0).descriptor.id,
             original_ordinal: 99
         }])
@@ -484,7 +515,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             .validate(&island)
             .is_err());
         assert!(island
-            .target_native_selection(&[NativeRequirementRoot::Group {
+            .native_binding_requirements_from_roots(&[NativeRequirementRoot::Group {
                 artifact: catalog.original(0, 1 - version).descriptor.id,
                 original_ordinal: 29
             }])
@@ -608,15 +639,18 @@ fn all_groups_distinguishes_native_zero_groups_from_non_native_custody() {
         .admit_shared(&inventory.empty_view(), vec![Arc::clone(&original)])
         .unwrap();
     assert!(
-        view.target_native_selection(&[NativeRequirementRoot::AllGroups(original.descriptor.id)])
-            .unwrap()
-            .groups()
-            .is_empty(),
+        view.native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(
+            original.descriptor.id
+        )])
+        .unwrap()
+        .is_empty(),
         "genuine zero-group native proof is a known empty set"
     );
     assert!(
-        view.target_native_selection(&[NativeRequirementRoot::AllGroups(canonical.descriptor.id)])
-            .is_err(),
+        view.native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(
+            canonical.descriptor.id
+        )])
+        .is_err(),
         "type custody is not native proof"
     );
     let foreign = ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
@@ -626,7 +660,9 @@ fn all_groups_distinguishes_native_zero_groups_from_non_native_custody() {
         BTreeMap::new(),
     ));
     assert!(view
-        .target_native_selection(&[NativeRequirementRoot::AllGroups(foreign.descriptor.id)])
+        .native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(
+            foreign.descriptor.id
+        )])
         .is_err());
 }
 

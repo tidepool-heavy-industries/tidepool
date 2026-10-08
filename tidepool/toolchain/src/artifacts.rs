@@ -2323,7 +2323,6 @@ pub struct SealedTurnProducts {
     original_execution: Option<Arc<crate::declaration_context::ExactDeclarationContext>>,
     pub artifact_view: crate::artifact_inventory::ArtifactView,
     pub(crate) source_selection: certified_products::CertifiedSourceSelection,
-    pub target_native_selection: crate::artifact_inventory::TargetNativeSelection,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     pub original_compile_input: Option<Arc<SealedOriginalCompileInput>>,
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
@@ -2828,8 +2827,6 @@ fn seal_turn_outputs_with_validation(
         validation,
     )
     .map_err(compiler_evidence_failure)?;
-    let target_native_selection =
-        artifact_view.certified_target_native_selection(typed_entry.as_ref(), &pending_imports)?;
     let package_interfaces = certified_products::certify_target_package_interfaces_with_validation(
         prepared,
         &package_closure,
@@ -2990,7 +2987,6 @@ fn seal_turn_outputs_with_validation(
         recovery_products: certified.recovery_products,
         retained_core_products: certified.retained_core_products,
         source_selection: certified.source_selection,
-        target_native_selection,
         package_interfaces,
     }))
 }
