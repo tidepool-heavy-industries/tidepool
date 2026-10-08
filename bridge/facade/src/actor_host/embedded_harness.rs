@@ -1882,7 +1882,7 @@ mod tests {
                 vec![Item(json!({
                     "type":"custom_tool_call", "call_id":"raw-cell-2",
                     "name":"haskell",
-                    "input":include_str!("embedded_checkpoint_capture.hs")
+                    "input":tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_checkpoint_capture.hs")
                 }))]
             } else {
                 self.completed.notify_one();

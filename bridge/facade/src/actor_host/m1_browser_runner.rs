@@ -591,7 +591,9 @@ pub(super) async fn production_browser_journey() {
         std::fs::create_dir_all(&authored).unwrap();
         std::fs::write(
             authored.join("AgentSpec.hs"),
-            include_str!("fixtures/browser_agent_spec.hs"),
+            tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs",
+            ),
         )
         .unwrap();
         crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {

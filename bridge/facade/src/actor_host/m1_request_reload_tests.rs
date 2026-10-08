@@ -13,7 +13,11 @@ use tokio::sync::oneshot;
 
 const OLD_CALL: &str = "reload-old-issued-call";
 const NEW_CALL: &str = "reload-new-issued-call";
-const SPEC: &str = include_str!("fixtures/request_reload_agent_spec.hs");
+fn request_reload_spec() -> String {
+    tidepool_testing::fixture_source(
+        "bridge/facade/src/actor_host/fixtures/request_reload_agent_spec.hs",
+    )
+}
 
 struct IssuedRequest {
     id: Option<RequestId>,
@@ -264,7 +268,7 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     let host = HostedTestRuntime::start_configured(&settings, &transport, |config| {
         let authored = config.workspace.join(".exomonad");
         std::fs::create_dir_all(&authored).unwrap();
-        std::fs::write(authored.join("AgentSpec.hs"), SPEC).unwrap();
+        std::fs::write(authored.join("AgentSpec.hs"), request_reload_spec()).unwrap();
         crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
             project.haskell.source_roots = vec![".".into()];
             project.haskell.spec = Some("AgentSpec.agentSpec".into());
@@ -318,7 +322,7 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     // The transport already owns the request. Reload before its call is emitted.
     std::fs::write(
         host.context.config.workspace.join(".exomonad/AgentSpec.hs"),
-        SPEC.replace("offset = 2", "offset = 3"),
+        request_reload_spec().replace("offset = 2", "offset = 3"),
     )
     .unwrap();
     // The issued provider request stays held while its exact actor reloads.

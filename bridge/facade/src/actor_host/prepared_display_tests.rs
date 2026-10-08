@@ -8,8 +8,18 @@ use tidepool_runtime::session::ModuleEnv;
 async fn prepared_first_display_returns_admission_before_consumer_and_survives_failure() {
     tidepool_testing::eval_harness::require_extract();
     for (source, fails) in [
-        (include_str!("prepared_display_success.hs"), false),
-        (include_str!("prepared_display_failure.hs"), true),
+        (
+            tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/prepared_display_success.hs",
+            ),
+            false,
+        ),
+        (
+            tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/prepared_display_failure.hs",
+            ),
+            true,
+        ),
     ] {
         let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
         let run_root = tempfile::tempdir().unwrap();

@@ -244,9 +244,9 @@ impl CapturedHostTransport {
                 1 => vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"captured-scope-setup", "name":"haskell",
                     "input":match self.scenario {
-                        HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => format!("{}\n{}\n{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs"), include_str!("embedded_shutdown_command_refusal.hs"), include_str!("embedded_shutdown_gate_setup.hs")),
-                        HostedScenario::LocalActorStartup | HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::FailureAfterReplies) => format!("{}\n{}\ndisplay True", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs")),
-                        HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => format!("{}\n{}\n{}", include_str!("embedded_checkpoint_scope_setup.hs"), include_str!("embedded_captured_group_setup.hs"), include_str!("embedded_nominal_join_setup.hs")),
+                        HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => format!("{}\n{}\n{}\n{}\ndisplay True", tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_checkpoint_scope_setup.hs"), tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_setup.hs"), tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_shutdown_command_refusal.hs"), tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_shutdown_gate_setup.hs")),
+                        HostedScenario::LocalActorStartup | HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked | CapturedScenario::FailureAfterReplies) => format!("{}\n{}\ndisplay True", tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_checkpoint_scope_setup.hs"), tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_setup.hs")),
+                        HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => format!("{}\n{}\n{}", tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_checkpoint_scope_setup.hs"), tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_setup.hs"), tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_setup.hs")),
                     }
                 }))],
                 2 => {
@@ -264,16 +264,16 @@ impl CapturedHostTransport {
                                 "seed <- R.call (readSeed (R.client seedStore)) ()\ngroup <- R.call (readGroup (R.client groupStore)) ()\ndisplay (case (seed, group) of (Nothing, Nothing) -> True; _ -> False)"
                             }
                             HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked) => {
-                                include_str!("embedded_captured_unfold_and_await.hs")
+                                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_and_await.hs")
                             }
                             HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => {
-                                include_str!("embedded_shutdown_parent_join.hs")
+                                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_shutdown_parent_join.hs")
                             }
                             HostedScenario::Captured(CapturedScenario::FailureAfterReplies) => {
-                                include_str!("embedded_captured_unfold_await_then_fail.hs")
+                                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_await_then_fail.hs")
                             }
                             HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => {
-                                include_str!("embedded_nominal_join_a.hs")
+                                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_a.hs")
                             }
                         },
                         if self.scenario == HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) {
@@ -387,9 +387,9 @@ impl CapturedHostTransport {
                         "type":"custom_tool_call", "call_id":format!("captured-child-{path}"),
                         "name":"haskell", "input":match self.scenario {
                             HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) if ordinal == 0 => "display (error \"HOSTED_INTENTIONAL_CHILD_FAILURE\" :: Int)",
-                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => include_str!("embedded_shutdown_parked_child.hs"),
+                            HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_shutdown_parked_child.hs"),
                             HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin) => "respond (m2MakeReply sessionInput)",
-                            HostedScenario::Captured(CapturedScenario::FailureAfterReplies) if ordinal >= 2 => include_str!("embedded_captured_child_reuse_nominal.hs"),
+                            HostedScenario::Captured(CapturedScenario::FailureAfterReplies) if ordinal >= 2 => tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs"),
                             _ => "respond capturedGetter",
                         }
                     }))]
@@ -1506,7 +1506,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     &campaign,
                     &transport,
                     "captured-interrupted-group-cleanup",
-                    include_str!("embedded_captured_group_cleanup.hs"),
+                    tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs"),
                 )
                 .await
                 .unwrap();
@@ -1524,7 +1524,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     &campaign,
                     &transport,
                     "nominal-join-root-b",
-                    include_str!("embedded_nominal_join_b.hs"),
+                    tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_b.hs"),
                 )
                 .await
                 .expect("same-root B publishes while A remains parked");
@@ -1606,7 +1606,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         &campaign,
                         &transport,
                         "nominal-join-final-read",
-                        include_str!("embedded_nominal_join_final.hs"),
+                        tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_nominal_join_final.hs"),
                     )
                     .await
                     .expect("final provider tool reads both A and B public declarations");
@@ -1705,7 +1705,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         &campaign,
                         &transport,
                         REUSE_CALL,
-                        include_str!("embedded_captured_unfold_reuse_after_failure.hs"),
+                        tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_reuse_after_failure.hs"),
                     )
                     .await
                     .expect("the failed cell's transferred capture admits and joins a third child");
@@ -1763,7 +1763,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     &campaign,
                     &transport,
                     "captured-active-cleanup-refusal",
-                    include_str!("embedded_captured_group_cleanup.hs"),
+                    tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs"),
                 )
                 .await
                 .unwrap();
@@ -1802,7 +1802,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 &campaign,
                 &transport,
                 "captured-group-cleanup",
-                include_str!("embedded_captured_group_cleanup.hs"),
+                tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs"),
             )
             .await
             .expect("known original group cleanup settles");
@@ -2126,7 +2126,9 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
             std::fs::create_dir_all(&authored).unwrap();
             std::fs::write(
                 authored.join("AgentSpec.hs"),
-                include_str!("embedded_bad_final_agent_spec.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/embedded_bad_final_agent_spec.hs",
+                ),
             )
             .unwrap();
             crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
@@ -2192,9 +2194,11 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 0,
                 "ordinary user input must not publish an actor notification"
             );
-            let source = include_str!("embedded_bad_final_cell.hs")
-                .replace("TARGET_ID", &actor.id.0.to_string())
-                .replace("TARGET_INCARNATION", &actor.incarnation.0.to_string());
+            let source = tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/embedded_bad_final_cell.hs",
+            )
+            .replace("TARGET_ID", &actor.id.0.to_string())
+            .replace("TARGET_INCARNATION", &actor.incarnation.0.to_string());
 
             // Prove this installed tool, effect route and target before a negative check.
             let control_source = source

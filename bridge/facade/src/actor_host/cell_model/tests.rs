@@ -84,7 +84,7 @@ fn configure(config: &mut ActorHostConfig) {
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
         authored.join("ModelFixture.hs"),
-        include_str!("../fixtures/cell_model.hs"),
+        tidepool_testing::fixture_source("bridge/facade/src/actor_host/fixtures/cell_model.hs"),
     )
     .unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {

@@ -227,13 +227,17 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         std::fs::create_dir_all(&authored).unwrap();
         std::fs::write(
             authored.join("QuotedProvider.hs"),
-            include_str!("../../../../exomonad/actor/src/fixtures/quoted-agent-provider.hs"),
+            tidepool_testing::fixture_source(
+                "exomonad/actor/src/fixtures/quoted-agent-provider.hs",
+            ),
         )
         .unwrap();
         std::fs::write(
             authored.join("PreparedRuntimeSpec.hs"),
-            include_str!("prepared_runtime_spec.hs")
-                .replace("{quotation-input}", quotation_input.to_str().unwrap()),
+            tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/prepared_runtime_spec.hs",
+            )
+            .replace("{quotation-input}", quotation_input.to_str().unwrap()),
         )
         .unwrap();
         crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
@@ -293,7 +297,7 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         host.input("Execute prepared child native probes.").await.unwrap();
         let root = harness::model::AgentPath("/root".into());
         let mut pending = VecDeque::new();
-        let children_source = include_str!("prepared_runtime_children.hs")
+        let children_source = tidepool_testing::fixture_source("bridge/facade/src/actor_host/prepared_runtime_children.hs")
             .replace("{prepared-child-count}", &expected_children.to_string());
         next_hosted_script_round(&mut requests, &mut pending, &root).await
             .call("prepared-children", &children_source);

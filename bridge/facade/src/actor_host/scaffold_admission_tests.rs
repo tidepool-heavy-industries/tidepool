@@ -46,7 +46,12 @@ async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {
     round.call("scaffold-reflect", "import qualified Tidepool.Effects.Core as Core\nreflected <- Core.reflect 1\ndisplay (case reflected of { Right _ -> True; _ -> False })");
     let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     round.assert_value("scaffold-reflect", "True");
-    round.call("scaffold-facts", include_str!("command_tool_facts_gate.hs"));
+    round.call(
+        "scaffold-facts",
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/command_tool_facts_gate.hs",
+        ),
+    );
     let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     round.assert_value("scaffold-facts", "(True,True,True,True,True)");
     let stdout = format!("{}stdout-tail\n", "λ".repeat(800));
@@ -234,7 +239,7 @@ async fn assert_pinned_shell_recovery(campaign: &mut TestCampaign) {
     commands.shorten_slice_read(3);
     let source = format!(
         "import qualified Tidepool.Command as Cmd\n{snapshot}\n{}",
-        include_str!("scaffold_expired_output.hs")
+        tidepool_testing::fixture_source("bridge/facade/src/actor_host/scaffold_expired_output.hs")
     );
     let expired = campaign
         .drive_actor_output(&store, dispatch_haskell_script(policy.as_ref(), &source))

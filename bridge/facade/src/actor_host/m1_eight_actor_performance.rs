@@ -64,7 +64,7 @@ impl EightActorTransport {
                 0 => {
                     self.clients.issue(&operation("eight-actor-setup"));
                     harness::item::Item(
-                        json!({"type":"custom_tool_call","call_id":"eight-actor-setup","name":"haskell","input":format!("{}\n_ <- display True", include_str!("embedded_later_failure_scope_setup.hs"))}),
+                        json!({"type":"custom_tool_call","call_id":"eight-actor-setup","name":"haskell","input":format!("{}\n_ <- display True", tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_later_failure_scope_setup.hs"))}),
                     )
                 }
                 1 => {
@@ -91,7 +91,7 @@ impl EightActorTransport {
                     }));
                     self.clients.issue(&operation("eight-actor-launch"));
                     harness::item::Item(
-                        json!({"type":"custom_tool_call","call_id":"eight-actor-launch","name":"haskell","input":include_str!("m1_eight_actor_launch.hs")}),
+                        json!({"type":"custom_tool_call","call_id":"eight-actor-launch","name":"haskell","input":tidepool_testing::fixture_source("bridge/facade/src/actor_host/m1_eight_actor_launch.hs")}),
                     )
                 }
                 2 => {

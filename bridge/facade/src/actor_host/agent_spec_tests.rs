@@ -497,7 +497,9 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
             });
             std::fs::write(
                 authored.join("AgentSpec.hs"),
-                include_str!("fixtures/spec_reload_with_slot.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/spec_reload_with_slot.hs",
+                ),
             )
             .unwrap();
             std::fs::write(
@@ -529,7 +531,9 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
 
     std::fs::write(
         workspace.join(".exomonad/AgentSpec.hs"),
-        include_str!("fixtures/spec_reload_without_slot.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/spec_reload_without_slot.hs",
+        ),
     )
     .unwrap();
     let receipt = reload(policy).await;

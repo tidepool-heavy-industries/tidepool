@@ -2,13 +2,12 @@ use super::command_jobs_tests::{backend_request, committed};
 use super::command_test_support::TestCommands;
 use super::test_campaign::TestCampaign;
 
-const EXAMPLE: &str = include_str!(
-    "../../../../exomonad/examples/workspace/.exomonad/checks/background-command-example.hs"
-);
-
 fn example_stage(name: &str) -> String {
+    let example = tidepool_testing::fixture_source(
+        "exomonad/examples/workspace/.exomonad/checks/background-command-example.hs",
+    );
     let marker = format!("-- Stage: {name}\n");
-    let (_, after) = EXAMPLE
+    let (_, after) = example
         .split_once(&marker)
         .unwrap_or_else(|| panic!("missing {marker:?} in background command example"));
     after

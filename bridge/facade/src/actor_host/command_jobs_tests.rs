@@ -57,7 +57,7 @@ fn cargo_report_preserves_nonzero_diagnostics_and_typed_parse_errors() {
     let scratch = tempfile::tempdir().unwrap();
     std::fs::write(
         scratch.path().join("CargoReportContract.hs"),
-        include_str!("cargo_report_contract.hs"),
+        tidepool_testing::fixture_source("bridge/facade/src/actor_host/cargo_report_contract.hs"),
     )
     .unwrap();
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -739,7 +739,11 @@ async fn later_command_tools_keep_recovery_without_repeating_binding_introductio
 #[tokio::test]
 async fn command_jobs_retain_completion_and_route_to_record_actors() {
     let mut campaign = TestCampaign::start().await;
-    let initial = committed(&campaign, include_str!("command_jobs.hs")).await;
+    let initial = committed(
+        &campaign,
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/command_jobs.hs"),
+    )
+    .await;
     assert!(initial.to_string().contains("CommandQueued"), "{initial}");
     let backend = TestCommands::new();
     backend_request(&mut campaign)
@@ -800,7 +804,13 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
         .await
         .supply(Ok(backend.clone()));
 
-    committed(&campaign, include_str!("inherited_command_observer.hs")).await;
+    committed(
+        &campaign,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/inherited_command_observer.hs",
+        ),
+    )
+    .await;
     let child = campaign
         .next_deployment(
             "inherited command observer",
@@ -930,8 +940,20 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
         &format!("let fixedPath = {:?} :: Text", fixed_text),
     )
     .await;
-    committed(&campaign, include_str!("inherited_command_helpers.hs")).await;
-    committed(&campaign, include_str!("inherited_command_observer.hs")).await;
+    committed(
+        &campaign,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/inherited_command_helpers.hs",
+        ),
+    )
+    .await;
+    committed(
+        &campaign,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/inherited_command_observer.hs",
+        ),
+    )
+    .await;
     let child = campaign
         .next_deployment(
             "inherited helper observer",
@@ -1013,7 +1035,13 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
 #[tokio::test]
 async fn extracted_effectful_closure_starts_work_in_receiver_after_response_release() {
     let mut campaign = TestCampaign::start().await;
-    committed(&campaign, include_str!("inherited_effectful_producer.hs")).await;
+    committed(
+        &campaign,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/inherited_effectful_producer.hs",
+        ),
+    )
+    .await;
     let producer = campaign
         .next_deployment(
             "effectful producer",
@@ -1040,7 +1068,13 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
         )
         .await;
 
-    committed(&campaign, include_str!("inherited_effectful_observer.hs")).await;
+    committed(
+        &campaign,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/inherited_effectful_observer.hs",
+        ),
+    )
+    .await;
     let observer = campaign
         .next_deployment(
             "effectful observer",
@@ -1119,7 +1153,11 @@ async fn command_output_ux_preserves_large_values_and_decodes_complete_stdout() 
     backend.finish.send_replace(true);
     backend_request(&mut campaign).await.supply(Ok(backend));
     committed(&campaign, "finished <- Cmd.await job").await;
-    let result = committed(&campaign, include_str!("command_output_ux.hs")).await;
+    let result = committed(
+        &campaign,
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/command_output_ux.hs"),
+    )
+    .await;
     let text = result.to_string();
     for marker in [
         "large-display-ok",
@@ -1162,7 +1200,11 @@ async fn read_command_captures_both_streams_of_a_failed_command() {
         .supply(Ok(backend.clone()));
     committed(&campaign, "finished <- Cmd.await job").await;
 
-    let whole = committed(&campaign, include_str!("command_capture.hs")).await;
+    let whole = committed(
+        &campaign,
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/command_capture.hs"),
+    )
+    .await;
     let text = whole.to_string();
     for marker in [
         "outcome-unreinterpreted",
@@ -1180,7 +1222,11 @@ async fn read_command_captures_both_streams_of_a_failed_command() {
     backend
         .degraded_output
         .store(true, std::sync::atomic::Ordering::Release);
-    let degraded = committed(&campaign, include_str!("command_capture_lossy.hs")).await;
+    let degraded = committed(
+        &campaign,
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/command_capture_lossy.hs"),
+    )
+    .await;
     let text = degraded.to_string();
     for marker in [
         "loss-signals-survive",
@@ -1320,7 +1366,13 @@ async fn failed_command_display_retains_result_without_reexecution() {
         .await
         .supply(Ok(backend.clone()));
     committed(&campaign, "finished <- Cmd.await job").await;
-    let failed = committed(&campaign, include_str!("command_display_failure.hs")).await;
+    let failed = committed(
+        &campaign,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/command_display_failure.hs",
+        ),
+    )
+    .await;
     let text = failed.to_string();
     assert!(text.contains("Display failed"), "{text}");
     assert!(text.contains("Value remains bound"), "{text}");
@@ -1510,7 +1562,12 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
             Some("haskell".into()),
         )),
         name: exomonad_actor::HASKELL_TOOL.into(),
-        arguments: ToolArguments::Raw(include_str!("command_wait_continuation.hs").into()),
+        arguments: ToolArguments::Raw(
+            tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/command_wait_continuation.hs",
+            )
+            .into(),
+        ),
     };
     let policy = campaign.root_installation.policy.clone();
     let first = invocation();
@@ -1583,7 +1640,9 @@ async fn command_run_returns_typed_output_failure_and_resumes_the_suffix() {
     let running = tokio::spawn(async move {
         dispatch_haskell_script(
             policy.as_ref(),
-            include_str!("command_wait_continuation.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/command_wait_continuation.hs",
+            ),
         )
         .await
     });
@@ -1648,7 +1707,9 @@ async fn command_wait_preserves_the_exact_continuation_until_terminal_completion
     let running = tokio::spawn(async move {
         dispatch_haskell_script(
             policy.as_ref(),
-            include_str!("command_wait_continuation.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/command_wait_continuation.hs",
+            ),
         )
         .await
     });
@@ -1710,7 +1771,11 @@ async fn command_wait_preserves_the_exact_continuation_until_terminal_completion
 #[tokio::test]
 async fn command_handler_returns_typed_output_failure_without_interactive_recovery() {
     let mut campaign = TestCampaign::start().await;
-    committed(&campaign, include_str!("command_handler_wait.hs")).await;
+    committed(
+        &campaign,
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/command_handler_wait.hs"),
+    )
+    .await;
     let policy = campaign.root_installation.policy.clone();
     let mut running = tokio::spawn(async move {
         super::tests::dispatch_haskell_script_result(policy.as_ref(),
@@ -1751,7 +1816,13 @@ async fn command_wait_values_and_explicit_observations_have_one_display_owner() 
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     let mut running = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), include_str!("command_presentation.hs")).await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/command_presentation.hs",
+            ),
+        )
+        .await
     });
     let backend = TestCommands::new();
     backend.finish.send_replace(true);
@@ -1924,7 +1995,9 @@ async fn command_output_failure_preserves_the_existing_authored_job() {
         .supply(Ok(backend.clone()));
     let outcome = super::tests::dispatch_haskell_script_result(
         campaign.root_installation.policy.as_ref(),
-        include_str!("command_binding_failure.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/command_binding_failure.hs",
+        ),
     )
     .await;
     let rendered = match outcome {
@@ -1959,7 +2032,7 @@ async fn completed_command_output_survives_a_later_failure_in_the_same_computati
         .supply(Ok(backend.clone()));
     let result = super::tests::dispatch_haskell_script_result(
         campaign.root_installation.policy.as_ref(),
-        include_str!("command_prefix_failure.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/command_prefix_failure.hs"),
     )
     .await;
     let rendered = match result {
@@ -2001,7 +2074,7 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
         .supply(Ok(backend.clone()));
     let prefix = super::test_campaign::dispatch_haskell_script_response(
         campaign.root_installation.policy.as_ref(),
-        include_str!("command_prefix_failure.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/command_prefix_failure.hs"),
     )
     .await;
     assert_eq!(backend.executions(), 1);
@@ -2064,7 +2137,9 @@ pub(crate) async fn result_presentation_cases() -> Vec<(
         .supply(Ok(backend.clone()));
     let recovery = super::test_campaign::dispatch_haskell_script_response(
         campaign.root_installation.policy.as_ref(),
-        include_str!("command_binding_failure.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/command_binding_failure.hs",
+        ),
     )
     .await;
     assert_eq!(backend.executions(), 1);
@@ -2238,7 +2313,7 @@ async fn resident_print_preserves_order_and_output_before_same_unit_failure() {
     backend_request(&mut campaign).await.supply(Ok(backend));
     let result = super::tests::dispatch_haskell_script_result(
         campaign.root_installation.policy.as_ref(),
-        include_str!("print_command_failure.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/print_command_failure.hs"),
     )
     .await;
     let text = match result {
@@ -2345,7 +2420,9 @@ async fn command_receipts_preserve_owner_settlement_across_continuation_failure(
     let mut campaign = TestCampaign::start().await;
     let rejected = super::tests::dispatch_haskell_script_result(
         campaign.root_installation.policy.as_ref(),
-        include_str!("command_receipt_rejected.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/command_receipt_rejected.hs",
+        ),
     )
     .await
     .unwrap_err()
@@ -2363,7 +2440,9 @@ async fn command_receipts_preserve_owner_settlement_across_continuation_failure(
     );
     let failed = super::tests::dispatch_haskell_script_result(
         campaign.root_installation.policy.as_ref(),
-        include_str!("command_receipt_continuation.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/command_receipt_continuation.hs",
+        ),
     )
     .await
     .unwrap_err()
@@ -2609,7 +2688,13 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
         .await
         .supply(Ok(backend.clone()));
 
-    committed(&campaign, include_str!("inherited_command_observer.hs")).await;
+    committed(
+        &campaign,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/inherited_command_observer.hs",
+        ),
+    )
+    .await;
     let child = campaign
         .next_deployment(
             "sibling actor installation",
@@ -2777,7 +2862,13 @@ async fn command_direct_wait_captures_report_and_releases_subscription() {
     let mut campaign = TestCampaign::start().await;
     let policy = campaign.root_installation.policy.clone();
     let running = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), include_str!("command_direct_wait.hs")).await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/command_direct_wait.hs",
+            ),
+        )
+        .await
     });
     let backend = TestCommands::new();
     backend_request(&mut campaign)

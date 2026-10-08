@@ -78,7 +78,9 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
                 .await
                 .call(
                     "checkpoint-issuer-setup",
-                    include_str!("checkpoint_issuer_setup.hs"),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/checkpoint_issuer_setup.hs",
+                    ),
                 );
             let next_root = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             next_root.assert_committed("checkpoint-issuer-setup");
@@ -106,7 +108,9 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
                 .await
                 .call(
                     "checkpoint-issuer-capture",
-                    include_str!("checkpoint_issuer_capture.hs"),
+                    &tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/checkpoint_issuer_capture.hs",
+                    ),
                 );
             let issuer_done =
                 next_hosted_script_round(&mut requests, &mut pending, &issuer_path).await;
@@ -117,7 +121,9 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             // retain the issuer until that assignment has actually replied.
             next_root.call(
                 "checkpoint-pending-cleanup-refusal",
-                include_str!("checkpoint_pending_cleanup_refusal.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/checkpoint_pending_cleanup_refusal.hs",
+                ),
             );
             let root_after_pending =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
@@ -152,7 +158,9 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             wait_for_succeeded_provider_turn(&host, issuer_id).await;
             root_after_pending.call(
                 "checkpoint-issuer-cleanup",
-                include_str!("checkpoint_issuer_cleanup.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/checkpoint_issuer_cleanup.hs",
+                ),
             );
             let root_after_cleanup =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
@@ -166,7 +174,9 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             assert!(issuer_cleanup.is_confirmed(), "{issuer_cleanup:?}");
             root_after_cleanup.call(
                 "checkpoint-observer-admission",
-                include_str!("checkpoint_deferred_branch.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/checkpoint_deferred_branch.hs",
+                ),
             );
             let root_after_admission =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
@@ -206,14 +216,18 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
                 next_hosted_script_round(&mut requests, &mut pending, &observer_path).await;
             root_after_admission.call(
                 "checkpoint-release-twice",
-                include_str!("checkpoint_release_twice.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/checkpoint_release_twice.hs",
+                ),
             );
             let root_after_release =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_after_release.assert_value("checkpoint-release-twice", "True");
             root_after_release.call(
                 "checkpoint-released-refusal",
-                include_str!("checkpoint_released_refusal.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/checkpoint_released_refusal.hs",
+                ),
             );
             let root_after_refusal =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
@@ -251,7 +265,9 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             wait_for_succeeded_provider_turn(&host, observer_id).await;
             root_after_refusal.call(
                 "checkpoint-observer-cleanup",
-                include_str!("checkpoint_observer_cleanup.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/checkpoint_observer_cleanup.hs",
+                ),
             );
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_done.assert_value("checkpoint-observer-cleanup", "True");

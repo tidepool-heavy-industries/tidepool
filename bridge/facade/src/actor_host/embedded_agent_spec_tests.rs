@@ -7,12 +7,18 @@ fn write_spec(workspace: &std::path::Path, handler: &str, slot: &str) {
     std::fs::create_dir_all(authored.join("Project")).unwrap();
     std::fs::write(
         authored.join("Project/Tools.hs"),
-        include_str!("fixtures/retained_handler_tools.hs").replace("HANDLER_GENERATION", handler),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/retained_handler_tools.hs",
+        )
+        .replace("HANDLER_GENERATION", handler),
     )
     .unwrap();
     std::fs::write(
         authored.join("AgentSpec.hs"),
-        include_str!("fixtures/retained_handler_agent_spec.hs").replace("SLOT_GENERATION", slot),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs",
+        )
+        .replace("SLOT_GENERATION", slot),
     )
     .unwrap();
 }

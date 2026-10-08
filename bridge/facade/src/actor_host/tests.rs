@@ -259,7 +259,9 @@ fn write_bootstrap_workspace(workspace: &Path, spec: &str) {
     std::fs::write(authored.join("ConfiguredSpec.hs"), spec).unwrap();
     std::fs::write(
         authored.join("Project/BootstrapWitness.hs"),
-        include_str!("fixtures/bootstrap_workspace_witness.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/bootstrap_workspace_witness.hs",
+        ),
     )
     .unwrap();
 }
@@ -268,7 +270,9 @@ fn write_bootstrap_workspace(workspace: &Path, spec: &str) {
 fn driver_sources_keep_policy_private_and_preserve_explicit_public_modules() {
     let project = tempfile::tempdir().unwrap();
     let authored = project.path().join(".exomonad");
-    let spec = include_str!("fixtures/configured_bootstrap_spec.hs");
+    let spec = tidepool_testing::fixture_source(
+        "bridge/facade/src/actor_host/fixtures/configured_bootstrap_spec.hs",
+    );
     write_bootstrap_workspace(project.path(), spec);
     std::fs::write(
         authored.join("AgentSpec.hs"),
@@ -323,7 +327,9 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
     let invalid_run = tempfile::tempdir().unwrap();
     write_bootstrap_workspace(
         project.path(),
-        include_str!("fixtures/configured_bootstrap_spec.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/configured_bootstrap_spec.hs",
+        ),
     );
     let valid = crate::exomonad::workspace::FrozenWorkspace::load(project.path(), valid_run.path())
         .unwrap();
@@ -332,7 +338,9 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
 
     write_bootstrap_workspace(
         project.path(),
-        include_str!("fixtures/invalid_configured_bootstrap_spec.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/invalid_configured_bootstrap_spec.hs",
+        ),
     );
     let invalid =
         crate::exomonad::workspace::FrozenWorkspace::load(project.path(), invalid_run.path())
@@ -397,7 +405,9 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
         hosted_test_context::HostedTestRuntime::start_configured(&settings, &provider, |config| {
             configure(
                 config,
-                include_str!("fixtures/configured_bootstrap_spec.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/configured_bootstrap_spec.hs",
+                ),
             )
         })
         .await
@@ -411,7 +421,9 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
         hosted_test_context::HostedTestRuntime::start_configured(&settings, &provider, |config| {
             configure(
                 config,
-                include_str!("fixtures/invalid_configured_bootstrap_spec.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/invalid_configured_bootstrap_spec.hs",
+                ),
             );
         })
         .await;
@@ -604,7 +616,9 @@ fn typed_site_surface_callers_have_returning_contracts() {
         "childProgressProbe",
     ];
     let artifacts = tidepool_runtime::compile_targets(
-        include_str!("typed_site_return_contract.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/typed_site_return_contract.hs",
+        ),
         &names,
         &sources.include,
         |_, _, _| {},
@@ -640,7 +654,11 @@ fn typed_site_surface_callers_have_returning_contracts() {
 async fn roster_observation_preserves_host_and_sibling_workbenches() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(root.as_ref(), include_str!("roster_setup.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/roster_setup.hs"),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let mut children = Vec::new();
     while children.len() < 2 {
@@ -661,7 +679,11 @@ async fn roster_observation_preserves_host_and_sibling_workbenches() {
     for policy in
         std::iter::once(root.as_ref()).chain(children.iter().map(|child| child.policy.as_ref()))
     {
-        let observed = dispatch_haskell_script(policy, include_str!("roster_observe.hs")).await;
+        let observed = dispatch_haskell_script(
+            policy,
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/roster_observe.hs"),
+        )
+        .await;
         assert_eq!(observed["status"], "committed", "{observed:?}");
         let roster_type = dispatch_lookup(policy, &["AgentRosterEntry"]).await;
         assert!(
@@ -813,7 +835,11 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
 async fn actor_sources_capture_current_then_deliver_every_publication_and_settlement() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(root.as_ref(), include_str!("source_setup.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/source_setup.hs"),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
@@ -831,14 +857,20 @@ async fn actor_sources_capture_current_then_deliver_every_publication_and_settle
     )
     .await;
     assert_eq!(first["status"], "committed", "{first:?}");
-    let installed = dispatch_haskell_script(root.as_ref(), include_str!("source_actor.hs")).await;
+    let installed = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/source_actor.hs"),
+    )
+    .await;
     assert_eq!(installed["status"], "committed", "{installed:?}");
     for item in installed["items"].as_array().unwrap() {
         assert_eq!(item["status"], "committed", "{installed:?}");
     }
     let rejected = dispatch_haskell_script_result(
         root.as_ref(),
-        include_str!("source_replacement_rejected.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/source_replacement_rejected.hs",
+        ),
     )
     .await
     .expect_err("replacement cannot change the source graph");
@@ -874,7 +906,11 @@ async fn actor_sources_capture_current_then_deliver_every_publication_and_settle
 async fn progress_retains_closures_and_watch_snapshots_across_calls() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(root.as_ref(), include_str!("progress_setup.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/progress_setup.hs"),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
@@ -909,8 +945,11 @@ async fn progress_retains_closures_and_watch_snapshots_across_calls() {
     )
     .await;
     assert_eq!(second["status"], "committed", "{second:?}");
-    let captured =
-        dispatch_haskell_script(root.as_ref(), include_str!("progress_observe.hs")).await;
+    let captured = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/progress_observe.hs"),
+    )
+    .await;
     assert_eq!(captured["status"], "committed", "{captured:?}");
     assert!(captured.to_string().contains("(13, 30)"), "{captured:?}");
     assert_eq!(captured["items"][7]["output"], "40", "{captured:?}");
@@ -918,8 +957,11 @@ async fn progress_retains_closures_and_watch_snapshots_across_calls() {
     assert_eq!(reply["status"], "replied", "{reply:?}");
     let stopped = dispatch_haskell_script(root.as_ref(), "stopAgent worker").await;
     assert_eq!(stopped["status"], "committed", "{stopped:?}");
-    let retained =
-        dispatch_haskell_script(root.as_ref(), include_str!("progress_retained.hs")).await;
+    let retained = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/progress_retained.hs"),
+    )
+    .await;
     assert_eq!(retained["status"], "committed", "{retained:?}");
     assert_eq!(retained["items"][1]["output"], "True", "{retained:?}");
     assert_eq!(retained["items"][2]["output"], "15", "{retained:?}");
@@ -1376,7 +1418,11 @@ async fn selected_context_child_reaches_its_supervisor_through_parent_agent() {
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root_id = campaign.actor.identity();
-    let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/notification_setup.hs"),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
@@ -1479,7 +1525,11 @@ async fn notification_admission_and_poll_preserve_typed_request_bindings() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/notification_setup.hs"),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
@@ -1787,7 +1837,11 @@ async fn held_native_delivery_preserves_typed_request_bindings() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
     let output_store = display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/notification_setup.hs"),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
@@ -1879,7 +1933,11 @@ async fn held_native_delivery_preserves_typed_request_bindings() {
 async fn lookup_during_held_native_delivery_returns_respond_signature() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(root.as_ref(), include_str!("notification_setup.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/notification_setup.hs"),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
@@ -2011,7 +2069,7 @@ async fn record_actor_dispatches_typed_routes_and_commits_state() {
     let campaign = test_campaign::TestCampaign::start().await;
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
-        include_str!("record_actor.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/record_actor.hs"),
     )
     .await;
     assert_eq!(result["status"], "committed", "{result:?}");
@@ -2030,7 +2088,9 @@ async fn record_try_send_reports_mailbox_admission_without_waiting_for_handler()
         Duration::from_secs(120),
         dispatch_haskell_script(
             campaign.root_installation.policy.as_ref(),
-            include_str!("record_actor_try_send.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/record_actor_try_send.hs",
+            ),
         ),
     )
     .await
@@ -2050,7 +2110,7 @@ async fn record_actor_sleep_keeps_mailbox_handlers_sequential() {
     let campaign = test_campaign::TestCampaign::start().await;
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
-        include_str!("record_actor_sleep.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/record_actor_sleep.hs"),
     )
     .await;
     assert_eq!(result["status"], "committed", "{result:?}");
@@ -2068,7 +2128,9 @@ async fn record_actor_nested_failure_reaches_interactive_owner_once() {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
-        include_str!("record_actor_nested_failure.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/record_actor_nested_failure.hs",
+        ),
     )
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -2099,7 +2161,9 @@ async fn record_actor_explains_invalid_state_shapes() {
     let root = campaign.root_installation.policy.clone();
     let setup = dispatch_haskell_script(
         root.as_ref(),
-        include_str!("record_actor_invalid_shapes.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/record_actor_invalid_shapes.hs",
+        ),
     )
     .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
@@ -2126,7 +2190,7 @@ async fn stateful_actor_drains_accepted_messages_into_its_retained_exit() {
     let campaign = test_campaign::TestCampaign::start().await;
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
-        include_str!("stateful_drain.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/stateful_drain.hs"),
     )
     .await;
     assert_eq!(result["status"], "committed", "{result:?}");
@@ -2146,7 +2210,11 @@ async fn stateful_actor_drains_accepted_messages_into_its_retained_exit() {
 async fn stateful_handler_failure_after_effect_pauses_without_replay_or_closing_mailbox() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(root.as_ref(), include_str!("stateful_failure.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/stateful_failure.hs"),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     for item in setup["items"].as_array().unwrap() {
         assert_eq!(item["status"], "committed", "{setup:?}");
@@ -2195,8 +2263,11 @@ async fn stateful_handler_failure_after_effect_pauses_without_replay_or_closing_
         "{queued:?}"
     );
     campaign.assert_no_deployment("duplicate failure notice", |_| true);
-    let repaired =
-        dispatch_haskell_script(root.as_ref(), include_str!("stateful_replacement.hs")).await;
+    let repaired = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/stateful_replacement.hs"),
+    )
+    .await;
     assert_eq!(repaired["status"], "committed", "{repaired:?}");
     for item in repaired["items"].as_array().unwrap() {
         assert_eq!(item["status"], "committed", "{repaired:?}");
@@ -2209,9 +2280,10 @@ async fn stateful_handler_failure_after_effect_pauses_without_replay_or_closing_
 #[tokio::test]
 async fn lifecycle_sources_follow_replacement_and_capture_retained_exit() {
     let mut campaign = test_campaign::TestCampaign::start().await;
-    for (stage, source) in include_str!("lifecycle_source.hs")
-        .split("-- STAGE --\n")
-        .enumerate()
+    for (stage, source) in
+        tidepool_testing::fixture_source("bridge/facade/src/actor_host/lifecycle_source.hs")
+            .split("-- STAGE --\n")
+            .enumerate()
     {
         eprintln!("lifecycle fixture stage {stage} starting");
         let root = campaign.root_installation.policy.clone();
@@ -2287,8 +2359,13 @@ async fn stateful_replacement_rejects_changed_state_and_protocol_types() {
 async fn stateful_replacement_preserves_owned_children() {
     let campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let ownership =
-        dispatch_haskell_script(root.as_ref(), include_str!("stateful_replacement_tree.hs")).await;
+    let ownership = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/stateful_replacement_tree.hs",
+        ),
+    )
+    .await;
     assert_eq!(ownership["status"], "committed", "{ownership:?}");
     for item in ownership["items"].as_array().unwrap() {
         assert_eq!(item["status"], "committed", "{ownership:?}");
@@ -2306,7 +2383,7 @@ async fn haskell_mailbox_preserves_state_and_opaque_replies_across_calls() {
     let campaign = test_campaign::TestCampaign::start().await;
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
-        include_str!("mailbox_state.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/mailbox_state.hs"),
     )
     .await;
     assert_eq!(result["status"], "committed", "{result:?}");
@@ -2422,7 +2499,7 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
     let setup = tokio::spawn(async move {
         dispatch_haskell_script(
             root_for_setup.as_ref(),
-            include_str!("descendants_setup.hs"),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/descendants_setup.hs"),
         )
         .await
     });
@@ -2454,7 +2531,9 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
     let child_spawn = tokio::spawn(async move {
         dispatch_haskell_script(
             child_policy.as_ref(),
-            include_str!("descendants_child_spawn.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/descendants_child_spawn.hs",
+            ),
         )
         .await
     });
@@ -2481,8 +2560,11 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
     let child_spawn = child_spawn.await.unwrap();
     assert_eq!(child_spawn["status"], "committed", "{child_spawn:?}");
 
-    let observed =
-        dispatch_haskell_script(root.as_ref(), include_str!("descendants_observe.hs")).await;
+    let observed = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/descendants_observe.hs"),
+    )
+    .await;
     assert_eq!(observed["status"], "committed", "{observed:?}");
     let rendered = observed.to_string();
     assert!(
@@ -2505,8 +2587,11 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
     .await;
     assert_eq!(stopped["status"], "committed", "{stopped:?}");
 
-    let after_retirement =
-        dispatch_haskell_script(root.as_ref(), include_str!("descendants_observe.hs")).await;
+    let after_retirement = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/descendants_observe.hs"),
+    )
+    .await;
     assert_eq!(
         after_retirement["status"], "committed",
         "{after_retirement:?}"
@@ -2572,7 +2657,11 @@ async fn forest_operator_survives_model_root_recovery() {
         bound.status,
         tidepool_runtime::session::WorkbenchRunStatus::Committed
     );
-    let requested = submit(&operator, include_str!("operator_request.hs")).await;
+    let requested = submit(
+        &operator,
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/operator_request.hs"),
+    )
+    .await;
     assert_eq!(
         requested.status,
         tidepool_runtime::session::WorkbenchRunStatus::Committed,
@@ -2664,8 +2753,11 @@ async fn forest_operator_survives_model_root_recovery() {
 async fn request_update_keeps_original_request_and_fences_terminal_delivery() {
     let mut campaign = test_campaign::TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let setup =
-        dispatch_haskell_script(root.as_ref(), include_str!("request_update_setup.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/request_update_setup.hs"),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let child = campaign
         .next_deployment(
@@ -2959,7 +3051,7 @@ async fn root_journal_effect_appends_a_typed_record() {
     let campaign = test_campaign::TestCampaign::start().await;
     let result = dispatch_haskell_script(
         campaign.root_installation.policy.as_ref(),
-        include_str!("journal_record.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/journal_record.hs"),
     )
     .await;
     assert_eq!(result["status"], "committed", "{result:?}");
@@ -2994,7 +3086,11 @@ async fn haskell_actor_sends_normal_steering_without_a_native_session() {
     let root = campaign.root_installation.policy.clone();
     let policy = root.clone();
     let mut run = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), include_str!("message_actor.hs")).await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/message_actor.hs"),
+        )
+        .await
     });
     let mut launched = None;
     let command = tokio::time::timeout(Duration::from_secs(120), async {

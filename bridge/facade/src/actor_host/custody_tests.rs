@@ -326,7 +326,9 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     let root = campaign.root_installation.policy.clone();
     let first = tests::dispatch_haskell_script(
         root.as_ref(),
-        include_str!("inherited_response_producer.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/inherited_response_producer.hs",
+        ),
     )
     .await;
     assert_eq!(first["status"], "committed", "{first:?}");
@@ -351,7 +353,9 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     // ExitCell is still pending at this fork boundary.
     let second = tests::dispatch_haskell_script(
         root.as_ref(),
-        include_str!("inherited_response_observer.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/inherited_response_observer.hs",
+        ),
     )
     .await;
     assert_eq!(second["status"], "committed", "{second:?}");
@@ -426,7 +430,9 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
         .await;
     let extracted = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
-        include_str!("inherited_response_read.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/inherited_response_read.hs",
+        ),
     )
     .await;
     assert_eq!(extracted["status"], "committed", "{extracted:?}");
@@ -506,7 +512,11 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
     .await;
     let policy = campaign.root_installation.policy.clone();
     let launched = tokio::spawn(async move {
-        tests::dispatch_haskell_script(policy.as_ref(), include_str!("custody_siblings.hs")).await
+        tests::dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/custody_siblings.hs"),
+        )
+        .await
     });
     let mut installed = Vec::new();
     for _ in 0..2 {
@@ -635,7 +645,11 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
 
     let policy = installed[0].policy.clone();
     let nested = tokio::spawn(async move {
-        tests::dispatch_haskell_script(policy.as_ref(), include_str!("custody_nested.hs")).await
+        tests::dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/custody_nested.hs"),
+        )
+        .await
     });
     let (actor, release) = tokio::time::timeout(Duration::from_secs(120), installing.recv())
         .await
@@ -720,7 +734,7 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
         .await;
     let reply = tests::dispatch_haskell_script(
         installed[0].policy.as_ref(),
-        include_str!("custody_nested_reply.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/custody_nested_reply.hs"),
     )
     .await;
     assert_eq!(reply["status"], "committed", "{reply:?}");
@@ -896,7 +910,11 @@ async fn custody_install_failure_prevents_provider_publication() {
     .await;
     let policy = campaign.root_installation.policy.clone();
     let launched = tokio::spawn(async move {
-        tests::dispatch_haskell_script(policy.as_ref(), include_str!("custody_siblings.hs")).await
+        tests::dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/custody_siblings.hs"),
+        )
+        .await
     });
     let (actor, release) = tokio::time::timeout(Duration::from_secs(120), installing.recv())
         .await
@@ -955,7 +973,11 @@ async fn cancel_at_install_phase(phase: InstallPhase) {
     .await;
     let policy = campaign.root_installation.policy.clone();
     let launched = tokio::spawn(async move {
-        tests::dispatch_haskell_script(policy.as_ref(), include_str!("custody_single.hs")).await
+        tests::dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/custody_single.hs"),
+        )
+        .await
     });
     let (actor, release) = tokio::time::timeout(Duration::from_secs(120), installing.recv())
         .await
@@ -1059,7 +1081,13 @@ async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
     assert_eq!(original.matches(initial).count(), 1);
     std::fs::write(
         &agent_module,
-        original.replace(initial, include_str!("custody_boot_failure.hs").trim()),
+        original.replace(
+            initial,
+            tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/custody_boot_failure.hs",
+            )
+            .trim(),
+        ),
     )
     .unwrap();
     let (entered, mut installing) = mpsc::unbounded_channel();
@@ -1077,7 +1105,11 @@ async fn custody_haskell_bootstrap_failure_after_install_releases_binding() {
     .await;
     let root = campaign.root_installation.policy.clone();
     let launched = tokio::spawn(async move {
-        tests::dispatch_haskell_script(root.as_ref(), include_str!("custody_single.hs")).await
+        tests::dispatch_haskell_script(
+            root.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/custody_single.hs"),
+        )
+        .await
     });
     let (installing_actor, release) =
         tokio::time::timeout(Duration::from_secs(120), installing.recv())

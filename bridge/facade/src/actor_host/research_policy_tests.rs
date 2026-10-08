@@ -77,7 +77,13 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
     .await;
     let root = campaign.root_installation.policy.clone();
     let launch = tokio::spawn(async move {
-        dispatch_haskell_script(root.as_ref(), include_str!("research_policy_setup.hs")).await
+        dispatch_haskell_script(
+            root.as_ref(),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/research_policy_setup.hs",
+            ),
+        )
+        .await
     });
     let (research, _research_binding) = research_child(&mut campaign).await;
     let result = launch.await.unwrap();
@@ -92,7 +98,7 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
 
     let too_wide = dispatch_haskell_script(
         research.policy.as_ref(),
-        include_str!("research_policy_width.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/research_policy_width.hs"),
     )
     .await;
     assert_eq!(too_wide["status"], "committed", "{too_wide:?}");
@@ -106,7 +112,9 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
 
     let escalation = dispatch_haskell_script(
         research.policy.as_ref(),
-        include_str!("research_policy_escalation.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/research_policy_escalation.hs",
+        ),
     )
     .await;
     assert_eq!(escalation["status"], "committed", "{escalation:?}");
@@ -120,7 +128,13 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
 
     let policy = research.policy.clone();
     let nested = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), include_str!("research_policy_nested.hs")).await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/research_policy_nested.hs",
+            ),
+        )
+        .await
     });
     let (leaf, _leaf_binding) = research_child(&mut campaign).await;
     let result = nested.await.unwrap();
@@ -128,7 +142,9 @@ async fn research_admission_obeys_configured_width_and_consumes_depth() {
     assert_eq!(leaf.effective_role.descendants().maximum_depth, 0);
     let exhausted = dispatch_haskell_script(
         leaf.policy.as_ref(),
-        include_str!("research_policy_exhausted.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/research_policy_exhausted.hs",
+        ),
     )
     .await;
     assert_eq!(exhausted["status"], "committed", "{exhausted:?}");
@@ -156,8 +172,13 @@ async fn preview_and_explicit_research_budget_match_without_spawning_during_prev
     })
     .await;
     let root = campaign.root_installation.policy.clone();
-    let preview =
-        dispatch_haskell_script(root.as_ref(), include_str!("research_policy_preview.hs")).await;
+    let preview = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/research_policy_preview.hs",
+        ),
+    )
+    .await;
     assert_eq!(preview["status"], "committed", "{preview:?}");
     let outputs = preview["items"].as_array().unwrap();
     assert!(
@@ -198,14 +219,26 @@ async fn preview_and_explicit_research_budget_match_without_spawning_during_prev
     );
     let policy = coordinator.policy.clone();
     let launch = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), include_str!("research_policy_nested.hs")).await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/research_policy_nested.hs",
+            ),
+        )
+        .await
     });
     let (specialist, _specialist_binding) = research_child(&mut campaign).await;
     assert_eq!(launch.await.unwrap()["status"], "committed");
     assert_eq!(specialist.effective_role.descendants().maximum_depth, 1);
     let policy = specialist.policy.clone();
     let launch = tokio::spawn(async move {
-        dispatch_haskell_script(policy.as_ref(), include_str!("research_policy_nested.hs")).await
+        dispatch_haskell_script(
+            policy.as_ref(),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/research_policy_nested.hs",
+            ),
+        )
+        .await
     });
     let (leaf, _leaf_binding) = research_child(&mut campaign).await;
     assert_eq!(launch.await.unwrap()["status"], "committed");

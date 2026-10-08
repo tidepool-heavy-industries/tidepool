@@ -96,7 +96,12 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
             identity.actor.clone(),
             Some(request),
             "haskell".into(),
-            harness::item::ToolInput::Custom(include_str!("embedded_cancelled_prefix.hs").into()),
+            harness::item::ToolInput::Custom(
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/embedded_cancelled_prefix.hs",
+                )
+                .into(),
+            ),
         )
         .await
         .unwrap();
@@ -171,12 +176,10 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
     assert_eq!(item.0["call_id"], operation.call.0);
     let output: Value = serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
     assert_eq!(output["error"], "job cancelled");
-    assert!(
-        output["receipt"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("Committed")
-    );
+    assert!(output["receipt"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("Committed"));
     assert!(matches!(
         TerminalOutcome::from(&settlement.output),
         TerminalOutcome::CancelledWithReceipt(_)

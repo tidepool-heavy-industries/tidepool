@@ -33,7 +33,7 @@ impl ResponsesTransport for ParentTransport {
             1 => vec![harness::item::Item(json!({
                 "type":"custom_tool_call", "call_id":"later-failure-scope-setup",
                 "name":"haskell",
-                "input":include_str!("embedded_later_failure_scope_setup.hs")
+                "input":tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_later_failure_scope_setup.hs")
             }))],
             2 => {
                 self.setup_requested.notify_one();
@@ -41,7 +41,7 @@ impl ResponsesTransport for ParentTransport {
                 vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"later-failure-capture-and-unfold",
                     "name":"haskell",
-                    "input":include_str!("embedded_later_failure_capture_and_unfold.hs")
+                    "input":tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_later_failure_capture_and_unfold.hs")
                 }))]
             }
             3 => {
@@ -50,7 +50,7 @@ impl ResponsesTransport for ParentTransport {
                 vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"later-parent-cell-failure",
                     "name":"haskell",
-                    "input":include_str!("embedded_later_failure_parent_error.hs")
+                    "input":tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_later_failure_parent_error.hs")
                 }))]
             }
             4 => {

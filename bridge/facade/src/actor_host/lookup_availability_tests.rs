@@ -14,7 +14,13 @@ async fn hosted_lookup_uses_actual_actor_row_for_constraint_availability() {
     .await;
     let policy = campaign.root_installation.policy.as_ref();
 
-    let setup = dispatch_haskell_script(policy, include_str!("lookup_availability_setup.hs")).await;
+    let setup = dispatch_haskell_script(
+        policy,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/lookup_availability_setup.hs",
+        ),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     let names = dispatch_lookup(
         policy,

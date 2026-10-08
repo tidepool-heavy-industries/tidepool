@@ -8,8 +8,13 @@ use super::*;
 async fn record_service_survives_tool_return_and_runs_commands_in_its_handler() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let setup =
-        dispatch_haskell_script(root.as_ref(), include_str!("invocation_record_service.hs")).await;
+    let setup = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/invocation_record_service.hs",
+        ),
+    )
+    .await;
     assert_eq!(setup["status"], "committed", "{setup}");
     let address = setup["items"].as_array().unwrap().last().unwrap()["output"]
         .as_str()
@@ -99,7 +104,9 @@ async fn after_tool_deadline_retires_exact_invocation_worker_and_retains_host_un
             std::fs::create_dir_all(&authored).unwrap();
             std::fs::write(
                 authored.join("AgentSpec.hs"),
-                include_str!("invocation_deadline_spec.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/invocation_deadline_spec.hs",
+                ),
             )
             .unwrap();
             crate::exomonad::write_fixture_project_config(&authored, "gpt-6-sol", |project| {

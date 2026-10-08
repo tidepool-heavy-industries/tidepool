@@ -29,7 +29,9 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
             let call = format!("{}-cell", self.phase);
             let items = if count == 1 {
                 let source = if self.phase == "publish-original" {
-                    include_str!("fixtures/embedded_cold_declaration.hs")
+                    tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/fixtures/embedded_cold_declaration.hs",
+                    )
                 } else {
                     "case coldAnswer of RecoveryBox value -> value"
                 };
@@ -493,7 +495,9 @@ async fn production_authored_root_failure_is_not_evaluated_before_durable_bindin
     );
     std::fs::write(
         root.join("startup-driver/Tidepool/Actors/Internal/ExomonadDriver.hs"),
-        include_str!("fixtures/startup_authored_failure.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/startup_authored_failure.hs",
+        ),
     )
     .unwrap();
     let mut process = start_crashing(root, "authored-failure-before-bound", "bound");

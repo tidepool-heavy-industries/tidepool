@@ -12,7 +12,9 @@ use tracing_subscriber::prelude::*;
 const SAMPLES: usize = 50;
 const WARMUP_INPUT: &str = "Warm the real cancellation measurement host.";
 const WARMUP_CALL: &str = "cancel-performance-warmup";
-const SLEEP_SOURCE: &str = include_str!("m1_cancel_cell.hs");
+fn sleep_source() -> String {
+    tidepool_testing::fixture_source("bridge/facade/src/actor_host/m1_cancel_cell.hs")
+}
 
 struct IssuedCell {
     index: usize,
@@ -67,7 +69,7 @@ impl CancelTransport {
             self.clients.issue(&operation);
             self.calls.send(IssuedCell { index, operation }).unwrap();
             harness::item::Item(
-                json!({"type":"custom_tool_call", "call_id":call_id, "name":"haskell", "input":SLEEP_SOURCE}),
+                json!({"type":"custom_tool_call", "call_id":call_id, "name":"haskell", "input":sleep_source()}),
             )
         } else if request
             .input
@@ -328,7 +330,7 @@ async fn production_engine_store_active_cancellation_50() {
                 .any(|item| {
                     item.0["type"] == "custom_tool_call"
                         && item.0["call_id"] == cell.operation.call.0
-                        && item.0["input"] == SLEEP_SOURCE
+                        && item.0["input"] == sleep_source()
                 }),
             "the exact armed call must retain its real single-Sleep authored source"
         );

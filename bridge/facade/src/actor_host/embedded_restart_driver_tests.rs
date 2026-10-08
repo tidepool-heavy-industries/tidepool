@@ -195,7 +195,7 @@ impl ResponsesTransport for InterruptedStream {
                 .accept(
                     &json!({"type":"response.output_item.done", "item": {
                         "type":"custom_tool_call", "call_id":"effect-before-eof", "name":"haskell",
-                        "input": include_str!("restart_effect_once.hs"),
+                        "input": tidepool_testing::fixture_source("bridge/facade/src/actor_host/restart_effect_once.hs"),
                     }})
                     .to_string(),
                 )

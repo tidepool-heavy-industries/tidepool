@@ -13,12 +13,16 @@ async fn frozen_tools_dispatch_raw_and_structured_inputs_without_workbench_bindi
             std::fs::create_dir_all(directory.join("Project")).unwrap();
             std::fs::write(
                 directory.join("Project/Tools.hs"),
-                include_str!("hosted_tools_fixture.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/hosted_tools_fixture.hs",
+                ),
             )
             .unwrap();
             std::fs::write(
                 directory.join("ToolDispatchFixture.hs"),
-                include_str!("fixtures/tool_dispatch_fixture.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/tool_dispatch_fixture.hs",
+                ),
             )
             .unwrap();
             crate::exomonad::write_fixture_project_config(&directory, "gpt-6-sol", |project| {

@@ -93,7 +93,9 @@ pub(super) fn configure_shell_workspace(config: &mut ActorHostConfig) {
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
         authored.join("AgentSpec.hs"),
-        include_str!("fixtures/shell_agent_spec.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/shell_agent_spec.hs",
+        ),
     )
     .unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
@@ -116,7 +118,9 @@ pub(super) fn configure_notebook_lookup_workspace(config: &mut ActorHostConfig) 
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
         authored.join("AgentSpec.hs"),
-        include_str!("fixtures/notebook_lookup_agent_spec.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/notebook_lookup_agent_spec.hs",
+        ),
     )
     .unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
@@ -141,7 +145,9 @@ pub(super) fn configure_notebook_jev_workspace(config: &mut ActorHostConfig) {
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
         authored.join("AgentSpec.hs"),
-        include_str!("fixtures/notebook_jev_agent_spec.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/notebook_jev_agent_spec.hs",
+        ),
     )
     .unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {

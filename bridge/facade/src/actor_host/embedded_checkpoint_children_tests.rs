@@ -26,7 +26,9 @@ async fn embedded_checkpoint_scope_setup_starts_its_haskell_actor() {
             "checkpoint-scope-setup",
             &format!(
                 "{}\ndisplay True",
-                include_str!("embedded_checkpoint_scope_setup.hs")
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/embedded_checkpoint_scope_setup.hs"
+                )
             ),
         );
     let settled = next_hosted_script_round(&mut requests, &mut pending, &root).await;
@@ -57,14 +59,18 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
             "checkpoint-scope-setup",
             &format!(
                 "{}\ndisplay True",
-                include_str!("embedded_checkpoint_scope_setup.hs")
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/embedded_checkpoint_scope_setup.hs"
+                )
             ),
         );
     let after_setup = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     after_setup.assert_value("checkpoint-scope-setup", "True");
     after_setup.call(
         "checkpoint-parent-capture-failure",
-        include_str!("embedded_checkpoint_capture_and_children.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/embedded_checkpoint_capture_and_children.hs",
+        ),
     );
     let after_failure = next_hosted_script_round(&mut requests, &mut pending, &root).await;
     for retained in [
@@ -78,7 +84,9 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
         "checkpoint-parent-admit-stored-children",
         &format!(
             "{}\ndisplay True",
-            include_str!("embedded_checkpoint_admit_stored_children.hs")
+            tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/embedded_checkpoint_admit_stored_children.hs"
+            )
         ),
     );
     let root_after_admission = next_hosted_script_round(&mut requests, &mut pending, &root).await;

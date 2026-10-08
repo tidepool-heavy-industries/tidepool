@@ -45,7 +45,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
                 .await
                 .call(
                     "selected-workspace-input",
-                    include_str!("selected_workspace_child_setup.hs"),
+                    &tidepool_testing::fixture_source("bridge/facade/src/actor_host/selected_workspace_child_setup.hs"),
                 );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_after.assert_committed("selected-workspace-input");
@@ -119,7 +119,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
             child_replied.finish();
             root_after.call(
                 "selected-original-result",
-                include_str!("selected_workspace_child_result.hs"),
+                &tidepool_testing::fixture_source("bridge/facade/src/actor_host/selected_workspace_child_result.hs"),
             );
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_done.assert_value("selected-original-result", "True");
@@ -156,7 +156,9 @@ async fn opted_in_selected_context_child_owns_and_retires_its_machine() {
     let setup = tokio::spawn(async move {
         dispatch_haskell_script(
             root_for_setup.as_ref(),
-            include_str!("fresh_selected_child_setup.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/fresh_selected_child_setup.hs",
+            ),
         )
         .await
     });
