@@ -7,6 +7,7 @@ use std::path::{Component, Path};
 /// The runner supplies `TIDEPOOL_TEST_FIXTURE_ROOT`. Missing resources fail;
 /// frozen executions never consult a mutable source checkout. Each call reads
 /// the resource again so an existing test binary observes changed fixture bytes.
+/// Names are checked lexically; declared artifact links in the tree are followed.
 pub fn fixture_source(relative: &str) -> String {
     let root = std::env::var_os("TIDEPOOL_TEST_FIXTURE_ROOT")
         .unwrap_or_else(|| panic!("missing declared fixture resource TIDEPOOL_TEST_FIXTURE_ROOT"));
@@ -49,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn fixture_names_cannot_select_outside_the_declared_root() {
+    fn fixture_names_refuse_absolute_and_parent_components() {
         let root = tempfile::tempdir().unwrap();
         for name in [
             "",
