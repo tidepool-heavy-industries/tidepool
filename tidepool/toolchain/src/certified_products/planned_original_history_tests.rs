@@ -47,6 +47,211 @@ fn planned_product_sidecar(module: &str, body_tag: u8) -> Vec<u8> {
     }])
 }
 
+pub(super) fn planned_product_sidecar_with_historical_child(
+    module: &str,
+    child: &CachedHomeOwner,
+    body_tag: u8,
+) -> Vec<u8> {
+    let groups = [7, 11]
+        .into_iter()
+        .map(|ordinal| {
+            let mut wire = testing::wire_program();
+            let tidepool_repr::execution_schema::Group::NonRecursive(top) = &mut wire.bindings[0]
+            else {
+                unreachable!()
+            };
+            let occurrence = if ordinal == 7 { "local_7" } else { "entry_11" };
+            top.identity = SymbolIdentity {
+                unit: "main".into(),
+                module: module.into(),
+                namespace: "value".into(),
+                occurrence: occurrence.into(),
+                record_parent: None,
+            };
+            top.binding.rhs = tidepool_repr::execution_schema::HeapRhs::Bytes(vec![
+                ordinal as u8,
+                body_tag,
+            ]);
+            let top = top.clone();
+            wire.bindings = vec![tidepool_repr::execution_schema::Group::Recursive(vec![top])];
+            wire.expressions.nodes.clear();
+            wire.globals = if ordinal == 7 {
+                vec![tidepool_repr::execution_schema::GlobalDecl {
+                    identity: testing::identity(&child.module, "entry_7"),
+                    rep: tidepool_repr::execution_schema::RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    required_generation: None,
+                }]
+            } else {
+                vec![]
+            };
+            testing::projected_group(wire, ordinal).unwrap()
+        })
+        .collect();
+    tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+        unit: "main".into(),
+        module: module.into(),
+        interface: vec![0x42],
+        groups,
+    }])
+}
+
+pub(super) fn issue_planned_original_with_historical_child(
+    root: &Path,
+    context: &ExactDeclarationContext,
+    module: SessionModule,
+    producer: &[u8],
+    include: &[PathBuf],
+    child: &CachedHomeOwner,
+    child_source_path: &Path,
+    child_source: &str,
+) -> IssuedOriginal {
+    let module_name = module.module_name();
+    let source = format!(
+        "module {module_name} where\nimport {} (entry_7)\nlocal_7 = entry_7\nentry_11 = 4\n",
+        child.module
+    );
+    let source_root = root.join("planned-with-child");
+    std::fs::create_dir_all(&source_root).unwrap();
+    let input = source_root.join("module.hs");
+    std::fs::write(&input, &source).unwrap();
+    let mut admitted = evidence(&source);
+    admitted.modules[0].module = module_name.clone();
+    admitted.modules[0].imports = vec![crate::cache::ModuleImportEvidence {
+        qualifier: crate::cache::ImportQualifier::Unqualified,
+        module: child.module.clone(),
+        boot: false,
+        selected: Some(child_source_path.to_path_buf()),
+    }];
+    admitted.sources.push(SourceEvidence {
+        path: child_source_path.to_path_buf(),
+        sha256: hex(&sha(child_source.as_bytes())),
+    });
+    admitted.resolutions.push(crate::cache::ResolutionEvidence {
+        qualifier: crate::cache::ImportQualifier::Unqualified,
+        module: child.module.clone(),
+        boot: false,
+        selected: Some(child_source_path.to_path_buf()),
+        candidates: vec![child_source_path.to_path_buf()],
+    });
+    let normalized = CompletedSourceEvidence::from_normalized(admitted.clone(), &source).unwrap();
+    let request = context
+        .prepare_compilation(&root.join("planned-inputs"), producer)
+        .unwrap();
+    let receipt_root = source_root.join(".exact-compilations").join("source");
+    std::fs::create_dir_all(&receipt_root).unwrap();
+    let snapshot = receipt_root.join("source.hs");
+    std::fs::write(&snapshot, &source).unwrap();
+    let mut worker = admitted.clone();
+    worker.sources[0].path = input.clone();
+    let exact_receipt = value_array([
+        value_text("TPEXACTCOMPILE"),
+        value_text("3"),
+        value_text(&request.request_sha256),
+        value_text(hex(&request.semantic_sha256)),
+        value_text(input.to_string_lossy()),
+        value_text(hex(&sha(source.as_bytes()))),
+        value_text(snapshot.to_string_lossy()),
+        value_text(String::from_utf8(serde_json::to_vec(&worker).unwrap()).unwrap()),
+        value_array([value_array([
+            value_text("main"),
+            value_text(&module_name),
+            Value::Bool(false),
+            value_array([value_array([
+                value_text("none"),
+                value_text(&child.module),
+                Value::Bool(false),
+                value_text(&child.unit),
+            ])]),
+        ])]),
+        value_array([value_array([]), Value::Null]),
+    ]);
+    std::fs::write(
+        receipt_root.join("receipt.cbor"),
+        receipt_bytes(&exact_receipt),
+    )
+    .unwrap();
+    worker.cache_safe = false;
+    worker.selection_complete = false;
+    let evidence_bytes = serde_json::to_vec(&worker).unwrap();
+    let source_admission = request
+        .admit_source(&input, &source, &evidence_bytes)
+        .unwrap();
+    let authored = NativeAuthoredDeclarationAdmission::from_planned(&module, &source_admission)
+        .unwrap();
+    let exact = ExactProductAdmission {
+        request: &request,
+        source: &source_admission,
+    };
+    let bytes = planned_product_sidecar_with_historical_child(&module_name, child, 9);
+    let package_bytes = empty_package_bundle_for(&module_name);
+    let parsed = ParsedModuleProducts::decode(&bytes, &package_bytes).unwrap();
+    let binder = testing::identity(&child.module, "entry_7");
+    let mut accepted = receipt(&bytes, &admitted, &source);
+    accepted.module = module_name.clone();
+    accepted.groups = vec![
+        AcceptedGroup {
+            original_ordinal: 7,
+            globals: vec![AcceptedGlobal {
+                identity: binder.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: ReceiptImportOwner::Source {
+                    unit: child.unit.clone(),
+                    module: child.module.clone(),
+                    module_version: Some(child.module_version.clone()),
+                    original_ordinal: 7,
+                    binder,
+                },
+            }],
+        },
+        AcceptedGroup {
+            original_ordinal: 11,
+            globals: vec![],
+        },
+    ];
+    accepted.interface_requirements.insert(
+        (child.unit.clone(), child.module.clone()),
+        child.skinny_iface_sha256,
+    );
+    accepted.dependency_witness_sha256 = sha(&evidence_bytes);
+    let packet = CertifiedReceipt {
+        source_recipe: WorkerExecutionSource::ExactUnavailable(
+            SourceRecipeUnavailable::IncompleteSourceEvidence,
+        ),
+        finalization: fixture_finalization_from_products(
+            Some(root),
+            std::slice::from_ref(&accepted),
+            &parsed,
+        ),
+        modules: vec![accepted],
+        targets: BTreeMap::new(),
+        packages: BTreeMap::new(),
+    };
+    let certified = certify_products(
+        None,
+        &packet,
+        &parsed,
+        &evidence_bytes,
+        &input,
+        root,
+        &normalized,
+        &source,
+        producer,
+        include,
+        Some(&exact),
+        Some(&authored),
+    )
+    .unwrap();
+    IssuedOriginal {
+        request,
+        source: source_admission,
+        certified,
+    }
+}
+
 fn issue_planned_original(
     root: &Path,
     module: SessionModule,
