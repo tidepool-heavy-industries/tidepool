@@ -3930,7 +3930,7 @@ mod tests {
                             .map(String::as_str)
                             .or_else(|| panic.downcast_ref::<&str>().copied())
                             .unwrap_or("non-string history failure");
-                        TestCaseError::fail(detail)
+                        TestCaseError::fail(detail.to_owned())
                     })
                 })
                 .unwrap();

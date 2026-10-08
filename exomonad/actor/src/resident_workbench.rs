@@ -12794,7 +12794,7 @@ pub(crate) mod request_tests {
         let descriptor = crate::ActorDescriptor::new(
             "lazy cleanup scope",
             crate::ActorPlacement {
-                session: SessionId(991),
+                session: tidepool_repr::SessionId(991),
                 resource_scope: RealmId::ROOT,
                 lexical_scope: ScopeId::ROOT,
             },
