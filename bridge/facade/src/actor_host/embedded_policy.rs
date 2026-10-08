@@ -129,29 +129,23 @@ impl EmbeddedPolicySnapshot {
         checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn HostedContextBinding>>,
     ) -> ResidentToolFuture {
-        let arguments = match arguments {
-            ToolArguments::Structured(value) => {
-                let decoded = match self.schemas.get(&name) {
-                    Some(schema) => match schema.decode_arguments(value) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return Box::pin(async move {
-                                Err(ResidentToolError::InvalidInvocation(error.to_string()))
-                            });
-                        }
-                    },
-                    None => value,
-                };
-                ToolArguments::Structured(decoded)
-            }
-            raw => raw,
+        let validated = match arguments.clone() {
+            ToolArguments::Structured(value) => match self.schemas.get(&name) {
+                Some(schema) => schema
+                    .decode_arguments(value)
+                    .map(ToolArguments::Structured)
+                    .map_err(|error| ResidentToolError::InvalidInvocation(error.to_string())),
+                None => Ok(ToolArguments::Structured(value)),
+            },
+            raw => Ok(raw),
         };
-        let future = self.policy.dispatch_with_context_boxed(
+        let future = self.policy.dispatch_validated_with_context_boxed(
             ToolInvocation {
                 context: Some(context),
                 name,
                 arguments,
             },
+            validated,
             checkpoint_capture,
             context_binding,
         );
@@ -187,6 +181,30 @@ impl EmbeddedPolicySnapshot {
             ));
         }
         Ok(true)
+    }
+
+    pub(super) fn retained_operation(
+        &self,
+        context: ToolInvocationContext,
+    ) -> Result<exomonad_actor::HostedOperationSettlement, ResidentToolError> {
+        self.policy.retained_operation(context)
+    }
+
+    pub(super) async fn abort_operation(
+        &self,
+        context: ToolInvocationContext,
+    ) -> Result<(), ResidentToolError> {
+        let original = context.model_operation().ok_or_else(|| {
+            ResidentToolError::InvalidInvocation(
+                "provider finalization needs an original operation".into(),
+            )
+        })?;
+        self.policy
+            .abort_boxed(
+                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone()),
+            )
+            .await
+            .map(|_| ())
     }
 
     pub(super) async fn cancel(

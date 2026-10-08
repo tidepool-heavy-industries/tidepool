@@ -257,15 +257,23 @@ impl EmbeddedHarnessRuntime {
             })?
             .validate_child(installation.actor.identity())
             .map_err(EmbeddedError::Binding)?;
-        let lease = installation.checkpoint.as_ref().ok_or_else(|| {
-            EmbeddedError::Binding("checkpoint child has no captured context lease".into())
-        })?;
-        if captured.issuer != lease.issuer || installation.context_parent != Some(lease.issuer) {
-            return Err(EmbeddedError::Binding(
-                "embedded checkpoint issuer mismatch".into(),
-            ));
-        }
-        let checkpoint = captured.cuts.before_call();
+        let checkpoint = if let Some(lease) = &installation.checkpoint {
+            if captured.issuer != lease.issuer || installation.context_parent != Some(lease.issuer)
+            {
+                return Err(EmbeddedError::Binding(
+                    "embedded checkpoint issuer mismatch".into(),
+                ));
+            }
+            captured.cuts.before_call()
+        } else {
+            captured.validate_inherited_origin(
+                &self.run,
+                installation.creator,
+                installation.context_parent,
+                installation.checkpoint_boundary.as_ref(),
+            )?;
+            captured.cuts.deferred()
+        };
         let actor = installation.actor.clone();
         let parent = checkpoint.origin().clone();
         let actor_identity = actor.identity();
@@ -761,13 +769,82 @@ pub(super) struct EmbeddedHostedCheckpoint {
 }
 
 impl EmbeddedHostedCheckpoint {
+    fn validate_inherited_origin(
+        &self,
+        run: &str,
+        creator: Option<ActorRef>,
+        context_parent: Option<ActorRef>,
+        boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
+    ) -> Result<(), EmbeddedError> {
+        let operation = self.cuts.deferred().operation().ok_or_else(|| {
+            EmbeddedError::Binding("inherited hosted context has no captured operation".into())
+        })?;
+        validate_inherited_operation(
+            self.issuer,
+            self.cuts.deferred().origin(),
+            operation,
+            run,
+            creator,
+            context_parent,
+            boundary,
+        )
+    }
+
     pub(super) fn child_path(&self, actor: ActorRef) -> AgentPath {
         AgentPath(format!(
             "{}/a{}_i{}",
-            self.cuts.before_call().origin().0,
+            self.cuts.deferred().origin().0,
             actor.id.0,
             actor.incarnation.0
         ))
+    }
+}
+
+fn validate_inherited_operation(
+    issuer: ActorRef,
+    parent: &AgentPath,
+    operation: &OperationId,
+    run: &str,
+    creator: Option<ActorRef>,
+    context_parent: Option<ActorRef>,
+    boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
+) -> Result<(), EmbeddedError> {
+    let refused = || {
+        EmbeddedError::Binding(
+            "inherited hosted context does not match its admitted issuer/operation".into(),
+        )
+    };
+    if creator != Some(issuer) || context_parent != Some(issuer) {
+        return Err(refused());
+    }
+    let original = boundary
+        .and_then(tidepool_runtime::session::ContextCheckpointBoundary::hosted)
+        .filter(|operation| operation.is_complete())
+        .ok_or_else(refused)?;
+    match (&operation.origin, &original.origin) {
+        (
+            ConversationIdentity::Embedded {
+                run: source_run,
+                actor,
+                incarnation,
+            },
+            exomonad_tool::ConversationOrigin::Embedded {
+                run: boundary_run,
+                actor: boundary_actor,
+                incarnation: boundary_incarnation,
+            },
+        ) if source_run == run
+            && boundary_run == run
+            && actor == parent
+            && boundary_actor == &parent.0
+            && incarnation == &issuer.incarnation.0.to_string()
+            && boundary_incarnation == incarnation
+            && original.request_id == operation.request.0
+            && original.call_id == operation.call.0 =>
+        {
+            Ok(())
+        }
+        _ => Err(refused()),
     }
 }
 
@@ -1062,42 +1139,52 @@ impl Provider for EmbeddedDispatcher {
             .dispatch(name, arguments, context, authority)
             .await
             .map_err(ProviderError::into_tool_failure);
-        if let Some(binding) = binding {
-            let output = JobOutput::Completed(result);
-            return binding
-                .completion(output.clone())
-                .unwrap_or_else(|| unavailable_context_completion(output));
-        }
-        // A signalled cancellation asks the same exact native owner to
-        // arbitrate its retained terminal. The ordinary result waiter and
-        // the scheduler's cancellation waiter may observe that reply in
-        // either order; both must project the same typed cancellation.
-        // Dispatch has already released the native reply, so this cannot
-        // depend on completion of the provider future or Store publication.
-        let output = if cancellation.is_cancelled() {
-            let terminal = match operation.as_ref().map(|operation| self.context(operation)) {
-                Some(Ok(invocation)) => self.snapshot.cancel(invocation).await,
-                Some(Err(error)) => {
-                    return ProviderCompletion {
-                        output: JobOutput::CancellationUnconfirmed(error.to_string()),
-                        full_success: false,
-                        context: harness::provider::ContextDisposition::Unedited,
-                    };
+        let invocation = operation.as_ref().map(|operation| self.context(operation));
+        let retained_terminal = invocation
+            .as_ref()
+            .and_then(|invocation| invocation.as_ref().ok())
+            .and_then(|invocation| self.snapshot.retained_operation(invocation.clone()).ok())
+            .map(|owner| owner.terminal());
+        // Native retirement can win before scheduler cancellation is signalled.
+        // Its immutable CellExit, rather than notification timing, determines
+        // cancellation, publication and unconfirmed cleanup.
+        let terminal = match retained_terminal {
+            Some(exomonad_actor::HostedOperationTerminal::Settled(terminal)) => Some(Ok(terminal)),
+            _ if cancellation.is_cancelled() => Some(match invocation.as_ref() {
+                Some(Ok(invocation)) => self.snapshot.cancel(invocation.clone()).await,
+                Some(Err(error)) => Err(ResidentToolError::Unavailable(error.to_string())),
+                None => Err(ResidentToolError::Unavailable(
+                    "native cancellation requires an exact operation".into(),
+                )),
+            }),
+            _ => None,
+        };
+        let output = if let Some(terminal) = terminal {
+            if matches!(
+                &terminal,
+                Ok(WorkbenchCancellationOutcome::Cancelled { .. })
+            ) {
+                let finalized = match invocation.as_ref() {
+                    Some(Ok(invocation)) => self.snapshot.abort_operation(invocation.clone()).await,
+                    _ => Err(ResidentToolError::Unavailable(
+                        "cancelled operation lacks original finalization authority".into(),
+                    )),
+                };
+                if let Err(error) = finalized {
+                    return unavailable_context_completion(JobOutput::CancellationUnconfirmed(
+                        error.to_string(),
+                    ));
                 }
-                None => {
-                    return ProviderCompletion {
-                        output: JobOutput::CancellationUnconfirmed(
-                            "native cancellation requires an exact operation".into(),
-                        ),
-                        full_success: false,
-                        context: harness::provider::ContextDisposition::Unedited,
-                    };
-                }
-            };
+            }
             native_terminal_output(result, terminal)
         } else {
             JobOutput::Completed(result)
         };
+        if let Some(binding) = binding {
+            return binding
+                .completion(output.clone())
+                .unwrap_or_else(|| unavailable_context_completion(output));
+        }
         UneditedInvocationCompletion::project(output)
     }
 
@@ -1173,9 +1260,14 @@ impl CancellationOwner for EmbeddedDispatcher {
             Ok(context) => context,
             Err(error) => return CancellationAcknowledgment::Unconfirmed(error.to_string()),
         };
-        match self.snapshot.cancel(context).await {
+        match self.snapshot.cancel(context.clone()).await {
             Ok(WorkbenchCancellationOutcome::Cancelled { reply, .. }) => {
-                CancellationAcknowledgment::StoppedWithReceipt(workbench_reply_receipt(reply))
+                match self.snapshot.abort_operation(context).await {
+                    Ok(()) => CancellationAcknowledgment::StoppedWithReceipt(
+                        workbench_reply_receipt(reply),
+                    ),
+                    Err(error) => CancellationAcknowledgment::Unconfirmed(error.to_string()),
+                }
             }
             Ok(
                 WorkbenchCancellationOutcome::Expired { reply, .. }
@@ -1625,6 +1717,95 @@ mod tests {
                 .unwrap()
                 .contains("explicit fresh-launch")
         );
+    }
+
+    #[test]
+    fn inherited_hosted_operation_requires_exact_admitted_parent_and_call() {
+        let issuer = ActorRef::first(exomonad_actor::ActorId(1));
+        let other = ActorRef::first(exomonad_actor::ActorId(2));
+        let parent = AgentPath("/root".into());
+        let operation = OperationId {
+            origin: ConversationIdentity::Embedded {
+                run: "run".into(),
+                actor: parent.clone(),
+                incarnation: "1".into(),
+            },
+            request: harness::model::RequestId("request".into()),
+            call: harness::model::CallId("call".into()),
+        };
+        let original = exomonad_tool::OriginalOperation {
+            origin: exomonad_tool::ConversationOrigin::Embedded {
+                run: "run".into(),
+                actor: parent.0.clone(),
+                incarnation: "1".into(),
+            },
+            request_id: "request".into(),
+            call_id: "call".into(),
+        };
+        let boundary =
+            tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original.clone());
+        let check =
+            |run: &str,
+             creator,
+             context_parent,
+             boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>| {
+                validate_inherited_operation(
+                    issuer,
+                    &parent,
+                    &operation,
+                    run,
+                    creator,
+                    context_parent,
+                    boundary,
+                )
+            };
+        assert!(check("run", Some(issuer), Some(issuer), Some(&boundary)).is_ok());
+        assert!(check("other-run", Some(issuer), Some(issuer), Some(&boundary)).is_err());
+        assert!(check("run", Some(other), Some(issuer), Some(&boundary)).is_err());
+        assert!(check("run", Some(issuer), Some(other), Some(&boundary)).is_err());
+        assert!(check("run", None, Some(issuer), Some(&boundary)).is_err());
+        assert!(check("run", Some(issuer), Some(issuer), None).is_err());
+        for foreign in [
+            exomonad_tool::OriginalOperation {
+                request_id: "other-request".into(),
+                ..original.clone()
+            },
+            exomonad_tool::OriginalOperation {
+                call_id: "other-call".into(),
+                ..original.clone()
+            },
+            exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::Embedded {
+                    run: "run".into(),
+                    actor: "/other".into(),
+                    incarnation: "1".into(),
+                },
+                ..original.clone()
+            },
+            exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::Embedded {
+                    run: "run".into(),
+                    actor: "/root".into(),
+                    incarnation: "2".into(),
+                },
+                ..original.clone()
+            },
+            exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::External {
+                    thread_id: "thread".into(),
+                },
+                ..original
+            },
+        ] {
+            let boundary = tidepool_runtime::session::ContextCheckpointBoundary::Hosted(foreign);
+            assert!(check("run", Some(issuer), Some(issuer), Some(&boundary)).is_err());
+        }
+        let route = tidepool_runtime::session::ContextCheckpointBoundary::Route {
+            actor_id: 1,
+            incarnation: 1,
+            watch_id: 1,
+        };
+        assert!(check("run", Some(issuer), Some(issuer), Some(&route)).is_err());
     }
 
     #[derive(Clone)]
