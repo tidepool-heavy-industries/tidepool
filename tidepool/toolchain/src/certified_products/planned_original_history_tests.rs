@@ -164,6 +164,7 @@ pub(super) fn issue_planned_original_with_historical_child(
         candidates: vec![child_source_path.to_path_buf()],
     });
     let normalized = CompletedSourceEvidence::from_normalized(admitted.clone(), &source).unwrap();
+    let context = Arc::new(context.clone());
     let request = context
         .prepare_compilation(
             &root.join(format!("planned-inputs-{module_name}")),
@@ -327,10 +328,12 @@ pub(super) fn issue_planned_original_with_source_value(
     admitted.modules[0].module = module_name.clone();
     let normalized = CompletedSourceEvidence::from_normalized(admitted.clone(), &source).unwrap();
     let canonical_producer = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
-    let context = ExactDeclarationContext::new(&[], &[], vec![])
-        .unwrap()
-        .extend_checked_original_products(canonical_producer, &[])
-        .unwrap();
+    let context = Arc::new(
+        ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_checked_original_products(canonical_producer, &[])
+            .unwrap(),
+    );
     let request = context
         .prepare_compilation(&root.join(format!("inputs-{source_tag}")), producer)
         .unwrap();

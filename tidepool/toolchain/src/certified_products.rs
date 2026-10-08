@@ -12862,8 +12862,13 @@ pub(crate) mod tests {
             .chain(prior_planned.certified.recovery_products.iter().cloned())
             .chain(planned.certified.recovery_products.iter().cloned())
             .collect::<Vec<_>>();
-        let view =
-            certified_product_artifact_view(canonical_producer, &custody, &[], None).unwrap();
+        let view = crate::declaration_context::certified_product_artifact_view(
+            canonical_producer,
+            &custody,
+            &[],
+            None,
+        )
+        .unwrap();
         let incompatible_source =
             planned_original_history_tests::issue_planned_original_with_source_value(
                 root.path(),
@@ -12875,7 +12880,7 @@ pub(crate) mod tests {
                 5,
             );
         assert!(
-            certified_product_artifact_view(
+            crate::declaration_context::certified_product_artifact_view(
                 canonical_producer,
                 &custody
                     .iter()
