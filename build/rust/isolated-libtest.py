@@ -273,6 +273,7 @@ def execute(args, timeout, service_slice=None, service_record=None, environment=
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            errors='replace',
             start_new_session=True,
             env=environment,
         )
@@ -561,6 +562,8 @@ def diagnostic_summaries(artifact_root):
                               ('lifecycle.json', 'owned_compiler_lifecycle')):
             path = compiler / filename
             if path.exists():
+                if key == 'owned_compiler_outcome':
+                    result['owned_cleanup_status'] = 'unknown'
                 try:
                     if path.is_symlink():
                         raise ValueError('compiler diagnostic marker must not be a symlink')
@@ -844,6 +847,11 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
     if compiler_statuses:
         record['compiler_cleanup_status'] = (next(iter(compiler_statuses))
                                              if len(compiler_statuses) == 1 else 'mixed')
+    for root in summaries.get('owned_compiler_roots', []):
+        status = root.get('owned_cleanup_status')
+        if status is not None and status != 'confirmed':
+            cleanup_complete = False
+            stderr += f"\nowned compiler cleanup remains {status}: {root['path']}"
     evidence_complete = (not summaries.get('issues')
                          and not summaries.get('transactions_truncated')
                          and summaries.get('physical_compiler_timing', {}).get('complete', True)
@@ -948,6 +956,11 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         record['process_cleanup_status'] = process_cleanup_status(error, service_record)
         record.update(status='spawn_failed', elapsed_ns=time.monotonic_ns() - started)
         return finish(False, f'could not start test process: {error}', '')
+    except Exception as error:
+        record['process_cleanup_status'] = process_cleanup_status(error, service_record)
+        record.update(status='runner_failed', process_execution_count=None,
+                      elapsed_ns=time.monotonic_ns() - started)
+        return finish(False, f'test process observation failed: {type(error).__name__}: {error}', '')
     record.update(status='finished', process_execution_count=(None if service_record is not None else 1),
                   exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started,
                   process_cleanup_status=process_cleanup_status(result, service_record))

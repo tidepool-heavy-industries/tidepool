@@ -183,11 +183,73 @@ class IsolatedLibtestTests(unittest.TestCase):
         with patch.object(runner, 'execute', side_effect=run):
             passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
                 10, record, artifact_root=root)
-        self.assertTrue(passed)
+        self.assertFalse(passed)
         self.assertTrue(root.exists())
         self.assertFalse(record['diagnostic_evidence_complete'])
         self.assertEqual(record['process_cleanup_status'], 'confirmed')
         self.assertEqual(record['compiler_cleanup_status'], 'unknown')
+
+    def test_nested_owned_compiler_receipts_gate_cleanup_independently_of_timing(self):
+        for status in ('confirmed', 'unconfirmed', 'failed'):
+            with self.subTest(status=status):
+                root = Path(self.tmp.name) / f'nested-owner-{status}'
+                record = {}
+                def run(args, timeout, environment=None):
+                    compiler = root / 'owned-compiler-control-1/compiler'
+                    compiler.mkdir(parents=True)
+                    (compiler / 'owned-compiler-outcome.json').write_text(json.dumps({
+                        'cleanup': {'status': status}}))
+                    (compiler / 'lifecycle.json').write_text('{}')
+                    return completed_process(args, 0,
+                        'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+                with patch.object(runner, 'execute', side_effect=run):
+                    passed, _, errors = runner.run_one(str(self.binary), 'suite::works', False,
+                        10, record, artifact_root=root)
+                self.assertEqual(passed, status == 'confirmed')
+                self.assertTrue(root.exists(), 'missing timing retains diagnostics even after confirmed cleanup')
+                self.assertEqual(record['compiler_cleanup_status'], status)
+                self.assertEqual(record['process_cleanup_status'], 'confirmed')
+                self.assertEqual(record['executed_test_count'], 1)
+                if status != 'confirmed':
+                    self.assertIn(f'owned compiler cleanup remains {status}', errors)
+
+    def test_invalid_utf8_native_output_keeps_counts_and_cleanup_evidence(self):
+        root = Path(self.tmp.name) / 'invalid-output'
+        self.binary.write_text('#!' + sys.executable + '\n' +
+            'import json, os, pathlib\n' +
+            'campaign = pathlib.Path(os.environ["TIDEPOOL_TEST_ARTIFACT_ROOT"]) / "hosted-campaign-1"\n' +
+            'campaign.mkdir()\n' +
+            '(campaign / "hosted-outcome.json").write_text(json.dumps({"cleanup": {"status": "unknown"}}))\n' +
+            'os.write(1, b"\\xff\\ntest result: ok. 1 passed; 0 failed; 0 ignored;\\n")\n' +
+            'os.write(2, b"\\xfe\\n")\n')
+        self.binary.chmod(0o700)
+        record = {}
+        passed, stdout, stderr = runner.run_one(str(self.binary), 'suite::works', False,
+            10, record, artifact_root=root)
+        self.assertFalse(passed)
+        self.assertTrue(root.exists())
+        self.assertEqual(record['executed_test_count'], 1)
+        self.assertEqual(record['process_cleanup_status'], 'confirmed')
+        self.assertEqual(record['hosted_cleanup_status'], 'unknown')
+        self.assertIn('\ufffd', stdout)
+        self.assertIn('\ufffd', stderr)
+
+    def test_unexpected_observation_error_settles_artifacts_without_hiding_interrupts(self):
+        root = Path(self.tmp.name) / 'unexpected-observation'
+        record = {}
+        with patch.object(runner, 'execute', side_effect=ValueError('observation failed')):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                10, record, artifact_root=root)
+        self.assertFalse(passed)
+        self.assertTrue(root.exists())
+        self.assertEqual(record['status'], 'runner_failed')
+        self.assertEqual(record['process_cleanup_status'], 'unknown')
+        self.assertIsNone(record['process_execution_count'])
+        for error in (KeyboardInterrupt(), SystemExit(1)):
+            with self.subTest(exception=type(error).__name__), \
+                 patch.object(runner, 'execute', side_effect=error):
+                with self.assertRaises(type(error)):
+                    runner.run_one(str(self.binary), 'suite::works', False, 10, {})
 
     def test_case_environment_isolated_and_success_removes_diagnostics(self):
         root = Path(self.tmp.name) / 'successful-artifacts'
