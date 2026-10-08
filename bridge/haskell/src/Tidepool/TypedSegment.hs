@@ -451,12 +451,14 @@ installTypedSegmentRoots environment pending guts = do
         , dataConstructor <- tyConDataCons constructor
         , field <- dataConFieldLabels dataConstructor]
         ++ concatMap patSynFieldLabels (mg_patsyns guts)
-      selectorNames = mkNameSet (map flSelector recordFields)
+      patternSupportNames = concatMap (\patternSynonym ->
+        let (matcher, _, _) = patSynMatcher patternSynonym
+        in matcher : maybe [] (\(builder, _, _) -> [builder])
+          (patSynBuilder patternSynonym)) (mg_patsyns guts)
+      metadataNames = mkNameSet (map flSelector recordFields ++ patternSupportNames)
       metadataIds = map instanceDFunId (mg_insts guts)
-        ++ concatMap (\patternSynonym -> fst (patSynMatcher patternSynonym)
-            : maybe [] (pure . fst) (patSynBuilder patternSynonym)) (mg_patsyns guts)
         ++ [identifier | binding <- mg_binds guts, identifier <- bindersOf binding
-            , idName identifier `elemNameSet` selectorNames]
+            , idName identifier `elemNameSet` metadataNames]
       metadataRoots = foldl' extendVarSet emptyVarSet metadataIds
       -- Retained instances, records and pattern synonyms reference explicit
       -- local Ids in the finalized interface. Keep those metadata dependencies
