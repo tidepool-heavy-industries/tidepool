@@ -345,6 +345,7 @@ proptest! {
         prop_assert!(projected_entries.iter().any(|entry| {
             entry.descriptor.owner == interface_owner
         }));
+        drop(interface);
         let initial_indices = left
             .0
             .lock()
@@ -386,7 +387,6 @@ proptest! {
         prop_assert_eq!(left.node_count(), exhaustive_oracle(&peer).closure.len() + 1);
         drop(reused);
         drop(peer);
-        drop(interface);
         prop_assert_eq!(left.node_count(), 0);
         prop_assert!(!snapshot.selected_native_groups.is_empty());
     }
