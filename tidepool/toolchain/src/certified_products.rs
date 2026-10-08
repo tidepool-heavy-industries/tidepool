@@ -12317,6 +12317,7 @@ pub(crate) mod tests {
     fn repeated_retained_core_promotion_preserves_exact_original_membership() {
         use crate::artifact_inventory::CanonicalProducerIdentity;
         use crate::declaration_context::{ExactDeclarationContext, ExactProductAdmission};
+        use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
         use crate::recovery_artifacts::CertifiedRecoveryProduct;
         use tidepool_repr::{Generation, SessionModule};
         let root = tempfile::tempdir().unwrap();
@@ -12734,11 +12735,24 @@ pub(crate) mod tests {
             )
         };
         let historical_projection = make_projection(std::slice::from_ref(child)).unwrap();
+        let fresh_identity = ExactModuleIdentity {
+            unit: historical_child.unit.clone(),
+            module: historical_child.module.clone(),
+        };
         let historical_context = context
             .compiler_input_projection()
             .interface_only()
             .merge(&historical_projection)
             .and_then(|projection| context.clone().with_compiler_input_projection(projection))
+            .and_then(|context| {
+                context.extend_lexical_joins(
+                    &[],
+                    &[ExactLexicalNode {
+                        owner: fresh_identity.clone(),
+                        imports: vec![],
+                    }],
+                )
+            })
             .unwrap();
         let prior_module = SessionModule::lib(Generation(6));
         let prior_source = format!(
@@ -12783,6 +12797,24 @@ pub(crate) mod tests {
             .interface_only()
             .merge(&current_projection)
             .and_then(|projection| planned_context.with_compiler_input_projection(projection))
+            .and_then(|context| {
+                context.extend_lexical_joins(
+                    &[],
+                    &[
+                        ExactLexicalNode {
+                            owner: fresh_identity.clone(),
+                            imports: vec![],
+                        },
+                        ExactLexicalNode {
+                            owner: ExactModuleIdentity {
+                                unit: prior_module_product.owner().unit.clone(),
+                                module: prior_module_product.owner().module.clone(),
+                            },
+                            imports: vec![fresh_identity.clone()],
+                        },
+                    ],
+                )
+            })
             .unwrap();
         let stale_fresh =
             planned_original_history_tests::issue_planned_original_with_historical_child(
