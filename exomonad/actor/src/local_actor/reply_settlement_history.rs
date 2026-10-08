@@ -408,7 +408,13 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
     for subscription in subscriptions {
         let observed = subscription.wait().await.unwrap();
         match history.completion {
-            Completion::Success => assert_eq!(observed, WatchObservation::Ready(Vec::new())),
+            Completion::Success => assert_eq!(
+                observed,
+                WatchObservation::Ready(crate::request::readiness::Decision {
+                    leaves: vec![(0, None)],
+                    choices: vec![]
+                })
+            ),
             Completion::Failure => assert_eq!(
                 observed,
                 WatchObservation::Unavailable {
@@ -604,7 +610,12 @@ fn singleton_reply_watches_distinguish_required_success_from_allowed_failure() {
         );
         assert_eq!(
             registry.observe_watch(owner, collect),
-            Ok(WatchObservation::Ready(vec![(request, failure)]))
+            Ok(WatchObservation::Ready(
+                crate::request::readiness::Decision {
+                    leaves: vec![(0, Some(failure))],
+                    choices: vec![]
+                }
+            ))
         );
     }
 }

@@ -243,7 +243,7 @@ async fn run_native_reply_case(case: NativeReplyCase) {
                     .requests
                     .await_watch(requester.identity(), watch)
                     .await,
-                Ok(WatchObservation::Ready(Vec::new())),
+                Ok(WatchObservation::Ready(crate::request::readiness::Decision { leaves: vec![(0, None)], choices: vec![] })),
                 "the accepted reply must finish its exact continuation"
             );
             assert_eq!(
