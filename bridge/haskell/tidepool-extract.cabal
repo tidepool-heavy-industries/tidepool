@@ -757,6 +757,7 @@ test-suite model-turn-test
   other-modules:
     JevPreparedTest
     JevPreparedWorkflow
+    Examples.JevFormWorkflow
     FormJevDialogueTest
     Jev.Core
     Jev.Core.Contract
