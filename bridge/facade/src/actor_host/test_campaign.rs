@@ -1612,6 +1612,13 @@ mod tests {
         for original in [None, Some(73_u32)] {
             let mut campaign = TestCampaign::start().await;
             let forest = campaign.forest.clone();
+            let _repository = std::mem::replace(
+                &mut campaign._repository,
+                exomonad_worktree::testing::TestRepo::init().unwrap(),
+            );
+            let _runtime = std::mem::replace(&mut campaign._runtime, tempfile::tempdir().unwrap());
+            let _session_root = campaign.session_root.clone();
+            let _host_incarnation = campaign.host_incarnation.clone();
             // This guard test keeps executor custody outside the owner being
             // deliberately dropped, then settles those real resources below.
             let executor = std::mem::replace(
