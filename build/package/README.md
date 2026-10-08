@@ -211,6 +211,16 @@ native bundle action and checked against its source contract. Freeze cannot
 substitute a separately supplied driver. Schema 2 descriptors require that
 contract; historical frozen bundles retain their own qualification program.
 
+Every runtime cohort seals `owned-resident` compilation into its descriptor,
+matching the resident daemon used by CLI launch. A direct override, missing mode,
+or unknown mode refuses before execution. The general isolated unit runner still
+defaults to direct compilation for process isolation; release qualification does
+not inherit that default. The separate catalog consumer keeps direct compilation
+inside its cold namespace and refuses an existing daemon. Preserve older frozen
+descriptors and their reports with their bundled qualification program; the new
+reader refuses older unsealed cohort contracts. Build and freeze a new candidate
+to qualify the resident runtime contract.
+
 The frozen descriptor is the authority for the exact M1/M2 case rosters, counts
 and deadlines. M2 has a 600-second default watchdog; unfinished-parent survival,
 nominal publication join, checkpoint release and
@@ -280,6 +290,23 @@ hash recorded; it cannot replace the frozen libtest for release qualification.
 Preserve older frozen descriptors and their reports unchanged when introducing
 this new cohort; build and freeze the new candidate rather than editing an old
 qualification contract.
+
+The supplementary `harness-performance` cohort selects the one ignored
+eight-phase HTTP/Engine/Store/notebook workload. It requires the frozen prepared
+catalog/root entry, an isolated owned resident compiler, one test process, and
+retained artifacts. Only provider replies are scripted. It records behavior and
+measurement separately: `behavioral_completed` requires the one executed passing
+case; `measurement.completed` also requires the runner's complete compiler
+diagnostics and retained artifacts. Missing timing evidence cannot qualify the
+measurement, even when all notebook answers pass. Inspect the retained host and
+daemon traces for phase correlation and workload comparisons; this gate imposes
+no latency threshold and does not establish provider network performance.
+
+```sh
+python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+  --cohort harness-performance --output "$HARNESS_PERFORMANCE_EVIDENCE" --jobs 1 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+```
 
 The catalog acceptance route requires the frozen descriptor. It verifies the
 exact native selection before entering the consumer namespace, exposes the

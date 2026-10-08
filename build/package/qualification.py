@@ -44,6 +44,9 @@ UNIFIED_REGRESSION_TESTS = [
     "actor_host::embedded_policy::operation_settlement_tests::acknowledged_schema_refusal_then_native_close_cancels_only_the_successor_request",
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
+HARNESS_PERFORMANCE_TESTS = [
+    "actor_host::context_transaction_acceptance_tests::harness_usecase_performance::production_harness_notebook_usecase_phases",
+]
 PREPARED_CHILD_TESTS = [
     "actor_host::prepared_runtime_acceptance::production_prepared_toolset_twenty_children_execute_original_native_probe",
 ]
@@ -96,16 +99,28 @@ def programs(root: Path) -> dict:
 
 def cohorts() -> dict:
     return {"m2": {"tests": M2_TESTS, "expected_count": len(M2_TESTS), "ignored": False, "timeout": 600,
+                   "compiler_mode": "owned-resident",
                    "case_timeouts": {M2_SURVIVAL_TEST: 900, M2_NOMINAL_JOIN_TEST: 900,
                                      M2_CHECKPOINT_RELEASE_TEST: 900,
                                      M2_SELECTED_CODING_TEST: 900}},
             "unified-regressions": {"tests": UNIFIED_REGRESSION_TESTS,
                                     "expected_count": len(UNIFIED_REGRESSION_TESTS),
-                                    "ignored": False, "timeout": 600},
-            "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900},
+                                    "ignored": False, "timeout": 600,
+                                    "compiler_mode": "owned-resident"},
+            "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900,
+                   "compiler_mode": "owned-resident"},
             "prepared-child": {"tests": PREPARED_CHILD_TESTS, "expected_count": 1,
                                "ignored": True, "timeout": 1800,
-                               "compiler_mode": "owned-resident", "max_jobs": 1}}
+                               "compiler_mode": "owned-resident", "max_jobs": 1},
+            "harness-performance": {"tests": HARNESS_PERFORMANCE_TESTS, "expected_count": 1,
+                                    "ignored": True, "timeout": 1800,
+                                    "compiler_mode": "owned-resident", "max_jobs": 1,
+                                    "retain_artifacts": True,
+                                    "measurement_required": True,
+                                    "required_stdlib_mode": "catalog-backed",
+                                    "required_startup_mode": "prepared",
+                                    "required_environment": ["TIDEPOOL_COMPILER_MODULES",
+                                                             "TIDEPOOL_PREPARED_ROOT_ENTRY"]}}
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -1232,16 +1247,27 @@ def run_cohort(args) -> int:
     tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
     cohort = descriptor["cohorts"][args.cohort]
     required_compiler_mode = cohort.get("compiler_mode")
-    compiler_mode = getattr(args, "compiler_mode", None) or required_compiler_mode or "direct"
-    if required_compiler_mode is not None and compiler_mode != required_compiler_mode:
+    if required_compiler_mode not in ("direct", "owned-resident"):
+        raise ValueError(f"{args.cohort} requires an explicit sealed compiler mode")
+    compiler_mode = getattr(args, "compiler_mode", None) or required_compiler_mode
+    if compiler_mode != required_compiler_mode:
         raise ValueError(f"{args.cohort} requires compiler mode {required_compiler_mode}")
     if args.jobs > cohort.get("max_jobs", args.jobs):
         raise ValueError(f"{args.cohort} permits at most {cohort['max_jobs']} test process")
+    for field in ("stdlib_mode", "startup_mode"):
+        required = cohort.get("required_" + field)
+        if required is not None and descriptor.get(field) != required:
+            raise ValueError(f"{args.cohort} requires {field} {required}")
+    for name in cohort.get("required_environment", []):
+        if not descriptor["environment"].get(name):
+            raise ValueError(f"{args.cohort} requires bundle-owned {name}")
     output = args.output.absolute()
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
     command = [str(tools / "bin/python3"), descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
                "--expected-count", str(cohort["expected_count"]), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
                "--output-dir", str(output / "tests"), "--compiler-mode", compiler_mode]
+    if cohort.get("retain_artifacts", False):
+        command.append("--retain-artifacts")
     for name, timeout in sorted(cohort.get("case_timeouts", {}).items()):
         command.extend(["--case-timeout", f"{name}={timeout}"])
     if args.delegated_service:
@@ -1263,7 +1289,18 @@ def run_cohort(args) -> int:
     confirmed = exact and len(records) == cohort["expected_count"] and all(record["passed"] and record["execution"]["executed_test_count"] == 1
         and record["execution"]["exit_code"] == 0
         and record["execution"].get("startup_diagnostic_seconds") is None for record in records)
-    code = result.returncode if result.returncode else int(not confirmed)
+    behavioral_completed = result.returncode == 0 and confirmed
+    measurement = None
+    if cohort.get("measurement_required", False):
+        measurement = {
+            "diagnostic_evidence_complete": exact and all(
+                record["execution"].get("diagnostic_evidence_complete") is True for record in records),
+            "artifacts_retained": exact and all(
+                record["execution"].get("artifacts_retained_after_success") is True for record in records),
+        }
+        measurement["completed"] = behavioral_completed and all(measurement.values())
+    completed = behavioral_completed and (measurement is None or measurement["completed"])
+    code = result.returncode if result.returncode else int(not completed)
     report = {"schema": 1, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
               "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
               "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"], "cohort": args.cohort,
@@ -1275,7 +1312,8 @@ def run_cohort(args) -> int:
               "elapsed_ns": time.monotonic_ns() - started, "expected_count": cohort["expected_count"],
               "executed_test_count": sum((record.get("execution") or {}).get("executed_test_count") or 0 for record in records),
               "unknown_execution_count": sum((record.get("execution") or {}).get("executed_test_count") is None for record in records),
-              "completed": code == 0, "tests": records}
+              "behavioral_completed": behavioral_completed,
+              "measurement": measurement, "completed": completed, "tests": records}
     write_json(output / "report.json", report)
     return code
 

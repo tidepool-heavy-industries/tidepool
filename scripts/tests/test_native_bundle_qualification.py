@@ -456,6 +456,49 @@ class NativeQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'unsupported schema'):
                 qualification.verify(path)
 
+    def test_older_unsealed_cohorts_require_their_own_frozen_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / qualification.DESCRIPTOR
+            older = qualification.cohorts()
+            older.pop('harness-performance')
+            for name in ('m2', 'm1', 'unified-regressions'):
+                older[name].pop('compiler_mode')
+            qualification.write_json(path, {
+                'schema': qualification.QUALIFICATION_SCHEMA, 'kind': 'native-runtime-qualification',
+                'bundle_root': str(root), 'stdlib_mode': 'catalog-backed',
+                'feature_profile': 'embedded-native', 'programs': qualification.programs(root),
+                'cohorts': older,
+            })
+            with self.assertRaisesRegex(ValueError, 'mandatory test cohorts'):
+                qualification.verify(path)
+
+    def test_runtime_cohorts_refuse_direct_or_unsealed_modes_before_launch(self):
+        for name in qualification.cohorts():
+            for mode in ('direct', None, 'unrecognized'):
+                with self.subTest(cohort=name, mode=mode), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    descriptor = {
+                        'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                        'cohorts': qualification.cohorts(),
+                    }
+                    options = []
+                    if mode == 'direct':
+                        options = ['--compiler-mode', 'direct']
+                    elif mode is None:
+                        descriptor['cohorts'][name].pop('compiler_mode')
+                    else:
+                        descriptor['cohorts'][name]['compiler_mode'] = mode
+                    output = root / 'evidence'
+                    with patch.object(qualification, 'verify', return_value=descriptor), \
+                         patch.object(qualification.subprocess, 'run') as execute, \
+                         contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(qualification.main([
+                            'run', str(root / 'qualification.json'), '--cohort', name,
+                            '--output', str(output), *options]), 1)
+                    execute.assert_not_called()
+                    self.assertFalse(output.exists())
+
     def test_catalog_resources_cross_frozen_cohort_delegation_without_ambient_selection(self):
         runner_spec = importlib.util.spec_from_file_location(
             'frozen_resource_runner', SCRIPT.parent.parent / 'rust/isolated-libtest.py')
@@ -563,6 +606,87 @@ class NativeQualificationTests(unittest.TestCase):
                 execute.assert_not_called()
                 self.assertFalse(output.exists())
 
+    def test_harness_performance_seals_resources_and_keeps_behavior_separate_from_measurement(self):
+        for label, count, diagnostics, retained, expected in (
+                ('complete', 1, True, True, 0),
+                ('missing-timing', 1, False, True, 1),
+                ('unknown-timing', 1, None, True, 1),
+                ('discarded-artifacts', 1, True, False, 1),
+                ('empty', 0, True, True, 1)):
+            with self.subTest(outcome=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / 'qualification.json'
+                path.write_text('frozen descriptor')
+                descriptor = {
+                    'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
+                    'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                    'cohorts': qualification.cohorts(),
+                    'environment': {'TIDEPOOL_COMPILER_MODULES': '/frozen/catalog/catalog.json',
+                                    'TIDEPOOL_PREPARED_ROOT_ENTRY': '/frozen/root-entry'},
+                    'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                    'profile': 'production', 'stdlib_mode': 'catalog-backed', 'startup_mode': 'prepared',
+                }
+                output = root / 'evidence'
+
+                def execute(command, **kwargs):
+                    self.assertIn('--retain-artifacts', command)
+                    self.assertIn('--ignored', command)
+                    self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
+                    self.assertEqual([command[index + 1] for index, value in enumerate(command)
+                                      if value == '--exact'], qualification.HARNESS_PERFORMANCE_TESTS)
+                    self.assertEqual({command[index + 1] for index, value in enumerate(command)
+                                      if value == '--resource-env'}, set(descriptor['environment']))
+                    qualification.write_json(output / 'tests/case.json', {
+                        'test': qualification.HARNESS_PERFORMANCE_TESTS[0], 'passed': True,
+                        'execution': {'executed_test_count': count, 'exit_code': 0,
+                                      'diagnostic_evidence_complete': diagnostics,
+                                      'artifacts_retained_after_success': retained}})
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run', side_effect=execute):
+                    code = qualification.main(['run', str(path), '--cohort', 'harness-performance',
+                                               '--output', str(output)])
+                self.assertEqual(code, expected)
+                report = json.loads((output / 'report.json').read_text())
+                self.assertEqual(report['behavioral_completed'], count == 1)
+                self.assertEqual(report['measurement']['completed'], expected == 0)
+                self.assertEqual(report['measurement']['diagnostic_evidence_complete'], diagnostics is True)
+                self.assertEqual(report['measurement']['artifacts_retained'], retained)
+                self.assertEqual(report['completed'], expected == 0)
+                self.assertTrue(report['tests'][0]['passed'])
+
+    def test_harness_performance_refuses_unprepared_inputs_and_parallel_execution(self):
+        mutations = (
+            ('source-backed', {'stdlib_mode': 'source-backed'}, None, []),
+            ('unprepared', {'startup_mode': 'unprepared'}, None, []),
+            ('missing-catalog', {}, 'TIDEPOOL_COMPILER_MODULES', []),
+            ('missing-entry', {}, 'TIDEPOOL_PREPARED_ROOT_ENTRY', []),
+            ('parallel', {}, None, ['--jobs', '2']),
+        )
+        for label, changed, missing, options in mutations:
+            with self.subTest(input=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor = {
+                    'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                    'cohorts': qualification.cohorts(), 'stdlib_mode': 'catalog-backed',
+                    'startup_mode': 'prepared',
+                    'environment': {'TIDEPOOL_COMPILER_MODULES': '/frozen/catalog.json',
+                                    'TIDEPOOL_PREPARED_ROOT_ENTRY': '/frozen/root-entry'},
+                    **changed,
+                }
+                if missing is not None:
+                    descriptor['environment'].pop(missing)
+                output = root / 'evidence'
+                with patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run') as execute, \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(qualification.main([
+                        'run', str(root / 'qualification.json'), '--cohort', 'harness-performance',
+                        '--output', str(output), *options]), 1)
+                execute.assert_not_called()
+                self.assertFalse(output.exists())
+
     def test_frozen_cohort_refuses_diagnostic_startup_override_before_execution(self):
         with patch.dict(os.environ, {'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600'}):
             with patch.object(qualification, 'verify') as verify:
@@ -578,7 +702,8 @@ class NativeQualificationTests(unittest.TestCase):
             descriptor = {
                 'external_inputs': {'runtime_tools': {'path': str(root / 'tools')}},
                 'cohorts': {'m2': {'tests': ['suite::works'], 'expected_count': 1,
-                                  'timeout': 900, 'ignored': False}},
+                                  'timeout': 900, 'ignored': False,
+                                  'compiler_mode': 'owned-resident'}},
                 'programs': {'runner': '/declared/runner', 'libtest': '/declared/libtest'},
                 'source_oid': 'recorded-source', 'harness_revision': 'recorded-harness',
                 'profile': 'recorded-profile', 'stdlib_mode': 'source-backed',
@@ -655,7 +780,7 @@ class NativeQualificationTests(unittest.TestCase):
                     query.assert_not_called()
 
     def test_run_forwards_scheduling_and_sealed_watchdogs_and_records_them(self):
-        for compiler_mode in ('direct', 'owned-resident'):
+        for compiler_mode in (None, 'owned-resident'):
             with self.subTest(compiler_mode=compiler_mode):
                 self.assert_run_scheduling(compiler_mode)
 
@@ -688,9 +813,12 @@ class NativeQualificationTests(unittest.TestCase):
                  patch.object(qualification.sys, 'executable', '/ambient/unqualified-python'), \
                  patch.dict(os.environ, {'PATH': '/ambient/unqualified-tools'}), \
                  patch.object(qualification.subprocess, 'run', side_effect=execute):
-                code = qualification.main(['run', str(descriptor_path), '--cohort', 'm2',
+                arguments = ['run', str(descriptor_path), '--cohort', 'm2',
                     '--output', str(root / 'evidence'), '--jobs', '4', '--delegated-service',
-                    '--service-slice', 'tidepool-completion-build.slice', '--compiler-mode', compiler_mode])
+                    '--service-slice', 'tidepool-completion-build.slice']
+                if compiler_mode is not None:
+                    arguments.extend(['--compiler-mode', compiler_mode])
+                code = qualification.main(arguments)
             self.assertEqual(code, 0)
             report = json.loads((root / 'evidence/report.json').read_text())
             command = report['command']
@@ -702,9 +830,9 @@ class NativeQualificationTests(unittest.TestCase):
                              [f'{name}=900' for name in sorted([qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST])])
             self.assertEqual(report['scheduling'], {
                 'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
-                'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': compiler_mode, 'timeout_seconds': 600,
+                'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': 'owned-resident', 'timeout_seconds': 600,
                 'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST]}})
-            self.assertEqual(command[command.index('--compiler-mode') + 1], compiler_mode)
+            self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
             self.assertEqual(report['executed_test_count'], len(descriptor['cohorts']['m2']['tests']))
             self.assertTrue(report['completed'])
 
