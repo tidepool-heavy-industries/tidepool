@@ -828,7 +828,7 @@ pub(super) fn install_tracing() {
          tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
          exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
          tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
-         exomonad_actor::workbench_phase=info,exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,exomonad_actor::resident_tools=info,exomonad::content=off",
+         exomonad_actor::workbench_phase=info,exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,exomonad_actor::resident_tools=info,exomonad::content=off,harness::runtime_cost=debug",
     );
     let subscriber = tracing_subscriber::fmt()
         .json()
@@ -1006,6 +1006,52 @@ pub(super) fn pinned_jev_workspace(config: &mut ActorHostConfig) {
     );
 }
 
+pub(super) fn prepare_performance_traces() -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    Value,
+) {
+    let artifact_root = std::path::PathBuf::from(
+        std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+            .expect("owned-resident counted runner supplies per-case artifacts"),
+    );
+    assert!(
+        artifact_root.is_absolute(),
+        "per-case artifact root is absolute"
+    );
+    let host_trace = artifact_root.join("host.jsonl");
+    let compiler_trace = artifact_root.join("compiler/compiler.jsonl");
+    let phase_trace = artifact_root.join("phases.jsonl");
+    std::fs::File::create(&phase_trace).expect("create owned phase JSONL");
+    let lifecycle: Value = serde_json::from_slice(
+        &std::fs::read(artifact_root.join("compiler/lifecycle.json"))
+            .expect("owned compiler runner records its live daemon identity before the test"),
+    )
+    .expect("owned compiler lifecycle record is JSON");
+    assert_eq!(
+        lifecycle["cleanup_confirmed"], false,
+        "daemon is live for the case"
+    );
+    assert!(
+        compiler_trace.is_file(),
+        "owned daemon created its JSONL trace"
+    );
+    std::env::set_var("TIDEPOOL_TEST_TRACE", &host_trace);
+    std::env::set_var("TIDEPOOL_PERFORMANCE_COMPILER_TRACE", &compiler_trace);
+    (host_trace, compiler_trace, phase_trace, lifecycle)
+}
+
+pub(super) fn record_phase(path: &std::path::Path, record: Value) {
+    let mut phases = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open owned phase JSONL");
+    serde_json::to_writer(&mut phases, &record).expect("serialize phase JSON");
+    std::io::Write::write_all(&mut phases, b"\n").expect("terminate phase JSONL record");
+    println!("harness-usecase {record}");
+}
+
 /// A scripted provider reply. This observes requests from the real host; it
 /// neither attaches an actor nor constructs a tool installation.
 pub(super) struct HostedScriptRound {
@@ -1024,7 +1070,7 @@ impl HostedScriptRound {
         }
     }
 
-    pub fn call(self, call_id: &str, source: &str) {
+    fn assert_advertised(&self, call_id: &str, name: &str, kind: &str) {
         let advertised = self
             .request
             .tools
@@ -1041,31 +1087,55 @@ impl HostedScriptRound {
             self.request
                 .tools
                 .iter()
-                .any(|tool| tool["name"] == "haskell_sync" && tool["type"] == "custom"),
-            "scripted cell label {call_id:?} sends a custom_tool_call named `haskell_sync`; \
-             the issuing request advertised [{}]",
+                .any(|tool| tool["name"] == name && tool["type"] == kind),
+            "scripted call {call_id:?} sends {kind} tool {name:?}; the issuing request advertised [{}]",
             advertised.join(", ")
         );
+    }
+
+    pub fn call(self, call_id: &str, source: &str) {
+        self.cell(call_id, source, harness::item::ToolExecution::Synchronous);
+    }
+
+    pub fn async_call(self, call_id: &str, source: &str) {
+        self.cell(call_id, source, harness::item::ToolExecution::Asynchronous);
+    }
+
+    fn cell(self, call_id: &str, source: &str, execution: harness::item::ToolExecution) {
+        use harness::item::ToolExecution;
+        let name = match execution {
+            ToolExecution::Synchronous => "haskell_sync",
+            ToolExecution::Asynchronous => "haskell",
+        };
+        self.assert_advertised(call_id, name, "custom");
+        let call = harness::item::Item(serde_json::json!({
+            "type":"custom_tool_call", "call_id":call_id, "name":name, "input":source,
+            "async": execution == ToolExecution::Asynchronous,
+        }));
+        assert_eq!(call.tool_call().unwrap().unwrap().execution, execution);
         self.reply
             .send(harness::transport::ResponsesTurn {
                 response_id: format!("script-{call_id}"),
-                items: vec![harness::item::Item(serde_json::json!({
-                    "type":"custom_tool_call", "call_id":call_id,
-                    "name":"haskell_sync", "input":source,
-                }))],
+                items: vec![call],
                 usage: Default::default(),
             })
             .expect("production provider request remains live");
     }
 
     pub fn function(self, call_id: &str, name: &str, arguments: serde_json::Value) {
+        self.assert_advertised(call_id, name, "function");
+        let call = harness::item::Item(serde_json::json!({
+            "type": "function_call", "call_id": call_id, "name": name,
+            "arguments": serde_json::to_string(&arguments).unwrap(),
+        }));
+        assert_eq!(
+            call.tool_call().unwrap().unwrap().execution,
+            harness::item::ToolExecution::Synchronous
+        );
         self.reply
             .send(harness::transport::ResponsesTurn {
                 response_id: format!("script-{call_id}"),
-                items: vec![harness::item::Item(serde_json::json!({
-                    "type": "function_call", "call_id": call_id, "name": name,
-                    "arguments": serde_json::to_string(&arguments).unwrap(),
-                }))],
+                items: vec![call],
                 usage: Default::default(),
             })
             .expect("production provider request remains live");
@@ -1396,6 +1466,51 @@ mod tests {
         assert!(response.await.is_err(), "no invalid tool call was sent");
     }
 
+    #[tokio::test]
+    async fn scripted_async_cell_uses_advertised_name_and_typed_execution() {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let mut request = request();
+        request.tools = vec![serde_json::json!({"type":"custom", "name":"haskell"})].into();
+        HostedScriptRound { request, reply }.async_call("held-capture", "display True");
+        let response = response.await.unwrap();
+        let call = response.items[0].tool_call().unwrap().unwrap();
+        assert_eq!(call.name, "haskell");
+        assert_eq!(call.execution, harness::item::ToolExecution::Asynchronous);
+    }
+
+    #[tokio::test]
+    async fn scripted_function_requires_the_advertised_function_kind() {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let mut advertised_request = request();
+        advertised_request.tools =
+            vec![serde_json::json!({"type":"function", "name":"yield"})].into();
+        HostedScriptRound {
+            request: advertised_request,
+            reply,
+        }
+        .function("held-yield", "yield", serde_json::json!({}));
+        let response = response.await.unwrap();
+        let call = response.items[0].tool_call().unwrap().unwrap();
+        assert_eq!(call.name, "yield");
+        assert_eq!(call.execution, harness::item::ToolExecution::Synchronous);
+
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let mut wrong_kind = request();
+        wrong_kind.tools = vec![serde_json::json!({"type":"custom", "name":"yield"})].into();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            HostedScriptRound {
+                request: wrong_kind,
+                reply,
+            }
+            .function("wrong-kind", "yield", serde_json::json!({}));
+        }))
+        .is_err());
+        assert!(
+            response.await.is_err(),
+            "wrong-kind invocation never reaches Engine"
+        );
+    }
+
     struct ShutdownCommands {
         backend: Arc<super::super::command_test_support::TestCommands>,
         started: tokio::sync::Semaphore,
@@ -1640,7 +1755,16 @@ mod tests {
             Some(first_root.cleanup.clone())
         );
         let controls = observed.backend.controls.lock();
-        assert!(matches!(controls.as_slice(), [exomonad_actor::command_jobs::CommandControl::Cancel, exomonad_actor::command_jobs::CommandControl::Cancel]), "post_stop cancels execution; retirement retries uncertain external cleanup: {controls:?}");
+        assert!(
+            matches!(
+                controls.as_slice(),
+                [
+                    exomonad_actor::command_jobs::CommandControl::Cancel,
+                    exomonad_actor::command_jobs::CommandControl::Cancel
+                ]
+            ),
+            "post_stop cancels execution; retirement retries uncertain external cleanup: {controls:?}"
+        );
         assert!(observed
             .backend
             .cancelled

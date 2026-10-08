@@ -4,54 +4,9 @@
 //! and its daemon JSONL retained. Rows measure reply-to-successor wall time and
 //! logical submissions. Physical service/queue time belongs to the daemon trace.
 
+use super::super::test_campaign::{prepare_performance_traces, record_phase};
 use super::*;
-use std::{io::Write, time::Instant};
-
-fn prepare_performance_traces() -> (
-    std::path::PathBuf,
-    std::path::PathBuf,
-    std::path::PathBuf,
-    Value,
-) {
-    let artifact_root = std::path::PathBuf::from(
-        std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
-            .expect("owned-resident counted runner supplies per-case artifacts"),
-    );
-    assert!(
-        artifact_root.is_absolute(),
-        "per-case artifact root is absolute"
-    );
-    let host_trace = artifact_root.join("host.jsonl");
-    let compiler_trace = artifact_root.join("compiler/compiler.jsonl");
-    let phase_trace = artifact_root.join("phases.jsonl");
-    std::fs::File::create(&phase_trace).expect("create owned phase JSONL");
-    let lifecycle: Value = serde_json::from_slice(
-        &std::fs::read(artifact_root.join("compiler/lifecycle.json"))
-            .expect("owned compiler runner records its live daemon identity before the test"),
-    )
-    .expect("owned compiler lifecycle record is JSON");
-    assert_eq!(
-        lifecycle["cleanup_confirmed"], false,
-        "daemon is live for the case"
-    );
-    assert!(
-        compiler_trace.is_file(),
-        "owned daemon created its JSONL trace"
-    );
-    std::env::set_var("TIDEPOOL_TEST_TRACE", &host_trace);
-    std::env::set_var("TIDEPOOL_PERFORMANCE_COMPILER_TRACE", &compiler_trace);
-    (host_trace, compiler_trace, phase_trace, lifecycle)
-}
-
-fn record_phase(path: &std::path::Path, record: Value) {
-    let mut phases = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .expect("open owned phase JSONL");
-    serde_json::to_writer(&mut phases, &record).expect("serialize phase JSON");
-    writeln!(phases).expect("terminate phase JSONL record");
-    println!("harness-usecase {record}");
-}
+use std::time::Instant;
 
 struct Phase {
     name: &'static str,
@@ -156,14 +111,54 @@ async fn production_harness_notebook_usecase_phases() {
         }),
     );
     let phases = [
-        Phase { name: "first-arithmetic", source: "_ <- display (40 + 2 :: Int)", expected: "42", asynchronous: false },
-        Phase { name: "publish-retained", source: include_str!("fixtures/harness_usecase_publish.hs"), expected: "6", asynchronous: false },
-        Phase { name: "lookup-retained", source: "inspected <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"perfSamples\", \"perfAction\"])\n_ <- display (show inspected)", expected: "perfSamples", asynchronous: false },
-        Phase { name: "reuse-retained", source: "value <- perfAction\n_ <- display (value + 36 :: Int)", expected: "42", asynchronous: false },
-        Phase { name: "repeat-retained", source: "value <- perfAction\n_ <- display (value + 36 :: Int)", expected: "42", asynchronous: false },
-        Phase { name: "async-yield-result", source: include_str!("fixtures/harness_usecase_async.hs"), expected: "42", asynchronous: true },
-        Phase { name: "reuse-async-action", source: "value <- perfDelayed\n_ <- display value", expected: "42", asynchronous: false },
-        Phase { name: "repeat-arithmetic", source: "_ <- display (40 + 2 :: Int)", expected: "42", asynchronous: false },
+        Phase {
+            name: "first-arithmetic",
+            source: "_ <- display (40 + 2 :: Int)",
+            expected: "42",
+            asynchronous: false,
+        },
+        Phase {
+            name: "publish-retained",
+            source: include_str!("fixtures/harness_usecase_publish.hs"),
+            expected: "6",
+            asynchronous: false,
+        },
+        Phase {
+            name: "lookup-retained",
+            source: "inspected <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"perfSamples\", \"perfAction\"])\n_ <- display (show inspected)",
+            expected: "perfSamples",
+            asynchronous: false,
+        },
+        Phase {
+            name: "reuse-retained",
+            source: "value <- perfAction\n_ <- display (value + 36 :: Int)",
+            expected: "42",
+            asynchronous: false,
+        },
+        Phase {
+            name: "repeat-retained",
+            source: "value <- perfAction\n_ <- display (value + 36 :: Int)",
+            expected: "42",
+            asynchronous: false,
+        },
+        Phase {
+            name: "async-yield-result",
+            source: include_str!("fixtures/harness_usecase_async.hs"),
+            expected: "42",
+            asynchronous: true,
+        },
+        Phase {
+            name: "reuse-async-action",
+            source: "value <- perfDelayed\n_ <- display value",
+            expected: "42",
+            asynchronous: false,
+        },
+        Phase {
+            name: "repeat-arithmetic",
+            source: "_ <- display (40 + 2 :: Int)",
+            expected: "42",
+            asynchronous: false,
+        },
     ];
     for (index, phase) in phases.iter().enumerate() {
         let call_id = format!("usecase-{index}-{}", phase.name);
