@@ -30,9 +30,11 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         artifact_root = self.root / "artifacts"
         host_path = artifact_root / "host.jsonl"
         compiler_path = artifact_root / "compiler/compiler.jsonl"
+        phase_path = artifact_root / "phases.jsonl"
         phase_records = [
             {"schema": 1, "phase": "environment", "prepared_root_entry_supplied": False,
              "host_trace": str(host_path), "compiler_trace": str(compiler_path),
+             "phase_trace": str(phase_path),
              "deployment": {"TIDEPOOL_COMPILER_DEPLOYMENT": "/test/compiler"}},
             {"schema": 1, "phase": "activation", "completed": True,
              "wall_ns": 9_000, "logical_compiler_requests": 1, "context_items": 1},
@@ -42,8 +44,8 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
              "completed": True, "source": "value <- perfAction\n_ <- display value"},
         ]
         stdout = self.root / "case.stdout.log"
-        stdout.write_text("".join("harness-usecase " + json.dumps(row) + "\n"
-                                  for row in phase_records))
+        stdout.write_text("running 1 test\ntest actor_host::perf ...\n")
+        self.write_jsonl(phase_path, phase_records)
         request = {
             "daemon_epoch": "epoch-a", "admission_id": 7,
             "request_ordinal": 2, "compile_request": "digest-a",
@@ -147,36 +149,44 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
 
     def test_missing_environment_trace_path_is_a_controlled_report_error(self):
         record = self.make_case()
-        output_path = self.root / "case.stdout.log"
-        lines = output_path.read_text().splitlines()
-        row = json.loads(lines[0][len("harness-usecase "):])
+        phase_path = self.root / "artifacts/phases.jsonl"
+        rows = reporter.read_jsonl(phase_path)
+        row = rows[0]
         del row["host_trace"]
-        lines[0] = "harness-usecase " + json.dumps(row)
-        output_path.write_text("\n".join(lines) + "\n")
+        rows[0] = row
+        self.write_jsonl(phase_path, rows)
         with self.assertRaisesRegex(ValueError, "no host_trace path"):
+            reporter.analyze(record)
+
+    def test_missing_phase_trace_path_is_a_controlled_report_error(self):
+        record = self.make_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        rows = reporter.read_jsonl(phase_path)
+        del rows[0]["phase_trace"]
+        self.write_jsonl(phase_path, rows)
+        with self.assertRaisesRegex(ValueError, "no phase_trace path"):
             reporter.analyze(record)
 
     def test_missing_activation_is_reported_in_coverage(self):
         record = self.make_case()
-        output_path = self.root / "case.stdout.log"
-        rows = [line for line in output_path.read_text().splitlines()
-                if '"phase": "activation"' not in line]
-        output_path.write_text("\n".join(rows) + "\n")
+        phase_path = self.root / "artifacts/phases.jsonl"
+        rows = [row for row in reporter.read_jsonl(phase_path) if row["phase"] != "activation"]
+        self.write_jsonl(phase_path, rows)
         report = reporter.analyze(record)
         self.assertIsNone(report["activation"])
         self.assertEqual(report["phase_coverage"]["control_phases"]["missing"], ["activation"])
 
     def test_phase_coverage_reports_duplicates_and_wrong_sequence(self):
         record = self.make_case()
-        output_path = self.root / "case.stdout.log"
-        rows = output_path.read_text().splitlines()
-        phase_index = next(index for index, line in enumerate(rows)
-                           if '"phase": "reuse-retained"' in line)
-        duplicate = json.loads(rows[phase_index][len("harness-usecase "):])
+        phase_path = self.root / "artifacts/phases.jsonl"
+        rows = reporter.read_jsonl(phase_path)
+        phase_index = next(index for index, row in enumerate(rows)
+                           if row["phase"] == "reuse-retained")
+        duplicate = rows[phase_index]
         duplicate["sequence"] = 4
-        rows[phase_index] = "harness-usecase " + json.dumps(duplicate)
-        rows.append("harness-usecase " + json.dumps(duplicate))
-        output_path.write_text("\n".join(rows) + "\n")
+        rows[phase_index] = duplicate
+        rows.append(duplicate)
+        self.write_jsonl(phase_path, rows)
         coverage = reporter.analyze(record)["phase_coverage"]
         self.assertEqual(coverage["duplicates"], ["reuse-retained"])
         self.assertEqual(coverage["sequence_errors"], [
@@ -185,13 +195,14 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         ])
         self.assertFalse(coverage["complete"])
 
-    def test_truncated_phase_log_is_rejected(self):
+    def test_runner_stdout_prefix_and_truncation_do_not_affect_phase_jsonl(self):
         record = self.make_case()
         payload = json.loads(record.read_text())
         payload["streams"]["stdout"]["truncated"] = True
         record.write_text(json.dumps(payload))
-        with self.assertRaisesRegex(ValueError, "truncated"):
-            reporter.analyze(record)
+        report = reporter.analyze(record)
+        self.assertEqual(report["phase_coverage"]["observed_workload_record_count"], 1)
+        self.assertTrue(report["runner"]["phase_trace"].endswith("/phases.jsonl"))
 
     def test_retained_producer_shapes_do_not_invent_execution_correlation(self):
         # Sanitized event shapes from the retained process-cleanup host JSONL

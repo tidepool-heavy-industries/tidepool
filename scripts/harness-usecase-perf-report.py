@@ -12,7 +12,6 @@ from pathlib import Path
 import sys
 
 
-PREFIX = "harness-usecase "
 EXPECTED_PHASES = (
     "first-arithmetic", "publish-retained", "lookup-retained", "reuse-retained",
     "repeat-retained", "async-yield-result", "reuse-async-action", "repeat-arithmetic",
@@ -29,25 +28,21 @@ def read_jsonl(path):
     with path.open() as stream:
         for line_number, line in enumerate(stream, 1):
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
             except json.JSONDecodeError as error:
                 raise ValueError(f"{path}:{line_number}: invalid JSON: {error}") from error
+            if not isinstance(row, dict):
+                raise ValueError(f"{path}:{line_number}: expected a JSON object")
+            rows.append(row)
     return rows
 
 
-def phase_rows(stdout_path):
+def phase_rows(path):
     result = []
-    with stdout_path.open() as stream:
-        for line_number, line in enumerate(stream, 1):
-            if not line.startswith(PREFIX):
-                continue
-            try:
-                row = json.loads(line[len(PREFIX):])
-            except json.JSONDecodeError as error:
-                raise ValueError(f"{stdout_path}:{line_number}: invalid phase JSON: {error}") from error
-            if row.get("schema") != 1 or not isinstance(row.get("phase"), str):
-                raise ValueError(f"{stdout_path}:{line_number}: unsupported phase record")
-            result.append(row)
+    for line_number, row in enumerate(read_jsonl(path), 1):
+        if row.get("schema") != 1 or not isinstance(row.get("phase"), str):
+            raise ValueError(f"{path}:{line_number}: unsupported phase record")
+        result.append(row)
     return result
 
 
@@ -175,6 +170,8 @@ def compiler_events(host_rows, daemon_rows):
 def analyze(record_path):
     record_path = Path(record_path).resolve()
     record = read_json(record_path)
+    if not isinstance(record, dict):
+        raise ValueError("runner record is not a JSON object")
     execution = record.get("execution")
     if not isinstance(execution, dict):
         raise ValueError("runner record has no execution object")
@@ -182,21 +179,20 @@ def analyze(record_path):
     if not isinstance(artifact_root_value, str):
         raise ValueError("runner record has no per-case artifact root")
     artifact_root = Path(artifact_root_value)
-    streams = record.get("streams")
-    if not isinstance(streams, dict):
-        raise ValueError("runner record has no streams object")
-    stdout = streams.get("stdout")
-    if not isinstance(stdout, dict):
-        raise ValueError("runner record has no retained stdout record")
-    stdout_name = stdout.get("path")
-    if not isinstance(stdout_name, str) or Path(stdout_name).name != stdout_name:
-        raise ValueError("runner record has no safe retained stdout path")
-    if stdout.get("truncated") is True:
-        raise ValueError("retained stdout is truncated; phase coverage is incomplete")
-    phases = phase_rows(record_path.parent / stdout_name)
+    if not artifact_root.is_dir():
+        raise ValueError(f"runner artifact root does not exist: {artifact_root}")
+    phase_path = artifact_root / "phases.jsonl"
+    if not phase_path.is_file():
+        raise ValueError(f"runner artifact root has no phase JSONL: {phase_path}")
+    phases = phase_rows(phase_path)
     environment = next((row for row in phases if row["phase"] == "environment"), None)
     if environment is None:
         raise ValueError("retained output has no environment phase")
+    phase_value = environment.get("phase_trace")
+    if not isinstance(phase_value, str) or not phase_value:
+        raise ValueError("environment phase has no phase_trace path")
+    if Path(phase_value) != phase_path:
+        raise ValueError("environment phase_trace does not match runner artifact root")
     host_value = environment.get("host_trace")
     daemon_value = environment.get("compiler_trace")
     if not isinstance(host_value, str) or not host_value:
@@ -209,8 +205,6 @@ def analyze(record_path):
         raise ValueError(f"environment host_trace does not exist: {host_path}")
     if not daemon_path.is_file():
         raise ValueError(f"environment compiler_trace does not exist: {daemon_path}")
-    if not artifact_root.is_dir():
-        raise ValueError(f"runner artifact root does not exist: {artifact_root}")
     host_rows = read_jsonl(host_path)
     daemon_rows = read_jsonl(daemon_path)
     dispatches, calls, submissions, services, queues = compiler_events(host_rows, daemon_rows)
@@ -395,6 +389,7 @@ def analyze(record_path):
             "compiler_mode": execution.get("compiler_mode"),
             "artifacts_retained_after_success": execution.get("artifacts_retained_after_success"),
             "diagnostic_evidence_complete": execution.get("diagnostic_evidence_complete"),
+            "phase_trace": str(phase_path),
         },
         "environment": {
             "prepared_root_entry_supplied": environment.get("prepared_root_entry_supplied"),

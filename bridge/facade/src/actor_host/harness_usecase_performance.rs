@@ -5,9 +5,14 @@
 //! logical submissions. Physical service/queue time belongs to the daemon trace.
 
 use super::*;
-use std::time::Instant;
+use std::{io::Write, time::Instant};
 
-fn prepare_performance_traces() -> (std::path::PathBuf, std::path::PathBuf, Value) {
+fn prepare_performance_traces() -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    Value,
+) {
     let artifact_root = std::path::PathBuf::from(
         std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
             .expect("owned-resident counted runner supplies per-case artifacts"),
@@ -18,6 +23,8 @@ fn prepare_performance_traces() -> (std::path::PathBuf, std::path::PathBuf, Valu
     );
     let host_trace = artifact_root.join("host.jsonl");
     let compiler_trace = artifact_root.join("compiler/compiler.jsonl");
+    let phase_trace = artifact_root.join("phases.jsonl");
+    std::fs::File::create(&phase_trace).expect("create owned phase JSONL");
     let lifecycle: Value = serde_json::from_slice(
         &std::fs::read(artifact_root.join("compiler/lifecycle.json"))
             .expect("owned compiler runner records its live daemon identity before the test"),
@@ -33,7 +40,17 @@ fn prepare_performance_traces() -> (std::path::PathBuf, std::path::PathBuf, Valu
     );
     std::env::set_var("TIDEPOOL_TEST_TRACE", &host_trace);
     std::env::set_var("TIDEPOOL_PERFORMANCE_COMPILER_TRACE", &compiler_trace);
-    (host_trace, compiler_trace, lifecycle)
+    (host_trace, compiler_trace, phase_trace, lifecycle)
+}
+
+fn record_phase(path: &std::path::Path, record: Value) {
+    let mut phases = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open owned phase JSONL");
+    serde_json::to_writer(&mut phases, &record).expect("serialize phase JSON");
+    writeln!(phases).expect("terminate phase JSONL record");
+    println!("harness-usecase {record}");
 }
 
 struct Phase {
@@ -71,7 +88,8 @@ fn has_output(round: &RequestedRound, call_id: &str) -> bool {
 #[tokio::test]
 #[ignore = "requires exclusive matched compiler daemon and retained host/daemon traces"]
 async fn production_harness_notebook_usecase_phases() {
-    let (host_trace, compiler_trace, compiler_lifecycle) = prepare_performance_traces();
+    let (host_trace, compiler_trace, phase_trace, compiler_lifecycle) =
+        prepare_performance_traces();
     assert!(
         std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some(),
         "measure resident production compilation, not per-request worker spawning"
@@ -106,17 +124,18 @@ async fn production_harness_notebook_usecase_phases() {
         )
     })
     .collect();
-    println!(
-        "harness-usecase {}",
+    record_phase(
+        &phase_trace,
         json!({
             "schema": 1,
             "phase": "environment",
             "prepared_root_entry_supplied": deployment["TIDEPOOL_PREPARED_ROOT_ENTRY"].is_some(),
             "host_trace": host_trace,
             "compiler_trace": compiler_trace,
+            "phase_trace": phase_trace,
             "owned_compiler_lifecycle": compiler_lifecycle,
             "deployment": deployment,
-        })
+        }),
     );
     let activation_started = Instant::now();
     let activation_requests = tidepool_extract_cmd::extract_spawn_count();
@@ -124,8 +143,8 @@ async fn production_harness_notebook_usecase_phases() {
     let mut round = next_round(&mut rounds, &fixture.context).await;
     let actor = fixture.context.actor.identity();
     let session = round.request.session_id.clone();
-    println!(
-        "harness-usecase {}",
+    record_phase(
+        &phase_trace,
         json!({
             "schema": 1, "phase": "activation", "completed": true,
             "wall_ns": activation_started.elapsed().as_nanos(),
@@ -134,7 +153,7 @@ async fn production_harness_notebook_usecase_phases() {
             "context_items": round.request.input.len(),
             "context_json_bytes": serde_json::to_vec(&round.request.input).unwrap().len(),
             "cold_scope": "fresh host/session; daemon and artifact cache history recorded externally",
-        })
+        }),
     );
     let phases = [
         Phase { name: "first-arithmetic", source: "_ <- display (40 + 2 :: Int)", expected: "42", asynchronous: false },
@@ -175,8 +194,8 @@ async fn production_harness_notebook_usecase_phases() {
         assert_eq!(round.request.session_id, session);
         assert_eq!(fixture.context.actor.identity(), actor);
         let logical_compiler_requests = tidepool_extract_cmd::extract_spawn_count() - before;
-        println!(
-            "harness-usecase {}",
+        record_phase(
+            &phase_trace,
             json!({
                 "schema": 1, "phase": phase.name, "sequence": index, "call_id": call_id,
                 "completed": true, "wall_ns": completed_ns, "first_successor_ns": first_successor_ns,
@@ -188,7 +207,7 @@ async fn production_harness_notebook_usecase_phases() {
                 "yielded_before_terminal": yielded_before_terminal,
                 "source": phase.source, "expected": phase.expected, "displayed": displayed,
                 "history": if index == 0 { "first authored cell in fresh session" } else { "ordered prior phases in same session" },
-            })
+            }),
         );
     }
     round.finish();
