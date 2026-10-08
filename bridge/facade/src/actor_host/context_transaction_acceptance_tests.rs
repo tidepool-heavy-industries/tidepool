@@ -291,10 +291,7 @@ async fn prove_child_survives(
     let raw = raw_request_items(fixture, &reused.request);
     assert_before_call_prefix(&reused.request, &raw, parent_call);
     let output = successful_output_items(&raw, "surviving-child-reuse");
-    assert_eq!(
-        output["items"].as_array().unwrap().last().unwrap()["output"],
-        "42"
-    );
+    assert_eq!(test_campaign::explicit_display_text(&output), "42");
     reused.finish();
 }
 
@@ -655,44 +652,35 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
         "first-sync-publication",
         "let notebookAction = (pure (41 :: Int) :: Eff effects Int)\n\
          let notebookSamples = [1, 2, 3] :: [Int]\n\
-         notebookAction",
+         notebookAction >>= display",
     );
     let following = next_round(&mut rounds).await;
     let output = successful_output(&following.request, "first-sync-publication");
-    assert_eq!(
-        output["items"].as_array().unwrap().last().unwrap()["output"],
-        "41"
-    );
+    assert_eq!(test_campaign::explicit_display_text(&output), "41");
     following.async_cell(
         "async-publication",
         "let asyncValue = sum notebookSamples - 5 :: Int\n\
          let asyncAction = (do { value <- notebookAction; pure (value + asyncValue) } :: Eff effects Int)\n\
-         asyncAction",
+         asyncAction >>= display",
     );
     let following = next_round_with_output(&mut rounds, "async-publication").await;
     let output = successful_output(&following.request, "async-publication");
-    assert_eq!(
-        output["items"].as_array().unwrap().last().unwrap()["output"],
-        "42"
-    );
+    assert_eq!(test_campaign::explicit_display_text(&output), "42");
     following.cell(
         "sync-publication",
         "let syncAction = (do { value <- asyncAction; pure (value + 1) } :: Eff effects Int)\n\
-         syncAction",
+         syncAction >>= display",
     );
     let following = next_round(&mut rounds).await;
     let output = successful_output(&following.request, "sync-publication");
-    assert_eq!(
-        output["items"].as_array().unwrap().last().unwrap()["output"],
-        "43"
+    assert_eq!(test_campaign::explicit_display_text(&output), "43");
+    following.async_cell(
+        "async-reuse",
+        "syncAction >>= \\value -> display (value + 1)",
     );
-    following.async_cell("async-reuse", "syncAction >>= \\value -> pure (value + 1)");
     let following = next_round_with_output(&mut rounds, "async-reuse").await;
     let output = successful_output(&following.request, "async-reuse");
-    assert_eq!(
-        output["items"].as_array().unwrap().last().unwrap()["output"],
-        "44"
-    );
+    assert_eq!(test_campaign::explicit_display_text(&output), "44");
     assert_eq!(following.request.session_id, session);
     assert_eq!(fixture.context.actor.identity(), actor);
     following.finish();
@@ -837,10 +825,7 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
     );
     assert_eq!(user_text_occurrences(&replied.request, SEED), 1);
     let output = successful_output(&completed.request, "fresh-idle-activate");
-    assert_eq!(
-        output["items"].as_array().unwrap().last().unwrap()["output"],
-        INPUT
-    );
+    assert_eq!(test_campaign::explicit_display_text(&output), INPUT);
     replied.finish();
     completed.finish();
     fixture.stop().await.unwrap();
@@ -1341,10 +1326,7 @@ async fn resident_async_failure_keeps_bindings_and_activated_child() {
     assert!(reused.is_root());
     assert_eq!(reused.request.session_id, session);
     let output = successful_output(&reused.request, "async-failure-reuse");
-    assert_eq!(
-        output["items"].as_array().unwrap().last().unwrap()["output"],
-        "42"
-    );
+    assert_eq!(test_campaign::explicit_display_text(&output), "42");
     assert_eq!(fixture.context.actor.identity(), actor);
     assert!(fixture.context.actor.terminal().get().is_none());
     reused.finish();

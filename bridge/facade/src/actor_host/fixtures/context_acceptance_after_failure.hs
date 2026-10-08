@@ -1,1 +1,1 @@
-pure (retainedHelper retainedValue)
+display (retainedHelper retainedValue)
