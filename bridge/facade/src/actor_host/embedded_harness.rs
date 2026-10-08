@@ -10,7 +10,7 @@ use parking_lot::Mutex as ParkingMutex;
 
 use exomonad_actor::{
     ActorAdmissionLease, ActorExitKind, ActorRef, ActorTerminal, HostedCheckpointAttachment,
-    HostedCheckpointCapture, HostedCheckpointCaptureError, LocalActorRef,
+    HostedCheckpointCapture, HostedCheckpointCaptureError, KernelCallFailure, LocalActorRef,
     LocalResidentInstallation, ResidentToolError, WorkbenchCancellationOutcome,
 };
 use exomonad_tool::{ToolArguments, ToolInvocationContext};
@@ -47,6 +47,13 @@ struct StoreAdmission {
     _lease: ActorAdmissionLease,
 }
 impl AdmissionGuard for StoreAdmission {}
+
+fn embedded_admission_error(error: KernelCallFailure) -> EmbeddedError {
+    match error {
+        KernelCallFailure::MailboxClosed(_) => EmbeddedError::AdmissionClosed,
+        error => EmbeddedError::Host(error.to_string()),
+    }
+}
 
 /// One harness owner for the existing run directory. The default
 /// Codex launch never opens this Store; the embedding owner calls `open` when
@@ -654,7 +661,7 @@ impl HostActor for EmbeddedHostActor {
         self.actor
             .admit_transaction()
             .map(|lease| Box::new(StoreAdmission { _lease: lease }) as Box<dyn AdmissionGuard>)
-            .map_err(|error| EmbeddedError::Host(error.to_string()))
+            .map_err(embedded_admission_error)
     }
 
     fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
@@ -663,7 +670,7 @@ impl HostActor for EmbeddedHostActor {
         let _admission = self
             .actor
             .admit_transaction()
-            .map_err(|error| EmbeddedError::Host(error.to_string()))?;
+            .map_err(embedded_admission_error)?;
         let snapshot = Arc::new(
             self.installation
                 .request_snapshot()
@@ -1695,6 +1702,24 @@ mod tests {
     // worker. Keep that budget bounded, while leaving provider and cleanup
     // waits short because they do not include native compilation.
     const COLD_NATIVE_CELL_SETTLEMENT_BUDGET: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn admission_closure_preserves_temporary_and_generic_refusals() {
+        let actor = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1));
+        assert!(matches!(
+            embedded_admission_error(KernelCallFailure::MailboxClosed(actor)),
+            EmbeddedError::AdmissionClosed
+        ));
+        for error in [
+            KernelCallFailure::RetirementPending(actor),
+            KernelCallFailure::TargetUnavailable(actor),
+        ] {
+            assert!(matches!(
+                embedded_admission_error(error),
+                EmbeddedError::Host(_)
+            ));
+        }
+    }
 
     #[test]
     fn m1_only_accepts_fresh_root_and_rejects_inherited_or_child_attachments() {

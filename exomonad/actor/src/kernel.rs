@@ -114,6 +114,8 @@ pub enum KernelCallFailure {
     TargetExited(ActorRef),
     #[error("target actor {0} is unavailable")]
     TargetUnavailable(ActorRef),
+    #[error("idle retirement for target actor {0} is being checked")]
+    RetirementPending(ActorRef),
     #[error("target actor {0} has closed mailbox admission")]
     MailboxClosed(ActorRef),
     #[error("target actor {actor:?} failed while handling the call: {detail}")]
@@ -837,6 +839,31 @@ enum AdmissionPhase {
     Closed,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum AdmissionRefusal {
+    RetirementPending,
+    Closed,
+}
+
+impl AdmissionRefusal {
+    fn for_actor(self, actor: ActorRef) -> KernelCallFailure {
+        match self {
+            Self::RetirementPending => KernelCallFailure::RetirementPending(actor),
+            Self::Closed => KernelCallFailure::MailboxClosed(actor),
+        }
+    }
+}
+
+impl AdmissionPhase {
+    fn refusal(&self) -> Option<AdmissionRefusal> {
+        match self {
+            Self::Open => None,
+            Self::IdleRetirementClaim => Some(AdmissionRefusal::RetirementPending),
+            Self::Closed => Some(AdmissionRefusal::Closed),
+        }
+    }
+}
+
 #[derive(PartialEq, Eq)]
 enum NativeProviderState {
     NotStarted,
@@ -1064,13 +1091,13 @@ impl MailboxAdmission {
         self.0.released.notify_waiters();
     }
 
-    fn transaction(&self) -> Option<ActorAdmissionLease> {
+    fn transaction(&self) -> Result<ActorAdmissionLease, AdmissionRefusal> {
         let mut state = self.0.state.lock();
-        if state.phase != AdmissionPhase::Open {
-            return None;
+        if let Some(refusal) = state.phase.refusal() {
+            return Err(refusal);
         }
         state.transactions += 1;
-        Some(ActorAdmissionLease(std::sync::Arc::clone(&self.0)))
+        Ok(ActorAdmissionLease(std::sync::Arc::clone(&self.0)))
     }
 
     /// Admission must already be closed. Register the waiter before inspecting
@@ -1283,8 +1310,8 @@ impl LocalActorRef {
     /// belong to the existing Ractor mailbox even while execution is paused.
     pub(crate) fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
         let admission = self.admission.0.state.lock();
-        if admission.phase != AdmissionPhase::Open {
-            return Err(KernelCallFailure::MailboxClosed(self.identity));
+        if let Some(refusal) = admission.phase.refusal() {
+            return Err(refusal.for_actor(self.identity));
         }
         self.address
             .send_message(message)
@@ -1296,7 +1323,7 @@ impl LocalActorRef {
     pub fn admit_transaction(&self) -> Result<ActorAdmissionLease, KernelCallFailure> {
         self.admission
             .transaction()
-            .ok_or(KernelCallFailure::MailboxClosed(self.identity))
+            .map_err(|refusal| refusal.for_actor(self.identity))
     }
 
     /// Attach the durable native work probe once for this exact incarnation.
@@ -1512,7 +1539,10 @@ mod tests {
         let (admission, provider) = native_admission(|| Ok(true));
         succeed_native(&provider, "first");
         let claim = admission.claim_idle().unwrap();
-        assert!(admission.transaction().is_none());
+        assert!(matches!(
+            admission.transaction(),
+            Err(AdmissionRefusal::RetirementPending)
+        ));
         assert!(matches!(
             provider.begin_provider_turn("thread".into(), "next".into()),
             Err(NativeProviderStartError::RetirementPending)
@@ -1522,7 +1552,7 @@ mod tests {
         assert!(futures_util::poll!(&mut waiting).is_pending());
         drop(claim);
         assert!(futures_util::poll!(&mut waiting).is_ready());
-        assert!(admission.transaction().is_some());
+        assert!(admission.transaction().is_ok());
         succeed_native(&provider, "next");
     }
 
@@ -1539,7 +1569,7 @@ mod tests {
         drop(input);
         // Durable commit exists, but no wake has reached the provider.
         assert!(admission.claim_idle().is_err());
-        assert!(admission.transaction().is_some());
+        assert!(admission.transaction().is_ok());
         let round = provider
             .begin_provider_turn("thread".into(), "second".into())
             .unwrap();
@@ -1547,7 +1577,10 @@ mod tests {
         pending.store(false, std::sync::atomic::Ordering::SeqCst);
         round.succeed();
         admission.claim_idle().unwrap().commit().unwrap();
-        assert!(admission.transaction().is_none());
+        assert!(matches!(
+            admission.transaction(),
+            Err(AdmissionRefusal::Closed)
+        ));
         assert!(matches!(
             provider.begin_provider_turn("thread".into(), "third".into()),
             Err(NativeProviderStartError::Closed)
@@ -1584,7 +1617,10 @@ mod tests {
         admission.close();
         assert!(futures_util::poll!(&mut waiting).is_ready());
         assert!(claim.commit().is_err());
-        assert!(admission.transaction().is_none());
+        assert!(matches!(
+            admission.transaction(),
+            Err(AdmissionRefusal::Closed)
+        ));
         assert!(matches!(
             provider.begin_provider_turn("thread".into(), "second".into()),
             Err(NativeProviderStartError::Closed)
@@ -1596,7 +1632,7 @@ mod tests {
         let (admission, provider) = native_admission(|| Err("Store unavailable".into()));
         succeed_native(&provider, "first");
         assert!(admission.claim_idle().is_err());
-        assert!(admission.transaction().is_some());
+        assert!(admission.transaction().is_ok());
         succeed_native(&provider, "second");
     }
 
@@ -1606,7 +1642,7 @@ mod tests {
         let first = admission.transaction().unwrap();
         let second = admission.transaction().unwrap();
         admission.close();
-        assert!(admission.transaction().is_none());
+        assert!(admission.transaction().is_err());
         let waiting = admission.wait_transactions();
         tokio::pin!(waiting);
         assert!(futures_util::poll!(&mut waiting).is_pending());

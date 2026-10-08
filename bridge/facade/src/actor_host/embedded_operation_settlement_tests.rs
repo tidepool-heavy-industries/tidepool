@@ -272,3 +272,276 @@ async fn sealed_and_retired_mailboxes_keep_no_admission_acknowledgement() {
     host.output_committed(&retired).await.unwrap();
     host.output_aborted(&retired).await.unwrap();
 }
+
+struct Offline;
+impl harness::transport::Auth for Offline {
+    fn access(&self) -> Result<(String, String), harness::transport::TransportError> {
+        panic!("the deterministic transport must not request credentials")
+    }
+}
+
+#[derive(Clone)]
+struct SchemaRefusalTransport(Arc<std::sync::atomic::AtomicUsize>);
+#[async_trait::async_trait]
+impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
+    async fn create(
+        &self,
+        _: harness::transport::ResponsesRequest,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        assert_eq!(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0);
+        Ok(harness::transport::ResponsesTurn {
+            response_id: "schema-refusal".into(),
+            items: vec![harness::item::Item(json!({
+                "type":"function_call", "call_id":"schema", "name":"lookup",
+                "arguments":"\"not an object\""
+            }))],
+            usage: Default::default(),
+        })
+    }
+}
+
+// Close in the valid window after the real facade acknowledges a durable
+// NotAdmitted result. This driver supplies no native execution/retirement proof.
+struct CloseAfterAcknowledgement {
+    inner: Arc<EmbeddedHostActor>,
+    actor: exomonad_actor::LocalActorRef,
+    policy: Arc<dyn ResidentToolEndpoint>,
+    store: Arc<Store>,
+    retained: std::sync::Mutex<
+        Option<(
+            OperationId,
+            harness::store::RecordedToolOutput,
+            Vec<harness::store::Claim>,
+        )>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl HostActor for CloseAfterAcknowledgement {
+    fn identity(&self) -> &HostIdentity {
+        self.inner.identity()
+    }
+    fn admit(
+        &self,
+    ) -> Result<Box<dyn harness::embedding::AdmissionGuard>, harness::embedding::EmbeddedError>
+    {
+        self.inner.admit()
+    }
+    fn tool_surface(
+        &self,
+    ) -> Result<Arc<harness::embedding::ToolSurface>, harness::embedding::EmbeddedError> {
+        self.inner.tool_surface()
+    }
+    async fn wake(&self, envelope_id: i64) -> Result<(), String> {
+        self.inner.wake(envelope_id).await
+    }
+    async fn control(
+        &self,
+        control: harness::embedding::HostControl,
+    ) -> Result<Value, harness::embedding::HostControlError> {
+        self.inner.control(control).await
+    }
+    async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
+        self.inner.output_committed(operation).await?;
+        let invocation = ToolInvocationContext {
+            origin: exomonad_tool::ToolInvocationOrigin::Model(exomonad_tool::OriginalOperation {
+                origin: exomonad_tool::ConversationOrigin::Embedded {
+                    run: self.identity().run.clone(),
+                    actor: self.identity().actor.0.clone(),
+                    incarnation: self.identity().incarnation.clone(),
+                },
+                request_id: operation.request.0.clone(),
+                call_id: operation.call.0.clone(),
+            }),
+            call_id: operation.call.0.clone(),
+            namespace: None,
+        };
+        assert!(matches!(
+            self.policy
+                .retained_operation(invocation)
+                .unwrap()
+                .finalization(),
+            exomonad_actor::HostedOperationFinalization::Settled(Ok(
+                exomonad_actor::ProviderFinalizationKind::NotAdmitted
+            ))
+        ));
+        let output = self
+            .store
+            .replay_tool_output_operation(operation)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            output.terminal,
+            harness::store::TerminalOutcome::Failure(_)
+        ));
+        let claims = self.store.claims_for_operation(operation).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].state, harness::store::ClaimState::Settled);
+        assert!(self
+            .retained
+            .lock()
+            .unwrap()
+            .replace((operation.clone(), output, claims))
+            .is_none());
+        let stopped = self
+            .actor
+            .shutdown_with_cleanup(ActorTerminal {
+                kind: exomonad_actor::ActorExitKind::Cancelled,
+                summary: "close after acknowledged schema refusal".into(),
+                diagnostic: None,
+            })
+            .await
+            .unwrap();
+        assert!(stopped.cleanup.is_confirmed());
+        Ok(())
+    }
+    async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
+        self.inner.output_aborted(operation).await
+    }
+}
+
+#[tokio::test]
+async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successor_request() {
+    let (actor, task) = exomonad_actor::spawn_local_actor(None, AdmissionSentinel)
+        .await
+        .unwrap();
+    let tools = vec![HostedTool::Function(exomonad_tool::ToolDeclaration {
+        schedule: Default::default(),
+        implementation: Default::default(),
+        effect_keys: Vec::new(),
+        name: "lookup".into(),
+        description: "object input".into(),
+        input_schema: json!({"type":"object","properties":{}}),
+        output_schema: None,
+        kind: exomonad_tool::ToolKind::Call,
+    })];
+    let policy: Arc<dyn ResidentToolEndpoint> = Arc::new(
+        exomonad_actor::ResidentInteractivePolicy::local_with_tools(actor.clone(), tools),
+    );
+    let installation = Arc::new(EmbeddedPolicyInstallation::new(
+        actor.identity(),
+        policy.clone(),
+    ));
+    let store = Arc::new(Store::memory().unwrap());
+    let (identity, _, _) = operation(actor.identity(), "schema");
+    let (wakes, incoming) = tokio::sync::mpsc::unbounded_channel();
+    let host = Arc::new(CloseAfterAcknowledgement {
+        inner: Arc::new(
+            EmbeddedHostActor::new(
+                identity,
+                actor.clone(),
+                installation,
+                store.clone(),
+                wakes,
+                Arc::new(EmbeddedRoundControl::default()),
+            )
+            .unwrap(),
+        ),
+        actor: actor.clone(),
+        policy,
+        store: store.clone(),
+        retained: Default::default(),
+    });
+    let conversation =
+        harness::embedding::Conversation::attach(store.clone(), host.clone(), None).unwrap();
+    let scheduler = Arc::new(harness::turn::JobScheduler::new(1).unwrap());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let engine = conversation
+        .engine::<Offline, _>(
+            SchemaRefusalTransport(calls.clone()),
+            scheduler.clone(),
+            harness::engine::EngineConfig {
+                instructions: "exercise actual schema refusal then permanent native closure".into(),
+                tools: Vec::new(),
+                model: "offline".into(),
+                effort: harness::model::Effort::Low,
+                session_id: "post-retirement".into(),
+                agent: host.identity().actor.clone(),
+            },
+            std::num::NonZeroU64::new(1000).unwrap(),
+        )
+        .unwrap();
+    let (cancellation, receiver) = tokio::sync::watch::channel(false);
+    assert!(!*cancellation.borrow());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.run_embedded(
+            None,
+            vec![harness::item::Item(
+                json!({"type":"message","role":"user","content":"lookup"}),
+            )],
+            receiver,
+            incoming,
+        ),
+    )
+    .await
+    .unwrap();
+    let head = match result {
+        Err(harness::engine::EngineError::Cancelled {
+            head_request: Some(head),
+        }) => head,
+        result => panic!("expected typed successor cancellation, got {result:?}"),
+    };
+    assert!(!*cancellation.borrow());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let (operation, output, claims) = host.retained.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        store.request(&head).unwrap().unwrap().parent,
+        Some(operation.request.clone())
+    );
+    assert_eq!(
+        store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap(),
+        output
+    );
+    assert_eq!(store.claims_for_operation(&operation).unwrap(), claims);
+    assert!(store.pending_at(&operation.request).unwrap().is_empty());
+    assert!(store.pending_at(&head).unwrap().is_empty());
+    assert!(matches!(
+        scheduler.output(&operation).await.unwrap(),
+        Some(harness::turn::JobOutput::Completed(Err(_)))
+    ));
+    assert!(matches!(
+        host.inner.tool_surface(),
+        Err(harness::embedding::EmbeddedError::AdmissionClosed)
+    ));
+    // Engine reports the exact settled frontier; the outer driver owns its CAS.
+    assert_eq!(store.embedded_agent_head(host.identity()).unwrap(), None);
+    assert_eq!(
+        store
+            .embedded_round_frontier(host.identity())
+            .unwrap()
+            .pending_head,
+        Some(head.clone())
+    );
+    assert!(store
+        .settle_embedded_round(
+            host.identity(),
+            None,
+            &head,
+            harness::store::EmbeddedRoundOutcome::Cancelled
+        )
+        .unwrap());
+    assert_eq!(
+        store.embedded_agent_head(host.identity()).unwrap(),
+        Some(head.clone())
+    );
+    assert_eq!(
+        store
+            .embedded_round_frontier(host.identity())
+            .unwrap()
+            .pending_head,
+        None
+    );
+    assert_eq!(
+        store
+            .replay_tool_output_operation(&operation)
+            .unwrap()
+            .unwrap(),
+        output
+    );
+    host.inner.output_committed(&operation).await.unwrap();
+    task.await.unwrap();
+}
