@@ -296,11 +296,16 @@ eight-phase HTTP/Engine/Store/notebook workload. It requires the frozen prepared
 catalog/root entry, an isolated owned resident compiler, one test process, and
 retained artifacts. Only provider replies are scripted. It records behavior and
 measurement separately: `behavioral_completed` requires the one executed passing
-case; `measurement.completed` also requires the runner's complete compiler
-diagnostics and retained artifacts. Missing timing evidence cannot qualify the
-measurement, even when all notebook answers pass. Inspect the retained host and
-daemon traces for phase correlation and workload comparisons; this gate imposes
-no latency threshold and does not establish provider network performance.
+case and determines this supplementary run's exit status. Complete runner
+diagnostics and retained artifacts are measurement prerequisites;
+`measurement.status` remains `unreconciled` and `measurement.completed` is false.
+The existing `scripts/harness-usecase-perf-report.py` owns exact phase coverage
+and physical request joins. Run it on the retained runner record listed in the
+report; generic diagnostic flags cannot establish its conclusions. Packaging and
+invoking that reporter through this qualification owner remain the explicit
+integration step before automatic measurement acceptance. The supplementary
+measurement does not block M2 acceptance. It imposes no latency threshold and
+does not establish provider network performance.
 
 ```sh
 python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \

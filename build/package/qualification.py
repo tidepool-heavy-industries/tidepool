@@ -116,7 +116,7 @@ def cohorts() -> dict:
                                     "ignored": True, "timeout": 1800,
                                     "compiler_mode": "owned-resident", "max_jobs": 1,
                                     "retain_artifacts": True,
-                                    "measurement_required": True,
+                                    "measurement_reporter": "scripts/harness-usecase-perf-report.py",
                                     "required_stdlib_mode": "catalog-backed",
                                     "required_startup_mode": "prepared",
                                     "required_environment": ["TIDEPOOL_COMPILER_MODULES",
@@ -1291,15 +1291,21 @@ def run_cohort(args) -> int:
         and record["execution"].get("startup_diagnostic_seconds") is None for record in records)
     behavioral_completed = result.returncode == 0 and confirmed
     measurement = None
-    if cohort.get("measurement_required", False):
+    if "measurement_reporter" in cohort:
         measurement = {
             "diagnostic_evidence_complete": exact and all(
                 record["execution"].get("diagnostic_evidence_complete") is True for record in records),
             "artifacts_retained": exact and all(
                 record["execution"].get("artifacts_retained_after_success") is True for record in records),
         }
-        measurement["completed"] = behavioral_completed and all(measurement.values())
-    completed = behavioral_completed and (measurement is None or measurement["completed"])
+        measurement["prerequisites_complete"] = behavioral_completed and all(measurement.values())
+        # Generic runner diagnostics do not reconcile workload phases or join
+        # their exact physical requests. That remains the performance reporter's
+        # contract until the bundle owns and invokes it.
+        measurement.update(status="unreconciled", completed=False,
+                           reporter=cohort["measurement_reporter"],
+                           runner_records=[str(path) for path in sorted((output / "tests").glob("*.json"))])
+    completed = behavioral_completed
     code = result.returncode if result.returncode else int(not completed)
     report = {"schema": 1, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
               "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],

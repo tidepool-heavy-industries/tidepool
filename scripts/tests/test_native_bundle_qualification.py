@@ -609,9 +609,11 @@ class NativeQualificationTests(unittest.TestCase):
     def test_harness_performance_seals_resources_and_keeps_behavior_separate_from_measurement(self):
         for label, count, diagnostics, retained, expected in (
                 ('complete', 1, True, True, 0),
-                ('missing-timing', 1, False, True, 1),
-                ('unknown-timing', 1, None, True, 1),
-                ('discarded-artifacts', 1, True, False, 1),
+                ('missing-phase-artifact', 1, True, True, 0),
+                ('unjoined-physical-request', 1, True, True, 0),
+                ('missing-timing', 1, False, True, 0),
+                ('unknown-timing', 1, None, True, 0),
+                ('discarded-artifacts', 1, True, False, 0),
                 ('empty', 0, True, True, 1)):
             with self.subTest(outcome=label), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -636,6 +638,19 @@ class NativeQualificationTests(unittest.TestCase):
                                       if value == '--exact'], qualification.HARNESS_PERFORMANCE_TESTS)
                     self.assertEqual({command[index + 1] for index, value in enumerate(command)
                                       if value == '--resource-env'}, set(descriptor['environment']))
+                    if label in ('missing-phase-artifact', 'unjoined-physical-request'):
+                        from scripts.tests.test_harness_usecase_perf_report import (
+                            HarnessUsecasePerfReportTests, reporter)
+                        fixture = HarnessUsecasePerfReportTests()
+                        fixture.root = root / 'retained-traces'
+                        fixture.root.mkdir()
+                        retained_case = fixture.make_case(submissions=label != 'unjoined-physical-request')
+                        reconciled = reporter.analyze(retained_case)
+                        self.assertTrue(reconciled['runner']['diagnostic_evidence_complete'])
+                        if label == 'missing-phase-artifact':
+                            self.assertFalse(reconciled['phase_coverage']['complete'])
+                        else:
+                            self.assertEqual(reconciled['phases'][0]['compiler_attribution'], 'partial')
                     qualification.write_json(output / 'tests/case.json', {
                         'test': qualification.HARNESS_PERFORMANCE_TESTS[0], 'passed': True,
                         'execution': {'executed_test_count': count, 'exit_code': 0,
@@ -650,7 +665,12 @@ class NativeQualificationTests(unittest.TestCase):
                 self.assertEqual(code, expected)
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(report['behavioral_completed'], count == 1)
-                self.assertEqual(report['measurement']['completed'], expected == 0)
+                self.assertFalse(report['measurement']['completed'])
+                self.assertEqual(report['measurement']['status'], 'unreconciled')
+                self.assertEqual(report['measurement']['prerequisites_complete'],
+                                 count == 1 and diagnostics is True and retained)
+                self.assertEqual(report['measurement']['reporter'], 'scripts/harness-usecase-perf-report.py')
+                self.assertEqual(report['measurement']['runner_records'], [str(output / 'tests/case.json')])
                 self.assertEqual(report['measurement']['diagnostic_evidence_complete'], diagnostics is True)
                 self.assertEqual(report['measurement']['artifacts_retained'], retained)
                 self.assertEqual(report['completed'], expected == 0)
