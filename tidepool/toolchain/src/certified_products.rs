@@ -6484,11 +6484,7 @@ pub(crate) fn certify_products_with_validation(
                             "available original native witness",
                         ))?;
                     let original = native
-                        .groups
-                        .iter()
-                        .find(|original| {
-                            original.group.original_ordinal() == group.original_ordinal()
-                        })
+                        .group(group.original_ordinal())
                         .ok_or(CertificationError::Mismatch("shared original home groups"))?;
                     return validate_original_group_receipts(
                         &group,
