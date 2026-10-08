@@ -90,7 +90,9 @@ async fn expansion_fences_immediate_handler_before_callback_input() {
     let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
         exact_context: None,
         session_id: Some(session_id),
-        turn_text: include_str!("display_callback_immediate.hs"),
+        turn_text: tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
+        ),
         templates: &templates,
         include: &include,
         session_root: view.session_root(),

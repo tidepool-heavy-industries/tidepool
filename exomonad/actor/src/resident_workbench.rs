@@ -13116,11 +13116,10 @@ pub(crate) mod request_tests {
             .unwrap();
         assert_eq!(repeated, first);
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_repeat);
+        let first_fixture =
+            tidepool_testing::fixture_source("exomonad/actor/src/fixtures/host-job-first.hs");
         workbench
-            .execute_cell_for_test(
-                context.clone(),
-                &format!(include_str!("fixtures/host-job-first.hs"), first = first),
-            )
+            .execute_cell_for_test(context.clone(), &first_fixture.replace("{first}", &first))
             .await
             .unwrap();
         workbench
@@ -13196,10 +13195,12 @@ pub(crate) mod request_tests {
         .unwrap();
         drop(dependencies);
         assert_ne!(first, second);
+        let retained_fixture =
+            tidepool_testing::fixture_source("exomonad/actor/src/fixtures/host-job-retained.hs");
         workbench
             .execute_cell_for_test(
                 context.clone(),
-                &include_str!("fixtures/host-job-retained.hs")
+                &retained_fixture
                     .replace("{first}", &first)
                     .replace("{second}", &second),
             )
@@ -13259,7 +13260,10 @@ pub(crate) mod request_tests {
             .host_binding_identity_for_test(context.clone(), "tool_one")
             .await;
         workbench
-            .execute_cell_for_test(context.clone(), include_str!("fixtures/host-text-first.hs"))
+            .execute_cell_for_test(
+                context.clone(),
+                &tidepool_testing::fixture_source("exomonad/actor/src/fixtures/host-text-first.hs"),
+            )
             .await
             .unwrap();
         workbench
@@ -13327,7 +13331,9 @@ pub(crate) mod request_tests {
         workbench
             .execute_cell_for_test(
                 context.clone(),
-                include_str!("fixtures/host-text-retained.hs"),
+                &tidepool_testing::fixture_source(
+                    "exomonad/actor/src/fixtures/host-text-retained.hs",
+                ),
             )
             .await
             .unwrap();
@@ -14861,15 +14867,21 @@ pub(crate) mod request_tests {
         for (path, bytes) in [
             (
                 "LookupPlanParent.hs",
-                include_str!("fixtures/LookupPlanParent.hs"),
+                &tidepool_testing::fixture_source(
+                    "exomonad/actor/src/fixtures/LookupPlanParent.hs",
+                ),
             ),
             (
                 "LookupPlanParent/Choice.hs",
-                include_str!("fixtures/LookupPlanChoice.hs"),
+                &tidepool_testing::fixture_source(
+                    "exomonad/actor/src/fixtures/LookupPlanChoice.hs",
+                ),
             ),
             (
                 "LookupPlanParent/ModuleOnly.hs",
-                include_str!("fixtures/LookupPlanModuleOnly.hs"),
+                &tidepool_testing::fixture_source(
+                    "exomonad/actor/src/fixtures/LookupPlanModuleOnly.hs",
+                ),
             ),
         ] {
             std::fs::write(modules.path().join(path), bytes).unwrap();
@@ -15902,13 +15914,17 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             std::fs::create_dir(&root).unwrap();
             std::fs::write(
                 root.join("PreparedInstanceProvider.hs"),
-                include_str!("fixtures/prepared-instance-provider.hs")
-                    .replace("INSTANCE_RESULT", value),
+                &tidepool_testing::fixture_source(
+                    "exomonad/actor/src/fixtures/prepared-instance-provider.hs",
+                )
+                .replace("INSTANCE_RESULT", value),
             )
             .unwrap();
             std::fs::write(
                 root.join("PreparedInstanceAgentSpec.hs"),
-                include_str!("fixtures/prepared-instance-agent-spec.hs"),
+                &tidepool_testing::fixture_source(
+                    "exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs",
+                ),
             )
             .unwrap();
             let root = root.canonicalize().unwrap();
@@ -16205,12 +16221,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         std::fs::write(&input, "41").unwrap();
         std::fs::write(
             source_root.join("QuotedProvider.hs"),
-            include_str!("fixtures/quoted-agent-provider.hs"),
+            &tidepool_testing::fixture_source(
+                "exomonad/actor/src/fixtures/quoted-agent-provider.hs",
+            ),
         )
         .unwrap();
         std::fs::write(
             source_root.join("QuotedAgentSpec.hs"),
-            include_str!("fixtures/quoted-agent-spec.hs")
+            &tidepool_testing::fixture_source("exomonad/actor/src/fixtures/quoted-agent-spec.hs")
                 .replace("{quotation-input}", input.to_str().unwrap()),
         )
         .unwrap();
@@ -16489,12 +16507,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         std::fs::write(&quotation_input, "41").unwrap();
         std::fs::write(
             authored.path().join("QuotedProvider.hs"),
-            include_str!("fixtures/quoted-agent-provider.hs"),
+            &tidepool_testing::fixture_source(
+                "exomonad/actor/src/fixtures/quoted-agent-provider.hs",
+            ),
         )
         .unwrap();
         std::fs::write(
             authored.path().join("QuotedAgentSpec.hs"),
-            include_str!("fixtures/quoted-agent-spec.hs")
+            &tidepool_testing::fixture_source("exomonad/actor/src/fixtures/quoted-agent-spec.hs")
                 .replace("{quotation-input}", quotation_input.to_str().unwrap()),
         )
         .unwrap();
@@ -17780,7 +17800,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let images = Arc::new(tidepool_runtime::session::ImageRegistry::new());
         publisher.set_image_registry(images.clone());
         observer.set_image_registry(images);
-        let fixture = include_str!("fixtures/ProgressRuntime.hs");
+        let fixture =
+            tidepool_testing::fixture_source("exomonad/actor/src/fixtures/ProgressRuntime.hs");
         std::fs::write(publisher_root.path().join("ProgressRuntime.hs"), fixture).unwrap();
         let preamble = insert_preamble_imports(
             surface.preamble(),
@@ -19304,7 +19325,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .host_binding_identity_for_test(context.clone(), "capturedInput")
             .await;
         workbench
-            .execute_cell_for_test(context.clone(), include_str!("fixtures/host-json-first.hs"))
+            .execute_cell_for_test(
+                context.clone(),
+                &tidepool_testing::fixture_source("exomonad/actor/src/fixtures/host-json-first.hs"),
+            )
             .await
             .unwrap();
         workbench
@@ -19365,7 +19389,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 .await,
             original_capture
         );
-        let source = include_str!("fixtures/host-json-retained.hs");
+        let source =
+            tidepool_testing::fixture_source("exomonad/actor/src/fixtures/host-json-retained.hs");
         let (checked, prepared) = workbench
             .prepare_checked_cell(
                 context.clone(),
@@ -19671,8 +19696,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         } = tidepool_runtime::session::turn::run_turn(TurnRequest {
             exact_context: None,
             session_id: None,
-            turn_text: include_str!(
-                "../../../tidepool/runtime/src/session/fixtures/activation-input-function.hs"
+            turn_text: tidepool_testing::fixture_source(
+                "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
             ),
             templates: &templates,
             include: &include,
@@ -19725,8 +19750,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             &private_context.haskell_effects_alias,
             &prepared.imports,
         );
-        let receiver_text = include_str!(
-            "../../../tidepool/runtime/src/session/fixtures/activation-input-receiver.hs"
+        let receiver_text = tidepool_testing::fixture_source(
+            "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
         );
         let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
             admission_digest: [0; 32],
@@ -21084,7 +21109,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         std::fs::create_dir(&fixture_dir).expect("fixture directory");
         std::fs::write(
             fixture_dir.join("ForkReplyContracts.hs"),
-            include_str!("fixtures/ForkReplyContracts.hs"),
+            &tidepool_testing::fixture_source("exomonad/actor/src/fixtures/ForkReplyContracts.hs"),
         )
         .expect("fork reply contract fixture");
         let mut include = source.base_include.to_vec();

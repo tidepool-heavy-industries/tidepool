@@ -103,7 +103,10 @@ async fn run_native_reply_case(case: NativeReplyCase) {
         )
         .await
         .expect("requesting workbench");
-    let setup = execute(&requester, include_str!("terminal_transfer_setup.hs"), None)
+    let setup_source = tidepool_testing::fixture_source(
+        "exomonad/actor/src/resident_actor/terminal_transfer_setup.hs",
+    );
+    let setup = execute(&requester, &setup_source, None)
         .await
         .expect("native receiving child admitted");
     assert_eq!(setup.status, WorkbenchRunStatus::Committed, "{setup:?}");
@@ -116,7 +119,9 @@ async fn run_native_reply_case(case: NativeReplyCase) {
     // child receiver is used. A parent-owned startup hole cannot pass this.
     let submission = execute(
         &requester,
-        include_str!("terminal_transfer_request.hs"),
+        &tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_actor/terminal_transfer_request.hs",
+        ),
         None,
     )
     .await

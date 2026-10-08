@@ -7200,7 +7200,9 @@ mod tests {
         tidepool_testing::eval_harness::require_extract();
         let compile_error = tidepool_toolchain::artifacts::check_source(
             &tidepool_toolchain::artifacts::SourceCheckRequest {
-                source: include_str!("local_actor/failure_origin.hs"),
+                source: &tidepool_testing::fixture_source(
+                    "exomonad/actor/src/local_actor/failure_origin.hs",
+                ),
                 include: &[],
                 fallback_module_name: "FailureOrigin",
             },

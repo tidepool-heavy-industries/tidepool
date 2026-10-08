@@ -243,10 +243,12 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
                 boundary,
             )
             .expect("owning group admission");
-        let source = include_str!("capture_workspace_child.hs")
-            .replace("CHILD_PATH", &reservations[0].allocated.to_string())
-            .replace("GROUP_ID", &group.0.to_string())
-            .replace("CHECKPOINT_TOKEN", &token);
+        let source = tidepool_testing::fixture_source(
+            "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
+        )
+        .replace("CHILD_PATH", &reservations[0].allocated.to_string())
+        .replace("GROUP_ID", &group.0.to_string())
+        .replace("CHECKPOINT_TOKEN", &token);
         calls.push(tokio::spawn(run_host_cell_with_context(
             launcher.clone(),
             source,
@@ -479,7 +481,10 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .settle_checkpoint(&token, session, true)
         .expect("private capture completed");
     eprintln!("captured reader fixture: original private capture is published");
-    let source = include_str!("captured_readers_parent.hs").replace("CHECKPOINT_TOKEN", &token);
+    let source = tidepool_testing::fixture_source(
+        "exomonad/actor/src/resident_actor/captured_readers_parent.hs",
+    )
+    .replace("CHECKPOINT_TOKEN", &token);
     let call = tokio::spawn(dispatch_host_cell(parent.clone(), source, None));
     let mut children = Vec::new();
     while children.len() < 2 {
@@ -562,7 +567,10 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
         .store(false, std::sync::atomic::Ordering::SeqCst);
     workspaces.release.add_permits(1);
     eprintln!("captured reader fixture: parent cell failed, supervising actor remains live");
-    let reused = include_str!("captured_reader_reuse.hs").replace("CHECKPOINT_TOKEN", &token);
+    let reused = tidepool_testing::fixture_source(
+        "exomonad/actor/src/resident_actor/captured_reader_reuse.hs",
+    )
+    .replace("CHECKPOINT_TOKEN", &token);
     assert_committed(&run_host_cell(parent.clone(), reused).await);
     loop {
         let event = tokio::time::timeout(std::time::Duration::from_secs(240), deployments.recv())
@@ -871,7 +879,10 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
         .settle_checkpoint(&token, session, true)
         .expect("independently completed capture");
 
-    let reuse = include_str!("captured_reader_reuse.hs").replace("CHECKPOINT_TOKEN", &token);
+    let reuse = tidepool_testing::fixture_source(
+        "exomonad/actor/src/resident_actor/captured_reader_reuse.hs",
+    )
+    .replace("CHECKPOINT_TOKEN", &token);
     assert_committed(&run_host_cell(parent.clone(), reuse.clone()).await);
     let survivor_path = entered_rx
         .recv()
@@ -897,8 +908,10 @@ async fn partial_captured_group_startup_failure_cleans_first_child_and_preserves
     );
 
     workspaces.release.add_permits(1);
-    let source =
-        include_str!("capture_partial_startup_failure.hs").replace("CHECKPOINT_TOKEN", &token);
+    let source = tidepool_testing::fixture_source(
+        "exomonad/actor/src/resident_actor/capture_partial_startup_failure.hs",
+    )
+    .replace("CHECKPOINT_TOKEN", &token);
     let mut call = tokio::spawn(dispatch_host_cell(parent.clone(), source, None));
     let paths = tokio::time::timeout(std::time::Duration::from_secs(240), async {
         let mut paths = Vec::new();
