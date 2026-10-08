@@ -425,9 +425,9 @@ impl InvocationWork {
                 })
                 .collect(),
         );
-        // Reserved identities never reached a target. Preserve the original
-        // rollback fence, including internally detached branch reservations,
-        // before target cancellation changes any request state.
+        // Roll back unsubmitted reservations, including detached branches,
+        // before dispatching request cancellation notifications. Worker intent
+        // is already fenced; it does not settle these request reservations.
         let (_, notifications) = environment
             .requests
             .abort_unsubmitted(self.owner, &self.reservation);

@@ -136,6 +136,23 @@ impl<H, O> ResidentActorRoot<H, O> {
     }
 }
 
+fn selected_child_retirement_batch(
+    kernel: &KernelContext,
+    children: Vec<ActorRef>,
+    summary: &str,
+) -> crate::kernel::RetirementBatch {
+    crate::kernel::RetirementBatch::issue(
+        children
+            .into_iter()
+            .filter_map(|child| {
+                kernel
+                    .resolve(child)
+                    .map(|child| (child, ActorTerminal::new(ActorExitKind::Cancelled, summary)))
+            })
+            .collect(),
+    )
+}
+
 #[derive(Clone)]
 pub struct LocalResidentInstallation {
     /// Newly prepared handler custody transfers only with application publication.
@@ -5685,21 +5702,14 @@ where
                                             error.to_string(),
                                         )
                                     })?;
-                                for child in children {
-                                    if let Some(child) = kernel.resolve(child) {
-                                        // A child already gone from a failed fork-group admission is
-                                        // the common case here; log anything else so an actor that
-                                        // refused shutdown does not silently linger.
-                                        if let Err(error) = child
-                                            .shutdown(ActorTerminal {
-                                                kind: ActorExitKind::Cancelled,
-                                                summary: "fork group admission failed".into(),
-                                                diagnostic: None,
-                                            })
-                                            .await
-                                        {
-                                            tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                                        }
+                                let children = selected_child_retirement_batch(
+                                    &kernel,
+                                    children,
+                                    "fork group admission failed",
+                                );
+                                for (child, terminal) in children.into_actors() {
+                                    if let Err(error) = child.shutdown(terminal).await {
+                                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
                                     }
                                 }
                                 return environment
@@ -6919,18 +6929,14 @@ where
                                 ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                             })?;
                         invocation.retain_aborted_children(kernel, &children);
-                        for child in children {
-                            if let Some(child) = kernel.resolve(child) {
-                                if let Err(error) = child
-                                    .shutdown_with_cleanup(ActorTerminal {
-                                        kind: ActorExitKind::Cancelled,
-                                        summary: "deferred invocation-owned worker refused".into(),
-                                        diagnostic: None,
-                                    })
-                                    .await
-                                {
-                                    tracing::warn!(child = ?child.identity(), %error, "invocation-owned deferred worker cleanup was unconfirmed");
-                                }
+                        let children = selected_child_retirement_batch(
+                            kernel,
+                            children,
+                            "deferred invocation-owned worker refused",
+                        );
+                        for (child, terminal) in children.into_actors() {
+                            if let Err(error) = child.shutdown_with_cleanup(terminal).await {
+                                tracing::warn!(child = ?child.identity(), %error, "invocation-owned deferred worker cleanup was unconfirmed");
                             }
                         }
                         return self
@@ -7001,21 +7007,14 @@ where
                 if let Some(invocation) = effect_owner.invocation_work() {
                     invocation.retain_aborted_children(kernel, &children);
                 }
-                for child in children {
-                    if let Some(child) = kernel.resolve(child) {
-                        // A child already gone from a failed fork-group admission is
-                        // the common case here; log anything else so an actor that
-                        // refused shutdown does not silently linger.
-                        if let Err(error) = child
-                            .shutdown(ActorTerminal {
-                                kind: ActorExitKind::Cancelled,
-                                summary: "fork group admission aborted".into(),
-                                diagnostic: None,
-                            })
-                            .await
-                        {
-                            tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                        }
+                let children = selected_child_retirement_batch(
+                    kernel,
+                    children,
+                    "fork group admission aborted",
+                );
+                for (child, terminal) in children.into_actors() {
+                    if let Err(error) = child.shutdown(terminal).await {
+                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
                     }
                 }
                 self.environment
@@ -11670,20 +11669,6 @@ where
             return Ok(());
         }
         let context = self.context(kernel.identity());
-        if boundary.hosted().is_some()
-            && self
-                .workbench_executions
-                .lock()
-                .at_boundary(&boundary)
-                .is_some()
-        {
-            workbench_ledger::settle_provider_children(
-                &self.workbench_executions,
-                kernel,
-                &boundary,
-            )
-            .await?;
-        }
         let owner = WorkbenchExecutions::boundary_abort_owner(
             &self.workbench_executions,
             &boundary,
@@ -11716,10 +11701,36 @@ where
                 .abort_unpublished_at_boundary(context.actor, &boundary);
             workbench_ledger::BoundaryAbortCleanup { children, scopes }
         });
-        while let Some(child) = cleanup.children.last().copied() {
-            workbench_ledger::settle_provider_child(kernel, child).await?;
-            cleanup.children.pop();
-            owner.retain_cleanup(cleanup.clone());
+        let provider_children = if boundary.hosted().is_some()
+            && self
+                .workbench_executions
+                .lock()
+                .at_boundary(&boundary)
+                .is_some()
+        {
+            self.workbench_executions
+                .lock()
+                .provider_children(&boundary)?
+        } else {
+            Vec::new()
+        };
+        let provider_count = provider_children.len();
+        let selected = provider_children
+            .into_iter()
+            .chain(cleanup.children.iter().rev().copied())
+            .collect();
+        let children = workbench_ledger::provider_child_retirement_batch(kernel, selected)?;
+        for (index, (child, terminal)) in children.into_actors().into_iter().enumerate() {
+            let identity = child.identity();
+            workbench_ledger::settle_provider_child_owner(child, terminal).await?;
+            if index < provider_count {
+                self.workbench_executions
+                    .lock()
+                    .provider_child_released(&boundary, identity)?;
+            } else {
+                cleanup.children.pop();
+                owner.retain_cleanup(cleanup.clone());
+            }
         }
         self.environment
             .runner
@@ -11741,21 +11752,14 @@ where
         owner: ActorRef,
         summary: &str,
     ) {
-        for child in self.environment.fork_groups.abort_unpublished(owner) {
-            if let Some(child) = kernel.resolve(child) {
-                // A child already gone from a failed fork-group admission is
-                // the common case here; log anything else so an actor that
-                // refused shutdown does not silently linger.
-                if let Err(error) = child
-                    .shutdown(ActorTerminal {
-                        kind: ActorExitKind::Cancelled,
-                        summary: summary.into(),
-                        diagnostic: None,
-                    })
-                    .await
-                {
-                    tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                }
+        let children = selected_child_retirement_batch(
+            kernel,
+            self.environment.fork_groups.abort_unpublished(owner),
+            summary,
+        );
+        for (child, terminal) in children.into_actors() {
+            if let Err(error) = child.shutdown(terminal).await {
+                tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
             }
         }
     }
@@ -11959,21 +11963,10 @@ where
         if let Some(invocation) = invocation {
             invocation.retain_aborted_children(kernel, &children);
         }
-        for child in children {
-            if let Some(child) = kernel.resolve(child) {
-                // A child already gone from a failed fork-group admission is
-                // the common case here; log anything else so an actor that
-                // refused shutdown does not silently linger.
-                if let Err(error) = child
-                    .shutdown(ActorTerminal {
-                        kind: ActorExitKind::Cancelled,
-                        summary: summary.into(),
-                        diagnostic: None,
-                    })
-                    .await
-                {
-                    tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                }
+        let children = selected_child_retirement_batch(kernel, children, summary);
+        for (child, terminal) in children.into_actors() {
+            if let Err(error) = child.shutdown(terminal).await {
+                tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
             }
         }
     }
@@ -12369,26 +12362,16 @@ where
                 None => None,
             };
             let context = self.context(kernel.identity());
-            for child in self
-                .environment
-                .fork_groups
-                .abort_incomplete_at_boundary(context.actor, &boundary)
-            {
-                if let Some(child) = kernel.resolve(child) {
-                    // A child already gone from a failed fork-group admission is
-                    // the common case here; log anything else so an actor that
-                    // refused shutdown does not silently linger.
-                    if let Err(error) = child
-                        .shutdown(ActorTerminal {
-                            kind: ActorExitKind::Cancelled,
-                            summary: "fork admission stopped before interrupted tool settlement"
-                                .into(),
-                            diagnostic: None,
-                        })
-                        .await
-                    {
-                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                    }
+            let children = selected_child_retirement_batch(
+                kernel,
+                self.environment
+                    .fork_groups
+                    .abort_incomplete_at_boundary(context.actor, &boundary),
+                "fork admission stopped before interrupted tool settlement",
+            );
+            for (child, terminal) in children.into_actors() {
+                if let Err(error) = child.shutdown(terminal).await {
+                    tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
                 }
             }
             if let Some(reply) = reply {
@@ -13364,25 +13347,16 @@ where
                     .as_ref()
                     .map(|(_, groups)| groups.as_slice())
                     .unwrap_or_default();
-                for child in self
-                    .environment
-                    .fork_groups
-                    .abort_selected_unpublished(context.actor, groups)
-                {
-                    if let Some(child) = kernel.resolve(child) {
-                        // A child already gone from a failed fork-group admission is
-                        // the common case here; log anything else so an actor that
-                        // refused shutdown does not silently linger.
-                        if let Err(error) = child
-                            .shutdown(ActorTerminal {
-                                kind: ActorExitKind::Cancelled,
-                                summary: "route callback failed before publication".into(),
-                                diagnostic: None,
-                            })
-                            .await
-                        {
-                            tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                        }
+                let children = selected_child_retirement_batch(
+                    kernel,
+                    self.environment
+                        .fork_groups
+                        .abort_selected_unpublished(context.actor, groups),
+                    "route callback failed before publication",
+                );
+                for (child, terminal) in children.into_actors() {
+                    if let Err(error) = child.shutdown(terminal).await {
+                        tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
                     }
                 }
             }

@@ -830,21 +830,14 @@ where
                     if let Some(invocation) = &invocation_work {
                         invocation.retain_aborted_children(&kernel, &children);
                     }
-                    for child in children {
-                        if let Some(child) = kernel.resolve(child) {
-                            // A child already gone from a failed fork-group admission is
-                            // the common case here; log anything else so an actor that
-                            // refused shutdown does not silently linger.
-                            if let Err(error) = child
-                                .shutdown(ActorTerminal {
-                                    kind: ActorExitKind::Cancelled,
-                                    summary: "fork group admission failed".into(),
-                                    diagnostic: None,
-                                })
-                                .await
-                            {
-                                tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
-                            }
+                    let children = selected_child_retirement_batch(
+                        &kernel,
+                        children,
+                        "fork group admission failed",
+                    );
+                    for (child, terminal) in children.into_actors() {
+                        if let Err(error) = child.shutdown(terminal).await {
+                            tracing::warn!(child = ?child.identity(), %error, "fork-group child did not shut down");
                         }
                     }
                 }

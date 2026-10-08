@@ -1,6 +1,7 @@
 use super::*;
 
-pub(super) async fn settle_provider_child(
+#[cfg(test)]
+async fn settle_provider_child(
     kernel: &KernelContext,
     child: ActorRef,
 ) -> Result<(), KernelBehaviorError> {
@@ -20,7 +21,7 @@ fn provider_child_terminal() -> ActorTerminal {
     }
 }
 
-async fn settle_provider_child_owner(
+pub(super) async fn settle_provider_child_owner(
     child_owner: LocalActorRef,
     terminal: ActorTerminal,
 ) -> Result<(), KernelBehaviorError> {
@@ -43,6 +44,19 @@ pub(super) async fn settle_provider_children(
     boundary: &tidepool_runtime::session::WorkbenchForkBoundary,
 ) -> Result<(), KernelBehaviorError> {
     let children = journal.lock().provider_children(boundary)?;
+    let batch = provider_child_retirement_batch(kernel, children)?;
+    for (owner, terminal) in batch.into_actors() {
+        let child = owner.identity();
+        settle_provider_child_owner(owner, terminal).await?;
+        journal.lock().provider_child_released(boundary, child)?;
+    }
+    Ok(())
+}
+
+pub(super) fn provider_child_retirement_batch(
+    kernel: &KernelContext,
+    children: Vec<ActorRef>,
+) -> Result<crate::kernel::RetirementBatch, KernelBehaviorError> {
     let owners = children
         .into_iter()
         .map(|child| {
@@ -56,13 +70,7 @@ pub(super) async fn settle_provider_children(
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let batch = crate::kernel::RetirementBatch::issue(owners);
-    for (owner, terminal) in batch.into_actors() {
-        let child = owner.identity();
-        settle_provider_child_owner(owner, terminal).await?;
-        journal.lock().provider_child_released(boundary, child)?;
-    }
-    Ok(())
+    Ok(crate::kernel::RetirementBatch::issue(owners))
 }
 
 #[derive(Clone)]
