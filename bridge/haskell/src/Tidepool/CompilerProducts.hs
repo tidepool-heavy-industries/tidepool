@@ -9,6 +9,7 @@ module Tidepool.CompilerProducts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts, prepareOriginalProductsWithExecutor
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
   , prepareCompilerProjectionContext, prepareCompilerProjectionContextForEnvironment, exactProgramProductVersionFromDigest
   , OriginalProjectionCollector, newOriginalProjectionCollector, observeOriginalProjection
   , prepareOriginalProductsWithCollector
@@ -47,7 +48,9 @@ import System.FilePath (normalise, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.Info qualified as SystemInfo
 import System.Mem.StableName (makeStableName)
-import Tidepool.CertifiedProducts (encodeCertifiedProductsWithOriginals, sourceProductSha256)
+import Tidepool.CertifiedProducts
+  ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProducts
+  , encodeCertifiedItemProducts, sourceProductSha256 )
 import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
@@ -182,6 +185,7 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   , certifiedExecutionSource :: WorkerExecutionSource
   , certifiedRetainedOriginals :: Map.Map (String,String) CanonicalInterfaceProof
   , certifiedRetainedNativeVersions :: Map.Map (String,String) String
+  , certifiedTargetContext :: Maybe TargetCertificationContext
   }
 
 data PreparedProductContext = PreparedProductContext
@@ -600,7 +604,28 @@ writeCertifiedProductsKeeping includes originalInterfaces outDir prepared produc
 writeCertifiedProductsKeepingWithOriginals
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
   -> [(String, WireProgram)] -> IO CertifiedOriginalProducts
-writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir prepared productContext targets = do
+writeCertifiedProductsKeepingWithOriginals = writeCertifiedProducts OrdinaryProductFacts
+
+writeCertifiedSegmentProducts
+  :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult
+  -> PreparedProductContext -> IO CertifiedOriginalProducts
+writeCertifiedSegmentProducts includes originals directory prepared context =
+  writeCertifiedProducts SegmentOriginalFacts includes originals directory prepared (Just context) []
+
+writeCertifiedSegmentItemProducts
+  :: PreparedPipelineResult -> CertifiedOriginalProducts -> FilePath -> WireProgram -> IO ()
+writeCertifiedSegmentItemProducts prepared originals directory program = do
+  context <- maybe (fail "item output lacks its segment original certification") pure
+    (certifiedTargetContext originals)
+  certified <- encodeCertifiedItemProducts (prHscEnv (pprPipelineResult prepared)) context program
+  bytes <- either fail pure certified
+  BS.writeFile (directory </> "certified-products.cbor") bytes
+
+writeCertifiedProducts
+  :: CertifiedProductKind
+  -> [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
+  -> [(String, WireProgram)] -> IO CertifiedOriginalProducts
+writeCertifiedProducts kind includes originalInterfaces outDir prepared productContext targets = do
     let hscEnv = prHscEnv (pprPipelineResult prepared)
         retained = maybe Map.empty preparedRetainedOriginals productContext
         retainedProofs = Map.fromList
@@ -654,7 +679,7 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
       ExactExecutionSourceAvailable graph ->
         BS.writeFile (outDir </> "execution-source.cbor") (executionGraphBytes graph)
       _ -> pure ()
-    retainedVersions <- timeDetailPhase timing "module_products" "certify" $ do
+    (retainedVersions,targetContext) <- timeDetailPhase timing "module_products" "certify" $ do
       let emittedSeals = Map.fromList
             [((unit,name),(version,T.pack (shaHex iface),T.pack (shaHex native),T.pack (shaHex packages)))
             | product <- freshProducts
@@ -671,19 +696,19 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
         Just current -> pure (currentReconciledOriginalProducts current)
         Nothing -> either (ioError . userError) pure (reconcileOriginalProducts
           (compilationScope <$> preparedExactCompilation prepared) [])
-      certified <- encodeCertifiedProductsWithOriginals retainedProofs emittedSeals reconciled hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
+      certified <- encodeCertifiedOriginalProducts kind retainedProofs emittedSeals reconciled hscEnv sourceRecipe (pprProductInterfaces prepared) finalized (pprAcceptedCandidates prepared)
         (compilationScope <$> preparedExactCompilation prepared)
         (map moduleProductInput freshProducts) targets
         finalDependencies productBytes evidenceBytes
       versions <- case certified of
-        Right (bytes,versions) -> do
+        Right (bytes,versions,context) -> do
           BS.writeFile (outDir </> "certified-products.cbor") bytes
-          pure versions
+          pure (versions,case kind of OrdinaryProductFacts -> Nothing; SegmentOriginalFacts -> Just context)
         Left reason -> do
           hPutStrLn stderr ("product certification unavailable: " ++ reason)
           BS.writeFile (outDir </> "certified-products.cbor") BS.empty
           unless (null freshProducts) $ fail ("native product certification failed: " ++ reason)
-          pure Map.empty
+          pure (Map.empty,Nothing)
       pure versions
     sourceOriginals <- case preparedExactCompilation prepared of
       Nothing -> pure Map.empty
@@ -691,7 +716,7 @@ writeCertifiedProductsKeepingWithOriginals includes originalInterfaces outDir pr
         let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
         captureFinalizedSourceOriginals compilation (pprAcceptedCandidates prepared)
           (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
-    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions)
+    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions targetContext)
 
 
 -- An immutable original product needs captured finalized Core as well as its

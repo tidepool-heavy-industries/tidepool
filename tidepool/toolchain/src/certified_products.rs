@@ -128,6 +128,17 @@ pub struct CertifiedModuleReceipt {
     pub interface_requirements: BTreeMap<(String, String), [u8; 32]>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompleteProductKind {
+    Ordinary,
+    SegmentOriginals,
+}
+
+pub(crate) struct SegmentItemReceipt {
+    pub globals: Vec<AcceptedGlobal>,
+    pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CertifiedReceipt {
     pub modules: Vec<CertifiedModuleReceipt>,
@@ -999,7 +1010,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded `TPCERT9` tuple with exact owner rows shared
+/// Decode the worker's bounded ordinary `TPCERT10` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -1022,11 +1033,15 @@ pub(crate) fn decode_receipt_with_operation(
     output_dir: Option<&Path>,
     operation: &InventoryOperation,
 ) -> CertResult<CertifiedReceipt> {
-    decode_receipt_packet_with_operation(bytes, output_dir, operation)
-        .map(|decoded| decoded.receipt)
+    let decoded = decode_receipt_packet_with_operation(bytes, output_dir, operation)?;
+    if decoded.kind != CompleteProductKind::Ordinary {
+        return Err(CertificationError::Receipt("expected ordinary product output"));
+    }
+    Ok(decoded.receipt)
 }
 
 struct DecodedReceiptPacket {
+    kind: CompleteProductKind,
     receipt: CertifiedReceipt,
     #[cfg(test)]
     globals: Vec<AcceptedGlobal>,
@@ -1117,29 +1132,27 @@ fn decode_receipt_value_in(
     output_dir: Option<&Path>,
     operation: &InventoryOperation,
 ) -> CertResult<DecodedReceiptPacket> {
-    let header = array(value)?;
-    if header.len() < 2 || string(&header[0])? != "TPCERT" {
-        return Err(CertificationError::Receipt("receipt header"));
-    }
-    let version = number(&header[1])?;
-    if version != 9 {
-        return Err(CertificationError::UnsupportedVersion {
-            format: CertificationFormat::ProductReceipt,
-            found: version,
-            expected: 9,
-        });
-    }
-    if header.len() != 9 {
-        return Err(CertificationError::Receipt("receipt header"));
-    }
-    let mut coordinates = OwnerCoordinates::decode(&header[8])?;
+    let payload = product_receipt_payload(value)?;
+    let (kind, modules_value, targets_value, packages_value, globals_value,
+        finalization_value, recipe_value, coordinates_value) = match payload {
+        [tag, modules, targets, packages, globals, finalization, recipe, coordinates]
+            if string(tag)? == "ordinary" =>
+            (CompleteProductKind::Ordinary, modules, Some(targets), packages, globals,
+             finalization, recipe, coordinates),
+        [tag, modules, packages, globals, finalization, recipe, coordinates]
+            if string(tag)? == "segment-originals" =>
+            (CompleteProductKind::SegmentOriginals, modules, None, packages, globals,
+             finalization, recipe, coordinates),
+        _ => return Err(CertificationError::Receipt("complete product output variant")),
+    };
+    let mut coordinates = OwnerCoordinates::decode(coordinates_value)?;
     let mut dictionary =
-        GlobalDictionary::decode_with_operation(&header[5], &mut coordinates, operation)?;
+        GlobalDictionary::decode_with_operation(globals_value, &mut coordinates, operation)?;
     let mut read_globals = |value: &Value| {
         let globals = array(value)?;
         dictionary.resolve_with_operation(globals, operation)
     };
-    let modules = array(&header[2])?;
+    let modules = array(modules_value)?;
     let modules = modules
         .iter()
         .map(|module| {
@@ -1176,7 +1189,7 @@ fn decode_receipt_value_in(
             })
         })
         .collect::<CertResult<Vec<_>>>()?;
-    let target_rows = array(&header[3])?;
+    let target_rows = targets_value.map(array).transpose()?.unwrap_or(&[]);
     let mut targets = BTreeMap::new();
     for target in target_rows {
         let row = sized(target, 2)?;
@@ -1197,7 +1210,7 @@ fn decode_receipt_value_in(
         return Err(CertificationError::Receipt("unreferenced owner coordinate"));
     }
 
-    let package_rows = array(&header[4])?;
+    let package_rows = array(packages_value)?;
     if package_rows.len() > PACKAGE_LIMIT {
         return Err(CertificationError::Receipt("package count"));
     }
@@ -1223,7 +1236,7 @@ fn decode_receipt_value_in(
             return Err(CertificationError::Receipt("duplicate package witness"));
         }
     }
-    let recipe = array(&header[7])?;
+    let recipe = array(recipe_value)?;
     let source_recipe = match recipe.first().map(string).transpose()? {
         Some("ordinary") if recipe.len() == 1 => WorkerExecutionSource::Ordinary,
         Some("exact-unavailable") if recipe.len() == 2 => {
@@ -1261,9 +1274,10 @@ fn decode_receipt_value_in(
         }
         _ => return Err(CertificationError::Receipt("source recipe result")),
     };
-    let finalization = finalized_module::decode_envelope_with_operation(&header[6], operation)?;
+    let finalization = finalized_module::decode_envelope_with_operation(finalization_value, operation)?;
     finalization.validate_owners(&modules, &packages)?;
     Ok(DecodedReceiptPacket {
+        kind,
         receipt: CertifiedReceipt {
             modules,
             targets,
@@ -1278,6 +1292,84 @@ fn decode_receipt_value_in(
             .map(|(global, _)| global)
             .collect(),
     })
+}
+
+fn product_receipt_payload(value: &Value) -> CertResult<&[Value]> {
+    let header = array(value)?;
+    if header.len() < 2 || string(&header[0])? != "TPCERT" {
+        return Err(CertificationError::Receipt("receipt header"));
+    }
+    let version = number(&header[1])?;
+    if version != 10 {
+        return Err(CertificationError::UnsupportedVersion {
+            format: CertificationFormat::ProductReceipt,
+            found: version,
+            expected: 10,
+        });
+    }
+    if header.len() != 3 {
+        return Err(CertificationError::Receipt("receipt header"));
+    }
+    array(&header[2])
+}
+
+pub(crate) fn decode_segment_originals_with_operation(
+    bytes: &[u8], root: &Path, operation: &InventoryOperation,
+) -> CertResult<CertifiedReceipt> {
+    let decoded = decode_receipt_packet_with_operation(bytes, Some(root), operation)?;
+    if decoded.kind != CompleteProductKind::SegmentOriginals {
+        return Err(CertificationError::Receipt("expected segment original output"));
+    }
+    Ok(decoded.receipt)
+}
+
+pub(crate) fn decode_segment_item_with_operation(
+    bytes: &[u8], operation: &InventoryOperation,
+) -> CertResult<SegmentItemReceipt> {
+    let value = operation.decode_value(bytes, operation.limits().max_bytes)?;
+    let payload = product_receipt_payload(&value)?;
+    let [tag, globals, packages] = payload else {
+        return Err(CertificationError::Receipt("segment item output arity"));
+    };
+    if string(tag)? != "segment-item" {
+        return Err(CertificationError::Receipt("expected segment item output"));
+    }
+    let rows = array(globals)?;
+    operation.reserve::<AcceptedGlobal>(rows.len())?;
+    let globals = rows.iter().map(|row| {
+        let global = accepted_global(row)?;
+        operation.charge(global_payload_copy_bytes(&global)?)?;
+        Ok(global)
+    }).collect::<CertResult<Vec<_>>>()?;
+    let packages = decode_package_rows(packages, operation)?;
+    Ok(SegmentItemReceipt { globals, packages })
+}
+
+fn decode_package_rows(
+    value: &Value, operation: &InventoryOperation,
+) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
+    let rows = array(value)?;
+    if rows.len() > PACKAGE_LIMIT {
+        return Err(CertificationError::Receipt("package count"));
+    }
+    operation.reserve::<((String, String), PackageInterfaceWitness, [usize; 4])>(rows.len())?;
+    let mut packages = BTreeMap::new();
+    for row in rows {
+        let [unit, module, path, seal] = sized(row, 4)? else { unreachable!() };
+        let unit = string(unit)?;
+        let module = string(module)?;
+        let path = string(path)?;
+        if unit.is_empty() || module.is_empty() || !Path::new(path).is_absolute() {
+            return Err(CertificationError::Receipt("package witness identity/path"));
+        }
+        operation.charge(unit.len() + module.len() + path.len())?;
+        if packages.insert((unit.to_owned(), module.to_owned()), PackageInterfaceWitness {
+            selected_path: PathBuf::from(path), sha256: digest(seal)?,
+        }).is_some() {
+            return Err(CertificationError::Receipt("duplicate package witness"));
+        }
+    }
+    Ok(packages)
 }
 
 // Coordinates name an owning source group or package interface; they never

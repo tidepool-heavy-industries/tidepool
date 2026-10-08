@@ -2,6 +2,8 @@
 
 module Tidepool.CertifiedProducts
   ( encodeCertifiedProducts, encodeCertifiedProductsWithOriginals
+  , CertifiedProductKind(..), TargetCertificationContext
+  , encodeCertifiedOriginalProducts, encodeCertifiedItemProducts
   , resolvePackageGlobal, homeInterfaceUsageOwners, sourceProductSha256 ) where
 
 import Prelude hiding (product)
@@ -63,6 +65,14 @@ import Tidepool.FinalizedModule (homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals )
 import Tidepool.Timing (readTimingEnabled, emitCount)
+
+data CertifiedProductKind = OrdinaryProductFacts | SegmentOriginalFacts
+
+data TargetCertificationContext = TargetCertificationContext
+  { targetBinderOwners :: Map.Map SymbolIdentity BinderOwner
+  , targetHomeModules :: Set.Set (T.Text,T.Text)
+  , targetModulePackages :: Map.Map (T.Text,T.Text) (FilePath,T.Text)
+  }
 
 data ProductOrigin = FreshProduct | CachedProduct | RetainedCoreProduct deriving (Eq)
 
@@ -153,7 +163,22 @@ encodeCertifiedProductsWithOriginals
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String))
-encodeCertifiedProductsWithOriginals retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
+encodeCertifiedProductsWithOriginals retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes =
+  fmap (fmap (\(bytes,versions,_) -> (bytes,versions))) $
+    encodeCertifiedOriginalProducts OrdinaryProductFacts retained emittedSeals reconciled env sourceRecipe
+      interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
+
+encodeCertifiedOriginalProducts
+  :: CertifiedProductKind
+  -> Map.Map (String,String) CanonicalInterfaceProof
+  -> Map.Map (T.Text,T.Text) (T.Text,T.Text,T.Text,T.Text)
+  -> ReconciledOriginalProducts
+  -> HscEnv -> WorkerExecutionSource -> Map.Map ModuleName ModIface -> FinalizedModuleArtifacts -> [ModuleCandidate] -> Maybe ExactScope
+  -> [(T.Text, T.Text, BS.ByteString, [ProjectedGroup])]
+  -> [(String, WireProgram)]
+  -> DependencyEvidence -> BS.ByteString -> BS.ByteString
+  -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext))
+encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
   packageRef <- newIORef []
   timing <- readTimingEnabled
   (resolvePackage, resolutionCounts) <- newPackageGlobalResolver timing env
@@ -328,15 +353,22 @@ encodeCertifiedProductsWithOriginals retained emittedSeals reconciled env source
                   , encodeString (T.pack path), encodeString sha]
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
-              certificateBytes = toStrictByteString $ array
-                [encodeString "TPCERT", encodeWord 9
-                , list id encodedModules, list id encodedTargets
-                , list id encodedPackages, list (encodeWitness coordinateIndices) globalWitnesses
-                , encodeFinalizedModuleArtifacts finalized, encodeWorkerExecutionSource sourceRecipe
-                , list encodeCoordinate coordinates]
+              originalFields =
+                [list id encodedModules, list id encodedPackages
+                ,list (encodeWitness coordinateIndices) globalWitnesses
+                ,encodeFinalizedModuleArtifacts finalized,encodeWorkerExecutionSource sourceRecipe
+                ,list encodeCoordinate coordinates]
+              payload = case kind of
+                OrdinaryProductFacts -> array (encodeString "ordinary" :
+                  list id encodedModules : list id encodedTargets : drop 1 originalFields)
+                SegmentOriginalFacts -> array (encodeString "segment-originals" : originalFields)
+              certificateBytes = toStrictByteString $
+                array [encodeString "TPCERT",encodeWord 10,payload]
+              context = TargetCertificationContext ownerMap homeModules
+                (Map.map Set.findMin packages)
           pure $ do
             versions <- retainedNativeVersions emittedSeals exact cached packages products moduleRows
-            Right (certificateBytes,versions)
+            Right (certificateBytes,versions,context)
   where
     internWitness :: Map.Map GlobalWitness Word -> GlobalWitness
       -> (Map.Map GlobalWitness Word, Word)
@@ -346,6 +378,55 @@ encodeCertifiedProductsWithOriginals retained emittedSeals reconciled env source
         let index = fromIntegral (Map.size indices)
         in (Map.insert witness index indices, index)
     third (_, _, value) = value
+
+-- Module owners and their package demand come from the once-issued inventory.
+-- An item adds only the facts selected by its own executable projection.
+encodeCertifiedItemProducts :: HscEnv -> TargetCertificationContext -> WireProgram
+  -> IO (Either String BS.ByteString)
+encodeCertifiedItemProducts env context program = do
+  packageRef <- newIORef []
+  timing <- readTimingEnabled
+  (resolvePackage,_) <- newPackageGlobalResolver timing env
+  globals <- forM (programGlobals program) $ \global ->
+    encodeGlobalWitness env resolvePackage packageRef (targetBinderOwners context)
+      (targetHomeModules context) (globalIdentity global) (globalRep global)
+      (globalEntrySignature global >>= \(SignatureId index) ->
+        at (programSignatures program) (fromIntegral index))
+      (globalRequiredEvaluated global) (globalRequiredGeneration global)
+  certifyLocalPackageExports env resolvePackage packageRef [program]
+  packages <- Map.fromListWith Set.union . map
+    (\(unit,name,path,seal) -> ((unit,name),Set.singleton (path,seal))) <$> readIORef packageRef
+  validated <- forM (Map.toAscList packages) $ \(owner,choices) ->
+    case Set.toAscList choices of
+      [(path,seal)] -> do
+        captured <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
+        pure $ do
+          bytes <- either (const (Left "item package interface unavailable")) Right captured
+          if digest bytes /= seal then Left "item package interface changed" else pure ()
+          case Map.lookup owner (targetModulePackages context) of
+            Just previous | previous /= (path,seal) -> Left "item replaces an original package selection"
+            Just _ -> Right Nothing
+            Nothing -> Right (Just (owner,path,seal))
+      _ -> pure (Left "item package owner selected more than one interface")
+  pure $ do
+    witnesses <- sequence globals
+    additions <- catMaybes <$> sequence validated
+    Right $ toStrictByteString $ array [encodeString "TPCERT",encodeWord 10,
+      array [encodeString "segment-item",list encodeFullWitness witnesses,
+        list (\((unit,name),path,seal) -> array [encodeString unit,encodeString name,
+          encodeString (T.pack path),encodeString seal]) additions]]
+
+encodeFullWitness :: GlobalWitness -> Encoding
+encodeFullWitness (identity,rep,signature,evaluated,owner) = array
+  [encodeIdentity identity,encodeRep rep,maybe encodeNull encodeSignature signature,
+   encodeBool evaluated,case owner of
+    SourceOwner unit name version ordinal -> array [encodeString "source",encodeString unit,
+      encodeString name,maybe encodeNull encodeString version,encodeWord ordinal,encodeIdentity identity]
+    RetainedOwner generation -> array [encodeString "retained",encodeIdentity identity,encodeWord64 generation]
+    PackageOwner unit name seal Nothing -> array [encodeString "package",encodeString unit,
+      encodeString name,encodeString seal,encodeIdentity identity]
+    PackageOwner unit name seal (Just generation) -> array [encodeString "retained-package",encodeString unit,
+      encodeString name,encodeString seal,encodeIdentity identity,encodeWord64 generation]]
 
 -- Native identity binds the finite graph actually retained for this owner.
 -- Promoted edges name nodes rather than recursively derived versions, so cycles

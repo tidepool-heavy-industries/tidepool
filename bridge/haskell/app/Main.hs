@@ -78,8 +78,9 @@ import Tidepool.CompilerProducts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProductsWithCache
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
-  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, currentReconciledOriginalProducts, selectPreparedOriginalSessionOutputs
-  , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals, prepareCompilerProjectionContext
+  , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, currentReconciledOriginalProducts
+  , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
 import Tidepool.HostBindingAuthority
@@ -163,7 +164,7 @@ import Tidepool.SessionArtifacts
   , emitHostBindingInterface
   , prepareTypedSegmentSessionBindings
   , typedSegmentSessionEnvironment, typedSegmentSessionGlobals, typedSegmentSessionInterfaces
-  , typedSegmentSessionBinders, typedSegmentSessionRetainedGlobals, typedSegmentSessionInterfacesThrough
+  , typedSegmentSessionBinders, typedSegmentSessionRetainedGlobals
   , typedSegmentSessionBindingRepresentations, withTypedSegmentSessionPublication )
 import Tidepool.Metadata (metadataForConstructors, targetBindingHasIO)
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut, encodeBoundBinder)
@@ -1490,6 +1491,9 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
             prepareArtifacts originalInterfaces directory caches prepared targets (standardAuxiliaryRoots binds)
               projectionGenerations (typedSegmentSessionBindingRepresentations batch)
           unless (length artifacts == length items) (fail "typed segment projection lost an entry")
+          currentProducts <- maybe (fail "typed segment has no admitted original inventory") pure productContext
+          sharedProducts <- writeCertifiedSegmentProducts (requestIncludes localArgs) originalInterfaces
+            directory prepared currentProducts
           emitted <- forM (zip3 items artifacts (cellPlanItems finalized)) $ \(item,artifact,sourceItem) -> do
             let itemPlan = typedItemPlan item
                 index = plannedItemOrdinal itemPlan
@@ -1516,10 +1520,8 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
             writePreparedSidecars InlineYieldSites itemDirectory binds (prTyCons result)
               Nothing (map T.pack (prWarnings result)) [outputArtifact]
             writePreparedArtifacts itemDirectory [outputArtifact]
-            currentProducts <- maybe (fail "typed item has no admitted original inventory") pure productContext
-            selectedProducts <- selectPreparedOriginalSessionOutputs originalInterfaces
-              (typedSegmentSessionInterfacesThrough index batch) currentProducts
-            certified <- writeRequestProducts localArgs originalInterfaces itemDirectory prepared (Just selectedProducts) [outputArtifact]
+            writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory (paProgram outputArtifact)
+            let certified = sharedProducts
             ordinal <- typedEntryOriginalOrdinal certified (preparedRootIdentity (typedItemRoot item))
             BS.writeFile (itemDirectory </> "turn.cbor") (encodeTurnOut turn)
             writeTypedItemReceipt itemDirectory scope itemAdmission rendered typedPlan
