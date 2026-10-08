@@ -28,7 +28,7 @@ import qualified Jev.Operators as J
 
 data Route = Express | Economy deriving (Eq, Show)
 data RouteMeaning = Delivery Route | MissingDeliveryCriteria deriving (Eq, Show)
-data RouteResult = Dispatched Route Text Text | CriteriaSupplied Text Text
+data RouteResult = DeliveryPrepared Route Text Text | CriteriaSupplied Text Text
   deriving (Eq, Show)
 
 -- | Semantic conditions and human presentation describe the same original
@@ -71,7 +71,7 @@ routeChoices subject =
       , meaning = Delivery route
       , originalContinuation = F.askUser
           (F.present (deliveryView route subject)
-            *> (Dispatched route subject <$> F.textInput "Dispatch note" Nothing))
+            *> (DeliveryPrepared route subject <$> F.textInput "Delivery note" Nothing))
       }
 
 routeQuestion :: NonEmpty (RouteChoice effects)
@@ -100,13 +100,12 @@ chooseRouteUnder :: J.Policy policy -> RouteResponse effects
 chooseRouteUnder policy response =
   fmap J.settledValue (J.takenUnder policy (J.answers response).route)
 
--- | Both judgments and all metadata below are pure reads of one response.
+-- | Both judgments and the response display are pure reads of one response.
 -- Projecting keys deliberately leaves captured actions opaque and unexecuted.
 routeResponseView :: RouteResponse effects -> V.View
 routeResponseView response = V.column
   [ V.text "Retained delivery judgment"
   , V.inspect response
-  , V.inspect (J.resolvedModel response, J.usage response, J.diagnostics response)
   , V.text "Careful policy"
   , V.inspect (fmap semanticKey (chooseRouteUnder J.careful response))
   , V.text "Strict policy"
@@ -189,7 +188,7 @@ deliveryView route subject = V.column
   ]
 
 routeResultView :: RouteResult -> V.View
-routeResultView (Dispatched route subject note) = V.column
-  [deliveryView route subject, V.text "Submitted dispatch note", V.inspect note]
+routeResultView (DeliveryPrepared route subject note) = V.column
+  [deliveryView route subject, V.text "Submitted delivery note", V.inspect note]
 routeResultView (CriteriaSupplied subject criteria) = V.column
   [V.text subject, V.text "Submitted delivery criteria", V.inspect criteria]
