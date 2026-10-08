@@ -625,7 +625,10 @@ fn same_inventory_merge_keeps_custody_after_peer_read_caches_drop() {
 
     drop(all);
     drop(empty);
-    assert_eq!(inventory.node_count(), exhaustive_oracle(&merged).closure.len());
+    assert_eq!(
+        inventory.node_count(),
+        exhaustive_oracle(&merged).closure.len()
+    );
     check_read_projection(&merged).unwrap();
     drop(merged);
     assert_eq!(inventory.node_count(), 0);
@@ -755,11 +758,11 @@ fn read_history_census(
             lease.parents.capacity() * std::mem::size_of::<Arc<ViewLease>>();
         census.materialization_parent_links += lease.materialization_parents.len();
         census.materialization_parent_capacity_items += lease.materialization_parents.capacity();
-        census.materialization_parent_vec_reserved_bytes +=
-            lease.materialization_parents.capacity()
-                * std::mem::size_of::<
-                    Arc<crate::declaration_context::RetainedArtifactMaterialization>,
-                >();
+        census.materialization_parent_vec_reserved_bytes += lease
+            .materialization_parents
+            .capacity()
+            * std::mem::size_of::<Arc<crate::declaration_context::RetainedArtifactMaterialization>>(
+            );
     }
     for reads in read_caches {
         if let Some(roots) = reads.canonical_roots.get() {
@@ -851,7 +854,9 @@ fn linear_view_history_reports_retained_read_projection_cost() {
         drop(latest.entries());
         drop(latest.interface_owners());
     }
-    assert!(prior_read_caches.iter().all(|reads| reads.upgrade().is_none()));
+    assert!(prior_read_caches
+        .iter()
+        .all(|reads| reads.upgrade().is_none()));
     assert!(prior_leases.iter().all(|lease| lease.upgrade().is_some()));
     drop(prior_read_caches);
     drop(prior_leases);
