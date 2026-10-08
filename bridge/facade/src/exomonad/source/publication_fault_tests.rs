@@ -27,15 +27,15 @@ use tidepool_runtime::session::{
 };
 
 const CHILD_TEST: &str = "exomonad::source::publication_fault_tests::publication_fault_child";
-const SPEC: &str = include_str!("../../actor_host/fixtures/browser_agent_spec.hs");
 const DIRECTORY_FAULT: &str =
     include_str!("../../../../atomic-write/tests/fixtures/directory_fault.c");
 
 fn spec_source() -> String {
-    SPEC.replace(
-        "module AgentSpec (agentSpec)",
-        "module AgentSpec (agentSpec, Probe (..), answer)",
-    )
+    tidepool_testing::fixture_source("bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs")
+        .replace(
+            "module AgentSpec (agentSpec)",
+            "module AgentSpec (agentSpec, Probe (..), answer)",
+        )
 }
 
 struct NoHandlers;
@@ -441,7 +441,9 @@ fn postrename_fsync_failure_keeps_paired_spec_and_fresh_process_recovers_visible
     std::fs::write(authored.join("AgentSpec.hs"), spec_source()).unwrap();
     std::fs::write(
         authored.join("PublicationFaultDriver.hs"),
-        include_str!("publication_fault_driver.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/exomonad/source/publication_fault_driver.hs",
+        ),
     )
     .unwrap();
     {

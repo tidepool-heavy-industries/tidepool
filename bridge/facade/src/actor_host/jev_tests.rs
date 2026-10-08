@@ -256,12 +256,14 @@ fn lookup_enrichment_workspace(config: &mut ActorHostConfig) {
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(
         authored.join("LookupFixture.hs"),
-        include_str!("lookup_enrichment_fixture.hs"),
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/lookup_enrichment_fixture.hs",
+        ),
     )
     .unwrap();
     std::fs::write(
         authored.join("AgentSpec.hs"),
-        include_str!("lookup_agent_spec.hs"),
+        tidepool_testing::fixture_source("bridge/facade/src/actor_host/lookup_agent_spec.hs"),
     )
     .unwrap();
     std::fs::create_dir_all(authored.join("checks")).unwrap();
@@ -301,7 +303,11 @@ fn lookup_tool_policy_matches_native_ghc_oracle() {
     let effects = tidepool_mcp::ensure_effects_module(&exomonad_effect_declarations()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let oracle = directory.path().join("LookupPolicyOracle.hs");
-    std::fs::write(&oracle, include_str!("lookup_policy_oracle.hs")).unwrap();
+    std::fs::write(
+        &oracle,
+        tidepool_testing::fixture_source("bridge/facade/src/actor_host/lookup_policy_oracle.hs"),
+    )
+    .unwrap();
     let mut command = std::process::Command::new("runghc");
     for path in effects.include_paths() {
         command.arg(format!("-i{}", path.display()));

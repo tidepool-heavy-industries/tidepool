@@ -366,11 +366,10 @@ async fn start() -> (
     HostedTestRuntime,
     mpsc::UnboundedReceiver<RequestedRound>,
 ) {
-    start_with_spec_and_model(
-        Some(include_str!("fixtures/context_acceptance_agent_spec.hs")),
-        "test-model",
-    )
-    .await
+    let spec = tidepool_testing::fixture_source(
+        "bridge/facade/src/actor_host/fixtures/context_acceptance_agent_spec.hs",
+    );
+    start_with_spec_and_model(Some(&spec), "test-model").await
 }
 
 async fn start_with_spec(
@@ -407,7 +406,9 @@ async fn start_with_spec_and_model(
             std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
             std::fs::write(
                 authored.join("ContextWorkflow.hs"),
-                include_str!("../../../haskell/examples/model-turns/ContextWorkflow.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/haskell/examples/model-turns/ContextWorkflow.hs",
+                ),
             )
             .unwrap();
             // ContextWorkflow imports Jev.Operators and Jev.Tidepool. Keep the
@@ -417,7 +418,9 @@ async fn start_with_spec_and_model(
             std::fs::create_dir_all(operators.parent().unwrap()).unwrap();
             std::fs::write(
                 operators,
-                include_str!("../../../../exomonad/examples/workspace/.exomonad/Jev/Operators.hs"),
+                &tidepool_testing::fixture_source(
+                    "exomonad/examples/workspace/.exomonad/Jev/Operators.hs",
+                ),
             )
             .unwrap();
             for (name, contents) in [
@@ -599,7 +602,9 @@ async fn resident_sync_native_trim_preserves_reasoning_and_deferred_child_bindin
     let setup = next_round(&mut rounds).await;
     setup.cell_with_reasoning(
         "native-trim-setup",
-        include_str!("fixtures/context_acceptance_native_trim_setup.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_native_trim_setup.hs",
+        ),
     );
     let parent = next_round(&mut rounds).await;
     assert!(parent.is_root());
@@ -621,7 +626,9 @@ async fn resident_sync_native_trim_preserves_reasoning_and_deferred_child_bindin
     let before = root_context_state(&fixture);
     parent.cell_with_reasoning(
         "native-trim-parent",
-        include_str!("fixtures/context_acceptance_native_trim_parent.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_native_trim_parent.hs",
+        ),
     );
 
     let mut child_sessions = BTreeSet::new();
@@ -675,7 +682,9 @@ async fn resident_sync_native_trim_preserves_reasoning_and_deferred_child_bindin
             successful_output_items(&raw, "native-trim-parent");
             round.cell(
                 "native-trim-child",
-                include_str!("fixtures/context_acceptance_native_trim_child.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/context_acceptance_native_trim_child.hs",
+                ),
             );
         } else {
             successful_output_items(&raw, "native-trim-child");
@@ -695,7 +704,9 @@ async fn resident_sync_notes_commit_before_deferred_children_and_child_model_swi
     assert!(setup.is_root());
     setup.cell(
         "context-setup",
-        include_str!("fixtures/context_acceptance_setup.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
+        ),
     );
     let parent = next_round(&mut rounds).await;
     assert!(parent.is_root());
@@ -703,7 +714,9 @@ async fn resident_sync_notes_commit_before_deferred_children_and_child_model_swi
     let root_session = parent.request.session_id.clone();
     parent.cell_with_reasoning(
         "context-parent",
-        include_str!("fixtures/context_acceptance_parent.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_parent.hs",
+        ),
     );
 
     let mut child_sessions = BTreeSet::new();
@@ -737,7 +750,9 @@ async fn resident_sync_notes_commit_before_deferred_children_and_child_model_swi
             assert_portable_exchange(&round.request, &raw, "context-parent", "haskell_sync");
             round.cell_with_reasoning(
                 "context-child",
-                include_str!("fixtures/context_acceptance_child.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/context_acceptance_child.hs",
+                ),
             );
         } else {
             let raw = raw_request_items(&fixture, &round.request);
@@ -760,10 +775,10 @@ async fn resident_sync_notes_commit_before_deferred_children_and_child_model_swi
 
 #[tokio::test]
 async fn resident_compiled_sync_handler_commits_context_and_model_before_inference() {
-    let (_files, fixture, mut rounds) = start_with_spec(Some(include_str!(
-        "fixtures/context_acceptance_agent_spec.hs"
-    )))
-    .await;
+    let spec = tidepool_testing::fixture_source(
+        "bridge/facade/src/actor_host/fixtures/context_acceptance_agent_spec.hs",
+    );
+    let (_files, fixture, mut rounds) = start_with_spec(Some(&spec)).await;
     let actor = fixture.context.actor.identity();
     let first = next_round(&mut rounds).await;
     assert!(first.is_root());
@@ -829,7 +844,9 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     assert!(fixture.context.actor.terminal().get().is_none());
     successor.cell(
         "inspect-context",
-        include_str!("fixtures/context_acceptance_inspect.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_inspect.hs",
+        ),
     );
     let inspected = next_round(&mut rounds).await;
     assert!(inspected.is_root());
@@ -874,7 +891,9 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     let setup = next_round(&mut rounds).await;
     setup.cell(
         "context-setup",
-        include_str!("fixtures/context_acceptance_setup.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
+        ),
     );
     let parent = next_round(&mut rounds).await;
     let setup_output = successful_output(&parent.request, "context-setup");
@@ -887,7 +906,9 @@ async fn resident_sync_context_failure_keeps_prefix_model_and_defers_children() 
     let before = root_context_state(&fixture);
     parent.cell_with_reasoning(
         "context-failure",
-        include_str!("fixtures/context_acceptance_failure.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_failure.hs",
+        ),
     );
     let successor = next_round(&mut rounds).await;
     assert!(
@@ -961,7 +982,9 @@ async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches
     let setup = next_round(&mut rounds).await;
     setup.async_cell(
         "async-failure-setup",
-        include_str!("fixtures/context_acceptance_setup.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
+        ),
     );
     let parent = next_round(&mut rounds).await;
     assert!(parent.is_root());
@@ -969,7 +992,9 @@ async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches
     let session = parent.request.session_id.clone();
     parent.async_cell(
         "async-deferred-failure",
-        include_str!("fixtures/context_acceptance_async_failure.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_async_failure.hs",
+        ),
     );
 
     let failed = next_round(&mut rounds).await;
@@ -1026,7 +1051,9 @@ async fn resident_async_failed_deferred_unfold_keeps_bindings_and_never_launches
     );
     failed.async_cell(
         "async-failure-reuse",
-        include_str!("fixtures/context_acceptance_after_failure.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_after_failure.hs",
+        ),
     );
     let reused = next_round(&mut rounds).await;
     assert!(
@@ -1057,7 +1084,9 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     let setup = next_round(&mut rounds).await;
     setup.cell(
         "context-setup",
-        include_str!("fixtures/context_acceptance_setup.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
+        ),
     );
     let parent = next_round(&mut rounds).await;
     let setup_output = successful_output(&parent.request, "context-setup");
@@ -1069,7 +1098,9 @@ async fn resident_sync_context_cancel_discards_staging_and_never_launches_childr
     let original_setup = retained_output_item(&parent.request.input, "context-setup").clone();
     parent.cell_with_reasoning(
         "context-cancel",
-        include_str!("fixtures/context_acceptance_cancel.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/context_acceptance_cancel.hs",
+        ),
     );
     let store = fixture.runtime.store();
     let identity = harness::embedding::HostIdentity {

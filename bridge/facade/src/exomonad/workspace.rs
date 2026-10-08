@@ -1062,7 +1062,7 @@ fn resource_module(
         .join(",\n  ");
     format!(
         "{}\nworkspaceIdentity = {}\nworkspaceRoot = {}\nworkspaceModules = [{}]\nworkspacePrompts = [{}]\n",
-        include_str!("workspace.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/exomonad/workspace.hs"),
         literal(identity),
         literal(workspace_root),
         module_names,
@@ -2531,7 +2531,9 @@ mod tests {
         .unwrap();
         std::fs::write(
             authored.join("Checks.hs"),
-            include_str!("workspace_pinned_check.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/exomonad/workspace_pinned_check.hs",
+            ),
         )
         .unwrap();
         pin_tiny_input(project.path(), pinned.path());

@@ -24,7 +24,9 @@ fn examples(document: &str) -> impl Iterator<Item = &str> {
 #[tokio::test]
 async fn deferred_inherited_child_preserves_original_owner_after_parent_shadowing() {
     assert_deferred_original_owner(
-        include_str!("../actor_host_fixtures/generic_actor/deferred_original_owner.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_original_owner.hs",
+        ),
         false,
     )
     .await;
@@ -33,7 +35,7 @@ async fn deferred_inherited_child_preserves_original_owner_after_parent_shadowin
 #[tokio::test]
 async fn deferred_checkpoint_child_preserves_prior_nominal_owner_after_publication() {
     assert_deferred_original_owner(
-        include_str!("../actor_host_fixtures/generic_actor/deferred_checkpoint_original_owner.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host_fixtures/generic_actor/deferred_checkpoint_original_owner.hs"),
         true,
     )
     .await;
@@ -171,7 +173,9 @@ async fn failed_deferred_capture_does_not_release_child_tools() {
     committed(root.as_ref(), "data DeferredInput = DeferredInput Int deriving Show\ndata DeferredReply = DeferredReply Int deriving Show").await;
     let source = format!(
         "{}\nerror \"deferred-before-commit-failure\" >> pure ()",
-        include_str!("../actor_host_fixtures/generic_actor/deferred_original_owner.hs")
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_original_owner.hs"
+        )
     );
     let result = root
         .dispatch_boxed(ToolInvocation {
@@ -278,15 +282,21 @@ async fn explicit_display_preserves_resource_guidance_and_specialized_renderers(
     let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     for (source, expected) in [
         (
-            include_str!("notebook_actor_scoped_handle.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/notebook_actor_scoped_handle.hs",
+            ),
             "resource control guidance rendered",
         ),
         (
-            include_str!("notebook_display_generic.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/notebook_display_generic.hs",
+            ),
             "NotebookPlain {1 = 3, 2 = <function>}",
         ),
         (
-            include_str!("notebook_display_custom.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/notebook_display_custom.hs",
+            ),
             "custom-display-wins",
         ),
     ] {
@@ -311,7 +321,9 @@ async fn explicit_display_is_the_only_value_presentation() {
     let mut running = tokio::spawn(async move {
         committed(
             executing_policy.as_ref(),
-            include_str!("notebook_retained_expression_history.hs"),
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/notebook_retained_expression_history.hs",
+            ),
         )
         .await
     });
@@ -433,7 +445,12 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
     let setup = campaign
         .drive_actor_output(
             &store,
-            committed(root.as_ref(), include_str!("notebook_nominal_setup.hs")),
+            committed(
+                root.as_ref(),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/notebook_nominal_setup.hs",
+                ),
+            ),
         )
         .await;
     assert_eq!(
@@ -484,8 +501,13 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
         "{setup}"
     );
 
-    let rejected =
-        dispatch_haskell_script(root.as_ref(), include_str!("notebook_nominal_rejected.hs")).await;
+    let rejected = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/notebook_nominal_rejected.hs",
+        ),
+    )
+    .await;
     assert_eq!(rejected["status"], "rejected", "{rejected:?}");
     let rejection = &rejected["items"][0];
     assert_eq!(rejection["failureLayer"], "compile", "{rejected:?}");
@@ -505,7 +527,9 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 
     let missing_declaration = dispatch_haskell_script(
         root.as_ref(),
-        include_str!("notebook_nominal_scope_probe.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/notebook_nominal_scope_probe.hs",
+        ),
     )
     .await;
     assert_eq!(
@@ -528,7 +552,9 @@ async fn notebook_cell_relocates_same_cell_types_and_rejects_before_installation
 
     let rejected = dispatch_haskell_script(
         root.as_ref(),
-        include_str!("notebook_prefix_compile_failure.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/notebook_prefix_compile_failure.hs",
+        ),
     )
     .await;
     assert_eq!(rejected["status"], "rejected", "{rejected}");
@@ -574,7 +600,12 @@ async fn notebook_cell_prologue_applies_to_check_stage_and_execution() {
     let result = campaign
         .drive_actor_output(
             &store,
-            committed(root.as_ref(), include_str!("notebook_prologue.hs")),
+            committed(
+                root.as_ref(),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/notebook_prologue.hs",
+                ),
+            ),
         )
         .await;
     assert_eq!(explicit_display_output(&result)["text"], "True", "{result}");
@@ -616,8 +647,13 @@ async fn notebook_cell_prologue_applies_to_check_stage_and_execution() {
 async fn notebook_cell_rejection_retains_its_source_plan() {
     let campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    let rejected =
-        dispatch_haskell_script(root.as_ref(), include_str!("notebook_multiple_errors.hs")).await;
+    let rejected = dispatch_haskell_script(
+        root.as_ref(),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/notebook_multiple_errors.hs",
+        ),
+    )
+    .await;
     assert_eq!(rejected["status"], "rejected", "{rejected:?}");
     let items = rejected["items"].as_array().unwrap();
     assert_eq!(items.len(), 4, "{rejected:?}");
@@ -653,11 +689,22 @@ async fn notebook_cell_preserves_old_types() {
     let mut campaign = TestCampaign::start().await;
     let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), include_str!("notebook_identity_original.hs")).await;
+    committed(
+        root.as_ref(),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/notebook_identity_original.hs",
+        ),
+    )
+    .await;
     let shadowed = campaign
         .drive_actor_output(
             &store,
-            committed(root.as_ref(), include_str!("notebook_identity_shadowed.hs")),
+            committed(
+                root.as_ref(),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/notebook_identity_shadowed.hs",
+                ),
+            ),
         )
         .await;
     let output = explicit_display_output(&shadowed)["text"].as_str().unwrap();
@@ -679,7 +726,9 @@ async fn notebook_cell_retains_observations_needed_by_its_suffix() {
     let saved = initial["items"][0]["installedBindings"][0]
         .as_str()
         .unwrap();
-    let source = include_str!("notebook_lease_suffix.hs").replace("__SAVED__", saved);
+    let source =
+        tidepool_testing::fixture_source("bridge/facade/src/actor_host/notebook_lease_suffix.hs")
+            .replace("__SAVED__", saved);
     let result = campaign
         .drive_actor_output(&store, committed(root.as_ref(), &source))
         .await;
@@ -695,7 +744,9 @@ async fn notebook_cell_infers_response_results() {
     let response = displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("notebook_identity_response.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/notebook_identity_response.hs",
+        ),
     )
     .await;
     let output = explicit_display_output(&response)["text"].as_str().unwrap();
@@ -746,7 +797,7 @@ async fn notebook_cell_reply_marks_its_tail_not_run() {
 
     let reply = dispatch_haskell_script(
         child.policy.as_ref(),
-        include_str!("notebook_reply_tail.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/notebook_reply_tail.hs"),
     )
     .await;
     assert_eq!(reply["status"], "replied", "{reply:?}");
@@ -823,7 +874,9 @@ async fn record_actor_unfold_publishes_and_routes_child_reply() {
             });
             std::fs::write(
                 authored.join("LaunchFixture.hs"),
-                include_str!("record_actor_unfold.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/record_actor_unfold.hs",
+                ),
             )
             .unwrap();
             super::test_campaign::commit_workspace(&config.workspace);
@@ -1112,7 +1165,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let topics_found = displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("lookup_topics_found.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/lookup_topics_found.hs"),
     )
     .await;
     assert_eq!(
@@ -1196,7 +1249,7 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     let layout = displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("notebook_let_layout.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/notebook_let_layout.hs"),
     )
     .await;
     assert_eq!(explicit_display_output(&layout)["text"], "42", "{layout}");
@@ -1208,7 +1261,9 @@ async fn shared_api_guide_example_handles_success_and_unavailable() {
     displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("shared_api_guide_unavailable.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/shared_api_guide_unavailable.hs",
+        ),
     )
     .await;
     campaign.await_watch_ready().await;
@@ -1294,7 +1349,9 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
     let progress = displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("watch_documentation_progress.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/watch_documentation_progress.hs",
+        ),
     )
     .await;
     let pages: Vec<_> = progress["items"]
@@ -1316,7 +1373,9 @@ async fn watch_documentation_request_options_reports_progress_then_settles() {
     let settled = displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("watch_documentation_settled.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/watch_documentation_settled.hs",
+        ),
     )
     .await;
     let pages: Vec<_> = settled["items"]
@@ -1343,7 +1402,9 @@ async fn activation_presents_prose_and_preserves_exact_inputs() {
     committed(root.as_ref(), "data Report = Report Int deriving Show\nworker <- startAgent (withAgentLifetime ActorOwned (readonlyAgent \"activation-preview-worker\"))").await;
     committed(
         root.as_ref(),
-        include_str!("../actor_host_fixtures/generic_actor/activation_preview_setup.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host_fixtures/generic_actor/activation_preview_setup.hs",
+        ),
     )
     .await;
     for (label, input, expected, reply) in [
@@ -1469,7 +1530,13 @@ async fn rich_response_survives_resident_computation() {
 async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), include_str!("quiet_observation_setup.hs")).await;
+    committed(
+        root.as_ref(),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/quiet_observation_setup.hs",
+        ),
+    )
+    .await;
     let child = campaign
         .next_deployment(
             "quiet observation child policy installation",
@@ -1553,7 +1620,10 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
     let expired = dispatch_haskell_script(root.as_ref(), &format!("{expiring} ()")).await;
     assert_eq!(expired["status"], "rejected", "{expired}");
     for name in ["retained", "declaredEvidence"] {
-        let source = include_str!("quiet_observation_exact_probe.hs").replace("__NAME__", name);
+        let source = tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/quiet_observation_exact_probe.hs",
+        )
+        .replace("__NAME__", name);
         let exact = campaign
             .drive_actor_output(&store, committed(root.as_ref(), &source))
             .await;
@@ -1608,7 +1678,9 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
     let root = Arc::clone(&campaign.root_installation.policy);
     committed(
         root.as_ref(),
-        include_str!("../actor_host_fixtures/generic_actor/documentation_setup.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host_fixtures/generic_actor/documentation_setup.hs",
+        ),
     )
     .await;
     let boundary = tidepool_runtime::session::WorkbenchForkBoundary::external(
@@ -1626,10 +1698,9 @@ async fn reattachment_preserves_completed_unacknowledged_forks() {
                 Some("haskell".into()),
             )),
             name: exomonad_actor::HASKELL_TOOL.into(),
-            arguments: ToolArguments::Raw(
-                include_str!("../actor_host_fixtures/generic_actor/deferred_unfold_example.hs")
-                    .into(),
-            ),
+            arguments: ToolArguments::Raw(tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_unfold_example.hs",
+            )),
         })
         .await
         .unwrap();
@@ -1693,22 +1764,24 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
         )
         .await;
     }
-    displayed(
-        &mut campaign,
-        root.as_ref(),
-        if rich_response {
-            include_str!("../actor_host_fixtures/generic_actor/rich_response_setup.hs")
-        } else {
-            include_str!("../actor_host_fixtures/generic_actor/documentation_setup.hs")
-        },
-    )
-    .await;
+    let setup = if rich_response {
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host_fixtures/generic_actor/rich_response_setup.hs",
+        )
+    } else {
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host_fixtures/generic_actor/documentation_setup.hs",
+        )
+    };
+    displayed(&mut campaign, root.as_ref(), &setup).await;
     let review_type = dispatch_lookup(root.as_ref(), &["Review"]).await;
     assert_eq!(review_type["status"], "committed", "{review_type:?}");
     let extra_group = if groups == 2 {
-        include_str!("../actor_host_fixtures/generic_actor/second_queued_unfold.hs")
+        tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host_fixtures/generic_actor/second_queued_unfold.hs",
+        )
     } else {
-        ""
+        String::new()
     };
     let call_id = "documentation-unfold".to_owned();
     let (invocation, completion) = original_tool_call(OriginalOperation {
@@ -1725,7 +1798,9 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
             name: exomonad_actor::HASKELL_TOOL.into(),
             arguments: ToolArguments::Raw(format!(
                 "{}\n{}\n{}\n{}",
-                include_str!("../actor_host_fixtures/generic_actor/deferred_unfold_example.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host_fixtures/generic_actor/deferred_unfold_example.hs",
+                ),
                 example(include_str!("../../../../exomonad/prompts/docs/watch.md")),
                 extra_group,
                 suffix.unwrap_or("")
@@ -1871,18 +1946,22 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
     displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("../actor_host_fixtures/generic_actor/response_computation.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host_fixtures/generic_actor/response_computation.hs",
+        ),
     )
     .await;
     for child in &children {
         let source = if rich_response {
-            include_str!("../actor_host_fixtures/generic_actor/rich_response_reply.hs")
+            tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host_fixtures/generic_actor/rich_response_reply.hs",
+            )
         } else if child.label.ends_with("/domain") {
-            "respond (Report sessionInput)"
+            "respond (Report sessionInput)".to_owned()
         } else {
-            "respond sessionInput"
+            "respond sessionInput".to_owned()
         };
-        let result = dispatch_haskell_script(child.policy.as_ref(), source).await;
+        let result = dispatch_haskell_script(child.policy.as_ref(), &source).await;
         assert_eq!(result["status"], "replied", "{result:?}");
     }
     campaign.await_watch_ready().await;
@@ -2003,7 +2082,11 @@ async fn execute_examples(rich_response: bool, suffix: Option<&str>, groups: usi
 async fn model_selection_is_independent_of_inherited_and_selected_context() {
     let mut campaign = TestCampaign::start().await;
     let root = campaign.root_installation.policy.clone();
-    committed(root.as_ref(), include_str!("fixtures/model_context.hs")).await;
+    committed(
+        root.as_ref(),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fixtures/model_context.hs"),
+    )
+    .await;
     let mut children = Vec::new();
     let mut bindings = Vec::new();
     {
@@ -2067,7 +2150,7 @@ async fn routes_forward_without_model_relay_and_retain_callback_failure() {
     displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("fixtures/route.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fixtures/route.hs"),
     )
     .await;
     let mut children = Vec::new();
@@ -2266,12 +2349,16 @@ async fn configured_modules_are_available_to_resident_declarations_from_frozen_s
             });
             std::fs::write(
                 authored.join("Project/Types.hs"),
-                include_str!("fixtures/project/Types.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/project/Types.hs",
+                ),
             )
             .unwrap();
             std::fs::write(
                 authored.join("Project/Work.hs"),
-                include_str!("fixtures/project/Work.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/project/Work.hs",
+                ),
             )
             .unwrap();
             config.workspace_inputs = Some(
@@ -2311,18 +2398,18 @@ async fn work_actor_consumes_later_progress_without_rearming() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/progress-route-producer.hs"),
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/progress-route-producer.hs"),
     )
     .await;
     let (producer, _producer_binding) = next_project_worker(&mut campaign).await;
     committed(
         root.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/progress-route.hs"),
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/progress-route.hs"),
     )
     .await;
     committed(
         producer.policy.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/progress-route-questions.hs"),
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/progress-route-questions.hs"),
     )
     .await;
     for (questions, expected, effects) in [
@@ -2389,7 +2476,9 @@ async fn usage_comparisons_deduplicate_resumes_and_preserve_unknown_intervals() 
     let result = displayed(
         &mut campaign,
         policy.as_ref(),
-        include_str!("fixtures/usage_comparisons.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/usage_comparisons.hs",
+        ),
     )
     .await;
     let output = explicit_display_output(&result)["text"].as_str().unwrap();
@@ -2526,7 +2615,9 @@ async fn independent_admission_rejects_inheritance_and_supervised_escape() {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    let fixture = include_str!("fixtures/independent_worker_setup.hs");
+    let fixture = tidepool_testing::fixture_source(
+        "bridge/facade/src/actor_host/fixtures/independent_worker_setup.hs",
+    );
     let inherited = fixture
         .replace("withContext (selected id)", "withContext inherited")
         .replace("peer <- unfold", "peerAttempt <- attemptUnfold");
@@ -2577,7 +2668,9 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     let root = campaign.root_installation.policy.clone();
     committed(
         root.as_ref(),
-        include_str!("fixtures/independent_worker_setup.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/independent_worker_setup.hs",
+        ),
     )
     .await;
     let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
@@ -2592,7 +2685,9 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     assert_eq!(result["status"], "replied", "{result}");
     committed(
         root.as_ref(),
-        include_str!("fixtures/independent_peer_setup.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/independent_peer_setup.hs",
+        ),
     )
     .await;
     let (observer, _observer_binding) = next_project_worker(&mut campaign).await;
@@ -2763,7 +2858,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_delivery_setup.hs"),
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/project_delivery_setup.hs"),
     )
     .await;
     let (implementer, _implementer_binding) = next_project_worker(&mut campaign).await;
@@ -2797,7 +2892,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_review_start.hs"),
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/project_review_start.hs"),
     )
     .await;
     let (reviewer, _reviewer_binding) = next_project_worker(&mut campaign).await;
@@ -2852,7 +2947,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     displayed(
         &mut campaign,
         reviewer.policy.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_review_repair.hs"),
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/project_review_repair.hs"),
     )
     .await;
     let pending = displayed(
@@ -2929,7 +3024,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     displayed(
         &mut campaign,
         reviewer.policy.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_design_question.hs"),
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/project_design_question.hs"),
     )
     .await;
     let (expert, _expert_binding) = next_project_worker(&mut campaign).await;
@@ -2988,7 +3083,9 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     displayed(
         &mut campaign,
         reviewer.policy.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/project_plan_incorporation.hs"),
+        &tidepool_testing::fixture_source(
+            ".exomonad/workspace/checks/project_plan_incorporation.hs",
+        ),
     )
     .await;
     let implementer_actor = implementer.actor.identity();
@@ -3046,7 +3143,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let questions = displayed(
         &mut campaign,
         reviewer.policy.as_ref(),
-        &include_str!("../../../../.exomonad/workspace/checks/project_review_questions.hs")
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/project_review_questions.hs")
             .replace("inspectFull ", "_ <- display . show $ ")
             .replace(
                 "pollReply sessionReply",
@@ -3075,7 +3172,7 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let pending = displayed(
         &mut campaign,
         root.as_ref(),
-        &include_str!("../../../../.exomonad/workspace/checks/project_decision_return.hs")
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/project_decision_return.hs")
             .replace("inspectFull ", "_ <- display . show $ ")
             .replace(
                 "pollReply sessionReply",
@@ -3144,16 +3241,18 @@ async fn project_review_retains_evidence_and_owns_direct_repair() {
     let propagated = displayed(
         &mut campaign,
         reviewer.policy.as_ref(),
-        &include_str!("../../../../.exomonad/workspace/checks/project_decision_consumer.hs")
-            .replace("inspectFull ", "_ <- display . show $ ")
-            .replace(
-                "pollReply sessionReply",
-                "_ <- pollReply sessionReply >>= display . show",
-            )
-            .replace(
-                "pollResponse reviewer",
-                "_ <- pollResponse reviewer >>= display . show",
-            ),
+        &tidepool_testing::fixture_source(
+            ".exomonad/workspace/checks/project_decision_consumer.hs",
+        )
+        .replace("inspectFull ", "_ <- display . show $ ")
+        .replace(
+            "pollReply sessionReply",
+            "_ <- pollReply sessionReply >>= display . show",
+        )
+        .replace(
+            "pollResponse reviewer",
+            "_ <- pollResponse reviewer >>= display . show",
+        ),
     )
     .await;
     assert!(
@@ -3271,14 +3370,14 @@ async fn route_reply_case(cancel: bool) {
     displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/route-reply-setup.hs"),
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/route-reply-setup.hs"),
     )
     .await;
     let (lead, _lead_binding) = next_project_worker(&mut campaign).await;
     displayed(
         &mut campaign,
         lead.policy.as_ref(),
-        include_str!("../../../../.exomonad/workspace/checks/route-reply-worker.hs"),
+        &tidepool_testing::fixture_source(".exomonad/workspace/checks/route-reply-worker.hs"),
     )
     .await;
     let (worker, _worker_binding) = next_project_worker(&mut campaign).await;
@@ -3491,7 +3590,9 @@ async fn workspace_check_refuses_sleep_required_by_a_spec_under_wider_role_ceili
         .expect("the original spec installs under every concrete public profile");
     std::fs::write(
         repository.path().join(".exomonad/AgentSpec.hs"),
-        include_str!("fixtures/sleep_required_spec.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/sleep_required_spec.hs",
+        ),
     )
     .unwrap();
     super::test_campaign::commit_workspace(repository.path());
@@ -3520,7 +3621,9 @@ async fn workspace_check_ignores_constraints_on_a_later_helper() {
     let spec = repository.path().join(".exomonad/AgentSpec.hs");
     std::fs::write(
         &spec,
-        include_str!("fixtures/unconstrained_spec_later_helper.hs"),
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/fixtures/unconstrained_spec_later_helper.hs",
+        ),
     )
     .unwrap();
     super::test_campaign::commit_workspace(repository.path());
@@ -3656,7 +3759,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     displayed(
         &mut campaign,
         root.as_ref(),
-        include_str!("work_notification.hs"),
+        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/work_notification.hs"),
     )
     .await;
     let source = campaign
@@ -3835,7 +3938,10 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
                 context: Some(dispatch_context),
                 name: exomonad_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(
-                    include_str!("notebook_explicit_display_siblings.hs").into(),
+                    tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/notebook_explicit_display_siblings.hs",
+                    )
+                    .into(),
                 ),
             })
             .await
@@ -4118,7 +4224,9 @@ async fn explicit_display_rejects_callback_effect_before_authority_input() {
             &store,
             committed(
                 policy.as_ref(),
-                include_str!("notebook_explicit_display_untrusted_callback.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/notebook_explicit_display_untrusted_callback.hs",
+                ),
             ),
         )
         .await;
@@ -4157,7 +4265,9 @@ async fn explicit_display_respects_shared_budget_and_handles_survive_cell_failur
             &store,
             super::test_campaign::dispatch_haskell_script_result(
                 policy.as_ref(),
-                include_str!("notebook_explicit_display_budget_failure.hs"),
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/notebook_explicit_display_budget_failure.hs",
+                ),
             ),
         )
         .await;

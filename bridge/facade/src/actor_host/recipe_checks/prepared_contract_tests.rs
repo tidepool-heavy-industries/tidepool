@@ -96,12 +96,14 @@ fn run() {
         required("TIDEPOOL_HASKELL_ACTORS_DIR"),
     ];
     let preamble = "{-# LANGUAGE DataKinds, OverloadedStrings #-}\nmodule RecipeContract where\nimport Control.Monad.Freer\nimport qualified Tidepool.Check as Check\n";
-    let expression = include_str!("prepared_contract_expression.hs");
+    let expression = tidepool_testing::fixture_source(
+        "bridge/facade/src/actor_host/recipe_checks/prepared_contract_expression.hs",
+    );
     let source = tidepool_runtime::session::assemble_expression_module(
         preamble,
         "result",
         "'[Check.RecipeCheck]",
-        expression,
+        &expression,
         tidepool_runtime::session::ExpressionLift::Effectful,
     );
     std::fs::write(scratch.join("contract.hs"), &source).unwrap();

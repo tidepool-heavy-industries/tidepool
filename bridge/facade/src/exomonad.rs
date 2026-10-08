@@ -3019,7 +3019,7 @@ mod tests {
         scaffold_workspace(workspace.path()).unwrap();
         let (relative, expected) = (
             ".exomonad/AgentSpec.hs",
-            include_str!("../../../exomonad/examples/workspace/.exomonad/AgentSpec.hs"),
+            tidepool_testing::fixture_source("exomonad/examples/workspace/.exomonad/AgentSpec.hs"),
         );
         assert_eq!(
             std::fs::read_to_string(workspace.path().join(relative)).unwrap(),
@@ -3047,7 +3047,7 @@ mod tests {
                     .join(".exomonad/workspace/Jev/Operators.hs")
             )
             .unwrap(),
-            include_str!("../../../.exomonad/workspace/Jev/Operators.hs")
+            tidepool_testing::fixture_source(".exomonad/workspace/Jev/Operators.hs")
         );
         let config =
             std::fs::read_to_string(workspace.path().join(".exomonad/config.toml")).unwrap();

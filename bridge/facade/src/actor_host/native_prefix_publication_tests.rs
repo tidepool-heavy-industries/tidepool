@@ -22,10 +22,21 @@ async fn notebook_failed_cells_preserve_completed_native_prefix() {
     let policy = campaign.root_installation.policy.as_ref();
     // The native prefix must replace a public declaration without publishing
     // the failed cell's new private declaration suffix.
-    committed(policy, include_str!("notebook_prefix_baseline.hs")).await;
-    let failed = dispatch_haskell_script_result(policy, include_str!("notebook_prefix_failure.hs"))
-        .await
-        .expect_err("the pattern match fails after completed native bindings");
+    committed(
+        policy,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/notebook_prefix_baseline.hs",
+        ),
+    )
+    .await;
+    let failed = dispatch_haskell_script_result(
+        policy,
+        &tidepool_testing::fixture_source(
+            "bridge/facade/src/actor_host/notebook_prefix_failure.hs",
+        ),
+    )
+    .await
+    .expect_err("the pattern match fails after completed native bindings");
     let exomonad_actor::ResidentToolError::Invocation(
         exomonad_actor::KernelInvocationFailure::Workbench(failure),
     ) = failed
