@@ -333,7 +333,10 @@ impl ResidentToolEndpoint for ValidationOnlyEndpoint {
 }
 
 #[derive(Clone)]
-struct SchemaRefusalTransport(Arc<std::sync::atomic::AtomicUsize>);
+struct SchemaRefusalTransport {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    successor: tokio::sync::mpsc::UnboundedSender<RequestId>,
+}
 
 fn schema_refusal_parameters() -> Value {
     json!({
@@ -354,21 +357,46 @@ impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
         &self,
         _: harness::transport::ResponsesRequest,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
-        assert_eq!(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0);
-        Ok(harness::transport::ResponsesTurn {
-            response_id: "schema-refusal".into(),
-            items: vec![harness::item::Item(json!({
-                "type":"function_call", "call_id":"schema", "name":"lookup",
-                "arguments":serde_json::to_string(&schema_refusal_input()).unwrap()
-            }))],
-            usage: Default::default(),
-        })
+        panic!("the Engine must issue the exact durable request identity")
+    }
+
+    async fn create_streaming_for_request(
+        &self,
+        request: &RequestId,
+        _: harness::transport::ResponsesRequest,
+        sink: tokio::sync::mpsc::Sender<harness::transport::sse::StreamEvent>,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => {
+                let turn = harness::transport::ResponsesTurn {
+                    response_id: "schema-refusal".into(),
+                    items: vec![harness::item::Item(json!({
+                        "type":"function_call", "call_id":"schema", "name":"lookup",
+                        "arguments":serde_json::to_string(&schema_refusal_input()).unwrap()
+                    }))],
+                    usage: Default::default(),
+                };
+                for item in &turn.items {
+                    sink.send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+                        .await
+                        .unwrap();
+                }
+                Ok(turn)
+            }
+            1 => {
+                self.successor.send(request.clone()).unwrap();
+                // The successor has pinned its surface and reached transport;
+                // only its owning Engine cancellation may stop this request.
+                std::future::pending().await
+            }
+            count => panic!("unexpected provider request {count}"),
+        }
     }
 }
 
-// Close in the valid window after the real facade acknowledges a durable
-// NotAdmitted result. This driver supplies no native execution/retirement proof.
-struct CloseAfterAcknowledgement {
+// Retain the real facade acknowledgement before the driver closes the actor
+// during the admitted successor request. This supplies no native execution proof.
+struct AcknowledgedSchemaRefusal {
     inner: Arc<EmbeddedHostActor>,
     actor: exomonad_actor::LocalActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
@@ -383,7 +411,7 @@ struct CloseAfterAcknowledgement {
 }
 
 #[async_trait::async_trait]
-impl HostActor for CloseAfterAcknowledgement {
+impl HostActor for AcknowledgedSchemaRefusal {
     fn identity(&self) -> &HostIdentity {
         self.inner.identity()
     }
@@ -449,6 +477,15 @@ impl HostActor for CloseAfterAcknowledgement {
             .unwrap()
             .replace((operation.clone(), output, claims))
             .is_none());
+        Ok(())
+    }
+    async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
+        self.inner.output_aborted(operation).await
+    }
+}
+
+impl AcknowledgedSchemaRefusal {
+    async fn close_native_actor(&self) {
         let stopped = self
             .actor
             .shutdown_with_cleanup(ActorTerminal {
@@ -486,10 +523,6 @@ impl HostActor for CloseAfterAcknowledgement {
             self.actor.terminal().get().as_ref(),
             Some(&stopped.terminal)
         );
-        Ok(())
-    }
-    async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
-        self.inner.output_aborted(operation).await
     }
 }
 
@@ -527,7 +560,9 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
     let store = Arc::new(Store::memory().unwrap());
     let (identity, _, _) = operation(actor.identity(), "schema");
     let (wakes, incoming) = tokio::sync::mpsc::unbounded_channel();
-    let host = Arc::new(CloseAfterAcknowledgement {
+    let round_control = Arc::new(EmbeddedRoundControl::default());
+    let round = round_control.begin().unwrap();
+    let host = Arc::new(AcknowledgedSchemaRefusal {
         inner: Arc::new(
             EmbeddedHostActor::new(
                 identity,
@@ -535,7 +570,7 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
                 installation,
                 store.clone(),
                 wakes,
-                Arc::new(EmbeddedRoundControl::default()),
+                round_control,
             )
             .unwrap(),
         ),
@@ -549,9 +584,13 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
     host.inner.tool_surface().unwrap();
     let scheduler = Arc::new(harness::turn::JobScheduler::new(1).unwrap());
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (successor, mut successors) = tokio::sync::mpsc::unbounded_channel();
     let engine = conversation
         .engine::<Offline, _>(
-            SchemaRefusalTransport(calls.clone()),
+            SchemaRefusalTransport {
+                calls: calls.clone(),
+                successor,
+            },
             scheduler.clone(),
             harness::engine::EngineConfig {
                 instructions: "exercise actual schema refusal then permanent native closure".into(),
@@ -564,29 +603,56 @@ async fn acknowledged_schema_refusal_then_native_close_cancels_only_the_successo
             std::num::NonZeroU64::new(1000).unwrap(),
         )
         .unwrap();
-    let (cancellation, receiver) = tokio::sync::watch::channel(false);
+    let cancellation = round.cancellation();
     assert!(!*cancellation.borrow());
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        engine.run_embedded(
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let run = engine.run_embedded(
             None,
             vec![harness::item::Item(
                 json!({"type":"message","role":"user","content":"lookup"}),
             )],
-            receiver,
+            cancellation.clone(),
             incoming,
-        ),
-    )
+        );
+        tokio::pin!(run);
+        let successor = tokio::select! {
+            request = successors.recv() => request.unwrap(),
+            result = &mut run => panic!("Engine stopped before successor admission: {result:?}"),
+        };
+        let (operation, _, _) = host.retained.lock().unwrap().clone().unwrap();
+        assert_ne!(successor, operation.request);
+        assert_eq!(
+            store.request(&successor).unwrap().unwrap().parent,
+            Some(operation.request.clone())
+        );
+        assert_eq!(
+            store
+                .embedded_round_frontier(host.identity())
+                .unwrap()
+                .pending_head,
+            Some(successor.clone())
+        );
+        assert!(store.latest_tool_surface(&successor).unwrap().is_some());
+        assert!(!*cancellation.borrow());
+        host.close_native_actor().await;
+        // Production's embedded driver forwards actor lifetime stop to this
+        // exact round; native closure alone is not an Engine cancellation signal.
+        round.cancel();
+        let result = run.await;
+        (successor, result)
+    })
     .await
     .unwrap();
+    let (successor, result) = result;
     let head = match result {
         Err(harness::engine::EngineError::Cancelled {
             head_request: Some(head),
         }) => head,
         result => panic!("expected typed successor cancellation, got {result:?}"),
     };
-    assert!(!*cancellation.borrow());
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(head, successor);
+    assert!(*cancellation.borrow());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     let (operation, output, claims) = host.retained.lock().unwrap().clone().unwrap();
     assert_eq!(
         store.request(&head).unwrap().unwrap().parent,
