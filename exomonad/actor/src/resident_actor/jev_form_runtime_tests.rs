@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use tidepool_bridge_effects::{FormAttempt, FormAttemptId, FormCause, FormTransition};
-use tidepool_runtime::session::{ModuleEnv, SessionLib};
+use tidepool_runtime::session::{insert_preamble_imports, ModuleEnv, SessionLib};
 use tidepool_testing::eval_harness;
 
 struct MountedForm {
@@ -266,10 +266,19 @@ impl Fixture {
         .expect("declared Jev workspace root");
         assert!(workspace.join("Jev/Operators.hs").is_file());
         include.push(workspace);
-        let preamble = format!(
-            "{}\nimport qualified Jev.Operators as J\nimport qualified Tidepool.Form as F\nimport qualified Tidepool.View as V\nimport Data.List.NonEmpty (NonEmpty(..))\nimport Control.Monad (foldM, forM_)\nimport Tidepool.Inspection.Display (Display(..))\nimport Tidepool.Inspection.Tree (DisplayTree(..))\nimport qualified Examples.JevFormWorkflow as Workflow\n",
-            tidepool_mcp::build_notebook_preamble(&declarations, false),
-        );
+        let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
+        for import in [
+            "qualified Jev.Operators as J",
+            "qualified Tidepool.Form as F",
+            "qualified Tidepool.View as V",
+            "Data.List.NonEmpty (NonEmpty(..))",
+            "Control.Monad (foldM, forM_)",
+            "Tidepool.Inspection.Display (Display(..))",
+            "Tidepool.Inspection.Tree (DisplayTree(..))",
+            "qualified Examples.JevFormWorkflow as Workflow",
+        ] {
+            preamble = insert_preamble_imports(&preamble, import);
+        }
         let directory = tempfile::tempdir().expect("session source directory");
         // Compile the canonical authored example supplied by this native
         // target's immutable source input, without a second test workflow.
@@ -282,7 +291,9 @@ impl Fixture {
             ),
         )
         .unwrap();
-        include.push(directory.path().to_path_buf());
+        // This test's declared canonical example takes precedence over any
+        // shared workspace publication of the same module.
+        include.insert(0, directory.path().to_path_buf());
         let session = tidepool_repr::SessionId(u64::from(std::process::id()) * 10_000 + case);
         let lib = SessionLib::open(session, directory.path(), ModuleEnv::standalone_default())
             .expect("session declaration environment")
