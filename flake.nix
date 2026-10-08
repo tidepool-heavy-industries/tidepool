@@ -355,6 +355,7 @@
           rootPaths = [ ghcTestEnv ghcEnv ];
         };
         packages.buck-cc = pkgs.stdenv.cc;
+        packages.buck-lld = pkgs.lld;
         packages.buck-binutils = pkgs.binutils;
         packages.buck-node = pkgs.nodejs_24;
         packages.buck-npm-cache = embeddedWebNpmCache;
@@ -379,6 +380,7 @@
             rust
             ghcEnv
             pkgs.stdenv.cc
+            pkgs.lld
             pkgs.binutils
             pkgs.nodejs_24
             embeddedWebNpmCache

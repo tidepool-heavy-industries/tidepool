@@ -128,6 +128,7 @@ if [[ $test_toolchain == true ]]; then
   jev_sources="$(output_path jev-sources)"
 fi
 cc="$(output_path cc)"
+lld="$(output_path lld)"
 binutils="$(output_path binutils)"
 node="$(output_path node)"
 npm_cache="$(output_path npm-cache)"
@@ -182,6 +183,7 @@ haskell_test_closure = $haskell_test_closure
 jev_sources = $jev_sources
 cc = $cc/bin/cc
 cxx = $cc/bin/c++
+lld_bin = $lld/bin
 ar = $binutils/bin/ar
 node = $node/bin/node
 npm_cache = $npm_cache
@@ -207,7 +209,7 @@ exomonad_runtime_tools = $exomonad_runtime_tools
 cmake = $cmake/bin/cmake
 perl = $perl/bin/perl
 pkg_config = $pkg_config/bin/pkg-config
-action_path = $rust/bin:$cc/bin:$binutils/bin:$cmake/bin:$perl/bin:$pkg_config/bin:$python/bin:$bash_path/bin:$coreutils/bin:$tar_path/bin:$gzip/bin:$node/bin:$git_path/bin
+action_path = $rust/bin:$cc/bin:$lld/bin:$binutils/bin:$cmake/bin:$perl/bin:$pkg_config/bin:$python/bin:$bash_path/bin:$coreutils/bin:$tar_path/bin:$gzip/bin:$node/bin:$git_path/bin
 
 [remote]
 enabled = $remote_enabled
