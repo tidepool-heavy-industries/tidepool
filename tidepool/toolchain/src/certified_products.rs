@@ -2171,15 +2171,20 @@ impl AvailableOriginalSources {
             if !product
                 .original_native()
                 .is_some_and(|witness| witness.matches_original(product))
-                || !original
-                    .anchors
-                    .iter()
-                    .zip(product.original_byte_anchors())
-                    .all(|(expected, actual)| Arc::ptr_eq(expected, actual) || expected == actual)
             {
                 return Err(failure(OriginalMembershipFailure::OriginalBytes(
                     product.owner().clone(),
                 )));
+            }
+            for (expected, actual) in original.anchors.iter().zip(product.original_byte_anchors()) {
+                if !Arc::ptr_eq(expected, actual) {
+                    operation.charge(actual.len())?;
+                    if expected != actual {
+                        return Err(failure(OriginalMembershipFailure::OriginalBytes(
+                            product.owner().clone(),
+                        )));
+                    }
+                }
             }
         }
         if let Some(owner) = self.originals.keys().find(|owner| !seen.contains(owner)) {
@@ -9397,6 +9402,77 @@ pub(crate) mod tests {
             weak.upgrade().is_none(),
             "retiring the owner releases its retained membership"
         );
+    }
+
+    #[test]
+    fn retained_original_membership_charges_independently_recovered_bytes() {
+        let product = full_native_fixture("RecoveredMembership", vec![(8, vec![])], 7);
+        let independently_recovered = recovered_witness_fixtures(std::slice::from_ref(&product))
+            .remove(0)
+            .product;
+        let comparison_bytes = product
+            .original_byte_anchors()
+            .into_iter()
+            .zip(independently_recovered.original_byte_anchors())
+            .map(|(original, recovered)| {
+                assert!(!Arc::ptr_eq(original, recovered));
+                assert_eq!(original, recovered);
+                assert!(!recovered.is_empty());
+                recovered.len()
+            })
+            .sum::<usize>();
+
+        let measured = RetainedOriginalSources::default();
+        let measurement = Arc::new(InventoryOperation::new(Default::default()));
+        measured
+            .admit(std::slice::from_ref(&product), &measurement)
+            .unwrap();
+        let construction_work = measurement.work_usage().unwrap().0;
+        measured
+            .admit(std::slice::from_ref(&product), &measurement)
+            .unwrap();
+        let census_work = measurement.work_usage().unwrap().0 - construction_work;
+        assert!(census_work > 0);
+
+        let retained = RetainedOriginalSources::default();
+        let pointer_budget = Arc::new(InventoryOperation::new(InventoryDecodeLimits {
+            max_work: construction_work + census_work,
+            ..Default::default()
+        }));
+        let first = retained
+            .admit(std::slice::from_ref(&product), &pointer_budget)
+            .unwrap();
+        let repeated = retained
+            .admit(std::slice::from_ref(&product), &pointer_budget)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &repeated));
+        assert_eq!(pointer_budget.work_usage().unwrap().1, 0);
+
+        for allowance in [0, comparison_bytes - 1, comparison_bytes] {
+            let retained = RetainedOriginalSources::default();
+            let recovery_budget = Arc::new(InventoryOperation::new(InventoryDecodeLimits {
+                max_work: construction_work + census_work + allowance,
+                ..Default::default()
+            }));
+            let first = retained
+                .admit(std::slice::from_ref(&product), &recovery_budget)
+                .unwrap();
+            let recovered = retained.admit(
+                std::slice::from_ref(&independently_recovered),
+                &recovery_budget,
+            );
+            if allowance < comparison_bytes {
+                assert!(matches!(
+                    recovered,
+                    Err(CertificationError::Product(
+                        tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+                    ))
+                ));
+            } else {
+                assert!(Arc::ptr_eq(&first, &recovered.unwrap()));
+                assert_eq!(recovery_budget.work_usage().unwrap().1, 0);
+            }
+        }
     }
 
     #[test]
