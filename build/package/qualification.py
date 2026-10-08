@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import re
 import shutil
 import shlex
@@ -42,6 +43,7 @@ UNSET_ENVIRONMENT = (
     "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PREPARED_ROOT_ENTRY",
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
     "TIDEPOOL_TEST_SYSTEMD_RUN", "TIDEPOOL_TEST_SYSTEMCTL",
+    "TIDEPOOL_TEST_FIXTURE_ROOT",
     "EXOMONAD_EMBEDDED_ASSET_ROOT", "EXOMONAD_WORKSPACE_GITLINK", "EXOMONAD_WORKSPACE_GIT_BUNDLE", "EXOMONAD_NIX_BIN", "EXOMONAD_NIX_OFFLINE", "LD_LIBRARY_PATH", "TIDEPOOL_EXTRACT_NO_DAEMON",
 )
 ARTIFACT_TARGETS = {
@@ -629,6 +631,146 @@ def verify_artifact_contract(bundle: Path, contract: dict) -> None:
         if artifact["target"] != target or artifact["sha256"] != sha256(bundle / relative):
             raise ValueError(f"mixed native build artifact: {relative}")
 
+TEST_FIXTURE_MANIFEST = "build/test-fixtures.json"
+TEST_FIXTURE_ROOT = "share/exomonad/test-fixtures"
+
+def read_fixture_manifest(path: Path) -> dict:
+    manifest = json.loads(path.read_text())
+    if (not isinstance(manifest, dict) or set(manifest) != {"schema", "kind", "files"}
+            or manifest["schema"] != 1 or manifest["kind"] != "haskell-test-fixtures"
+            or not isinstance(manifest["files"], list) or not manifest["files"]
+            or any(not isinstance(name, str) for name in manifest["files"])
+            or manifest["files"] != sorted(set(manifest["files"]))):
+        raise ValueError("invalid Haskell test fixture manifest")
+    for relative in manifest["files"]:
+        path = PurePosixPath(relative)
+        if (not relative or "\\" in relative or path.is_absolute() or not path.parts
+                or path.as_posix() != relative or any(part in (".", "..") for part in path.parts)
+                or not relative.endswith(".hs")):
+            raise ValueError(f"fixture is not a repository-relative Haskell source: {relative}")
+    return manifest
+
+def fixture_manifest(source: Path) -> tuple[dict, dict[str, str]]:
+    """Validate the tracked source roster and hash its current file bytes."""
+    source = source.resolve(strict=True)
+    if not source.is_dir():
+        raise ValueError("fixture source root must be a directory")
+    manifest_path = source / TEST_FIXTURE_MANIFEST
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("fixture manifest must be a regular source file")
+    manifest = read_fixture_manifest(manifest_path)
+    tracked = set(subprocess.check_output([
+        "git", "-C", str(source), "ls-files", "-z", "--recurse-submodules",
+    ]).decode().split("\0"))
+    hashes = {}
+    for relative in manifest["files"]:
+        path = PurePosixPath(relative)
+        if (not relative or "\\" in relative or path.is_absolute() or not path.parts
+                or path.as_posix() != relative or any(part in (".", "..") for part in path.parts)
+                or not relative.endswith(".hs")):
+            raise ValueError(f"fixture is not a repository-relative Haskell source: {relative}")
+        selected = source / path
+        component = source
+        symlinked = False
+        for part in path.parts:
+            component = component / part
+            symlinked = symlinked or component.is_symlink()
+        if (not selected.is_file() or not selected.resolve(strict=True).is_relative_to(source)
+                or symlinked):
+            raise ValueError(f"fixture source is missing or aliased: {relative}")
+        hashes[relative] = sha256(selected)
+    if TEST_FIXTURE_MANIFEST not in tracked or (source / TEST_FIXTURE_MANIFEST).is_symlink():
+        raise ValueError("fixture manifest must be tracked source")
+    return manifest, hashes
+
+def copy_test_fixtures(source_inputs: Path, manifest_path: Path, fixture_root: Path, shared: Path) -> dict:
+    """Admit declared resource bytes only when they match the native source snapshot."""
+    manifest = read_fixture_manifest(manifest_path)
+    expected_manifest_hash = source_inputs / TEST_FIXTURE_MANIFEST
+    if not expected_manifest_hash.is_file() or sha256(expected_manifest_hash) != sha256(manifest_path):
+        raise ValueError("fixture manifest differs from the declared native source snapshot")
+    fixture_root = fixture_root.resolve(strict=True)
+    if not fixture_root.is_dir():
+        raise ValueError("declared fixture resource is not a directory")
+    files = {}
+    for relative in manifest["files"]:
+        path = PurePosixPath(relative)
+        selected = fixture_root.joinpath(*path.parts)
+        source = source_inputs.joinpath(*path.parts)
+        if not selected.is_file() or not source.is_file():
+            raise ValueError(f"declared fixture is absent from runtime resources or source snapshot: {relative}")
+        files[relative] = sha256(selected)
+        if files[relative] != sha256(source):
+            raise ValueError(f"runtime fixture differs from native source snapshot: {relative}")
+    actual = set()
+    for current, directories, names in os.walk(fixture_root, followlinks=False):
+        current_path = Path(current)
+        if any((current_path / name).is_symlink() for name in directories):
+            raise ValueError("runtime fixture tree contains a directory alias")
+        actual.update((current_path / name).relative_to(fixture_root).as_posix()
+                      for name in names if (current_path / name).is_file())
+    if actual != set(files):
+        raise ValueError("runtime fixture tree differs from its manifest")
+    destination = shared / "test-fixtures"
+    shutil.copytree(fixture_root, destination, symlinks=False)
+    shutil.copyfile(manifest_path, shared / "test-fixtures.json")
+    bundled_files = {path.relative_to(destination).as_posix(): sha256(path)
+                     for path in destination.rglob("*") if path.is_file()}
+    if bundled_files != files:
+        raise ValueError("assembled fixture bytes changed while copying into the native bundle")
+    return {"manifest": manifest, "manifest_sha256": sha256(shared / "test-fixtures.json"),
+            "source_manifest_sha256": sha256(expected_manifest_hash), "files": bundled_files}
+
+def freeze_test_fixtures(source: Path, root: Path) -> dict:
+    """Bind the already assembled resource tree to the clean recorded source."""
+    manifest, source_files = fixture_manifest(source)
+    manifest_path = root / "share/exomonad/test-fixtures.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ValueError("native bundle lacks its declared fixture manifest")
+    if manifest != read_fixture_manifest(manifest_path) or sha256(manifest_path) != sha256(source / TEST_FIXTURE_MANIFEST):
+        raise ValueError("native bundle fixture manifest differs from recorded source")
+    fixture_root = root / TEST_FIXTURE_ROOT
+    if fixture_root.is_symlink() or not fixture_root.is_dir():
+        raise ValueError("native bundle fixture root is missing or aliased")
+    bundled_files = {path.relative_to(fixture_root).as_posix(): sha256(path)
+                     for path in fixture_root.rglob("*") if path.is_file()}
+    if bundled_files != source_files:
+        raise ValueError("native bundle fixture bytes differ from the clean recorded source")
+    record = {"manifest": manifest, "manifest_sha256": sha256(manifest_path),
+              "source_manifest_sha256": sha256(manifest_path), "files": bundled_files}
+    verify_frozen_test_fixtures(root, record)
+    return record
+
+def verify_frozen_test_fixtures(root: Path, record: dict) -> None:
+    manifest_path = root / "share/exomonad/test-fixtures.json"
+    manifest = json.loads(manifest_path.read_text())
+    if manifest != record.get("manifest") or sha256(manifest_path) != record.get("manifest_sha256"):
+        raise ValueError("frozen fixture manifest changed")
+    if manifest != {"schema": 1, "kind": "haskell-test-fixtures", "files": sorted(record.get("files", {}))}:
+        raise ValueError("frozen fixture inventory differs from its manifest")
+    fixture_root = root / TEST_FIXTURE_ROOT
+    if fixture_root.is_symlink() or not fixture_root.is_dir():
+        raise ValueError("frozen test fixture root is missing or aliased")
+    actual = {path.relative_to(fixture_root).as_posix(): sha256(path)
+              for path in fixture_root.rglob("*") if path.is_file()}
+    if actual != record.get("files"):
+        raise ValueError("frozen test fixture bytes or file inventory changed")
+    if any(path.is_symlink() for path in fixture_root.rglob("*")):
+        raise ValueError("frozen test fixtures cannot contain aliases")
+
+def verify_fixture_source_contract(record: dict, contract: dict) -> None:
+    files = record.get("files")
+    manifest = record.get("manifest")
+    source_inputs = contract.get("source_inputs")
+    if (contract.get("test_fixtures") != record
+            or not isinstance(files, dict) or not isinstance(manifest, dict)
+            or not isinstance(source_inputs, dict)
+            or source_inputs.get(TEST_FIXTURE_MANIFEST) != record.get("source_manifest_sha256")
+            or any(source_inputs.get(relative) != digest for relative, digest in files.items())):
+        raise ValueError("frozen fixture evidence differs from the native build source contract")
+    if manifest.get("files") != sorted(files):
+        raise ValueError("frozen fixture roster differs from its source contract")
+
 def workspace_gitlink(path: Path) -> dict:
     record = json.loads(path.read_text())
     if not isinstance(record, dict):
@@ -677,6 +819,7 @@ def native_environment(root: Path) -> dict:
         "EXOMONAD_EMBEDDED_ASSET_ROOT": str(root / "share/exomonad/web"),
         "EXOMONAD_WORKSPACE_GITLINK": str(root / "share/exomonad/workspace-gitlink.json"),
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": str(root / "share/exomonad/workspace.bundle"),
+        "TIDEPOOL_TEST_FIXTURE_ROOT": str(root / TEST_FIXTURE_ROOT),
         "EXOMONAD_NIX_BIN": str(root / "share/exomonad/runtime-tools/bin/nix"),
         "LD_LIBRARY_PATH": str(root / "lib/tidepool"),
         "PATH": str(tools / "bin") + ":" + str(root / "bin"),
@@ -766,6 +909,8 @@ def assemble(args) -> None:
         shutil.copytree(source, shared / name, symlinks=False)
     for source in args.libraries.iterdir():
         shutil.copy2(source.resolve(strict=True), root / "lib/tidepool" / source.name)
+    fixture_record = copy_test_fixtures(args.build_sources, args.fixture_manifest,
+                                        args.test_fixtures, shared)
     shutil.copy2(args.harness_revision, shared / "harness-source-revision.txt")
     shutil.copy2(args.workspace_gitlink, shared / "workspace-gitlink.json")
     shutil.copy2(args.workspace_git_bundle, shared / "workspace.bundle")
@@ -780,6 +925,7 @@ def assemble(args) -> None:
     contract = {
         "profile": args.profile, "feature_profile": "embedded-native", "stdlib_mode": "source-backed", "startup_mode": "unprepared",
         "source_inputs": source_inputs, "source_inputs_sha256": digest_inventory(source_inputs),
+        "test_fixtures": fixture_record,
         "artifacts": {relative: {"target": target, "sha256": sha256(root / relative)}
                       for relative, target in ARTIFACT_TARGETS.items()},
     }
@@ -822,6 +968,11 @@ def freeze(args) -> Path:
     if contract["feature_profile"] != "embedded-native" or contract["stdlib_mode"] not in ("source-backed", "catalog-backed"):
         raise ValueError("qualification requires a supported native bundle")
     verify_build_contract(source, args.bundle, contract, args.expect_profile)
+    fixture_source_manifest, fixture_source_hashes = fixture_manifest(source)
+    required_fixture_inputs = {TEST_FIXTURE_MANIFEST: sha256(source / TEST_FIXTURE_MANIFEST), **fixture_source_hashes}
+    if any(contract["source_inputs"].get(name) != digest
+           for name, digest in required_fixture_inputs.items()):
+        raise ValueError("native build contract does not retain the exact fixture manifest and source bytes")
     recorded_workspace = verify_workspace_gitlink(source, args.bundle / "share/exomonad/workspace-gitlink.json")
     verify_workspace_bundle(args.bundle / "share/exomonad/workspace.bundle", recorded_workspace,
                             tools / "bin/git")
@@ -857,6 +1008,10 @@ def freeze(args) -> Path:
     shutil.copy2(source / "build/rust/isolated-libtest.py", root / "share/exomonad/isolated-libtest.py")
     shutil.copy2(source / "build/package/qualification.py", root / "share/exomonad/qualification.py")
     shutil.copy2(source / "build/package/packaged-catalog-consumer.sh", root / "share/exomonad/packaged-catalog-consumer.sh")
+    fixture_record = freeze_test_fixtures(source, args.bundle)
+    if fixture_record["manifest"] != fixture_source_manifest or fixture_record["files"] != fixture_source_hashes:
+        raise ValueError("assembled fixture resources differ from recorded source")
+    verify_fixture_source_contract(fixture_record, contract)
     environment = native_environment(root)
     environment.update(TIDEPOOL_BROWSER_NODE=str(nix_path(args.browser_node)),
                        TIDEPOOL_BROWSER_DRIVER=str(root / "share/exomonad/browser-driver/driver.mjs"),
@@ -892,6 +1047,7 @@ def freeze(args) -> Path:
         "source_oid": oid, "harness_revision": revision, **contract,
         "source_submodules": submodules,
         "workspace_gitlink": recorded_workspace,
+        "test_fixtures": fixture_record,
         "declared_haskell_sources": haskell_sources,
         "source_metadata_inputs": {name: sha256(source / name) for name in ("Cargo.toml", "Cargo.lock", "flake.nix", "flake.lock", "scripts/native-profile.toml")},
         "build": {"commands": commands, "log": str(copied_log), "log_sha256": sha256(copied_log)},
@@ -926,7 +1082,9 @@ def verify(path: Path) -> dict:
     if descriptor["programs"] != programs(root) or descriptor["cohorts"] != cohorts():
         raise ValueError("qualification cannot replace its owned programs or mandatory test cohorts")
     verify_frozen_inventory(root, descriptor)
+    verify_frozen_test_fixtures(root, descriptor["test_fixtures"])
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
+    verify_fixture_source_contract(descriptor["test_fixtures"], contract)
     if any(descriptor.get(field) != contract.get(field) for field in (*BUILD_CONTRACT_FIELDS, "native_catalog", "native_root_entry", "generated_root_source")):
         raise ValueError("qualification differs from the owning native build contract")
     if not contract["source_inputs"] or digest_inventory(contract["source_inputs"]) != contract["source_inputs_sha256"]:
@@ -934,6 +1092,8 @@ def verify(path: Path) -> dict:
     verify_artifact_contract(root, contract)
     if workspace_gitlink(root / "share/exomonad/workspace-gitlink.json") != descriptor["workspace_gitlink"]:
         raise ValueError("qualification differs from its recorded workspace Gitlink")
+    if descriptor["environment"].get("TIDEPOOL_TEST_FIXTURE_ROOT") != str(root / TEST_FIXTURE_ROOT):
+        raise ValueError("qualification does not bind the frozen test fixture tree")
     if set(descriptor["external_inputs"]) != EXTERNAL_INPUTS:
         raise ValueError("qualification requires every declared Nix runtime input")
     for item in descriptor["external_inputs"].values():
@@ -1002,9 +1162,9 @@ def run_cohort(args) -> int:
         command.extend(["--case-timeout", f"{name}={timeout}"])
     if args.delegated_service:
         command.extend(["--delegated-service", "--service-slice", service_slice])
-    # These optional catalog-backed inputs are verified by the frozen owner.
-    # The runner must retain their declared-resource identity across delegation.
-    for name in ("TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY"):
+    # These bundle-owned resources are verified by the frozen owner. The runner
+    # must retain their declared-resource identity across delegation.
+    for name in ("TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_TEST_FIXTURE_ROOT"):
         if name in descriptor["environment"]:
             command.extend(["--resource-env", name])
     for name in cohort["tests"]:
@@ -1132,7 +1292,7 @@ def main(argv=None) -> int:
     stage = commands.add_parser("assemble")
     stage.add_argument("--catalog", type=Path)
     stage.add_argument("--root-entry", type=Path)
-    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template"):
+    for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template", "test-fixtures", "fixture-manifest"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
     frozen = commands.add_parser("freeze")

@@ -294,3 +294,13 @@ python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" exec \
   --report "$LIVE_PROCESS_REPORT" "$DESCRIPTOR" -- \
   init --workspace "$LIVE_WORKSPACE" --session "$LIVE_SESSION" --no-attach
 ```
+
+The native assembly consumes the tracked `build/test-fixtures.json` manifest
+and its declared Buck fixture tree. It checks their bytes against the native
+source snapshot and copies them to `share/exomonad/test-fixtures/<relative
+path>`. Freezing verifies this already assembled tree against the clean
+recorded source and seals the manifest and per-file SHA-256 inventory into the
+descriptor. The runtime environment binds `TIDEPOOL_TEST_FIXTURE_ROOT` to this
+bundle-owned directory and clears any inherited value before execution. Frozen
+verification rejects a changed manifest, missing or changed fixture, and extra
+fixture file.

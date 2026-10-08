@@ -47,6 +47,168 @@ def root_entry_source_fixture(root, modules):
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def fixture_source(self, root, relative='workspace/fixtures/sample.hs'):
+        source = root / 'source'
+        source.mkdir()
+        subprocess.run(['git', 'init', '-q', str(source)], check=True)
+        fixture = source / relative
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text('module Sample where\n')
+        resource_root = root / 'runtime-fixtures'
+        resource = resource_root / relative
+        resource.parent.mkdir(parents=True, exist_ok=True)
+        resource.write_bytes(fixture.read_bytes())
+        manifest = {'schema': 1, 'kind': 'haskell-test-fixtures', 'files': [relative]}
+        manifest_path = source / qualification.TEST_FIXTURE_MANIFEST
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True) + '\n')
+        subprocess.run(['git', '-C', str(source), 'add', qualification.TEST_FIXTURE_MANIFEST], check=True)
+        return source, fixture, manifest, resource_root
+
+    def frozen_fixture(self, root):
+        source, fixture, _, resource_root = self.fixture_source(root)
+        bundle = root / 'bundle'
+        (bundle / 'share/exomonad').mkdir(parents=True)
+        record = qualification.copy_test_fixtures(source, source / qualification.TEST_FIXTURE_MANIFEST,
+                                                  resource_root, bundle / 'share/exomonad')
+        contract = {'source_inputs': {qualification.TEST_FIXTURE_MANIFEST:
+                                     qualification.sha256(source / qualification.TEST_FIXTURE_MANIFEST),
+                                     fixture.relative_to(source).as_posix(): qualification.sha256(fixture)},
+                    'test_fixtures': record}
+        qualification.write_json(bundle / 'share/exomonad/native-build-contract.json', contract)
+        record = qualification.freeze_test_fixtures(source, bundle)
+        return source, fixture, bundle, record
+
+    def test_frozen_fixture_inventory_rejects_changed_missing_and_extra_files(self):
+        for change in ('changed', 'missing', 'extra'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                _, _, bundle, record = self.frozen_fixture(Path(directory))
+                fixture = bundle / qualification.TEST_FIXTURE_ROOT / 'workspace/fixtures/sample.hs'
+                if change == 'changed':
+                    fixture.write_text('module Changed where\n')
+                elif change == 'missing':
+                    fixture.unlink()
+                else:
+                    (fixture.parent / 'extra.hs').write_text('module Extra where\n')
+                with self.assertRaisesRegex(ValueError, 'fixture'):
+                    qualification.verify_frozen_test_fixtures(bundle, record)
+
+    def test_fixture_snapshot_rejects_absent_and_symlinked_roots_or_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = {'manifest': {'schema': 1, 'kind': 'haskell-test-fixtures', 'files': []},
+                      'manifest_sha256': '0' * 64, 'files': {}}
+            with self.assertRaises((FileNotFoundError, ValueError)):
+                qualification.verify_frozen_test_fixtures(root / 'absent', record)
+            source, fixture, bundle, frozen = self.frozen_fixture(root)
+            fixture.unlink()
+            fixture.parent.rmdir()
+            outside = root / 'outside'
+            outside.mkdir()
+            (outside / 'sample.hs').write_text('module Sample where\n')
+            (source / 'workspace/fixtures').symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'missing or aliased'):
+                qualification.fixture_manifest(source)
+            fixture_dir = bundle / qualification.TEST_FIXTURE_ROOT / 'workspace/fixtures'
+            shutil.rmtree(fixture_dir)
+            fixture_dir.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'inventory|aliases'):
+                qualification.verify_frozen_test_fixtures(bundle, frozen)
+            fixture_dir.unlink()
+            shutil.rmtree(bundle / qualification.TEST_FIXTURE_ROOT)
+            (bundle / qualification.TEST_FIXTURE_ROOT).symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'root is missing or aliased'):
+                qualification.verify_frozen_test_fixtures(bundle, frozen)
+
+    def test_fixture_manifest_rejects_noncanonical_traversal_and_absolute_names(self):
+        invalid = ('./workspace/sample.hs', 'workspace//sample.hs', '../sample.hs', '/sample.hs')
+        for relative in invalid:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, _, _, _ = self.fixture_source(root)
+                manifest = {'schema': 1, 'kind': 'haskell-test-fixtures', 'files': [relative]}
+                qualification.write_json(source / qualification.TEST_FIXTURE_MANIFEST, manifest)
+                with self.assertRaisesRegex(ValueError, 'fixture'):
+                    qualification.fixture_manifest(source)
+
+    def test_fixture_descriptor_must_match_native_source_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, _, bundle, record = self.frozen_fixture(Path(directory))
+            contract = {'test_fixtures': record, 'source_inputs': {
+                qualification.TEST_FIXTURE_MANIFEST: qualification.sha256(source / qualification.TEST_FIXTURE_MANIFEST),
+                **record['files']}}
+            qualification.verify_fixture_source_contract(record, contract)
+            contract['source_inputs'][next(iter(record['files']))] = '0' * 64
+            with self.assertRaisesRegex(ValueError, 'source contract'):
+                qualification.verify_fixture_source_contract(record, contract)
+            self.assertTrue(bundle.exists())
+
+    def test_bundle_assembly_refuses_runtime_fixture_drift_and_unlisted_files(self):
+        for mutation in ('changed', 'missing', 'extra'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, _, _, resource_root = self.fixture_source(root)
+                if mutation == 'changed':
+                    (resource_root / 'workspace/fixtures/sample.hs').write_text('module Changed where\n')
+                elif mutation == 'missing':
+                    (resource_root / 'workspace/fixtures/sample.hs').unlink()
+                else:
+                    (resource_root / 'workspace/fixtures/extra.hs').write_text('module Extra where\n')
+                shared = root / 'bundle/share/exomonad'
+                shared.mkdir(parents=True)
+                with self.assertRaisesRegex(ValueError, 'fixture'):
+                    qualification.copy_test_fixtures(source, source / qualification.TEST_FIXTURE_MANIFEST,
+                                                     resource_root, shared)
+                self.assertEqual(list(shared.iterdir()), [])
+
+    def test_native_bundle_assembly_copies_and_records_declared_fixture_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, fixture, _, resource_root = self.fixture_source(root)
+            resource_fixture = resource_root / fixture.relative_to(source)
+            resource_fixture.unlink()
+            resource_fixture.symlink_to(fixture)
+            assets = root / 'assets/web'; assets.mkdir(parents=True)
+            (assets / 'index.html').write_text('web')
+            sources = root / 'sources'
+            for name in ('lib', 'actors'):
+                (sources / name).mkdir(parents=True)
+            libraries = root / 'libraries'; libraries.mkdir()
+            (libraries / 'libfixture.so').write_bytes(b'library')
+            inputs = {}
+            for name in ('host', 'view-helper', 'frontend', 'worker', 'libtest'):
+                path = root / name; path.write_bytes(name.encode()); inputs[name] = path
+            workspace_gitlink = root / 'workspace-gitlink.json'
+            workspace_gitlink.write_text(json.dumps({
+                'schema': 1, 'path': '.exomonad/workspace', 'mode': '160000', 'revision': 'a' * 40}))
+            workspace_bundle = root / 'workspace.bundle'; workspace_bundle.write_bytes(b'bundle')
+            harness_revision = root / 'harness-revision'; harness_revision.write_text('revision\n')
+            entrypoint = root / 'entrypoint.sh'; entrypoint.write_text('#!/bin/bash\nexec "$@"\n')
+            tools = root / 'runtime-tools'; tools.mkdir()
+            ghc = root / 'ghc-libdir'; ghc.mkdir()
+            output = root / 'assembled'
+            args = SimpleNamespace(
+                output=output, host=inputs['host'], view_helper=inputs['view-helper'],
+                frontend=inputs['frontend'], worker=inputs['worker'], libtest=inputs['libtest'],
+                build_sources=source, test_fixtures=resource_root,
+                fixture_manifest=source / qualification.TEST_FIXTURE_MANIFEST,
+                workspace_gitlink=workspace_gitlink, workspace_git_bundle=workspace_bundle,
+                sources=sources, assets=root / 'assets', libraries=libraries,
+                harness_revision=harness_revision, runtime_tools=tools, ghc_libdir=ghc,
+                entrypoint_template=entrypoint, profile='fast-dev')
+            with patch.object(qualification, 'native_runtime_tools', return_value=tools), \
+                 patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
+                 patch.object(qualification, 'verify_workspace_bundle'):
+                qualification.assemble(args)
+            contract = json.loads((output / 'share/exomonad/native-build-contract.json').read_text())
+            self.assertEqual(contract['test_fixtures']['files'], {
+                fixture.relative_to(source).as_posix(): qualification.sha256(fixture)})
+            self.assertEqual((output / qualification.TEST_FIXTURE_ROOT / fixture.relative_to(source)).read_bytes(),
+                             fixture.read_bytes())
+            self.assertFalse((output / qualification.TEST_FIXTURE_ROOT / fixture.relative_to(source)).is_symlink())
+            self.assertEqual((output / 'share/exomonad/test-fixtures.json').read_bytes(),
+                             (source / qualification.TEST_FIXTURE_MANIFEST).read_bytes())
+
     def test_catalog_resources_cross_frozen_cohort_delegation_without_ambient_selection(self):
         runner_spec = importlib.util.spec_from_file_location(
             'frozen_resource_runner', SCRIPT.parent.parent / 'rust/isolated-libtest.py')
@@ -55,7 +217,8 @@ class NativeQualificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             resources = {}
-            for name in ('TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'):
+            for name in ('TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY',
+                         'TIDEPOOL_TEST_FIXTURE_ROOT'):
                 resource = root / name
                 resource.mkdir()
                 resources[name] = str(resource)
@@ -499,6 +662,7 @@ class NativeQualificationTests(unittest.TestCase):
             'TIDEPOOL_EXTRACT': '/tmp/older-extract',
             'TIDEPOOL_TEST_SYSTEMD_RUN': '/tmp/hostile-systemd-run',
             'TIDEPOOL_TEST_SYSTEMCTL': '/tmp/hostile-systemctl',
+            'TIDEPOOL_TEST_FIXTURE_ROOT': '/tmp/source-fixtures',
             'EXOMONAD_WORKSPACE_GITLINK': '/tmp/older-workspace-gitlink.json',
             'EXOMONAD_NIX_BIN': '/tmp/hostile-nix',
             'EXOMONAD_NIX_OFFLINE': '1',
@@ -509,7 +673,7 @@ class NativeQualificationTests(unittest.TestCase):
             }})
         self.assertEqual(environment['TIDEPOOL_EXTRACT'], '/frozen/bin/tidepool-extract')
         self.assertEqual(environment['EXOMONAD_NIX_BIN'], '/frozen/runtime-tools/bin/nix')
-        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON', 'EXOMONAD_WORKSPACE_GITLINK', 'EXOMONAD_NIX_OFFLINE', 'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL'):
+        for key in ('TIDEPOOL_EXTRACT_DAEMON_SOCKET', 'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_EXTRACT_NO_DAEMON', 'EXOMONAD_WORKSPACE_GITLINK', 'EXOMONAD_NIX_OFFLINE', 'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL', 'TIDEPOOL_TEST_FIXTURE_ROOT'):
             self.assertNotIn(key, environment)
 
     def test_frozen_bytes_may_not_change_and_descriptor_may_not_move(self):

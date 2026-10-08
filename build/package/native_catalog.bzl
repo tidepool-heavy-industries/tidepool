@@ -130,6 +130,8 @@ def native_runtime_bundle(name, catalog_backed):
             "//build/rust:native_qualification_sources",
             "//build/rust:workspace_gitlink",
             "//build/rust:workspace_git_bundle",
+            "//bridge/testing:haskell_test_fixtures",
+            "//:test_fixture_manifest",
         ] + ([":native_catalog", ":native_root_entry"] if catalog_backed else []),
         out = ".",
         env = {
@@ -144,6 +146,8 @@ def native_runtime_bundle(name, catalog_backed):
       --view-helper "$PWD/$(location //bridge/facade:exomonad-view-helper)" \
       --libtest "$PWD/$(location //bridge/facade:tidepool_unit_tests)" \
       --build-sources "$PWD/$(location //build/rust:native_qualification_sources)" \
+      --test-fixtures "$PWD/$(location //bridge/testing:haskell_test_fixtures)" \
+      --fixture-manifest "$PWD/$(location //:test_fixture_manifest)" \
       --workspace-gitlink "$PWD/$(location //build/rust:workspace_gitlink)" \
       --workspace-git-bundle "$PWD/$(location //build/rust:workspace_git_bundle)" \
       --frontend "$PWD/$(location //tidepool/extract-cmd:tidepool-extract)" \
