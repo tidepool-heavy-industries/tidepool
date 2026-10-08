@@ -8286,6 +8286,12 @@ pub(crate) mod tests {
     pub(crate) fn recovered_witness_fixtures(
         products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     ) -> Vec<CertifiedRecoveredOriginal> {
+        assert!(
+            products
+                .iter()
+                .all(|product| product.module_interface().is_some()),
+            "recovery fixtures require canonical finalized module interfaces",
+        );
         let root = tempfile::tempdir().unwrap();
         let producer = products
             .first()
@@ -9497,6 +9503,8 @@ pub(crate) mod tests {
         let a = original_witness_fixture("A", Some(source(inherited_owner("B"))), 7, &packages);
         let b = original_witness_fixture("B", Some(source(a.owner().clone())), 7, &packages);
         let a = original_witness_fixture("A", Some(source(b.owner().clone())), 7, &packages);
+        let a = fixture_finalized_product(a, [1; 32]);
+        let b = fixture_finalized_product(b, [1; 32]);
         let before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
         let recovered = recovered_witness_fixtures(&[a, b]);
         assert_eq!(
@@ -9938,6 +9946,8 @@ pub(crate) mod tests {
         };
         let consumer = original_witness_fixture("Consumer", Some(import), 7, &packages);
         let empty = original_witness_fixture("External", None, 7, &BTreeMap::new());
+        let consumer = fixture_finalized_product(consumer, [1; 32]);
+        let empty = fixture_finalized_product(empty, [1; 32]);
         let recovered = recovered_witness_fixtures(&[consumer, empty]);
         let consumer = &recovered[0].product;
         let empty = &recovered[1].product;
