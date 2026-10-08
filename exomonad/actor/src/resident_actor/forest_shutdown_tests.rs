@@ -434,7 +434,7 @@ async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
     assert!(!fixture.scope_is_live(placement));
 
     let error = match forest
-        .new_workbench("late-workbench".into(), crate::EffectiveRole::root())
+        .new_workbench("late-workbench".into(), crate::ActorCapabilities::default())
         .await
     {
         Ok(_) => panic!("sealed forest admitted a late workbench"),
