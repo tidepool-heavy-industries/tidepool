@@ -753,8 +753,10 @@ test-suite model-turn-test
   -- Buck compiles against the generated artifact providers. Local Cabal
   -- compatibility requires these explicit directories from the same outputs;
   -- missing generated modules are errors, never a skipped suite.
-  hs-source-dirs:   test-model-turn ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib
+  hs-source-dirs:   test-model-turn examples/model-turns ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib
   other-modules:
+    JevPreparedTest
+    JevPreparedWorkflow
     FormJevDialogueTest
     Jev.Core
     Jev.Core.Contract

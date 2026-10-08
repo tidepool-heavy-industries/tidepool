@@ -16,7 +16,10 @@ introduce a Jev call where an existing receipt or deterministic rule answers it.
 The constructors return ordinary Jev questions; append local questions with `:&`.
 Use the examples' state and packet values with `J.ask`. To inspect or replay a
 request, call `J.prepare model state packet` once, then pass that retained
-prepared value to `J.request` or `J.decode`. Keep the full response, then interpret
+prepared value to `J.executePrepared`, `J.request` or `J.decode`. Use
+`display prepared` to inspect its validated request without demanding payloads.
+A contrasting input gets its own prepared call from the reusable question.
+Return the full response for later projections, then interpret
 it with an explicit policy. Service error,
 policy doubt and a settled insufficient-evidence answer are distinct outcomes.
 None of these modules merges, retries, acknowledges delivery or suppresses a notice.

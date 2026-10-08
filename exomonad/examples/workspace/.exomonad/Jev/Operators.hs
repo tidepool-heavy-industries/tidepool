@@ -88,7 +88,7 @@ module Jev.Operators
   , ask, ask1, askWith, jevLatest, answers, usage, Usage (..), resolvedModel, diagnostics, Diagnostic (..)
   , JevCallError (..), JevError (..), PrepError (..), DecodeError (..), Rejection (..), ValidationIssue (..)
     -- * Recording and replay: the same operation split
-  , Prepared, prepare, request, decode, mapResponse, responsePreview, rawUsage
+  , Prepared, prepare, executePrepared, request, decode, mapResponse, responsePreview, rawUsage
     -- * Types, for signatures only
   , type (::=), type (:&), type (::>), type (::*), type (:|:), Offers, Handlers, Handles, Rubric
   , Noul, Choice, Score, Each, Optional, Group
@@ -334,6 +334,10 @@ instance Display (Core.Response Value a) where
     , ("diagnostics", displayTree (Core.diagnostics response))
     ]
 
+instance Display (Core.Prepared Value a) where
+  displayTree prepared = Constructor "Jev.Prepared"
+    [("request", jsonTree "Object" (Core.request prepared))]
+
 instance Display (Settled p a) where
   displayTree _ = TextLeaf "<Jev settled value; use settledValue to project>"
 
@@ -345,13 +349,16 @@ instance Display (Policy p) where displayTree = StringLeaf . show
 instance Show err => Display (JevError err) where displayTree = StringLeaf . show
 
 previewTree :: Value -> DisplayTree
-previewTree value = case Core.jView value of
+previewTree = jsonTree "Jev.Answer"
+
+jsonTree :: Text -> Value -> DisplayTree
+jsonTree objectName value = case Core.jView value of
   Core.VNull -> TextLeaf "null"
   Core.VBool b -> displayTree b
   Core.VNumber n -> displayTree n
   Core.VString text -> literalText text
-  Core.VArray values -> Sequence "[" "]" (map previewTree values)
-  Core.VObject fields -> Constructor "Jev.Answer" [(name, previewTree item) | (name, item) <- fields]
+  Core.VArray values -> Sequence "[" "]" (map (jsonTree objectName) values)
+  Core.VObject fields -> Constructor objectName [(name, jsonTree objectName item) | (name, item) <- fields]
 
 -- The operation
 jevLatest :: Model
@@ -380,7 +387,14 @@ ask1 = Core.jev1 (hostSession jevLatest)
 prepare :: Schema Value s => Model -> State t -> s Questions -> Either PrepError (Prepared (s Answers))
 prepare = Core.prepare
 
--- | The checked request body for recording or transport.
+-- | Execute the retained wire contract through the same production host as
+-- 'ask'. The model and input belong to the prepared request; this operation
+-- preserves its original decoder, payloads, typed error and response metadata.
+executePrepared :: Member Jev effs => Prepared a -> Eff effs (Either (JevError JevCallError) (Response a))
+executePrepared = Core.executePrepared (hostSession jevLatest)
+
+-- | The checked request body for recording or transport. Display the prepared
+-- value itself to inspect this body without traversing its captured payloads.
 request :: Prepared a -> Value
 request = Core.request
 

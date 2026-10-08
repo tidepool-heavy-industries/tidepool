@@ -42,9 +42,23 @@ optional: unknown or malformed usage stays unknown, and measured zero is
 `Just 0`. `J.mapResponse` projects the answer while preserving model, usage,
 diagnostics and preview facts.
 
-For recording and replay, retain `J.prepare model state packet` once.
-`J.request prepared` reads its checked wire body; `J.decode prepared body`
-uses the original typed decoder and payloads.
+For recording, execution and replay, retain `J.prepare model state packet`
+once. `J.executePrepared prepared` calls the same production host as `J.ask`
+and uses that original decoder and payloads. `display prepared` inspects its
+validated model, input and questions without demanding captured action payloads.
+`J.request prepared` reads the wire body for transport or recording;
+`J.decode prepared body` decodes a retained response through the original call.
+
+A prepared call fixes its model and input. Reuse a question value across
+contrasting inputs, preparing each input separately; the existing prepared
+request does not change when another input is constructed.
+
+Return the typed response from a composition when later cells need it. For
+example, end the successful and failed branches with the original `result`
+after displaying small projections, then bind that result in the notebook.
+`fmap J.usage result` observes metadata later; `fmap J.answers result` projects
+the answers explicitly. Ending with only `display` retains the display handle,
+not the response.
 
 ## Compose the questions
 
@@ -156,6 +170,10 @@ same with no handler list when every alternative carries the same type of
 payload, `J.judge` and `J.holds` do it for a noul — a doubt is not a no, and
 both read as `False` under `J.holds`, which is why it is a separate verb.
 Choose the projection that preserves the distinctions your continuation uses.
+A settled value has an opaque preview because its payload can be an action.
+To inspect an ordinary settled Bool, use
+`display (fmap J.settledValue (J.judge J.careful predicate))`.
+Project an action only when the continuation is ready to run it.
 
 `Right` means the winning alternative cleared the floors: a confident
 `insufficient_evidence` is also a `Right` and can select a read-more continuation.
