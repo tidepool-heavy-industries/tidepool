@@ -1808,11 +1808,23 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                 .unwrap(),
             ResidentOutcome::Completed { .. }
         ));
+        let binding = SessionVarId::from_extract(binder.var_id);
+        assert_eq!(
+            source
+                .current_binding_in(execution.private_scope(), &binder.name)
+                .unwrap()
+                .0,
+            binding,
+            "native settlement owns the exact private binding"
+        );
+        assert!(source
+            .current_binding_in(ScopeId::ROOT, &binder.name)
+            .is_none());
         values.push(
             source
-                .retain_binding_custody(&binder.name)
-                .unwrap()
-                .unwrap(),
+                .retain_binding_custody_in(execution.private_scope(), &binder.name, binding)
+                .expect("retain the exact settled binding in its private scope")
+                .expect("the checked native binding remains visible in its issuing scope"),
         );
         outputs.push(compiled);
     }
