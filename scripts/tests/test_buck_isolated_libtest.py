@@ -353,6 +353,57 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertFalse(root.exists())
         self.assertTrue(record['artifacts_removed_after_success'])
 
+    def test_retain_artifacts_option_controls_passing_case_cleanup(self):
+        self.binary.write_text(
+            '#!' + sys.executable + '\n'
+            'import os, pathlib, sys\n'
+            'args = sys.argv[1:]\n'
+            'if "--list" in args:\n'
+            '    print("suite::works: test\\nsuite::ignored: test" if "--ignored" not in args else "suite::ignored: test")\n'
+            'elif "--exact" in args:\n'
+            '    root = pathlib.Path(os.environ["TIDEPOOL_TEST_ARTIFACT_ROOT"])\n'
+            '    (root / "host.jsonl").write_text("{\\\"phase\\\":\\\"retained\\\"}\\n")\n'
+            '    print("test result: ok. 1 passed; 0 failed; 0 ignored;")\n'
+        )
+        self.binary.chmod(0o700)
+
+        for retain in (False, True):
+            with self.subTest(retain=retain):
+                output_dir = Path(self.tmp.name) / f'counted-retain-{retain}'
+                arguments = [
+                    str(self.binary), '--exact', 'suite::works', '--expected-count', '1',
+                    '--output-dir', str(output_dir),
+                ]
+                if retain:
+                    arguments.append('--retain-artifacts')
+                output = io.StringIO()
+                errors = io.StringIO()
+                with patch.dict(os.environ):
+                    os.environ.pop('TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', None)
+                    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                        result = runner.main(arguments)
+
+                key = hashlib.sha256(b'suite::works').hexdigest()
+                artifact_root = output_dir / key / 'artifacts'
+                case_record = json.loads((output_dir / f'{key}.json').read_text())
+                self.assertEqual(result, 0, errors.getvalue())
+                self.assertIn('Isolated libtest: 1 passed; 0 failed;', output.getvalue())
+                self.assertEqual(artifact_root.exists(), retain)
+                if retain:
+                    self.assertTrue(case_record['execution']['artifacts_retained_after_success'])
+                    self.assertNotIn('artifacts_removed_after_success', case_record['execution'])
+                else:
+                    self.assertTrue(case_record['execution']['artifacts_removed_after_success'])
+                    self.assertNotIn('artifacts_retained_after_success', case_record['execution'])
+
+    def test_retain_artifacts_option_requires_output_directory(self):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as raised:
+            runner.parse_args([str(self.binary), '--retain-artifacts'])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn('--retain-artifacts requires --output-dir', errors.getvalue())
+
     def test_owned_compiler_receives_case_root_without_changing_libtest_selection(self):
         root = Path(self.tmp.name) / 'resident-artifacts'
         frontend = Path(self.tmp.name) / 'declared-frontend'
