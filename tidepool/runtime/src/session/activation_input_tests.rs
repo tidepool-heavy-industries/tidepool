@@ -1875,7 +1875,8 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         local_sites.clone(),
         std::collections::BTreeSet::new(),
     ];
-    for (index, value) in values.iter().enumerate() {
+    let mut observed_unselected_request = false;
+    for (index, (value, output)) in values.iter().zip(&outputs).enumerate() {
         assert_eq!(
             value
                 .provenance
@@ -1886,13 +1887,27 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             expected[index],
             "item {index}: available originals do not select an executable site"
         );
-        for site in shared_sites.union(&local_sites) {
+        // Each item retains its own compiler-issued census. Available native
+        // owners and later items need not contribute metadata to every item.
+        for site in &output.asks {
             assert!(
-                value.provenance.sites.contains_key(site),
-                "unselected site metadata remains observable on item {index}"
+                value
+                    .provenance
+                    .sites
+                    .get(&site.site)
+                    .is_some_and(|retained| retained.same_metadata(site)),
+                "issued site metadata remains unchanged on item {index}: {}",
+                site.site,
             );
+            observed_unselected_request |= (shared_sites.contains(&site.site)
+                || local_sites.contains(&site.site))
+                && !expected[index].contains(&site.site);
         }
     }
+    assert!(
+        observed_unselected_request,
+        "the real compiler fixture exposes an unselected request site as metadata"
+    );
 
     let mut config = Config::default();
     if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
