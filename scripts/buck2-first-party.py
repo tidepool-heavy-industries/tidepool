@@ -796,6 +796,10 @@ def compile_fail_cases(package, library):
 
 def actor_observation_test_cases(binary):
     groups = [
+        ("actor_reply_settlement_history_tests", "local_actor::reply_settlement_history::", (
+            "fixed_reply_delivery_histories_preserve_pending_until_continuation_settles",
+            "generated_reply_delivery_histories_match_acknowledged_settlement",
+        )),
         ("actor_runtime_observation_lease_tests", "runtime_observation::provider_health_tests::", (
             "owned_provider_round_authorizes_idle_only_after_success",
             "abandoned_provider_round_requires_attention_until_a_new_success",

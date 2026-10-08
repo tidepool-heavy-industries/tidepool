@@ -440,6 +440,20 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "actor_reply_settlement_history_tests",
+    binary = ":exomonad_actor_unit_tests",
+    exact_tests = [
+        "local_actor::reply_settlement_history::fixed_reply_delivery_histories_preserve_pending_until_continuation_settles",
+        "local_actor::reply_settlement_history::generated_reply_delivery_histories_match_acknowledged_settlement",
+    ],
+    expected_count = 2,
+    jobs = 1,
+    timeout = 30,
+    test_rule_timeout_ms = 120000,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "actor_runtime_observation_lease_tests",
     binary = ":exomonad_actor_unit_tests",
     exact_tests = [
