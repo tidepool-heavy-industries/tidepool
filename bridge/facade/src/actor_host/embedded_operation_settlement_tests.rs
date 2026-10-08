@@ -458,7 +458,34 @@ impl HostActor for CloseAfterAcknowledgement {
             })
             .await
             .unwrap();
-        assert!(stopped.cleanup.is_confirmed());
+        // This real generic actor owns its hook and children, but no resident
+        // realm. Preserve Unsupported rather than certifying native resources.
+        assert_eq!(stopped.cleanup.actor(), self.actor.identity());
+        assert_eq!(
+            stopped.cleanup.hook(),
+            &exomonad_actor::CleanupComponentOutcome::Confirmed
+        );
+        assert_eq!(
+            stopped.cleanup.children(),
+            &exomonad_actor::CleanupComponentOutcome::Confirmed
+        );
+        assert_eq!(
+            stopped.cleanup.realm(),
+            &exomonad_actor::CleanupComponentOutcome::Unsupported
+        );
+        assert!(!stopped.cleanup.is_confirmed(), "{stopped:?}");
+        assert_eq!(
+            stopped.terminal.kind,
+            exomonad_actor::ActorExitKind::Cancelled
+        );
+        assert_eq!(
+            self.actor.terminal().cleanup().as_ref(),
+            Some(&stopped.cleanup)
+        );
+        assert_eq!(
+            self.actor.terminal().get().as_ref(),
+            Some(&stopped.terminal)
+        );
         Ok(())
     }
     async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
