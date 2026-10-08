@@ -388,8 +388,13 @@ mod tests {
             _: &'a KernelContext,
             _: crate::ActorWorkbenchInvocation,
             _: Option<Arc<crate::WorkbenchExecutionControl>>,
-        ) -> BoxFuture<'a, Result<KernelStep<crate::WorkbenchResponse>, KernelInvocationFailure>>
-        {
+        ) -> BoxFuture<
+            'a,
+            Result<
+                KernelStep<tidepool_runtime::session::WorkbenchResponse>,
+                KernelInvocationFailure,
+            >,
+        > {
             Box::pin(async { panic!("fixture has no workbench requests") })
         }
 

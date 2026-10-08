@@ -1299,7 +1299,6 @@ mod tests {
     fn embedded_application_intent_and_binding_survive_cold_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let path = directory.path().join("actors.jsonl");
         let actor = ActorRef {
             id: ActorId(7),
             incarnation: Incarnation(3),
@@ -1319,31 +1318,25 @@ mod tests {
                 Some(expected.clone()),
             )
             .unwrap();
-        assert!(
-            journal
-                .bind_application(actor, "fake-codex-thread".into())
-                .is_err()
-        );
+        assert!(journal
+            .bind_application(actor, "fake-codex-thread".into())
+            .is_err());
         let changed = ApplicationConversation::Embedded {
             run: "run".into(),
             agent_path: "/root/a7_i3".into(),
             incarnation: "4".into(),
         };
-        assert!(
-            journal
-                .bind_application_conversation(actor, changed)
-                .is_err()
-        );
+        assert!(journal
+            .bind_application_conversation(actor, changed)
+            .is_err());
         drop(journal);
         let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
-        assert!(
-            journal.records()[0]
-                .application
-                .as_ref()
-                .unwrap()
-                .conversation
-                .is_none()
-        );
+        assert!(journal.records()[0]
+            .application
+            .as_ref()
+            .unwrap()
+            .conversation
+            .is_none());
         journal
             .bind_application_conversation(actor, expected.clone())
             .unwrap();
@@ -1502,11 +1495,9 @@ mod tests {
         assert_eq!(records[0].admission.label, "observed");
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let missing = directory.path().join("missing.jsonl");
-        assert!(
-            ActorRecoveryJournal::read_observed(&missing)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(ActorRecoveryJournal::read_observed(&missing)
+            .unwrap()
+            .is_empty());
         assert!(!missing.exists());
     }
 
@@ -1527,7 +1518,6 @@ mod tests {
     fn every_application_publication_boundary_reopens_without_inventing_progress() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let path = directory.path().join("actors.jsonl");
         let binding = directory.path().join("binding.json");
         let actor = ActorRef::first(ActorId(9));
 
@@ -1574,7 +1564,6 @@ mod tests {
     fn recovered_host_requires_the_original_lifecycle_owner() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let missing = directory.path().join("missing.jsonl");
         assert_eq!(
             ActorRecoveryJournal::open_existing(&anchor, "missing.jsonl")
                 .err()
@@ -1585,15 +1574,12 @@ mod tests {
 
         let empty = directory.path().join("empty.jsonl");
         std::fs::write(&empty, b"").unwrap();
-        assert!(
-            ActorRecoveryJournal::open_existing(&anchor, "empty.jsonl")
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("creation marker")
-        );
+        assert!(ActorRecoveryJournal::open_existing(&anchor, "empty.jsonl")
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("creation marker"));
 
-        let initialized = directory.path().join("initialized.jsonl");
         drop(ActorRecoveryJournal::open(&anchor, "initialized.jsonl").unwrap());
         ActorRecoveryJournal::open_existing(&anchor, "initialized.jsonl").unwrap();
     }
@@ -1750,72 +1736,60 @@ mod tests {
         let proof = journal
             .certify_root_successor(old, placement.clone(), Some("source"), &binding)
             .unwrap();
-        assert!(
-            proof
-                .validate_successor(
-                    run.path(),
-                    &old_owner,
-                    placement.owner(),
-                    SessionId(1),
-                    ScopeId(1)
-                )
-                .unwrap()
-        );
-        assert!(
-            proof
-                .validate_embedded_binding(
-                    run.path(),
-                    &initial.conversation,
-                    &journal
-                        .records()
-                        .into_iter()
-                        .find(|record| record.admission.actor == next)
-                        .unwrap()
-                        .startup
-                        .unwrap()
-                        .conversation
-                )
-                .unwrap()
-        );
-        assert!(
-            !proof
-                .validate_successor(
-                    run.path(),
-                    &old_owner,
-                    placement.owner(),
-                    SessionId(9),
-                    ScopeId(1)
-                )
-                .unwrap()
-        );
-        assert!(
-            !proof
-                .validate_successor(
-                    tempfile::tempdir().unwrap().path(),
-                    &old_owner,
-                    placement.owner(),
-                    SessionId(1),
-                    ScopeId(1)
-                )
-                .unwrap()
-        );
-        assert!(
-            journal
-                .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
-                .is_err()
-        );
+        assert!(proof
+            .validate_successor(
+                run.path(),
+                &old_owner,
+                placement.owner(),
+                SessionId(1),
+                ScopeId(1)
+            )
+            .unwrap());
+        assert!(proof
+            .validate_embedded_binding(
+                run.path(),
+                &initial.conversation,
+                &journal
+                    .records()
+                    .into_iter()
+                    .find(|record| record.admission.actor == next)
+                    .unwrap()
+                    .startup
+                    .unwrap()
+                    .conversation
+            )
+            .unwrap());
+        assert!(!proof
+            .validate_successor(
+                run.path(),
+                &old_owner,
+                placement.owner(),
+                SessionId(9),
+                ScopeId(1)
+            )
+            .unwrap());
+        assert!(!proof
+            .validate_successor(
+                tempfile::tempdir().unwrap().path(),
+                &old_owner,
+                placement.owner(),
+                SessionId(1),
+                ScopeId(1)
+            )
+            .unwrap());
+        assert!(journal
+            .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
+            .is_err());
         write_manifest(&manifest, &old_owner, "changed", 7);
-        assert!(
-            !proof
-                .validate_successor(
-                    run.path(),
-                    &old_owner,
-                    placement.owner(),
-                    SessionId(1),
-                    ScopeId(1)
-                )
-                .unwrap()
-        );
+        assert!(!proof
+            .validate_successor(
+                run.path(),
+                &old_owner,
+                placement.owner(),
+                SessionId(1),
+                ScopeId(1)
+            )
+            .unwrap());
     }
 
     #[test]
@@ -1876,11 +1850,9 @@ mod tests {
         );
         let mut changed_bootstrap = third.clone();
         changed_bootstrap.bootstrap_identity = "different-bootstrap".into();
-        assert!(
-            journal
-                .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
-                .is_err()
-        );
+        assert!(journal
+            .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
+            .is_err());
         let mut changed_manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
         changed_manifest["public_surfaces"][0]["bindings"] =
@@ -1889,52 +1861,46 @@ mod tests {
         let mut changed_content = third.clone();
         changed_content.manifest =
             Some(RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap());
-        assert!(
-            journal
-                .admit_with_startup(c, &root, &[], Some(changed_content))
-                .is_err()
-        );
+        assert!(journal
+            .admit_with_startup(c, &root, &[], Some(changed_content))
+            .is_err());
         write_manifest(&manifest, &old_owner, "revision", 0);
         journal
             .admit_with_startup(c, &root, &[], Some(third.clone()))
             .unwrap();
-        assert!(
-            journal
-                .admit_with_startup(
+        assert!(journal
+            .admit_with_startup(
+                d,
+                &root,
+                &[],
+                Some(startup_intent(
                     d,
-                    &root,
-                    &[],
-                    Some(startup_intent(
-                        d,
-                        &binding,
-                        Some(b),
-                        Some(a),
-                        Some(pin.clone()),
-                        Some(initial.conversation.clone())
-                    ))
-                )
-                .is_err()
-        );
+                    &binding,
+                    Some(b),
+                    Some(a),
+                    Some(pin.clone()),
+                    Some(initial.conversation.clone())
+                ))
+            )
+            .is_err());
         journal
             .bind_application_conversation(c, third.conversation.clone())
             .unwrap();
-        assert!(
-            journal
-                .admit_with_startup(
+        assert!(journal
+            .admit_with_startup(
+                d,
+                &root,
+                &[],
+                Some(startup_intent(
                     d,
-                    &root,
-                    &[],
-                    Some(startup_intent(
-                        d,
-                        &binding,
-                        Some(c),
-                        Some(a),
-                        Some(pin.clone()),
-                        Some(initial.conversation.clone())
-                    ))
-                )
-                .is_err()
-        );
+                    &binding,
+                    Some(c),
+                    Some(a),
+                    Some(pin.clone()),
+                    Some(initial.conversation.clone())
+                ))
+            )
+            .is_err());
         let c_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root").unwrap(),
             12,
@@ -1942,23 +1908,21 @@ mod tests {
         .unwrap();
         write_manifest(&manifest, &c_owner, "new-owner-revision", 0);
         let c_pin = RootStartupManifestPin::capture_for_owner(&manifest, &c_owner).unwrap();
-        assert!(
-            journal
-                .admit_with_startup(
+        assert!(journal
+            .admit_with_startup(
+                d,
+                &root,
+                &[],
+                Some(startup_intent(
                     d,
-                    &root,
-                    &[],
-                    Some(startup_intent(
-                        d,
-                        &binding,
-                        Some(c),
-                        Some(c),
-                        Some(c_pin),
-                        Some(third.conversation)
-                    ))
-                )
-                .is_ok()
-        );
+                    &binding,
+                    Some(c),
+                    Some(c),
+                    Some(c_pin),
+                    Some(third.conversation)
+                ))
+            )
+            .is_ok());
         drop(journal);
         ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
     }
