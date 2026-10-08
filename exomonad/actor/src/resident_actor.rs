@@ -13720,7 +13720,7 @@ where
                 }
             }
             let staged_replacement = self.replacement_staged();
-            let staged_fork = self.boot.is_some() && self.descriptor.fork_group().is_some();
+            let staged_placement = self.boot.is_some();
             self.source_connections.take();
             self.sources.clear();
             let context = self.context(kernel.identity());
@@ -13802,7 +13802,7 @@ where
             // Realm retirement obtains its own exclusive checkout. A failed hook
             // does not skip this safe cleanup; it also never becomes success.
             let realm_result = if staged_replacement
-                || staged_fork
+                || staged_placement
                 || self.descriptor.supervisor_parent().is_none()
             {
                 self.environment

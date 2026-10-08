@@ -244,7 +244,7 @@ where
                 .as_ref()
                 .map(|prepared| prepared.handle().clone());
             let bound_worktrees = launch_worktrees.clone();
-            let descriptor_scope = descriptor.placement().lexical_scope;
+            let descriptor_placement = descriptor.placement();
             let checkpoint_descriptor = fork_group.map(|_| descriptor.clone());
             let mut behavior = ResidentKernelBehavior::child(
                 descriptor,
@@ -255,7 +255,9 @@ where
             behavior.admitted_checkpoint = checkpoint_admission.clone();
             behavior.inherited_host_attachment = inherited_host_attachment;
             behavior.prepared_workspace = prepared_workspace;
-            behavior.child_session_startup = child_session_startup;
+            // Keep preparation custody until a failed spawn's native cleanup
+            // has finished, even if Ractor already dropped the behavior.
+            behavior.child_session_startup = child_session_startup.clone();
             let startup_admission = match lifetime {
                 crate::WorkerLifetime::InvocationOwned => Some(
                     invocation_work.clone().ok_or_else(|| {
@@ -278,18 +280,13 @@ where
             let child = match child_result {
                 Ok(child) => child,
                 Err(error) => {
-                    if checkpoint_lease.is_some() {
-                        if let Err(cleanup) = environment
-                            .runner
-                            .retire_checkpoint_scopes(
-                                context.placement.session,
-                                vec![descriptor_scope],
-                            )
-                            .await
-                        {
-                            tracing::warn!(%cleanup, "failed checkpoint child scope cleanup was retained");
-                        }
-                    }
+                    settle_startup_refusal(
+                        &environment.runner,
+                        &kernel,
+                        descriptor_placement,
+                        &error,
+                    )
+                    .await;
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         error.to_string(),
                     ));
@@ -303,6 +300,344 @@ where
     CompletedChildLaunch {
         continuation,
         result,
+    }
+}
+
+async fn settle_startup_refusal<H, O>(
+    runner: &ResidentActorRunner<H, O>,
+    kernel: &KernelContext,
+    placement: crate::ActorPlacement,
+    error: &ractor::SpawnErr,
+) where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
+    // The kernel already retained every component of this actual cleanup.
+    if crate::local_actor::startup_cleanup(error).is_some() {
+        return;
+    }
+    let cleanup = match runner
+        .retire_root_placement_wait(placement, crate::local_actor::SHUTDOWN_BUDGET)
+        .await
+    {
+        Ok(()) => Confirmed,
+        Err(cleanup) => Unconfirmed(format!(
+            "child startup failed: {error}; placement cleanup: {cleanup}"
+        )),
+    };
+    kernel.retain_child_startup_cleanup(cleanup);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::future::BoxFuture;
+
+    struct CaptureKernel(Option<tokio::sync::oneshot::Sender<KernelContext>>);
+
+    impl KernelBehavior for CaptureKernel {
+        fn start(
+            &mut self,
+            kernel: &KernelContext,
+        ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
+            self.0.take().unwrap().send(kernel.clone()).ok().unwrap();
+            Box::pin(async { Ok(KernelStep::Continue(())) })
+        }
+
+        fn cast(
+            &mut self,
+            _: &KernelContext,
+            _: ActorRef,
+            _: MailboxValue,
+        ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
+            Box::pin(async { panic!("fixture has no casts") })
+        }
+
+        fn call(
+            &mut self,
+            _: &KernelContext,
+            _: ActorRef,
+            _: crate::CallAncestry,
+            _: MailboxValue,
+        ) -> BoxFuture<'_, Result<KernelStep<MailboxValue>, KernelBehaviorError>> {
+            Box::pin(async { panic!("fixture has no calls") })
+        }
+
+        fn tool<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: exomonad_tool::ToolInvocation,
+            _: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+        ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
+            Box::pin(async { panic!("fixture has no tools") })
+        }
+
+        fn workbench<'a>(
+            &'a mut self,
+            _: &'a KernelContext,
+            _: crate::ActorWorkbenchInvocation,
+            _: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> BoxFuture<'a, Result<KernelStep<crate::WorkbenchResponse>, KernelInvocationFailure>>
+        {
+            Box::pin(async { panic!("fixture has no workbench requests") })
+        }
+
+        fn external_application_failed(
+            &mut self,
+            _: &KernelContext,
+            _: ExternalApplicationFailure,
+        ) -> BoxFuture<'_, ExternalFailureDisposition> {
+            Box::pin(async { panic!("fixture has no external applications") })
+        }
+
+        fn shutdown(
+            &mut self,
+            _: &KernelContext,
+            _: &ActorTerminal,
+        ) -> BoxFuture<'_, Result<(), KernelBehaviorError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn stopped(&mut self, _: &KernelContext, _: &ActorTerminal) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+
+        fn child_exited(&mut self, _: ChildExitNotice) {}
+    }
+
+    struct RefuseStartup;
+
+    impl crate::local_actor::WorkerStartupAdmission for RefuseStartup {
+        fn reserve(&self, _: ActorRef) -> Result<(), String> {
+            Err("invocation startup reservation refused".into())
+        }
+
+        fn admit(&self, _: LocalActorRef) -> Result<(), String> {
+            panic!("refused reservation cannot reach actor admission")
+        }
+    }
+
+    type TestEnvironment = ResidentEnvironment<frunk::HNil, tidepool_mcp::CapturedOutput>;
+
+    async fn fixture() -> (
+        TestEnvironment,
+        KernelContext,
+        LocalActorRef,
+        tempfile::TempDir,
+    ) {
+        use tidepool_runtime::session::{ModuleEnv, SessionLib};
+        let root = tempfile::tempdir().unwrap();
+        let session_id = tidepool_repr::SessionId(0x57_A6_E);
+        let lib =
+            SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default()).unwrap();
+        let machine = ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        let (forest, _deployments) = ResidentForest::new(
+            ActorWorkbenchSource::new("", Vec::new()),
+            session_id,
+            machine,
+            None,
+            crate::Incarnation(1),
+        );
+        let (context_tx, context_rx) = tokio::sync::oneshot::channel();
+        let (parent, _task) = crate::local_actor::spawn_local_actor_in_directory(
+            None,
+            CaptureKernel(Some(context_tx)),
+            crate::Incarnation(1),
+            forest.directory.clone(),
+        )
+        .await
+        .unwrap();
+        (forest.environment, context_rx.await.unwrap(), parent, root)
+    }
+
+    fn terminal() -> ActorTerminal {
+        ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "fixture cleanup".into(),
+            diagnostic: None,
+        }
+    }
+
+    async fn prepared_child(
+        environment: &TestEnvironment,
+        kernel: &KernelContext,
+    ) -> (
+        crate::ActorPlacement,
+        ResidentKernelBehavior<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    ) {
+        let placement = environment
+            .runner
+            .provision_root_scope(tidepool_repr::SessionId(0x57_A6_E))
+            .await
+            .unwrap();
+        let descriptor = ActorDescriptor::new("prepared child", placement)
+            .with_supervisor_parent(kernel.identity());
+        let behavior = ResidentKernelBehavior::with_boot(
+            descriptor,
+            environment.clone(),
+            ResidentBoot::Workbench,
+            Vec::new(),
+        );
+        (placement, behavior)
+    }
+
+    async fn assert_scope_retired(environment: &TestEnvironment, placement: crate::ActorPlacement) {
+        assert!(
+            environment
+                .runner
+                .retain_fork_release_scope(placement.session, placement.lexical_scope)
+                .await
+                .is_err(),
+            "real scope owner must refuse the retired lexical scope"
+        );
+        assert!(
+            environment
+                .runner
+                .machines_for_test()
+                .kind(placement.session)
+                .is_some(),
+            "shared native session stays available"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_parent_refusal_retires_prepared_shared_scope() {
+        let (environment, kernel, parent, _root) = fixture().await;
+        let (placement, behavior) = prepared_child(&environment, &kernel).await;
+        parent.shutdown(terminal()).await.unwrap();
+        let error = kernel
+            .spawn_worker(None, behavior, crate::WorkerLifetime::ActorOwned)
+            .await
+            .unwrap_err();
+        assert!(
+            crate::local_actor::startup_cleanup(&error)
+                .unwrap()
+                .is_confirmed(),
+            "parent refusal runs real cleanup before member insertion"
+        );
+        assert!(error
+            .to_string()
+            .contains("actor child admission is closed"));
+        settle_startup_refusal(&environment.runner, &kernel, placement, &error).await;
+        assert_scope_retired(&environment, placement).await;
+    }
+
+    #[tokio::test]
+    async fn startup_reservation_refusal_awaits_prepared_shared_scope_cleanup() {
+        let (environment, kernel, parent, _root) = fixture().await;
+        let (placement, behavior) = prepared_child(&environment, &kernel).await;
+        let checkout = environment
+            .runner
+            .machines_for_test()
+            .checkout_run(placement.session)
+            .unwrap();
+        let mut startup = Box::pin(kernel.spawn_worker_scoped(
+            None,
+            behavior,
+            crate::WorkerLifetime::InvocationOwned,
+            Arc::new(RefuseStartup),
+        ));
+        use std::future::Future;
+        let progress =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(startup.as_mut().poll(cx))).await;
+        assert!(
+            matches!(progress, std::task::Poll::Pending),
+            "refusal waits for actual native cleanup checkout"
+        );
+        drop(checkout);
+        let error = startup.await.unwrap_err();
+        assert!(crate::local_actor::startup_cleanup(&error)
+            .unwrap()
+            .is_confirmed());
+        assert!(error
+            .to_string()
+            .contains("invocation startup reservation refused"));
+        settle_startup_refusal(&environment.runner, &kernel, placement, &error).await;
+        assert_scope_retired(&environment, placement).await;
+        let stopped = parent.shutdown_with_cleanup(terminal()).await.unwrap();
+        assert_eq!(
+            stopped.cleanup.children(),
+            &crate::CleanupComponentOutcome::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_refusal_awaits_scope_cleanup_without_upgrading_uncertainty() {
+        let (environment, kernel, parent, _root) = fixture().await;
+        let name = format!("staged-startup-refusal-{}", parent.identity());
+        let (context_tx, context_rx) = tokio::sync::oneshot::channel();
+        kernel
+            .spawn_child(Some(name.clone()), CaptureKernel(Some(context_tx)))
+            .await
+            .unwrap();
+        let _child_context = context_rx.await.unwrap();
+        let (placement, behavior) = prepared_child(&environment, &kernel).await;
+        let error = kernel
+            .spawn_worker(Some(name), behavior, crate::WorkerLifetime::ActorOwned)
+            .await
+            .unwrap_err();
+        assert!(crate::local_actor::startup_cleanup(&error).is_none());
+        let checkout = environment
+            .runner
+            .machines_for_test()
+            .checkout_run(placement.session)
+            .unwrap();
+        let mut cleanup = Box::pin(settle_startup_refusal(
+            &environment.runner,
+            &kernel,
+            placement,
+            &error,
+        ));
+        use std::future::Future;
+        let progress =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(cleanup.as_mut().poll(cx))).await;
+        assert!(matches!(progress, std::task::Poll::Pending));
+        drop(checkout);
+        cleanup.await;
+        assert_scope_retired(&environment, placement).await;
+        let stopped = parent.shutdown_with_cleanup(terminal()).await.unwrap();
+        assert!(matches!(
+            stopped.cleanup.children(),
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unavailable_refusal_cleanup_remains_unconfirmed() {
+        let (environment, kernel, parent, _root) = fixture().await;
+        let (placement, behavior) = prepared_child(&environment, &kernel).await;
+        assert!(environment
+            .runner
+            .machines_for_test()
+            .remove(
+                placement.session,
+                "native machine lost before startup cleanup"
+            )
+            .is_some());
+        let error = kernel
+            .spawn_worker_scoped(
+                None,
+                behavior,
+                crate::WorkerLifetime::InvocationOwned,
+                Arc::new(RefuseStartup),
+            )
+            .await
+            .unwrap_err();
+        assert!(!crate::local_actor::startup_cleanup(&error)
+            .unwrap()
+            .is_confirmed());
+        settle_startup_refusal(&environment.runner, &kernel, placement, &error).await;
+        let stopped = parent.shutdown_with_cleanup(terminal()).await.unwrap();
+        assert!(matches!(
+            stopped.cleanup.children(),
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
     }
 }
 
