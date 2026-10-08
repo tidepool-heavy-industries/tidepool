@@ -1549,3 +1549,6 @@ async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child
     successor.finish();
     fixture.stop().await.unwrap();
 }
+
+#[path = "harness_usecase_performance.rs"]
+mod harness_usecase_performance;

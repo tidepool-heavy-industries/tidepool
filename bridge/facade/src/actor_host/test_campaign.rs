@@ -828,7 +828,7 @@ pub(super) fn install_tracing() {
          tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
          exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
          tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
-         exomonad_actor::workbench_phase=info,exomonad::content=off",
+         exomonad_actor::workbench_phase=info,exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,exomonad_actor::resident_tools=info,exomonad::content=off",
     );
     let subscriber = tracing_subscriber::fmt()
         .json()
