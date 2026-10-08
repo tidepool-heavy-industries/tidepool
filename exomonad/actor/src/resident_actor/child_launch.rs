@@ -278,8 +278,8 @@ impl crate::local_actor::WorkerStartupAdmission for ChildStartupAdmission {
 pub(super) async fn await_launch<H, O>(
     environment: ResidentEnvironment<H, O>,
     kernel: KernelContext,
-    prepared: PreparedChildLaunch,
-) -> CompletedChildLaunch
+    prepared: Box<PreparedChildLaunch>,
+) -> Box<CompletedChildLaunch>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
@@ -287,7 +287,7 @@ where
     let PreparedChildLaunch {
         continuation,
         admission,
-    } = prepared;
+    } = *prepared;
     let _startup_guard = SpawnStartupGuard(continuation.spawn_admission.clone());
     // A failed spawn can drop its behavior before refusal cleanup finishes.
     // Keep the original machine preparation lease outside that await.
@@ -587,10 +587,10 @@ where
     if let (Err(error), Some(authority)) = (&result, &continuation.spawn_admission) {
         authority.fail(error.to_string());
     }
-    CompletedChildLaunch {
+    Box::new(CompletedChildLaunch {
         continuation,
         result,
-    }
+    })
 }
 
 /// Await refusal cleanup while the original preparation lease still retains
@@ -662,12 +662,12 @@ pub(super) fn matches_parent(
 pub(super) fn apply_launch(
     kernel: &KernelContext,
     descriptor: &ActorDescriptor,
-    completed: CompletedChildLaunch,
+    completed: Box<CompletedChildLaunch>,
 ) -> ChildLaunchResume {
     let CompletedChildLaunch {
         continuation,
         result,
-    } = completed;
+    } = *completed;
     let context = &continuation.context;
     let original = &continuation.parent_descriptor;
     let failed_child = result.as_ref().ok().map(|started| started.actor.clone());
@@ -1003,7 +1003,7 @@ mod tests {
         let completed = await_launch(
             fixture.environment.clone(),
             fixture.kernel.clone(),
-            PreparedChildLaunch {
+            Box::new(PreparedChildLaunch {
                 continuation: ChildLaunchContinuation {
                     context,
                     parent_descriptor: descriptor,
@@ -1018,7 +1018,7 @@ mod tests {
                 admission: Err(ResidentActorWorkbenchError::ActorProtocol(
                     "startup refused before actor admission".into(),
                 )),
-            },
+            }),
         )
         .await;
         let completion = crate::OwnedWorkbenchCompletion::<

@@ -606,7 +606,12 @@ impl KernelContext {
                 )
             })?;
             context
-                .spawn_worker_retained(None, behavior, crate::WorkerLifetime::ActorOwned, None)
+                .spawn_worker_retained(
+                    None,
+                    Box::new(behavior),
+                    crate::WorkerLifetime::ActorOwned,
+                    None,
+                )
                 .await
                 .map(|(actor, admission)| (actor, Some(admission)))
         } else {
@@ -717,48 +722,45 @@ impl KernelContext {
     }
 
     /// Start a linked child and return its exact handle only after startup.
-    pub async fn spawn_child<C>(
+    pub fn spawn_child<C>(
         &self,
         name: Option<String>,
         behavior: C,
-    ) -> Result<LocalActorRef, ractor::SpawnErr>
+    ) -> impl std::future::Future<Output = Result<LocalActorRef, ractor::SpawnErr>> + '_
     where
         C: KernelBehavior,
     {
         self.spawn_worker(name, behavior, crate::WorkerLifetime::ActorOwned)
-            .await
     }
 
-    pub(crate) async fn spawn_worker<C>(
+    pub(crate) fn spawn_worker<C>(
         &self,
         name: Option<String>,
         behavior: C,
         lifetime: crate::WorkerLifetime,
-    ) -> Result<LocalActorRef, ractor::SpawnErr>
+    ) -> impl std::future::Future<Output = Result<LocalActorRef, ractor::SpawnErr>> + '_
     where
         C: KernelBehavior,
     {
-        self.spawn_worker_retained(name, behavior, lifetime, None)
-            .await
-            .map(|(actor, _)| actor)
+        self.spawn_worker_retained(name, Box::new(behavior), lifetime, None)
+            .map(|result| result.map(|(actor, _)| actor))
     }
 
-    pub(crate) async fn spawn_worker_scoped<C: KernelBehavior>(
+    pub(crate) fn spawn_worker_scoped<C: KernelBehavior>(
         &self,
         name: Option<String>,
         behavior: C,
         lifetime: crate::WorkerLifetime,
         admission: Arc<dyn WorkerStartupAdmission>,
-    ) -> Result<LocalActorRef, ractor::SpawnErr> {
-        self.spawn_worker_retained(name, behavior, lifetime, Some(admission))
-            .await
-            .map(|(actor, _)| actor)
+    ) -> impl std::future::Future<Output = Result<LocalActorRef, ractor::SpawnErr>> + '_ {
+        self.spawn_worker_retained(name, Box::new(behavior), lifetime, Some(admission))
+            .map(|result| result.map(|(actor, _)| actor))
     }
 
     async fn spawn_worker_retained<C: KernelBehavior>(
         &self,
         name: Option<String>,
-        behavior: C,
+        behavior: Box<C>,
         lifetime: crate::WorkerLifetime,
         startup_admission: Option<Arc<dyn WorkerStartupAdmission>>,
     ) -> Result<(LocalActorRef, tokio::sync::OwnedRwLockReadGuard<bool>), ractor::SpawnErr> {
@@ -1257,7 +1259,8 @@ pub(crate) trait WorkerStartupAdmission: Send + Sync {
 pub struct LocalActorArguments<B> {
     pub(crate) startup_refusal: Option<StartupFailureCause>,
     pub(crate) spawn_ownership: SpawnOwnership,
-    pub behavior: B,
+    /// Retain the launch allocation until the actor installs its boxed state.
+    pub behavior: Box<B>,
     pub(crate) startup_admission: Option<Arc<dyn WorkerStartupAdmission>>,
     pub terminal: RetainedActorExit,
     pub directory: LocalActorDirectory,
@@ -1732,7 +1735,7 @@ where
             drain: DrainState::Open,
             mailbox_admission: arguments.mailbox_admission,
             context,
-            behavior: BehaviorSlot(Some(arguments.behavior)),
+            behavior: BehaviorSlot(Some(*arguments.behavior)),
             pending_tasks: HashMap::new(),
             next_task_generation: 0,
             pending_child_exits: Vec::new(),
@@ -3311,7 +3314,7 @@ where
         LocalActorArguments {
             spawn_ownership: SpawnOwnership::Independent,
             startup_refusal: None,
-            behavior,
+            behavior: Box::new(behavior),
             startup_admission: None,
             terminal: terminal.clone(),
             directory,

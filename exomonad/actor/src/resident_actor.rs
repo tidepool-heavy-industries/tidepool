@@ -3161,7 +3161,7 @@ enum OwnedWorkbenchWait {
         allowance: i64,
         operation: Option<WorkbenchOperationId>,
     },
-    Launch(child_launch::PreparedChildLaunch),
+    Launch(Box<child_launch::PreparedChildLaunch>),
     Prepared(
         futures_util::future::BoxFuture<
             'static,
@@ -4890,7 +4890,7 @@ where
         context: &ActorSessionContext,
         effect_owner: CurrentEffectOwner<'_>,
         start: crate::ResidentActorStart,
-    ) -> child_launch::PreparedChildLaunch {
+    ) -> Box<child_launch::PreparedChildLaunch> {
         tracing::info!(target: "exomonad_actor::workbench_phase", parent = %context.actor, label = %start.child.descriptor.display_label(), phase = "child_launch_requested", "actor phase");
         let crate::ResidentActorStart { parent_hole, child } = start;
         let spawn_reply = child.spawn.is_some();
@@ -5062,7 +5062,7 @@ where
             authority.fail(error.to_string());
         }
         let spawn_admission = retained_spawn_admission;
-        child_launch::PreparedChildLaunch {
+        Box::new(child_launch::PreparedChildLaunch {
             continuation: child_launch::ChildLaunchContinuation {
                 context: context.clone(),
                 parent_descriptor: self.descriptor.clone(),
@@ -5075,13 +5075,13 @@ where
                 placement_startup,
             },
             admission,
-        }
+        })
     }
 
     fn apply_child_launch(
         &mut self,
         kernel: &KernelContext,
-        completed: child_launch::CompletedChildLaunch,
+        completed: Box<child_launch::CompletedChildLaunch>,
     ) -> child_launch::ChildLaunchResume {
         child_launch::apply_launch(kernel, &self.descriptor, completed)
     }
