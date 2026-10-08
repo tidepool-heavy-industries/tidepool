@@ -1150,7 +1150,7 @@ impl ArtifactInventory {
     fn retain(
         &self,
         roots: Vec<InventoryNodeKey>,
-        parents: Vec<ArtifactView>,
+        parents: Vec<Arc<ViewLease>>,
         materialization_parents: Vec<
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
@@ -1160,17 +1160,13 @@ impl ArtifactInventory {
             *state.roots.entry(*id).or_default() += 1;
         }
         drop(state);
-        ArtifactView(Arc::new(ViewLease {
+        ArtifactView::new(ViewLease {
             inventory: self.clone(),
             roots,
-            canonical_roots: OnceLock::new(),
-            read_projection: OnceLock::new(),
-            #[cfg(test)]
-            root_parent_visits: AtomicU64::new(0),
             parents,
             materialization_parents,
             materialization: Mutex::new(BTreeMap::new()),
-        }))
+        })
     }
     pub(crate) fn admit(
         &self,
@@ -1276,7 +1272,7 @@ impl ArtifactInventory {
         exact: bool,
         root_intent: ArtifactRootIntent<'_>,
     ) -> Result<ArtifactView, CompileError> {
-        if !Arc::ptr_eq(&self.0, &parent.0.inventory.0) {
+        if !Arc::ptr_eq(&self.0, &parent.lease.inventory.0) {
             return Err(failure("view belongs to another inventory"));
         }
         if entries.is_empty() && groups.is_empty() {
@@ -1377,17 +1373,13 @@ impl ArtifactInventory {
             *state.roots.entry(*key).or_default() += 1;
         }
         drop(state);
-        Ok(ArtifactView(Arc::new(ViewLease {
+        Ok(ArtifactView::new(ViewLease {
             inventory: self.clone(),
             roots,
-            canonical_roots: OnceLock::new(),
-            read_projection: OnceLock::new(),
-            #[cfg(test)]
-            root_parent_visits: AtomicU64::new(0),
-            parents: vec![parent.clone()],
+            parents: vec![Arc::clone(&parent.lease)],
             materialization_parents,
             materialization: Mutex::new(BTreeMap::new()),
-        })))
+        }))
     }
     pub fn metrics(&self) -> ArtifactInventoryMetrics {
         let state = self.0.lock().expect("inventory lock");
@@ -1412,16 +1404,22 @@ impl ArtifactInventory {
 struct ViewLease {
     inventory: ArtifactInventory,
     roots: Vec<InventoryNodeKey>,
-    canonical_roots: OnceLock<Vec<InventoryNodeKey>>,
-    read_projection: OnceLock<ViewReadProjection>,
-    #[cfg(test)]
-    root_parent_visits: AtomicU64,
-    parents: Vec<ArtifactView>,
+    parents: Vec<Arc<ViewLease>>,
     // Projected selection must retain issued files without importing its
     // source view's selection roots or executable authority.
     materialization_parents: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
     materialization:
         Mutex<BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
+}
+
+/// Parent custody retains roots and materializations without retaining derived
+/// read projections. Only explicitly held views keep these caches alive.
+#[derive(Default)]
+struct ViewReadCache {
+    canonical_roots: OnceLock<Vec<InventoryNodeKey>>,
+    read_projection: OnceLock<ViewReadProjection>,
+    #[cfg(test)]
+    root_parent_visits: AtomicU64,
 }
 
 /// Live vertices never change payload or outgoing edges: admission checks reused
@@ -1433,6 +1431,43 @@ struct ViewReadProjection {
     nodes: BTreeSet<InventoryNodeKey>,
     entries: Vec<Arc<ArtifactEntry>>,
     dependencies: OnceLock<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>,
+}
+impl ViewLease {
+    fn collect_materializations(
+        self: &Arc<Self>,
+        materializations: &mut Vec<
+            Arc<crate::declaration_context::RetainedArtifactMaterialization>,
+        >,
+        visited: &mut BTreeSet<usize>,
+    ) {
+        let mut pending = vec![self];
+        while let Some(view) = pending.pop() {
+            if !visited.insert(Arc::as_ptr(view) as usize) {
+                continue;
+            }
+            let retained = view.materialization.lock().expect("materialization lock");
+            if !retained.is_empty() {
+                for materialization in retained.values() {
+                    if !materializations
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, materialization))
+                    {
+                        materializations.push(Arc::clone(materialization));
+                    }
+                }
+            } else {
+                for materialization in &view.materialization_parents {
+                    if !materializations
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, materialization))
+                    {
+                        materializations.push(Arc::clone(materialization));
+                    }
+                }
+                pending.extend(view.parents.iter().rev());
+            }
+        }
+    }
 }
 impl Drop for ViewLease {
     fn drop(&mut self) {
@@ -1546,9 +1581,13 @@ fn projected_dependencies(
     }
     dependencies.into_iter().collect()
 }
-/// Cloning a view retains its roots without copying the graph or artifact bytes.
+/// Clones share custody and the immutable read cache. Descendants retain only
+/// parent custody, so replacing a view releases its unobserved ancestor caches.
 #[derive(Clone)]
-pub struct ArtifactView(Arc<ViewLease>);
+pub struct ArtifactView {
+    lease: Arc<ViewLease>,
+    reads: Arc<ViewReadCache>,
+}
 
 /// One retained closure observed under the inventory lock. Entries are ordered
 /// by exact owner; dependency tuples keep their canonical wire order.
@@ -1601,16 +1640,23 @@ impl ArtifactMetadataSnapshot {
 impl std::fmt::Debug for ArtifactView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ArtifactView")
-            .field("roots", &self.0.roots)
+            .field("roots", &self.lease.roots)
             .finish()
     }
 }
 impl ArtifactView {
+    fn new(lease: ViewLease) -> Self {
+        Self {
+            lease: Arc::new(lease),
+            reads: Arc::new(ViewReadCache::default()),
+        }
+    }
+
     // Closure and dependency initializers receive an already locked inventory. Nothing
     // initialized under either OnceLock acquires that mutex, so concurrent first
     // reads and admission always take inventory -> projection in that order.
     fn read_projection(&self, state: &InventoryState) -> &ViewReadProjection {
-        self.0.read_projection.get_or_init(|| {
+        self.reads.read_projection.get_or_init(|| {
             let nodes = admitted_closure(state, self.roots().iter().copied());
             let mut entries = artifact_ids(&nodes)
                 .iter()
@@ -1654,14 +1700,18 @@ impl ArtifactView {
         >,
     ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
     {
-        let mut retained = self.0.materialization.lock().expect("materialization lock");
+        let mut retained = self
+            .lease
+            .materialization
+            .lock()
+            .expect("materialization lock");
         let key = metadata.materialization_key();
         if let Some(materialization) = retained.get(&key) {
             return Ok(Arc::clone(materialization));
         }
-        let mut parents = self.0.materialization_parents.clone();
+        let mut parents = self.lease.materialization_parents.clone();
         let mut visited = BTreeSet::new();
-        for parent in &self.0.parents {
+        for parent in &self.lease.parents {
             parent.collect_materializations(&mut parents, &mut visited);
         }
         let materialization = Arc::new(prepare(parents)?);
@@ -1676,49 +1726,23 @@ impl ArtifactView {
         >,
         visited: &mut BTreeSet<usize>,
     ) {
-        let mut pending = vec![self];
-        while let Some(view) = pending.pop() {
-            if !visited.insert(Arc::as_ptr(&view.0) as usize) {
-                continue;
-            }
-            let retained = view.0.materialization.lock().expect("materialization lock");
-            if !retained.is_empty() {
-                for materialization in retained.values() {
-                    if !materializations
-                        .iter()
-                        .any(|existing| Arc::ptr_eq(existing, materialization))
-                    {
-                        materializations.push(Arc::clone(materialization));
-                    }
-                }
-            } else {
-                for materialization in &view.0.materialization_parents {
-                    if !materializations
-                        .iter()
-                        .any(|existing| Arc::ptr_eq(existing, materialization))
-                    {
-                        materializations.push(Arc::clone(materialization));
-                    }
-                }
-                pending.extend(view.0.parents.iter().rev());
-            }
-        }
+        self.lease
+            .collect_materializations(materializations, visited);
     }
 
     pub(crate) fn retained_materialization(
         &self,
         metadata: &ArtifactMetadataSnapshot,
     ) -> Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
-        self.0
+        self.lease
             .materialization
             .lock()
             .expect("materialization lock")
             .get(&metadata.materialization_key())
             .cloned()
     }
-
     pub(crate) fn metadata_snapshot(&self) -> ArtifactMetadataSnapshot {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
         let projection = self.read_projection(&state);
         let selected_native_groups = native_groups(&projection.nodes);
@@ -1764,7 +1788,7 @@ impl ArtifactView {
         self.roots().is_empty()
     }
     pub fn inventory(&self) -> &ArtifactInventory {
-        &self.0.inventory
+        &self.lease.inventory
     }
     pub fn artifact_ids(&self) -> Vec<ArtifactId> {
         self.entries().iter().map(|e| e.descriptor.id).collect()
@@ -1790,11 +1814,11 @@ impl ArtifactView {
             .collect()
     }
     pub fn dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         self.read_dependencies(&state).clone()
     }
     pub fn selected_native_groups(&self) -> BTreeSet<NativeGroupKey> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         native_groups(&self.read_projection(&state).nodes)
     }
     /// Interface dependencies remain independent of executable group demand.
@@ -1821,7 +1845,7 @@ impl ArtifactView {
         &self,
         accepted_owners: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<Vec<NativeBindingRequirement>, CompileError> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
         let ids = artifact_ids(owned);
         let entries = ids
@@ -1890,7 +1914,7 @@ impl ArtifactView {
         &self,
         roots: &[NativeRequirementRoot],
     ) -> Result<NativeRequirements, CompileError> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
         let mut pending = Vec::new();
         for root in roots {
@@ -1993,21 +2017,18 @@ impl ArtifactView {
     }
 
     fn roots(&self) -> &[InventoryNodeKey] {
-        self.0.canonical_roots.get_or_init(|| {
-            let mut pending = vec![self];
+        self.reads.canonical_roots.get_or_init(|| {
+            let mut pending = vec![&self.lease];
             let mut roots = BTreeSet::new();
             let mut seen = BTreeSet::new();
-            while let Some(view) = pending.pop() {
-                if seen.insert(Arc::as_ptr(&view.0)) {
+            while let Some(lease) = pending.pop() {
+                if seen.insert(Arc::as_ptr(lease)) {
                     #[cfg(test)]
-                    self.0.root_parent_visits.fetch_add(1, Ordering::Relaxed);
-                    // A warm ancestor already represents all of its parents.
-                    if let Some(canonical) = view.0.canonical_roots.get() {
-                        roots.extend(canonical.iter().copied());
-                    } else {
-                        roots.extend(view.0.roots.iter().copied());
-                        pending.extend(view.0.parents.iter());
-                    }
+                    self.reads
+                        .root_parent_visits
+                        .fetch_add(1, Ordering::Relaxed);
+                    roots.extend(lease.roots.iter().copied());
+                    pending.extend(lease.parents.iter());
                 }
             }
             roots.into_iter().collect()
@@ -2016,7 +2037,7 @@ impl ArtifactView {
     /// Retain exactly these reachable artifact roots, independently of the
     /// source view's lifetime. Hidden dependencies remain graph-owned.
     pub fn select_roots(&self, roots: Vec<ArtifactId>) -> Result<Self, CompileError> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
         if roots
             .iter()
@@ -2036,19 +2057,19 @@ impl ArtifactView {
             self.collect_materializations(&mut materializations, &mut BTreeSet::new());
         }
         Ok(self
-            .0
+            .lease
             .inventory
             .retain(selected, Vec::new(), materializations))
     }
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
-        if Arc::ptr_eq(&self.0, &other.0) || other.is_empty() {
+        if Arc::ptr_eq(&self.lease, &other.lease) || other.is_empty() {
             return Ok(self.clone());
         }
         if self.is_empty() {
             return Ok(other.clone());
         }
-        if Arc::ptr_eq(&self.0.inventory.0, &other.0.inventory.0) {
-            let state = self.0.inventory.0.lock().expect("inventory lock");
+        if Arc::ptr_eq(&self.lease.inventory.0, &other.lease.inventory.0) {
+            let state = self.lease.inventory.0.lock().expect("inventory lock");
             let parent_nodes = &self.read_projection(&state).nodes;
             let parent_ids = artifact_ids(parent_nodes);
             let mut nodes = parent_nodes.clone();
@@ -2067,19 +2088,15 @@ impl ArtifactView {
                 &native_groups(&nodes),
             )?;
             drop(state);
-            Ok(ArtifactView(Arc::new(ViewLease {
-                inventory: self.0.inventory.clone(),
+            Ok(ArtifactView::new(ViewLease {
+                inventory: self.lease.inventory.clone(),
                 roots: Vec::new(),
-                canonical_roots: OnceLock::new(),
-                read_projection: OnceLock::new(),
-                #[cfg(test)]
-                root_parent_visits: AtomicU64::new(0),
-                parents: vec![self.clone(), other.clone()],
+                parents: vec![Arc::clone(&self.lease), Arc::clone(&other.lease)],
                 materialization_parents: Vec::new(),
                 materialization: Mutex::new(BTreeMap::new()),
-            })))
+            }))
         } else {
-            self.0.inventory.admit_selected(
+            self.lease.inventory.admit_selected(
                 self,
                 other.entries(),
                 other.selected_native_groups(),
@@ -2089,7 +2106,7 @@ impl ArtifactView {
         }
     }
     pub(crate) fn entries(&self) -> Vec<Arc<ArtifactEntry>> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
         let entries = self.read_projection(&state).entries.clone();
         state
@@ -2099,7 +2116,7 @@ impl ArtifactView {
     }
     /// Explicitly retained roots, excluding their hidden dependency closure.
     pub(crate) fn root_entries(&self) -> Vec<Arc<ArtifactEntry>> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
         let entries = self
             .roots()
@@ -2120,7 +2137,7 @@ impl ArtifactView {
         &self,
         owners: impl Iterator<Item = ExactModuleIdentity>,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
         let mut interfaces = BTreeMap::new();
         let mut native = BTreeMap::<ExactModuleIdentity, Vec<ArtifactId>>::new();
@@ -2160,7 +2177,7 @@ impl ArtifactView {
         &self,
         owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         let projection = self.read_projection(&state);
         let selected = projection
             .entries
@@ -2184,7 +2201,7 @@ impl ArtifactView {
     }
 
     pub(crate) fn interface_owners(&self) -> Vec<ExactInterfaceOwner> {
-        let state = self.0.inventory.0.lock().expect("inventory lock");
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
         self.read_projection(&state)
             .entries
@@ -2199,7 +2216,7 @@ impl ArtifactView {
 }
 impl PartialEq for ArtifactView {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.lease, &other.lease)
             || (self.entries() == other.entries()
                 && self.selected_native_groups() == other.selected_native_groups())
     }
@@ -3183,7 +3200,7 @@ mod tests {
         // Exercise the owning admission guard against a corrupted reused graph.
         let mut state = inventory.0.lock().unwrap();
         let source = state.indices[&InventoryNodeKey::Artifact(consumer.descriptor.id)];
-        let target = state.indices[&unrelated.0.roots[0]];
+        let target = state.indices[&unrelated.lease.roots[0]];
         state
             .graph
             .add_edge(source, target, ArtifactDependency::Interface);
@@ -3373,7 +3390,7 @@ mod tests {
             .unwrap();
         let before = inventory.metrics();
         let unchanged = inventory.admit(&view, Vec::new()).unwrap();
-        assert!(Arc::ptr_eq(&view.0, &unchanged.0));
+        assert!(Arc::ptr_eq(&view.lease, &unchanged.lease));
         let merged = view.merge(&unchanged).unwrap();
         drop(merged);
         drop(unchanged);
