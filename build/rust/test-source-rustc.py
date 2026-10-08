@@ -36,8 +36,8 @@ def option_values(arguments, option):
             values.append(arguments[index])
         elif argument.startswith(option + "="):
             values.append(argument[len(option) + 1:])
-        elif option == "-C" and argument.startswith("-C"):
-            values.append(argument[2:])
+        elif option in ("-C", "-o") and argument.startswith(option):
+            values.append(argument[len(option):])
         index += 1
     return values
 
@@ -165,16 +165,22 @@ def compile_test(rustc, arguments, environment):
         ))
         depfile = retained_depfile
     elif depfile is None:
-        # Bind the existing bare dep-info output explicitly to its original
-        # rustc default filename. Other requested emission modes stay intact.
-        crates = option_values(expanded, "--crate-name")
-        if not crates:
-            raise ValueError("bare dep-info emission requires a declared crate name")
-        extra = ""
-        for value in option_values(expanded, "-C"):
-            if value.startswith("extra-filename="):
-                extra = value.partition("=")[2]
-        depfile = output / (crates[-1] + extra + ".d")
+        # Retain the compiler's existing output selection without rewriting
+        # response arguments or changing where the action expects dep-info.
+        explicit_output = option_values(expanded, "-o")
+        if explicit_output:
+            depfile = Path(explicit_output[-1])
+            if len(modes) > 1:
+                depfile = depfile.with_suffix(".d")
+        else:
+            crates = option_values(expanded, "--crate-name")
+            if not crates:
+                raise ValueError("bare dep-info emission requires a declared crate name")
+            extra = ""
+            for value in option_values(expanded, "-C"):
+                if value.startswith("extra-filename="):
+                    extra = value.partition("=")[2]
+            depfile = output / (crates[-1] + extra + ".d")
     output.mkdir(parents=True, exist_ok=True)
     status = subprocess.call([rustc, *compiler_arguments])
     if status:

@@ -147,6 +147,19 @@ class CompilerActionTests(unittest.TestCase):
         self.assertEqual((self.extras / "test-source-participation.d").read_bytes(),
                          original.read_bytes())
 
+    def test_bare_dep_info_preserves_explicit_output_selection(self):
+        original = self.root / "already declared.d"
+        arguments = ["--test", "--crate-name=component", "--out-dir=" + str(self.extras),
+                     "--emit=dep-info", "-o", str(original)]
+        dependencies = " ".join(str(self.projection / path).replace(" ", "\\ ")
+                                for path in self.dependencies)
+        original.write_text("artifact: " + dependencies + "\n")
+        with patch.object(wrapper.subprocess, "call", return_value=0) as compiler:
+            self.assertEqual(wrapper.compile_test("/pinned/rustc", arguments, self.environment), 0)
+        compiler.assert_called_once_with(["/pinned/rustc", *arguments])
+        self.assertEqual((self.extras / "test-source-participation.d").read_bytes(),
+                         original.read_bytes())
+
     def test_non_test_and_unowned_compilations_forward_untouched(self):
         with patch.object(wrapper.subprocess, "call", return_value=0) as compiler:
             wrapper.compile_test("/pinned/rustc", ["--version"], self.environment)
