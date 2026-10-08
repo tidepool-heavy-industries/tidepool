@@ -62,6 +62,13 @@ impl crate::CellModelBinding for ModelOwner {
 }
 
 fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp::CapturedOutput> {
+    execution_with_id(model, [17; 16])
+}
+
+fn execution_with_id(
+    model: Arc<ModelOwner>,
+    digest: [u8; 16],
+) -> OwnedExecution<frunk::HNil, tidepool_mcp::CapturedOutput> {
     let descriptor = crate::ActorDescriptor::new(
         "model ownership",
         crate::ActorPlacement {
@@ -83,13 +90,16 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
         "model test execution abandoned".into(),
         resources.clone(),
     );
+    let request = WorkbenchRequest::from_cell_input("pure ()")
+        .with_execution_id(WorkbenchExecutionId::from_digest(digest));
     let reservation_owner = RequestReservationOwner::Workbench {
-        execution: WorkbenchExecutionId::from_digest([17; 16]),
+        execution: request.execution_id().unwrap().clone(),
         attempt: crate::request::WorkbenchReservationAttempt::fresh(),
     };
     let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
     OwnedExecution {
         state: Box::new(WorkbenchExecutionState {
+            cell_span: cell_execution_span(&context, &request),
             effects: WorkbenchEffectState {
                 display_receipt_owner: None,
                 park_effects: true,
@@ -106,7 +116,7 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
                 after_tool_active: false,
                 terminal_transfer: None,
             },
-            request: WorkbenchRequest::from_cell_input("pure ()"),
+            request,
             replay_request: None,
             invocation: None,
             cursor: WorkbenchCursor::default(),
@@ -118,6 +128,93 @@ fn execution(model: Arc<ModelOwner>) -> OwnedExecution<frunk::HNil, tidepool_mcp
         resources,
         observation: Default::default(),
         retirement: crate::RetainedActorExit::new(),
+    }
+}
+
+/// The first owned step prepares cells before `execute_workbench` is called.
+/// Exercise that scheduling boundary with overlapping futures and the real
+/// blocking helper; a compiler probe inside the serial execution wrapper would
+/// miss a dropped preparation ancestor.
+#[tokio::test(flavor = "current_thread")]
+async fn owned_preparation_keeps_execution_ancestry_across_yields_and_blocking() {
+    use crate::resident_actor::tests::CapturedWriter;
+
+    let trace = CapturedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_ansi(false)
+        .with_writer(trace.clone())
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let first = execution_with_id(Arc::new(ModelOwner::default()), [17; 16]);
+    let second = execution_with_id(Arc::new(ModelOwner::default()), [18; 16]);
+    let expected = [
+        first.state.request.execution_id().unwrap().to_string(),
+        second.state.request.execution_id().unwrap().to_string(),
+    ];
+    type Behavior = ResidentKernelBehavior<frunk::HNil, tidepool_mcp::CapturedOutput>;
+    let step = |owned, probe: u64| {
+        Behavior::run_owned_step(
+            owned,
+            move |_owned| {
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    tracing::info!(probe, boundary = "preparation", "trace probe");
+                    async move {
+                        tokio::task::yield_now().await;
+                        tidepool_runtime::spawn_blocking_in_span(move || {
+                            let request =
+                                tracing::info_span!("compile_request", compile_request = probe,);
+                            request.in_scope(|| {
+                                tracing::info!(probe, boundary = "blocking", "trace probe");
+                            });
+                        })
+                        .await
+                        .unwrap();
+                    }
+                    .instrument(tracing::info_span!("cell_prepare"))
+                    .await;
+                })
+            },
+            |_behavior, _kernel, _owned, ()| {
+                unreachable!("this test observes the owned step before actor application")
+            },
+        )
+    };
+    let (first, second) = tokio::join!(step(first, 0), step(second, 1));
+    drop((first, second));
+
+    let lines: Vec<serde_json::Value> = String::from_utf8(trace.0.lock().unwrap().clone())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (probe, execution) in expected.iter().enumerate() {
+        for boundary in ["preparation", "blocking"] {
+            let event = lines
+                .iter()
+                .find(|event| {
+                    event["fields"]["probe"] == probe && event["fields"]["boundary"] == boundary
+                })
+                .expect("each owned step reaches both tracing boundaries");
+            let spans = event["spans"].as_array().unwrap();
+            let cell = spans
+                .iter()
+                .find(|span| span["name"] == "cell")
+                .expect("initial preparation retains its admitted cell ancestor");
+            assert_eq!(cell["execution"], execution.as_str());
+            assert_eq!(cell["actor"], "9@1");
+            if boundary == "blocking" {
+                assert!(spans.iter().any(|span| span["name"] == "cell_prepare"));
+                let request = spans
+                    .iter()
+                    .find(|span| span["name"] == "compile_request")
+                    .expect("blocking compiler request retains the full ancestor chain");
+                assert_eq!(request["compile_request"], probe);
+            }
+        }
     }
 }
 

@@ -116,7 +116,7 @@ where
                         .as_ref()
                         .expect("reload cancellation owner")
                         .publication_decision();
-                    tokio::task::spawn_blocking(move || {
+                    tidepool_runtime::spawn_blocking_in_span(move || {
                         prepare_helpers(layers, actor, checked, receipt, &publication)
                     })
                     .await
@@ -218,7 +218,7 @@ where
                     {
                         return Ok(Err(crate::SourceLayerReload::Cancelled));
                     }
-                    tokio::task::spawn_blocking(move || {
+                    tidepool_runtime::spawn_blocking_in_span(move || {
                         let layers = layers.ok_or_else(|| {
                             crate::SourceLayerReload::Unavailable(
                                 "this host installs no source layers".into(),

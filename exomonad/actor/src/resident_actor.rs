@@ -2823,6 +2823,7 @@ pub struct ResidentKernelBehavior<H, O> {
 /// One admitted call owns its authority and cursor until final settlement.
 /// The actor prepares each fenced step; private execution state is never cloned.
 struct WorkbenchExecutionState {
+    cell_span: tracing::Span,
     effects: WorkbenchEffectState,
     request: WorkbenchRequest,
     replay_request: Option<WorkbenchRequest>,
@@ -2830,25 +2831,15 @@ struct WorkbenchExecutionState {
     cursor: WorkbenchCursor,
 }
 
-/// Keep the cell span attached to the future, so every poll and nested
-/// compile after an await retains the execution identity.
-fn instrument_cell_execution<F>(
-    actor: String,
-    execution: String,
-    tool: String,
-    items: usize,
-    future: F,
-) -> tracing::instrument::Instrumented<F>
-where
-    F: std::future::Future,
-{
-    future.instrument(tracing::info_span!(
+/// Admission owns the cell span; preparation and every resumed step retain it.
+fn cell_execution_span(context: &ActorSessionContext, request: &WorkbenchRequest) -> tracing::Span {
+    tracing::info_span!(
         "cell",
-        actor = %actor,
-        execution = %execution,
-        tool = %tool,
-        items,
-    ))
+        actor = %context.actor,
+        execution = request.execution_id().map(|id| id.as_str()),
+        tool = request.tool_call().map(|call| call.name.as_str()),
+        items = request.items.len(),
+    )
 }
 
 fn install_cell_preparation(
@@ -9437,16 +9428,7 @@ where
         admitted_workbench: Option<&'a crate::ResidentActorWorkbench<H, O>>,
     ) -> futures_util::future::BoxFuture<'a, Result<WorkbenchRunAdvance, WorkbenchExecutionFailure>>
     {
-        let actor = execution_state.effects.context.actor.to_string();
-        let execution = execution_state
-            .request
-            .execution_id()
-            .map_or_else(String::new, |id| id.as_str().to_owned());
-        let tool = execution_state
-            .request
-            .tool_call()
-            .map_or_else(String::new, |call| call.name.clone());
-        let items = execution_state.request.items.len();
+        let cell_span = execution_state.cell_span.clone();
         let future = async move {
             let WorkbenchExecutionState {
                 effects,
@@ -10372,9 +10354,7 @@ where
                 ),
             )))
         };
-        Box::pin(instrument_cell_execution(
-            actor, execution, tool, items, future,
-        ))
+        Box::pin(future.instrument(cell_span))
     }
 
     fn begin_workbench_finalization(
@@ -11896,6 +11876,7 @@ where
                 control.bind_receipt_owner(owner.clone());
             }
             let mut execution_state = WorkbenchExecutionState {
+                cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
                     display_receipt_owner,
                     park_effects: false,
@@ -14621,9 +14602,9 @@ async fn tracked_stopped_projection(
 mod tests {
     use super::{
         checkpoint_capture_delivered, disposition_for_non_command_failure,
-        failed_checkpoint_cleanup_response, instrument_cell_execution, lookup_response,
-        settlement_refusal, workbench_failure_after_operations, workbench_failure_after_unit,
-        workbench_response, ChildExitObservations,
+        failed_checkpoint_cleanup_response, lookup_response, settlement_refusal,
+        workbench_failure_after_operations, workbench_failure_after_unit, workbench_response,
+        ChildExitObservations,
     };
 
     #[test]
@@ -14955,9 +14936,9 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    pub(super) struct CapturedWriter(pub(super) std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
-    struct CapturedGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    pub(super) struct CapturedGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl std::io::Write for CapturedGuard {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -15175,58 +15156,6 @@ mod tests {
         assert_eq!(effect["fields"]["ordinal"], 0);
         assert_eq!(effect["fields"]["effect"], "commandRun");
         assert_eq!(effect["fields"]["disposition"], "Committed");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn cell_execution_span_follows_concurrent_futures_across_yields() {
-        let trace = CapturedWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .json()
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_ansi(false)
-            .with_writer(trace.clone())
-            .finish();
-        let _subscriber = tracing::subscriber::set_default(subscriber);
-        let first = instrument_cell_execution(
-            "actor-one".into(),
-            "execution-one".into(),
-            "lookup".into(),
-            1,
-            async {
-                tokio::task::yield_now().await;
-                tracing::info!(probe = "first", "compiler request identified");
-            },
-        );
-        let second = instrument_cell_execution(
-            "actor-two".into(),
-            "execution-two".into(),
-            "lookup".into(),
-            1,
-            async {
-                tokio::task::yield_now().await;
-                tracing::info!(probe = "second", "compiler request identified");
-            },
-        );
-
-        tokio::join!(first, second);
-
-        let lines: Vec<serde_json::Value> = String::from_utf8(trace.0.lock().unwrap().clone())
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        for (probe, execution) in [("first", "execution-one"), ("second", "execution-two")] {
-            let event = lines
-                .iter()
-                .find(|line| line["fields"]["probe"] == probe)
-                .expect("post-yield event recorded");
-            let cell = event["spans"]
-                .as_array()
-                .and_then(|spans| spans.iter().find(|span| span["name"] == "cell"))
-                .expect("cell span remains an ancestor while the future is polled");
-            assert_eq!(cell["execution"], execution);
-        }
     }
 
     #[test]

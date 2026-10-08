@@ -712,7 +712,7 @@ where
     /// A typed task owns only this admitted execution. The scheduler fences its
     /// result before this synchronous application can touch actor-owned state.
     fn owned_step_task<T, Run, Apply>(
-        mut owned: OwnedExecution<H, O>,
+        owned: OwnedExecution<H, O>,
         run: Run,
         apply: Apply,
     ) -> OwnedWorkbenchTask<Self>
@@ -741,7 +741,30 @@ where
                 std::mem::size_of::<OwnedExecution<H, O>>(),
             );
         }
-        OwnedWorkbenchTask::new(Box::pin(async move {
+        OwnedWorkbenchTask::new(Box::pin(Self::run_owned_step(owned, run, apply)))
+    }
+
+    async fn run_owned_step<T, Run, Apply>(
+        mut owned: OwnedExecution<H, O>,
+        run: Run,
+        apply: Apply,
+    ) -> OwnedWorkbenchCompletion<Self>
+    where
+        T: Send + 'static,
+        Run: for<'a> FnOnce(&'a mut OwnedExecution<H, O>) -> futures_util::future::BoxFuture<'a, T>
+            + Send
+            + 'static,
+        Apply: FnOnce(
+                &mut Self,
+                &KernelContext,
+                OwnedExecution<H, O>,
+                T,
+            ) -> Result<WorkbenchAdvance<Self>, KernelInvocationFailure>
+            + Send
+            + 'static,
+    {
+        let cell_span = owned.state.cell_span.clone();
+        async move {
             let (timing, cleanup) = owned.scopes();
             let deadline = owned
                 .state
@@ -815,20 +838,25 @@ where
                 join_execution_step(running, control.clone(), retirement, model.clone()).await
             };
             OwnedWorkbenchCompletion::advance(move |behavior: &mut Self, kernel| {
+                let cell_span = owned.state.cell_span.clone();
                 let (timing, cleanup) = owned.scopes();
-                timing.sync_scope(|| {
-                    cleanup.sync_scope(|| match completed {
-                        Some(completed) => apply(behavior, kernel, owned, completed),
-                        None => {
-                            owned.expire_after_tool();
-                            Ok(WorkbenchAdvance::Park(
-                                behavior.finish_owned_after_tool_task(owned, kernel.clone()),
-                            ))
-                        }
+                cell_span.in_scope(|| {
+                    timing.sync_scope(|| {
+                        cleanup.sync_scope(|| match completed {
+                            Some(completed) => apply(behavior, kernel, owned, completed),
+                            None => {
+                                owned.expire_after_tool();
+                                Ok(WorkbenchAdvance::Park(
+                                    behavior.finish_owned_after_tool_task(owned, kernel.clone()),
+                                ))
+                            }
+                        })
                     })
                 })
             })
-        }))
+        }
+        .instrument(cell_span)
+        .await
     }
 
     pub(super) fn dispatch_owned_workbench(
@@ -974,6 +1002,7 @@ where
             observation: self.runtime_observation.clone(),
             retirement: kernel.retained_exit(),
             state: Box::new(WorkbenchExecutionState {
+                cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
                     display_receipt_owner,
                     park_effects: true,
