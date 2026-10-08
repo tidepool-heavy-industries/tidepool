@@ -6,6 +6,7 @@ records into zero latency or a claim that no queueing/compilation occurred.
 """
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 from pathlib import Path
@@ -16,6 +17,14 @@ EXPECTED_PHASES = (
     "first-arithmetic", "publish-retained", "lookup-retained", "reuse-retained",
     "repeat-retained", "async-yield-result", "reuse-async-action", "repeat-arithmetic",
 )
+THREE_ACTOR_PHASES = (
+    "activation", "root-setup", "root-fork-capture", "async-yield", "child-alpha-reply",
+    "child-beta-reply", "parent-publication-read", "explicit-child-cleanup",
+    "host-cleanup",
+)
+KNOWN_ROSTERS = {"harness-eight-phase": EXPECTED_PHASES,
+                 "three-actor-capture": THREE_ACTOR_PHASES}
+STARTUP_OWNER_SPANS = {"compile_root", "workspace_toolsets_prepare"}
 
 
 def read_json(path):
@@ -23,8 +32,19 @@ def read_json(path):
         return json.load(stream)
 
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def read_jsonl(path):
-    rows = []
+    return list(iter_jsonl(path))
+
+
+def iter_jsonl(path):
     with path.open() as stream:
         for line_number, line in enumerate(stream, 1):
             try:
@@ -33,8 +53,7 @@ def read_jsonl(path):
                 raise ValueError(f"{path}:{line_number}: invalid JSON: {error}") from error
             if not isinstance(row, dict):
                 raise ValueError(f"{path}:{line_number}: expected a JSON object")
-            rows.append(row)
-    return rows
+            yield row
 
 
 def phase_rows(path):
@@ -133,17 +152,30 @@ def compiler_events(host_rows, daemon_rows):
                 calls.setdefault(str(execution), []).append(fields(row))
 
     submissions = []
-    for row in host_rows:
+    for event_index, row in enumerate(host_rows):
         if (row.get("target") != "tidepool_extract_cmd::endpoint"
                 or fields(row).get("message") != "compiler request identified"):
             continue
         identity = request_identity(row)
         executions = {str(span.get("execution")) for span in span_fields(row)
                       if span.get("name") == "cell" and span.get("execution") is not None}
-        submissions.append({"identity": identity, "executions": sorted(executions)})
+        owners = {
+            str(owner)
+            for span in span_fields(row)
+            for owner in (span.get("workload_phase"),)
+            if isinstance(owner, str) and owner
+        }
+        direct_owner = attr(row, "workload_phase")
+        if isinstance(direct_owner, str) and direct_owner:
+            owners.add(direct_owner)
+        startup_owners = sorted({str(span.get("name")) for span in span_fields(row)
+                                 if span.get("name") in STARTUP_OWNER_SPANS})
+        submissions.append({"event_index": event_index, "identity": identity, "executions": sorted(executions),
+                            "phase_owners": sorted(owners), "startup_owner_spans": startup_owners})
 
     services = []
     queues = {}
+    unidentified_queue_events = 0
     for row in daemon_rows:
         event_fields = fields(row)
         phase = event_fields.get("phase")
@@ -157,6 +189,7 @@ def compiler_events(host_rows, daemon_rows):
         elif phase == "compiler_queue":
             identity = admission_identity(row)
             if identity is None:
+                unidentified_queue_events += 1
                 continue
             entry = queues.setdefault(identity, {"queue_ms": [], "messages": []})
             value = integer(event_fields.get("queue_ms"))
@@ -164,7 +197,69 @@ def compiler_events(host_rows, daemon_rows):
                 entry["queue_ms"].append(value)
             if event_fields.get("message"):
                 entry["messages"].append(event_fields["message"])
-    return dispatches, calls, submissions, services, queues
+    return dispatches, calls, submissions, services, queues, unidentified_queue_events
+
+
+def runtime_cost_events(host_rows, phases):
+    phase_by_call = {}
+    for phase in phases:
+        call_id = phase.get("call_id")
+        if isinstance(call_id, str):
+            phase_by_call.setdefault(call_id, set()).add(phase["phase"])
+    events = []
+    for index, row in enumerate(host_rows):
+        if not str(row.get("target", "")).startswith("harness::runtime_cost"):
+            continue
+        call_ids = {str(value) for value in [fields(row).get("call_id"),
+                                             *(span.get("call_id") for span in span_fields(row))]
+                    if isinstance(value, str) and value}
+        explicit_phases = {str(value) for value in [fields(row).get("workload_phase"),
+                                                    *(span.get("workload_phase")
+                                                      for span in span_fields(row))]
+                           if isinstance(value, str) and value}
+        candidates = explicit_phases or set().union(*(phase_by_call.get(call_id, set())
+                                                       for call_id in call_ids))
+        events.append({
+            "event_index": index,
+            "target": row.get("target"),
+            "level": row.get("level"),
+            "fields": fields(row),
+            "span": row.get("span"),
+            "spans": row.get("spans"),
+            "call_id": next(iter(call_ids)) if len(call_ids) == 1 else None,
+            "call_ids": sorted(call_ids),
+            "phase_attribution": next(iter(candidates)) if len(candidates) == 1 else
+                                 "unknown" if not candidates else "ambiguous",
+        })
+    return events
+
+
+def runtime_cost_coverage(events):
+    names = set()
+    messages = set()
+    for event in events:
+        fields_value = event.get("fields") or {}
+        message = fields_value.get("message")
+        if isinstance(message, str):
+            messages.add(message)
+        spans = [event.get("span"), *(event.get("spans") or [])]
+        names.update(span["name"] for span in spans
+                     if isinstance(span, dict) and isinstance(span.get("name"), str))
+    store_spans = {"load_history_window", "read_model_history_window", "context_request_state",
+                   "projected_history_transaction", "lineage_query_and_decode",
+                   "portable_history_projection", "append_items_inner", "append_items_transaction",
+                   "seal_replay_request_with_hashes"}
+    return {
+        "observed_span_names": sorted(names),
+        "observed_event_messages": sorted(messages),
+        "host_admission_status": "events_observed" if "claim_operation" in names else "not_observed_unknown",
+        "store_projection_status": "events_observed" if names.intersection(store_spans)
+                                   else "not_observed_unknown",
+        "successor_preparation_status": "events_observed" if "successor request prepared" in messages
+                                       else "not_observed_unknown",
+        "output_acknowledgement_status": "events_observed" if "acknowledge_output" in names
+                                         else "not_observed_unknown",
+    }
 
 
 def analyze(record_path):
@@ -206,8 +301,23 @@ def analyze(record_path):
     if not daemon_path.is_file():
         raise ValueError(f"environment compiler_trace does not exist: {daemon_path}")
     host_rows = read_jsonl(host_path)
-    daemon_rows = read_jsonl(daemon_path)
-    dispatches, calls, submissions, services, queues = compiler_events(host_rows, daemon_rows)
+    daemon_rows = iter_jsonl(daemon_path)
+    dispatches, calls, submissions, services, queues, unidentified_queue_events = compiler_events(
+        host_rows, daemon_rows)
+    cost_events = runtime_cost_events(host_rows, phases)
+
+    cohort_name = environment.get("workload_cohort")
+    roster = environment.get("workload_roster")
+    if roster is None and record.get("test", "").endswith(
+            "harness_usecase_performance::production_harness_notebook_usecase_phases"):
+        cohort_name, roster = "harness-eight-phase", list(EXPECTED_PHASES)
+    if not isinstance(roster, list) or not roster or any(not isinstance(name, str) for name in roster):
+        raise ValueError("environment phase must declare a nonempty workload_roster")
+    if len(roster) != len(set(roster)):
+        raise ValueError("workload_roster contains duplicate phase names")
+    expected_roster = KNOWN_ROSTERS.get(cohort_name)
+    if expected_roster is not None and tuple(roster) != expected_roster:
+        raise ValueError(f"workload roster does not match declared cohort {cohort_name}")
 
     by_execution = {}
     for request in submissions:
@@ -229,18 +339,23 @@ def analyze(record_path):
         phase_submissions = []
         for execution_id in execution_ids:
             phase_submissions.extend(by_execution.get(execution_id, []))
+        phase_submissions.extend(request for request in submissions
+                                 if request["phase_owners"] == [phase["phase"]])
+        phase_submissions = list({request["event_index"]: request
+                                  for request in phase_submissions}.values())
         identities = sorted({request["identity"] for request in phase_submissions
                               if request["identity"] is not None})
         digest_set = {identity[3] for identity in identities}
         service_rows = []
         for identity in identities:
             matched = services_by_identity.get(identity, [])
-            timed_record = (len(matched) == 1 and matched[0]["elapsed_ms"] is not None)
+            timed_record = (len(matched) == 1 and matched[0]["elapsed_ms"] is not None
+                            and matched[0]["exit_code"] == 0)
             service_rows.append({
                 "daemon_epoch": identity[0], "admission_id": identity[1],
                 "request_ordinal": identity[2], "compile_request": identity[3],
                 "service_records": matched,
-                "service_attribution": "one_timed_record" if timed_record else
+                "service_attribution": "one_timed_success" if timed_record else
                                        "missing" if not matched else
                                        "incomplete_record" if len(matched) == 1 else "ambiguous",
             })
@@ -248,28 +363,36 @@ def analyze(record_path):
         call_timing = [item for execution_id in execution_ids for item in calls.get(execution_id, [])]
         source = phase.get("source")
         source_digest = hashlib.sha256(source.encode()).hexdigest() if isinstance(source, str) else None
+        phase_costs = [event for event in cost_events if event["phase_attribution"] == phase["phase"]]
+        cost_coverage = runtime_cost_coverage(phase_costs)
         phase_queue_ids = sorted({(identity[0], identity[1]) for identity in identities})
-        matched_services = sum(row["service_attribution"] == "one_timed_record" for row in service_rows)
+        matched_services = sum(row["service_attribution"] == "one_timed_success" for row in service_rows)
         missing_services = sum(row["service_attribution"] == "missing" for row in service_rows)
         incomplete_services = sum(row["service_attribution"] == "incomplete_record" for row in service_rows)
         ambiguous_services = sum(row["service_attribution"] == "ambiguous" for row in service_rows)
         missing_identities = sum(request["identity"] is None for request in phase_submissions)
-        unattributed_events = sum(not request["executions"] for request in submissions)
-        capture_complete = execution.get("diagnostic_evidence_complete") is True
+        unattributed_events = sum(not request["executions"] and not request["phase_owners"]
+                                  and not request["startup_owner_spans"]
+                                  for request in submissions)
+        identity_counts = Counter(request["identity"] for request in phase_submissions
+                                  if request["identity"] is not None)
+        duplicate_identities = sum(count > 1 for count in identity_counts.values())
         if not phase_submissions and logical == 0 and unattributed_events == 0:
             attribution = "zero_logical_requests_no_correlated_submission_observed"
         elif (logical is not None and logical == len(phase_submissions)
-              and not missing_identities and len(execution_ids) == 1
-              and len(identities) == len(phase_submissions)
+              and not missing_identities and (len(execution_ids) == 1 or
+                                               all(request["phase_owners"] == [phase["phase"]]
+                                                   for request in phase_submissions))
+              and len(identities) == len(phase_submissions) and duplicate_identities == 0
               and matched_services == len(identities)
-              and not missing_services and not incomplete_services and not ambiguous_services
-              and capture_complete):
+              and not missing_services and not incomplete_services and not ambiguous_services):
             attribution = "complete"
         elif phase_submissions or logical or unattributed_events:
             attribution = "partial"
         else:
             attribution = "unknown"
         output_phases.append({
+            "phase_record": phase,
             "phase": phase["phase"], "sequence": phase.get("sequence"), "call_id": call_id,
             "completed": phase.get("completed") is True,
             "invocation_execution": phase.get("invocation_execution"),
@@ -280,6 +403,7 @@ def analyze(record_path):
             "host_submission_event_count": len(phase_submissions),
             "host_submission_identity_count": len(identities),
             "host_submission_events_missing_identity": missing_identities,
+            "host_submission_duplicate_identity_count": duplicate_identities,
             "daemon_service_matched_count": matched_services,
             "daemon_service_missing_count": missing_services,
             "daemon_service_incomplete_count": incomplete_services,
@@ -289,7 +413,9 @@ def analyze(record_path):
             "dispatch_attribution": "one" if len(execution_ids) == 1 else
                                     "missing" if not execution_ids else "ambiguous",
             "call_timing_records": call_timing,
-            "host_admission_status": "not_separately_instrumented",
+            "harness_runtime_cost_events": phase_costs,
+            "harness_runtime_cost_coverage": cost_coverage,
+            "host_admission_status": cost_coverage["host_admission_status"],
             "client_compiler_submissions": service_rows,
             "compiler_attribution": attribution,
             "source_sha256": source_digest,
@@ -306,33 +432,34 @@ def analyze(record_path):
             "provider_model_latency_ms": None,
             "provider_model_latency_status": "not_measured_scripted_provider",
             "store_projection_ms": None,
-            "store_projection_status": "not_instrumented",
+            "store_projection_status": cost_coverage["store_projection_status"],
         })
         if source_digest:
             prior_sources.add(source_digest)
         prior_digests.update(digest_set)
 
-    workload_phases = [phase for phase in output_phases
-                       if phase["phase"] in EXPECTED_PHASES]
-    phase_counts = {name: sum(phase["phase"] == name for phase in workload_phases)
-                    for name in EXPECTED_PHASES}
+    workload_phases = [phase for phase in output_phases if phase["phase"] in roster]
+    workload_records = [phase for phase in phases if phase["phase"] in roster]
+    phase_counts = {name: sum(phase["phase"] == name for phase in workload_records)
+                    for name in roster}
     phase_coverage = {
-        "expected_count": len(EXPECTED_PHASES),
-        "expected_order": list(EXPECTED_PHASES),
-        "observed_workload_record_count": len(workload_phases),
+        "cohort": cohort_name,
+        "expected_count": len(roster),
+        "expected_order": list(roster),
+        "observed_workload_record_count": len(workload_records),
         "completed_unique_phase_count": sum(
-            count == 1 and next((phase.get("completed") is True for phase in workload_phases
+            count == 1 and next((phase.get("completed") is True for phase in workload_records
                                  if phase["phase"] == name), False)
             for name, count in phase_counts.items()),
         "missing": [name for name, count in phase_counts.items() if count == 0],
         "duplicates": [name for name, count in phase_counts.items() if count > 1],
         "unexpected": sorted({phase["phase"] for phase in output_phases
-                              if phase["phase"] not in EXPECTED_PHASES}),
+                              if phase["phase"] not in roster}),
         "sequence_errors": [
             {"phase": phase["phase"], "observed": phase.get("sequence"),
-             "expected": EXPECTED_PHASES.index(phase["phase"])}
-            for phase in workload_phases
-            if phase.get("sequence") != EXPECTED_PHASES.index(phase["phase"])
+             "expected": roster.index(phase["phase"])}
+            for phase in workload_records
+            if phase.get("sequence") != roster.index(phase["phase"])
         ],
     }
     control_phase_counts = {name: sum(phase["phase"] == name for phase in phases)
@@ -343,15 +470,16 @@ def analyze(record_path):
         "missing": [name for name, count in control_phase_counts.items() if count == 0],
         "duplicates": [name for name, count in control_phase_counts.items() if count > 1],
     }
-    observed_order = [phase["phase"] for phase in workload_phases]
+    observed_order = [phase["phase"] for phase in phases
+                      if phase["phase"] in roster]
     phase_coverage["observed_order"] = observed_order
-    phase_coverage["order_matches_expected"] = observed_order == list(EXPECTED_PHASES)
+    phase_coverage["order_matches_expected"] = observed_order == list(roster)
     phase_coverage["complete"] = (
         not phase_coverage["missing"] and not phase_coverage["duplicates"]
         and not phase_coverage["unexpected"] and not phase_coverage["sequence_errors"]
         and phase_coverage["order_matches_expected"]
         and phase_coverage["control_phases"]["counts"] == {"environment": 1, "activation": 1}
-        and phase_coverage["completed_unique_phase_count"] == len(EXPECTED_PHASES)
+        and phase_coverage["completed_unique_phase_count"] == len(roster)
     )
 
     queue_output = []
@@ -371,15 +499,94 @@ def analyze(record_path):
                            if request["identity"] is not None}
     unattributed_host = []
     for request in submissions:
-        if request["identity"] is None or not request["executions"]:
+        if request["identity"] is None or (not request["executions"] and not request["phase_owners"]
+                                            and not request["startup_owner_spans"]):
             identity = request["identity"]
             matched = services_by_identity.get(identity, []) if identity is not None else []
             unattributed_host.append({
                 "identity": identity, "executions": request["executions"],
+                "phase_owners": request["phase_owners"],
+                "startup_owner_spans": request["startup_owner_spans"],
                 "daemon_service_records": matched,
             })
     orphan_services = [service for service in services
                        if service["identity"] is None or service["identity"] not in all_host_identities]
+
+    host_identity_counts = Counter(request["identity"] for request in submissions
+                                   if request["identity"] is not None)
+    service_identity_counts = Counter(service["identity"] for service in services
+                                      if service["identity"] is not None)
+    host_identities = [request["identity"] for request in submissions]
+    service_identities = [service["identity"] for service in services]
+    queue_admissions_expected = {(identity[0], identity[1]) for identity in all_host_identities}
+    queue_missing = sorted(queue_admissions_expected - set(queues))
+    queue_unexpected = sorted(set(queues) - queue_admissions_expected)
+    queue_duplicate_records = sorted(identity for identity, details in queues.items()
+                                     if len(details["queue_ms"]) != 1)
+    workload_exact = all(
+        phase["compiler_attribution"] in ("complete", "zero_logical_requests_no_correlated_submission_observed")
+        for phase in workload_phases
+    )
+    whole_stream_complete = (
+        len(host_identities) == len(service_identities)
+        and all(identity is not None for identity in host_identities + service_identities)
+        and Counter(host_identities) == Counter(service_identities)
+        and all(count == 1 for count in host_identity_counts.values())
+        and all(count == 1 for count in service_identity_counts.values())
+    )
+    physical_services_successful = all(
+        service["elapsed_ms"] is not None and service["exit_code"] == 0 for service in services
+    )
+    startup_unowned = [item for item in unattributed_host]
+    ambiguous_owner_submissions = [request for request in submissions
+                                   if len(request["phase_owners"]) > 1]
+    unknown_owner_submissions = [request for request in submissions
+                                 if len(request["phase_owners"]) == 1
+                                 and request["phase_owners"][0] not in roster
+                                 and request["phase_owners"][0] != "activation"]
+    activation_record = next((phase for phase in phases if phase["phase"] == "activation"), None)
+    startup_owned_requests = [request for request in submissions
+                              if not request["phase_owners"]
+                              and len(request["startup_owner_spans"]) == 1]
+    ambiguous_startup_owner_requests = [request for request in submissions
+                                        if len(request["startup_owner_spans"]) > 1]
+    explicit_activation_requests = [request for request in submissions
+                                    if request["phase_owners"] == ["activation"]]
+    startup_owner_complete = (
+        not startup_unowned and not ambiguous_owner_submissions and not unknown_owner_submissions
+        and not ambiguous_startup_owner_requests
+        and activation_record is not None
+        and integer(activation_record.get("logical_compiler_requests")) ==
+            len(explicit_activation_requests) + len(startup_owned_requests)
+        and all(len(services_by_identity.get(request["identity"], [])) == 1
+                and services_by_identity[request["identity"]][0]["exit_code"] == 0
+                for request in explicit_activation_requests + startup_owned_requests)
+    )
+    startup_owner_status = "complete" if startup_owner_complete else "unknown_unowned_or_unmatched_requests"
+    queue_complete = (bool(queues) and unidentified_queue_events == 0 and not queue_missing
+                      and not queue_unexpected and not queue_duplicate_records)
+    cleanup = {
+        key: execution.get(key)
+        for key in ("process_cleanup_status", "hosted_cleanup_status", "compiler_cleanup_status",
+                    "compiler_cleanup_observation_complete")
+    }
+    cleanup["complete"] = all(cleanup[key] == "confirmed" for key in (
+        "process_cleanup_status", "hosted_cleanup_status", "compiler_cleanup_status")) \
+        and cleanup["compiler_cleanup_observation_complete"] is True
+    prepared = environment.get("prepared_root_entry_supplied") is True
+    diagnostic = execution.get("diagnostic_summaries") or {}
+    compiler_scan = diagnostic.get("compiler_trace_scan") or {}
+    physical_sample = diagnostic.get("physical_compiler_timing") or {}
+    queue_sample = diagnostic.get("compiler_job_queue") or {}
+    raw_capture_complete = (
+        compiler_scan.get("complete") is True
+        and physical_sample.get("request_count_complete") is True
+        and queue_sample.get("physical_job_count_complete") is True
+    )
+    raw_file_fingerprints = {
+        "host_trace": {"bytes": host_path.stat().st_size, "sha256": sha256_file(host_path)},
+        "compiler_trace": {"bytes": daemon_path.stat().st_size, "sha256": sha256_file(daemon_path)},
+    }
 
     return {
         "schema": 1,
@@ -390,11 +597,15 @@ def analyze(record_path):
             "artifacts_retained_after_success": execution.get("artifacts_retained_after_success"),
             "diagnostic_evidence_complete": execution.get("diagnostic_evidence_complete"),
             "phase_trace": str(phase_path),
+            "cleanup": cleanup,
         },
         "environment": {
             "prepared_root_entry_supplied": environment.get("prepared_root_entry_supplied"),
             "deployment": environment.get("deployment"),
-            "frozen_catalog_qualification": "not_established_by_this_counted_test",
+            "execution_profile_observed": "prepared-root-entry-supplied" if prepared else
+                                           "source-backed-or-unprepared",
+            "frozen_catalog_qualification": "requires-descriptor-identity-check" if prepared else
+                                             "not-established-by-this-counted-test",
         },
         "activation": activation,
         "phase_coverage": phase_coverage,
@@ -403,8 +614,79 @@ def analyze(record_path):
             "compiler_service_is_per_request_and_not_added_to_phase_wall": True,
             "queue_wait_is_per_admission_and_not_added_to_request_service": True,
             "missing_queue_records_mean_unknown_not_zero": True,
+            "nested_runtime_cost_events_are_retained_individually_not_summed": True,
+        },
+        "harness_runtime_cost_trace": {
+            "status": "events_observed" if cost_events else "no_records_observed_unknown",
+            "event_count": len(cost_events),
+            "phase_attributed_event_count": sum(event["phase_attribution"] not in ("unknown", "ambiguous")
+                                                 for event in cost_events),
+            "unattributed_event_count": sum(event["phase_attribution"] == "unknown" for event in cost_events),
+            "ambiguous_event_count": sum(event["phase_attribution"] == "ambiguous" for event in cost_events),
+            "events": cost_events,
+            "coverage": runtime_cost_coverage(cost_events),
         },
         "queue_trace_status": ("records_observed" if queues else "no_records_observed_unknown"),
+        "queue_evidence": {
+            "status": "complete" if queue_complete else "partial_or_unknown",
+            "expected_admission_count_from_exact_requests": len(queue_admissions_expected),
+            "observed_admission_count": len(queues),
+            "missing_admissions": [list(identity) for identity in queue_missing],
+            "unexpected_admissions": [list(identity) for identity in queue_unexpected],
+            "admissions_with_non_single_queue_timing": [list(identity) for identity in queue_duplicate_records],
+            "unidentified_queue_event_count": unidentified_queue_events,
+        },
+        "workload_request_service_joins": {
+            "status": "complete" if phase_coverage["complete"] and workload_exact else "partial_or_unknown",
+            "logical_request_count": sum(phase.get("logical_compiler_requests") or 0 for phase in workload_phases),
+            "exact_phase_request_join_count": sum(phase["daemon_service_matched_count"] for phase in workload_phases),
+        },
+        "whole_physical_stream_reconciliation": {
+            "status": "complete" if whole_stream_complete else "partial_or_unknown",
+            "raw_host_submission_count": len(submissions),
+            "raw_physical_service_count": len(services),
+            "host_identity_count": len(all_host_identities),
+            "duplicate_host_identity_count": sum(count > 1 for count in host_identity_counts.values()),
+            "duplicate_service_identity_count": sum(count > 1 for count in service_identity_counts.values()),
+            "unmatched_physical_service_count": len(orphan_services),
+            "host_submissions_missing_identity": sum(request["identity"] is None for request in submissions),
+            "physical_service_outcome_status": "all_successful" if physical_services_successful
+                                               else "failed_or_incomplete",
+            "physical_service_failed_or_incomplete_count": sum(
+                service["elapsed_ms"] is None or service["exit_code"] != 0 for service in services),
+            "raw_jsonl_scan": "all_rows_parsed",
+            "raw_event_capture_status": "complete" if raw_capture_complete else "unknown_or_partial",
+            "raw_trace_files": raw_file_fingerprints,
+            "runner_raw_scan": {
+                "compiler_trace_scan_complete": compiler_scan.get("complete"),
+                "physical_request_count_complete": physical_sample.get("request_count_complete"),
+                "queue_physical_job_count_complete": queue_sample.get("physical_job_count_complete"),
+            },
+            "detailed_compiler_sample_status": "complete" if physical_sample.get("complete") is True
+                                               else "truncated_or_unknown",
+            "detailed_compiler_sample_records_truncated": physical_sample.get("records_truncated"),
+            "runner_diagnostic_sample_status": "complete" if execution.get("diagnostic_evidence_complete") is True
+                                               else "incomplete_or_unknown",
+        },
+        "startup_scope": {
+            "owner_status": startup_owner_status,
+            "unowned_host_submission_count": len(startup_unowned),
+            "ambiguous_owner_submission_count": len(ambiguous_owner_submissions),
+            "unknown_owner_submission_count": len(unknown_owner_submissions),
+            "explicit_activation_owner_request_count": len(explicit_activation_requests),
+            "explicit_startup_span_owner_request_count": len(startup_owned_requests),
+            "recognized_startup_owner_spans": sorted(STARTUP_OWNER_SPANS),
+            "explicit_startup_span_requests": [
+                {"identity": request["identity"],
+                 "owner_spans": request["startup_owner_spans"],
+                 "daemon_service_records": services_by_identity.get(request["identity"], [])}
+                for request in startup_owned_requests
+            ],
+            "requests": startup_unowned,
+            "ambiguous_requests": ambiguous_owner_submissions,
+            "unknown_owner_requests": unknown_owner_submissions,
+            "assignment_policy": "only_exact_workload_phase_span; no count or timestamp assignment",
+        },
         "queue_observations": queue_output,
         "unattributed_compiler_submissions": unattributed_host,
         "unmatched_daemon_service_records": orphan_services,

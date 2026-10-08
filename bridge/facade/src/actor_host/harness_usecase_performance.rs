@@ -84,6 +84,11 @@ async fn production_harness_notebook_usecase_phases() {
         json!({
             "schema": 1,
             "phase": "environment",
+            "workload_cohort": "harness-eight-phase",
+            "workload_roster": [
+                "first-arithmetic", "publish-retained", "lookup-retained", "reuse-retained",
+                "repeat-retained", "async-yield-result", "reuse-async-action", "repeat-arithmetic",
+            ],
             "prepared_root_entry_supplied": deployment["TIDEPOOL_PREPARED_ROOT_ENTRY"].is_some(),
             "host_trace": host_trace,
             "compiler_trace": compiler_trace,

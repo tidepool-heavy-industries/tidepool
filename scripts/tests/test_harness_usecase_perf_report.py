@@ -32,7 +32,9 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         compiler_path = artifact_root / "compiler/compiler.jsonl"
         phase_path = artifact_root / "phases.jsonl"
         phase_records = [
-            {"schema": 1, "phase": "environment", "prepared_root_entry_supplied": False,
+            {"schema": 1, "phase": "environment", "workload_cohort": "harness-eight-phase",
+             "workload_roster": list(reporter.EXPECTED_PHASES),
+             "prepared_root_entry_supplied": False,
              "host_trace": str(host_path), "compiler_trace": str(compiler_path),
              "phase_trace": str(phase_path),
              "deployment": {"TIDEPOOL_COMPILER_DEPLOYMENT": "/test/compiler"}},
@@ -76,12 +78,18 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.write_jsonl(compiler_path, daemon)
         record_path = self.root / "abc.json"
         self.write_json(record_path, {
-            "test": "actor_host::production_harness_notebook_usecase_phases",
+            "test": "actor_host::context_transaction_acceptance_tests::harness_usecase_performance::production_harness_notebook_usecase_phases",
             "passed": True,
             "streams": {"stdout": {"path": stdout.name, "truncated": False}},
             "execution": {"artifact_root": str(artifact_root), "compiler_mode": "owned-resident",
                           "executed_test_count": 1, "diagnostic_evidence_complete": True,
-                          "artifacts_retained_after_success": True},
+                          "artifacts_retained_after_success": True,
+                          "diagnostic_summaries": {
+                              "compiler_trace_scan": {"complete": True},
+                              "physical_compiler_timing": {"request_count_complete": True,
+                                                            "complete": False, "records_truncated": True},
+                              "compiler_job_queue": {"physical_job_count_complete": True},
+                          }},
         })
         return record_path
 
@@ -100,7 +108,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                          "daemon worker admission; do not add to per-request service")
         self.assertEqual(phase["wall_ns"], 20_000)
         self.assertEqual(phase["provider_model_latency_ms"], None)
-        self.assertEqual(phase["store_projection_status"], "not_instrumented")
+        self.assertEqual(phase["store_projection_status"], "not_observed_unknown")
         self.assertEqual(report["activation"]["wall_ns"], 9_000)
         self.assertEqual(report["phase_coverage"]["expected_count"], 8)
         self.assertEqual(report["phase_coverage"]["completed_unique_phase_count"], 1)
@@ -112,6 +120,17 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual(report["queue_observations"], [])
         self.assertEqual(report["queue_trace_status"], "no_records_observed_unknown")
         self.assertTrue(report["timing_contract"]["missing_queue_records_mean_unknown_not_zero"])
+
+    def test_queue_rows_without_exact_admission_identity_keep_queue_evidence_unknown(self):
+        record = self.make_case()
+        compiler_path = self.root / "artifacts/compiler/compiler.jsonl"
+        rows = reporter.read_jsonl(compiler_path)
+        rows.append({"fields": {"phase": "compiler_queue", "message": "compiler job dequeued",
+                                "queue_ms": 0}})
+        self.write_jsonl(compiler_path, rows)
+        report = reporter.analyze(record)
+        self.assertEqual(report["queue_evidence"]["status"], "partial_or_unknown")
+        self.assertEqual(report["queue_evidence"]["unidentified_queue_event_count"], 1)
 
     def test_missing_exact_compiler_join_is_incomplete_not_a_zero_compile_claim(self):
         report = reporter.analyze(self.make_case(submissions=False))
@@ -128,15 +147,187 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                 self.assertEqual(phase["compiler_attribution"], "partial")
                 self.assertEqual(phase[status_key], 1)
 
-    def test_full_event_join_stays_partial_when_runner_trace_capture_is_incomplete(self):
+    def test_raw_exact_joins_remain_complete_when_sampled_diagnostics_are_incomplete(self):
         record = self.make_case()
         payload = json.loads(record.read_text())
         payload["execution"]["diagnostic_evidence_complete"] = False
         record.write_text(json.dumps(payload))
-        phase = reporter.analyze(record)["phases"][0]
+        report = reporter.analyze(record)
+        phase = report["phases"][0]
         self.assertEqual(phase["host_submission_event_count"], 1)
         self.assertEqual(phase["daemon_service_matched_count"], 1)
-        self.assertEqual(phase["compiler_attribution"], "partial")
+        self.assertEqual(phase["compiler_attribution"], "complete")
+        stream = report["whole_physical_stream_reconciliation"]
+        self.assertEqual(stream["raw_event_capture_status"], "complete")
+        self.assertEqual(stream["detailed_compiler_sample_status"], "truncated_or_unknown")
+        self.assertTrue(stream["detailed_compiler_sample_records_truncated"])
+
+    def test_raw_trace_scan_remains_unknown_when_only_parseable_prefix_is_proven(self):
+        record = self.make_case()
+        payload = json.loads(record.read_text())
+        payload["execution"]["diagnostic_summaries"]["compiler_trace_scan"]["complete"] = False
+        record.write_text(json.dumps(payload))
+        report = reporter.analyze(record)
+        self.assertEqual(report["whole_physical_stream_reconciliation"]["status"], "complete")
+        self.assertEqual(report["whole_physical_stream_reconciliation"]["raw_event_capture_status"],
+                         "unknown_or_partial")
+
+    def test_full_stream_and_workload_status_do_not_claim_startup_owner_from_counts(self):
+        record = self.make_case()
+        artifact_root = self.root / "artifacts"
+        host_path = artifact_root / "host.jsonl"
+        compiler_path = artifact_root / "compiler/compiler.jsonl"
+        phase_path = artifact_root / "phases.jsonl"
+        phase_rows = reporter.read_jsonl(phase_path)
+        phase_rows[0]["workload_cohort"] = "test-roster"
+        phase_rows[0]["workload_roster"] = ["reuse-retained"]
+        phase_rows[2]["sequence"] = 0
+        self.write_jsonl(phase_path, phase_rows)
+        host = reporter.read_jsonl(host_path)
+        service = reporter.read_jsonl(compiler_path)[0]
+        request = {"daemon_epoch": "epoch-a", "admission_id": 8,
+                   "request_ordinal": 1, "compile_request": "startup-digest"}
+        host.append({"target": "tidepool_extract_cmd::endpoint", "fields": {
+            "message": "compiler request identified", "transport": "daemon", **request},
+            "span": {"name": "compile_request", "compile_request": "startup-digest"}})
+        startup_service = json.loads(json.dumps(service))
+        startup_service["span"].update(request)
+        queue = {"target": "tidepool_extract_cmd::daemon", "fields": {
+            "message": "compiler job dequeued", "phase": "compiler_queue",
+            "queue_ms": 0, "daemon_epoch": "epoch-a", "admission_id": 8}}
+        self.write_jsonl(host_path, host)
+        self.write_jsonl(compiler_path, [service, startup_service, *reporter.read_jsonl(compiler_path)[1:], queue])
+        report = reporter.analyze(record)
+        self.assertEqual(report["phase_coverage"]["complete"], True)
+        self.assertEqual(report["workload_request_service_joins"]["status"], "complete")
+        self.assertEqual(report["whole_physical_stream_reconciliation"]["status"], "complete")
+        self.assertEqual(report["startup_scope"]["owner_status"], "unknown_unowned_or_unmatched_requests")
+        self.assertEqual(report["startup_scope"]["unowned_host_submission_count"], 1)
+        self.assertEqual(report["queue_evidence"]["status"], "complete")
+        self.assertEqual(report["startup_scope"]["assignment_policy"],
+                         "only_exact_workload_phase_span; no count or timestamp assignment")
+
+    def test_startup_owner_requires_and_accepts_explicit_phase_span(self):
+        record = self.make_case()
+        host_path = self.root / "artifacts/host.jsonl"
+        compiler_path = self.root / "artifacts/compiler/compiler.jsonl"
+        request = {"daemon_epoch": "epoch-a", "admission_id": 8,
+                   "request_ordinal": 1, "compile_request": "startup-digest"}
+        host = reporter.read_jsonl(host_path)
+        host.append({"target": "tidepool_extract_cmd::endpoint", "fields": {
+            "message": "compiler request identified", "transport": "daemon", **request},
+            "span": {"name": "activation", "workload_phase": "activation"}})
+        daemon = reporter.read_jsonl(compiler_path)
+        service = json.loads(json.dumps(daemon[0]))
+        service["span"].update(request)
+        daemon.append(service)
+        daemon.append({"target": "tidepool_extract_cmd::daemon", "fields": {
+            "phase": "compiler_queue", "message": "compiler job dequeued", "queue_ms": 0,
+            "daemon_epoch": "epoch-a", "admission_id": 8}})
+        self.write_jsonl(host_path, host)
+        self.write_jsonl(compiler_path, daemon)
+        report = reporter.analyze(record)
+        self.assertEqual(report["startup_scope"]["owner_status"], "complete")
+        self.assertEqual(report["startup_scope"]["explicit_activation_owner_request_count"], 1)
+        self.assertEqual(report["startup_scope"]["unowned_host_submission_count"], 0)
+
+    def test_named_production_startup_span_owns_request_without_count_assignment(self):
+        record = self.make_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        phases = reporter.read_jsonl(phase_path)
+        phases[1]["logical_compiler_requests"] = 2
+        self.write_jsonl(phase_path, phases)
+        host_path = self.root / "artifacts/host.jsonl"
+        compiler_path = self.root / "artifacts/compiler/compiler.jsonl"
+        request = {"daemon_epoch": "epoch-a", "admission_id": 8,
+                   "request_ordinal": 1, "compile_request": "startup-digest"}
+        host = reporter.read_jsonl(host_path)
+        host.append({"target": "tidepool_extract_cmd::endpoint", "fields": {
+            "message": "compiler request identified", "transport": "daemon", **request},
+            "spans": [{"name": "host_run"}, {"name": "compile_root", "actor_path": "root"}]})
+        daemon = reporter.read_jsonl(compiler_path)
+        service = json.loads(json.dumps(daemon[0]))
+        service["span"].update(request)
+        daemon.append(service)
+        daemon.append({"target": "tidepool_extract_cmd::daemon", "fields": {
+            "phase": "compiler_queue", "message": "compiler job dequeued", "queue_ms": 0,
+            "daemon_epoch": "epoch-a", "admission_id": 8}})
+        toolset_request = {"daemon_epoch": "epoch-a", "admission_id": 9,
+                           "request_ordinal": 1, "compile_request": "toolset-digest"}
+        host.append({"target": "tidepool_extract_cmd::endpoint", "fields": {
+            "message": "compiler request identified", "transport": "daemon", **toolset_request},
+            "spans": [{"name": "workspace_toolsets_prepare", "actor_path": "root"}]})
+        toolset_service = json.loads(json.dumps(daemon[0]))
+        toolset_service["span"].update(toolset_request)
+        daemon.append(toolset_service)
+        daemon.append({"target": "tidepool_extract_cmd::daemon", "fields": {
+            "phase": "compiler_queue", "message": "compiler job dequeued", "queue_ms": 0,
+            "daemon_epoch": "epoch-a", "admission_id": 9}})
+        self.write_jsonl(host_path, host)
+        self.write_jsonl(compiler_path, daemon)
+        report = reporter.analyze(record)
+        self.assertEqual(report["startup_scope"]["owner_status"], "complete")
+        self.assertEqual(report["startup_scope"]["explicit_startup_span_owner_request_count"], 2)
+        self.assertEqual({tuple(row["owner_spans"]) for row in
+                          report["startup_scope"]["explicit_startup_span_requests"]},
+                         {("compile_root",), ("workspace_toolsets_prepare",)})
+
+    def test_nested_harness_cost_events_are_retained_without_adding_spans(self):
+        phases = [{"phase": "reuse-retained", "call_id": "usecase-3"}]
+        rows = [{"target": "harness::runtime_cost", "level": "DEBUG", "fields": {
+            "message": "store projection", "elapsed_ns": 14},
+            "spans": [{"name": "request", "call_id": "usecase-3"},
+                      {"name": "portable_history_projection", "elapsed_ns": 14}]},
+            {"target": "harness::runtime_cost", "fields": {"message": "unknown boundary"}}]
+        events = reporter.runtime_cost_events(rows, phases)
+        self.assertEqual(events[0]["phase_attribution"], "reuse-retained")
+        self.assertEqual(events[0]["fields"]["elapsed_ns"], 14)
+        self.assertEqual(events[0]["spans"][1]["elapsed_ns"], 14)
+        self.assertEqual(events[1]["phase_attribution"], "unknown")
+        coverage = reporter.runtime_cost_coverage(events)
+        self.assertEqual(coverage["store_projection_status"], "events_observed")
+        self.assertEqual(coverage["host_admission_status"], "not_observed_unknown")
+
+    def test_unknown_or_source_backed_profile_is_never_reported_as_frozen_qualification(self):
+        report = reporter.analyze(self.make_case())
+        self.assertEqual(report["environment"]["execution_profile_observed"], "source-backed-or-unprepared")
+        self.assertEqual(report["environment"]["frozen_catalog_qualification"],
+                         "not-established-by-this-counted-test")
+
+    def test_unknown_workload_roster_is_a_controlled_error(self):
+        record = self.make_case()
+        payload = json.loads(record.read_text())
+        payload["test"] = "actor_host::fixture_without_workload_contract"
+        self.write_json(record, payload)
+        phase_path = self.root / "artifacts/phases.jsonl"
+        rows = reporter.read_jsonl(phase_path)
+        del rows[0]["workload_roster"]
+        self.write_jsonl(phase_path, rows)
+        with self.assertRaisesRegex(ValueError, "must declare a nonempty workload_roster"):
+            reporter.analyze(record)
+
+    def test_three_actor_roster_is_explicit_and_counts_activation_in_order(self):
+        record = self.make_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        rows = reporter.read_jsonl(phase_path)
+        rows[0]["workload_cohort"] = "three-actor-capture"
+        rows[0]["workload_roster"] = list(reporter.THREE_ACTOR_PHASES)
+        rows[1]["sequence"] = 0
+        rows[1]["logical_compiler_requests"] = 0
+        rows[2:] = [
+            {"schema": 1, "phase": phase, "sequence": index, "completed": True,
+             "call_id": "usecase-3" if phase == "root-fork-capture" else f"three-actor-{index}",
+             "logical_compiler_requests": 1 if phase == "root-fork-capture" else 0,
+             "boundary_kind": "native" if phase == "root-fork-capture" else "lifecycle"}
+            for index, phase in enumerate(reporter.THREE_ACTOR_PHASES[1:], 1)
+        ]
+        self.write_jsonl(phase_path, rows)
+        report = reporter.analyze(record)
+        self.assertEqual(report["phase_coverage"]["cohort"], "three-actor-capture")
+        self.assertEqual(report["phase_coverage"]["expected_count"], 9)
+        self.assertTrue(report["phase_coverage"]["complete"])
+        root_fork = next(phase for phase in report["phases"] if phase["phase"] == "root-fork-capture")
+        self.assertEqual(root_fork["phase_record"]["boundary_kind"], "native")
 
     def test_real_host_request_shape_without_cell_span_is_unattributed(self):
         report = reporter.analyze(self.make_case(cell_span=False))
@@ -224,7 +415,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                                "message": "compiler request finished"},
                     "span": {"name": "compile_request", "compile_request": "digest-a",
                              "physical_execution": "epoch-a:6:1"}}
-        dispatches, _, submissions, services, _ = reporter.compiler_events(
+        dispatches, _, submissions, services, _, _ = reporter.compiler_events(
             [dispatch, submission], [physical])
         self.assertEqual(dispatches["call-a"], {"exec-a"})
         self.assertEqual(submissions[0]["identity"], ("epoch-a", 6, 1, "digest-a"))
