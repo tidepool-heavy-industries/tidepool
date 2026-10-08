@@ -162,6 +162,8 @@ impl<T> KernelStep<T> {
 #[derive(Clone)]
 pub struct KernelContext {
     identity: ActorRef,
+    terminal: RetainedActorExit,
+    spawn_ownership: SpawnOwnership,
     myself: RactorRef<KernelMessage>,
     children: std::sync::Arc<parking_lot::Mutex<HashMap<ractor::ActorId, LocalActorRef>>>,
     resources: Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
@@ -201,6 +203,63 @@ fn advance_actor_ids_past(actor: crate::ActorId) {
     NEXT_ACTOR_ID.fetch_max(actor.0.saturating_add(1), Ordering::Relaxed);
 }
 
+/// Ownership issued before Ractor runs `pre_start`; live supervision may not yet
+/// be linked and remains independently queryable after replacement transfers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnOwnership {
+    Independent,
+    Supervised(ActorRef),
+}
+
+impl SpawnOwnership {
+    pub(crate) fn is_independent(self) -> bool {
+        matches!(self, Self::Independent)
+    }
+}
+
+#[derive(Default)]
+struct DirectoryMembership {
+    closed: bool,
+    entries: HashMap<ActorRef, DirectoryEntry>,
+}
+
+/// A sealed membership snapshot must issue cancellation before root cleanup.
+pub(crate) struct SealedActorMembership {
+    actors: Vec<(LocalActorRef, SpawnOwnership)>,
+}
+
+pub(crate) struct ForestRetirementBatch {
+    _fence: crate::kernel::RetirementBatch,
+    roots: Vec<LocalActorRef>,
+}
+
+impl SealedActorMembership {
+    pub(crate) fn cancel_all(self, terminal: ActorTerminal) -> ForestRetirementBatch {
+        let roots = self
+            .actors
+            .iter()
+            .filter(|(_, ownership)| ownership.is_independent())
+            .map(|(actor, _)| actor.clone())
+            .collect();
+        let fence = crate::kernel::RetirementBatch::issue(
+            self.actors
+                .into_iter()
+                .map(|(actor, _)| (actor, terminal.clone()))
+                .collect(),
+        );
+        ForestRetirementBatch {
+            _fence: fence,
+            roots,
+        }
+    }
+}
+
+impl ForestRetirementBatch {
+    pub(crate) fn into_roots(self) -> Vec<LocalActorRef> {
+        self.roots
+    }
+}
+
 /// Routing and terminal-observation index for one resident actor forest.
 ///
 /// This is deliberately not a scheduler or lifecycle state machine. Ractor
@@ -215,7 +274,7 @@ fn advance_actor_ids_past(actor: crate::ActorId) {
 /// fenced, claimed, or live in this particular forest.
 #[derive(Clone, Default)]
 pub struct LocalActorDirectory {
-    actors: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, DirectoryEntry>>>,
+    actors: std::sync::Arc<parking_lot::RwLock<DirectoryMembership>>,
     sessions: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, crate::ActorSessionContext>>>,
     identities: std::sync::Arc<parking_lot::Mutex<DirectoryIdentities>>,
     // Native resources transfer their existing Ractor identity and finalizer
@@ -234,6 +293,7 @@ struct DirectoryIdentities {
 
 struct DirectoryEntry {
     actor: LocalActorRef,
+    spawn_ownership: SpawnOwnership,
     // Retaining an exit must not keep its execution context (and thus this
     // directory) alive. Ractor's actor state owns the strong context reference.
     context: std::sync::Weak<KernelContext>,
@@ -296,6 +356,7 @@ impl LocalActorDirectory {
             let predecessor_is_terminal = self
                 .actors
                 .read()
+                .entries
                 .get(&previous)
                 .is_some_and(|entry| entry.actor.terminal().get().is_some());
             if !predecessor_is_terminal || actor.incarnation <= previous.incarnation {
@@ -318,6 +379,7 @@ impl LocalActorDirectory {
     pub fn resolve(&self, actor: ActorRef) -> Option<LocalActorRef> {
         self.actors
             .read()
+            .entries
             .get(&actor)
             .map(|entry| entry.actor.clone())
     }
@@ -327,27 +389,57 @@ impl LocalActorDirectory {
         self.sessions.read().get(&actor).cloned()
     }
 
-    fn insert(&self, actor: LocalActorRef, context: std::sync::Weak<KernelContext>) {
-        self.identities
-            .lock()
+    fn insert(
+        &self,
+        actor: LocalActorRef,
+        context: std::sync::Weak<KernelContext>,
+        spawn_ownership: SpawnOwnership,
+    ) -> Result<(), &'static str> {
+        // Match claim_exact's identities -> membership lock order. No staged
+        // actor becomes routable after the owning shutdown snapshot is sealed.
+        let mut identities = self.identities.lock();
+        let mut membership = self.actors.write();
+        if membership.closed {
+            return Err("actor forest admission is closed");
+        }
+        identities
             .runtime
             .insert(actor.address().get_id(), actor.identity());
-        self.actors
-            .write()
-            .insert(actor.identity(), DirectoryEntry { actor, context });
+        membership.entries.insert(
+            actor.identity(),
+            DirectoryEntry {
+                actor,
+                context,
+                spawn_ownership,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn seal(&self) -> SealedActorMembership {
+        let mut membership = self.actors.write();
+        membership.closed = true;
+        SealedActorMembership {
+            actors: membership
+                .entries
+                .values()
+                .map(|entry| (entry.actor.clone(), entry.spawn_ownership))
+                .collect(),
+        }
     }
 
     fn context(&self, actor: ActorRef) -> Option<std::sync::Arc<KernelContext>> {
-        self.actors.read().get(&actor)?.context.upgrade()
+        self.actors.read().entries.get(&actor)?.context.upgrade()
     }
 
     fn forget_terminal(&self, actor: ActorRef) -> bool {
         let mut actors = self.actors.write();
         let terminal = actors
+            .entries
             .get(&actor)
             .is_some_and(|entry| entry.actor.terminal().get().is_some());
         if terminal {
-            actors.remove(&actor);
+            actors.entries.remove(&actor);
             self.sessions.write().remove(&actor);
         }
         terminal
@@ -530,26 +622,21 @@ impl KernelContext {
         }
     }
 
+    pub(crate) fn spawn_ownership(&self) -> SpawnOwnership {
+        self.spawn_ownership
+    }
+
     pub(crate) fn requested_shutdown(&self) -> Option<ActorTerminal> {
-        self.directory
-            .resolve(self.identity)?
-            .terminal()
-            .requested_shutdown()
+        self.terminal.requested_shutdown()
     }
 
     pub(crate) fn retained_exit(&self) -> RetainedActorExit {
-        #[allow(
-            clippy::expect_used,
-            reason = "called on this actor's own KernelContext while it is \
-                      still running its turn loop; forget_terminal only ever \
-                      removes an entry already observed terminal, so a live \
-                      actor's own identity always resolves in its directory"
-        )]
-        self.directory
-            .resolve(self.identity)
-            .expect("running actor remains in its local directory")
-            .terminal()
-            .clone()
+        self.terminal.clone()
+    }
+
+    pub(crate) fn retain_child_startup_cleanup(&self, outcome: crate::CleanupComponentOutcome) {
+        let mut retained = self.forgotten_children.lock();
+        *retained = combine_cleanup(retained.clone(), outcome);
     }
 
     pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
@@ -678,11 +765,6 @@ impl KernelContext {
         // Hold admission through registration so retirement cannot miss a
         // child whose startup is already in flight.
         let admission = self.child_admission_closed.clone().read_owned().await;
-        if *admission {
-            return Err(ractor::SpawnErr::StartupFailed(
-                std::io::Error::other("actor child admission is closed").into(),
-            ));
-        }
         let mut custody = StartupCustody {
             retained: self.forgotten_children.clone(),
             accounted: false,
@@ -695,49 +777,75 @@ impl KernelContext {
             .map_err(|error| {
                 ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into())
             })?;
-        if let Some(admission) = &startup_admission {
-            admission.reserve(identity).map_err(|detail| {
-                custody.accounted = true;
-                ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into())
-            })?;
-        }
+        let startup_refusal = if *admission {
+            Some(StartupFailureCause::ChildAdmissionClosed)
+        } else {
+            startup_admission
+                .as_ref()
+                .and_then(|admission| admission.reserve(identity).err())
+                .map(StartupFailureCause::Reservation)
+        };
+        // An already prepared behavior still owns real resources on refusal.
+        // Run its ordinary cleanup in an unlinked startup, never registering or
+        // starting authored work after the admission boundary has closed.
+        let cleanup_only = startup_refusal.is_some();
         let arguments = LocalActorArguments {
+            spawn_ownership: match lifetime {
+                crate::WorkerLifetime::RunOwned => SpawnOwnership::Independent,
+                crate::WorkerLifetime::InvocationOwned
+                | crate::WorkerLifetime::ActorOwned
+                | crate::WorkerLifetime::InScope(_) => SpawnOwnership::Supervised(self.identity),
+            },
             behavior,
+            startup_refusal,
             startup_admission,
             terminal: terminal.clone(),
             directory: self.directory.clone(),
             identity,
             mailbox_admission: mailbox_admission.clone(),
         };
-        let spawned = match lifetime {
-            crate::WorkerLifetime::InvocationOwned
-            | crate::WorkerLifetime::ActorOwned
-            | crate::WorkerLifetime::InScope(_) => {
-                Box::pin(
-                    self.myself
-                        .spawn_linked(name, LocalActor::<C>(PhantomData), arguments),
-                )
-                .await
-            }
-            crate::WorkerLifetime::RunOwned => {
-                Box::pin(LocalActor::<C>::spawn(
-                    name,
-                    LocalActor::<C>(PhantomData),
-                    arguments,
-                ))
-                .await
+        let spawned = if cleanup_only {
+            Box::pin(LocalActor::<C>::spawn(
+                name,
+                LocalActor::<C>(PhantomData),
+                arguments,
+            ))
+            .await
+        } else {
+            match lifetime {
+                crate::WorkerLifetime::InvocationOwned
+                | crate::WorkerLifetime::ActorOwned
+                | crate::WorkerLifetime::InScope(_) => {
+                    Box::pin(self.myself.spawn_linked(
+                        name,
+                        LocalActor::<C>(PhantomData),
+                        arguments,
+                    ))
+                    .await
+                }
+                crate::WorkerLifetime::RunOwned => {
+                    Box::pin(LocalActor::<C>::spawn(
+                        name,
+                        LocalActor::<C>(PhantomData),
+                        arguments,
+                    ))
+                    .await
+                }
             }
         };
         let (address, task) = match spawned {
             Ok(spawned) => spawned,
             Err(error) => {
-                let mut retained = self.forgotten_children.lock();
-                *retained = combine_cleanup(
-                    retained.clone(),
-                    crate::CleanupComponentOutcome::Unconfirmed(format!(
-                        "child startup failed without retained cleanup: {error}"
-                    )),
-                );
+                if let Some(cleanup) = startup_cleanup(&error) {
+                    self.retain_child_startup_cleanup(combine_cleanup(
+                        combine_cleanup(cleanup.hook, cleanup.realm),
+                        cleanup.children,
+                    ));
+                } else {
+                    self.retain_child_startup_cleanup(crate::CleanupComponentOutcome::Unconfirmed(
+                        format!("child startup failed without retained cleanup: {error}"),
+                    ));
+                }
                 custody.accounted = true;
                 return Err(error);
             }
@@ -752,6 +860,37 @@ impl KernelContext {
         }
         custody.accounted = true;
         Ok((child, admission))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StartupFailureCause {
+    #[error("actor child admission is closed")]
+    ChildAdmissionClosed,
+    #[error("actor forest admission is closed")]
+    MembershipClosed,
+    #[error("worker reservation refused: {0}")]
+    Reservation(String),
+    #[error("worker admission refused: {0}")]
+    WorkerAdmission(String),
+    #[error(transparent)]
+    Behavior(KernelBehaviorError),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{cause}")]
+struct StartupRefusal {
+    #[source]
+    cause: StartupFailureCause,
+    cleanup: Option<crate::ResidentCleanupOutcome>,
+}
+
+pub(crate) fn startup_cleanup(error: &ractor::SpawnErr) -> Option<crate::ResidentCleanupOutcome> {
+    match error {
+        ractor::SpawnErr::StartupFailed(error) => {
+            error.downcast_ref::<StartupRefusal>()?.cleanup.clone()
+        }
+        _ => None,
     }
 }
 
@@ -1116,6 +1255,8 @@ pub(crate) trait WorkerStartupAdmission: Send + Sync {
 }
 
 pub struct LocalActorArguments<B> {
+    pub(crate) startup_refusal: Option<StartupFailureCause>,
+    pub(crate) spawn_ownership: SpawnOwnership,
     pub behavior: B,
     pub(crate) startup_admission: Option<Arc<dyn WorkerStartupAdmission>>,
     pub terminal: RetainedActorExit,
@@ -1570,6 +1711,8 @@ where
         let identity = arguments.identity;
         let context = std::sync::Arc::new(KernelContext {
             identity,
+            terminal: arguments.terminal.clone(),
+            spawn_ownership: arguments.spawn_ownership,
             myself,
             children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
             resources: Arc::new(Mutex::new(HashMap::new())),
@@ -1580,6 +1723,7 @@ where
             )),
         });
         let startup_admission = arguments.startup_admission;
+        let startup_refusal = arguments.startup_refusal;
         let mut state = Box::new(LocalActorState {
             replacement: None,
             drain: DrainState::Open,
@@ -1594,16 +1738,48 @@ where
             mailbox_drain_scheduled: false,
             hosted_admission: HostedAdmission::Open,
         });
+        if let Some(cause) = startup_refusal {
+            finish_actor(
+                &state.context.myself.clone(),
+                &mut state,
+                Disposition::Stop(ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: cause.to_string(),
+                    diagnostic: None,
+                }),
+            )
+            .await;
+            return Err(Box::new(StartupRefusal {
+                cause,
+                cleanup: state.terminal.cleanup(),
+            }));
+        }
         let child = LocalActorRef::with_identity_admission(
             state.context.myself.clone(),
             state.terminal.clone(),
             state.context.identity,
             state.mailbox_admission.clone(),
         );
-        state
-            .context
-            .directory
-            .insert(child.clone(), std::sync::Arc::downgrade(&state.context));
+        if let Err(detail) = state.context.directory.insert(
+            child.clone(),
+            std::sync::Arc::downgrade(&state.context),
+            state.context.spawn_ownership,
+        ) {
+            finish_actor(
+                &state.context.myself.clone(),
+                &mut state,
+                Disposition::Stop(ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: detail.into(),
+                    diagnostic: None,
+                }),
+            )
+            .await;
+            return Err(Box::new(StartupRefusal {
+                cause: StartupFailureCause::MembershipClosed,
+                cleanup: state.terminal.cleanup(),
+            }));
+        }
         if let Some(admission) = startup_admission {
             if let Err(detail) = admission.admit(child) {
                 finish_actor(
@@ -1616,7 +1792,21 @@ where
                     }),
                 )
                 .await;
-                return Err(std::io::Error::other(detail).into());
+                return Err(Box::new(StartupRefusal {
+                    cause: StartupFailureCause::WorkerAdmission(detail),
+                    cleanup: state.terminal.cleanup(),
+                }));
+            }
+        }
+        if !state.behavior.replacement_staged() {
+            if let Some(terminal) = state.context.requested_shutdown() {
+                finish_actor(
+                    &state.context.myself.clone(),
+                    &mut state,
+                    Disposition::Stop(terminal),
+                )
+                .await;
+                return Ok(state);
             }
         }
         match state.behavior.start(&state.context).await {
@@ -1645,7 +1835,20 @@ where
                     Disposition::Stop(terminal),
                 )
                 .await;
-                return Err(Box::new(error));
+                return Err(Box::new(StartupRefusal {
+                    cause: StartupFailureCause::Behavior(error),
+                    cleanup: state.terminal.cleanup(),
+                }));
+            }
+        }
+        if !state.behavior.replacement_staged() {
+            if let Some(terminal) = state.context.requested_shutdown() {
+                finish_actor(
+                    &state.context.myself.clone(),
+                    &mut state,
+                    Disposition::Stop(terminal),
+                )
+                .await;
             }
         }
         Ok(state)
@@ -1805,34 +2008,7 @@ where
                     state.replacement = Some(pending);
                     return Ok(());
                 }
-                {
-                    let mut children = state.context.children.lock();
-                    let mut inherited = successor_context.children.lock();
-                    for (id, child) in children.drain() {
-                        child
-                            .address()
-                            .get_cell()
-                            .link(successor_context.myself.get_cell());
-                        inherited.insert(id, child);
-                    }
-                }
-                {
-                    let mut resources = state.context.resources.lock();
-                    for (id, child) in resources.drain() {
-                        child.cell.link(successor_context.myself.get_cell());
-                        successor_context.resources.lock().insert(id, child);
-                    }
-                }
-                {
-                    let mut inherited = successor_context.forgotten_children.lock();
-                    *inherited = combine_cleanup(
-                        inherited.clone(),
-                        std::mem::replace(
-                            &mut *state.context.forgotten_children.lock(),
-                            crate::CleanupComponentOutcome::Confirmed,
-                        ),
-                    );
-                }
+                transfer_supervised_children(&state.context, &successor_context);
                 let summary = format!("replaced by {:?}", pending.successor.identity());
                 pending
                     .successor
@@ -1877,7 +2053,13 @@ where
                     state.drain = DrainState::Draining;
                 }
                 match state.behavior.activate_replacement(&state.context).await {
-                    Ok(step) => finish_after_step(&myself, state, step).await,
+                    Ok(step) => {
+                        if let Some(terminal) = state.context.requested_shutdown() {
+                            finish_actor(&myself, state, Disposition::Stop(terminal)).await;
+                        } else {
+                            finish_after_step(&myself, state, step).await;
+                        }
+                    }
                     Err(error) => fail_actor_with_error(&myself, state, error).await,
                 }
             }
@@ -3120,6 +3302,8 @@ where
         name,
         LocalActor::<B>(PhantomData),
         LocalActorArguments {
+            spawn_ownership: SpawnOwnership::Independent,
+            startup_refusal: None,
             behavior,
             startup_admission: None,
             terminal: terminal.clone(),
@@ -3351,7 +3535,7 @@ fn failed_terminal(summary: String) -> ActorTerminal {
     ActorTerminal::failed(summary, None)
 }
 
-fn combine_cleanup(
+pub(crate) fn combine_cleanup(
     left: crate::CleanupComponentOutcome,
     right: crate::CleanupComponentOutcome,
 ) -> crate::CleanupComponentOutcome {
@@ -3424,16 +3608,39 @@ async fn shutdown_resources(
     outcome
 }
 
+/// The accepted replacement owns the same children and resource scopes. This
+/// changes live Ractor supervision, never the spawn fact used at startup.
+fn transfer_supervised_children(predecessor: &KernelContext, successor: &KernelContext) {
+    {
+        let mut children = predecessor.children.lock();
+        let mut inherited = successor.children.lock();
+        for (id, child) in children.drain() {
+            child.address().get_cell().link(successor.myself.get_cell());
+            inherited.insert(id, child);
+        }
+    }
+    {
+        let mut resources = predecessor.resources.lock();
+        for (id, child) in resources.drain() {
+            child.cell.link(successor.myself.get_cell());
+            successor.resources.lock().insert(id, child);
+        }
+    }
+    let mut inherited = successor.forgotten_children.lock();
+    *inherited = combine_cleanup(
+        inherited.clone(),
+        std::mem::replace(
+            &mut *predecessor.forgotten_children.lock(),
+            crate::CleanupComponentOutcome::Confirmed,
+        ),
+    );
+}
+
 async fn shutdown_children(
     context: &KernelContext,
     owner_exit: ActorExitKind,
     timeout: Duration,
 ) -> crate::CleanupComponentOutcome {
-    let resources = shutdown_resources(&context.resources, timeout).await;
-    {
-        let mut retained = context.forgotten_children.lock();
-        *retained = combine_cleanup(retained.clone(), resources);
-    }
     let (children, mut outcome) = {
         let children = context.children.lock();
         (
@@ -3441,17 +3648,29 @@ async fn shutdown_children(
             context.forgotten_children.lock().clone(),
         )
     };
+    let requested = ActorTerminal {
+        kind: match owner_exit {
+            ActorExitKind::Failed => ActorExitKind::Failed,
+            ActorExitKind::Completed | ActorExitKind::Cancelled => ActorExitKind::Cancelled,
+        },
+        summary: "owner actor stopped".into(),
+        diagnostic: None,
+    };
+    let batch = crate::kernel::RetirementBatch::issue(
+        children
+            .into_iter()
+            .map(|child| (child, requested.clone()))
+            .collect(),
+    );
+    let resources = shutdown_resources(&context.resources, timeout).await;
+    {
+        let mut retained = context.forgotten_children.lock();
+        *retained = combine_cleanup(retained.clone(), resources);
+    }
+    outcome = combine_cleanup(outcome, context.forgotten_children.lock().clone());
     let mut shutdowns = FuturesUnordered::new();
-    for child in children {
+    for (child, requested) in batch.into_actors() {
         shutdowns.push(async move {
-            let requested = ActorTerminal {
-                kind: match owner_exit {
-                    ActorExitKind::Failed => ActorExitKind::Failed,
-                    ActorExitKind::Completed | ActorExitKind::Cancelled => ActorExitKind::Cancelled,
-                },
-                summary: "owner actor stopped".into(),
-                diagnostic: None,
-            };
             let result =
                 tokio::time::timeout(timeout, child.shutdown_with_cleanup(requested.clone())).await;
             match result {
@@ -3513,6 +3732,8 @@ mod tests {
     }
 
     struct ProbeBehavior {
+        start_observations: Option<Arc<Mutex<Vec<(KernelContext, Option<ActorRef>)>>>>,
+        cleanup_peers: Option<Arc<Mutex<Vec<LocalActorRef>>>>,
         replacement_staged: bool,
         startup_gate: Option<(Arc<Notify>, Arc<Notify>)>,
         calls: Arc<Mutex<Vec<&'static str>>>,
@@ -3671,8 +3892,13 @@ mod tests {
 
         fn start(
             &mut self,
-            _context: &KernelContext,
+            context: &KernelContext,
         ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
+            if let Some(observations) = &self.start_observations {
+                observations
+                    .lock()
+                    .push((context.clone(), context.supervisor_identity()));
+            }
             let gate = self.startup_gate.clone();
             Box::pin(async move {
                 if let Some((entered, release)) = gate {
@@ -4018,6 +4244,14 @@ mod tests {
         ) -> BoxFuture<'_, Result<(), KernelBehaviorError>> {
             let terminal = terminal.clone();
             Box::pin(async move {
+                if let Some(peers) = &self.cleanup_peers {
+                    for peer in peers.lock().iter() {
+                        assert!(
+                            peer.terminal().requested_shutdown().is_some(),
+                            "peer cleanup before cancellation fence"
+                        );
+                    }
+                }
                 self.terminal_callbacks.lock().push(terminal);
                 self.calls.lock().push("shutdown");
                 Ok(())
@@ -4151,6 +4385,8 @@ mod tests {
         let terminal_callbacks = Arc::new(Mutex::new(Vec::new()));
         ProbeFixture {
             behavior: ProbeBehavior {
+                start_observations: None,
+                cleanup_peers: None,
                 replacement_staged: false,
                 startup_gate: None,
                 calls: Arc::clone(&calls),
@@ -5785,6 +6021,284 @@ mod tests {
         assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
     }
 
+    fn observed_probe(
+        observations: &Arc<Mutex<Vec<(KernelContext, Option<ActorRef>)>>>,
+    ) -> ProbeBehavior {
+        let mut probe = behavior(false).behavior;
+        probe.start_observations = Some(observations.clone());
+        probe
+    }
+
+    #[tokio::test]
+    async fn startup_ownership_precedes_live_link_and_survives_reparenting() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let directory = LocalActorDirectory::default();
+        let (parent, parent_task) = spawn_local_actor_in_directory(
+            None,
+            observed_probe(&observations),
+            crate::Incarnation(1),
+            directory.clone(),
+        )
+        .await
+        .unwrap();
+        let parent_context = observations.lock()[0].0.clone();
+        assert_eq!(
+            parent_context.spawn_ownership(),
+            SpawnOwnership::Independent
+        );
+        assert_eq!(observations.lock()[0].1, None);
+        let mut children = Vec::new();
+        for lifetime in [
+            crate::WorkerLifetime::ActorOwned,
+            crate::WorkerLifetime::InvocationOwned,
+            crate::WorkerLifetime::RunOwned,
+        ] {
+            let child = parent_context
+                .spawn_worker(None, observed_probe(&observations), lifetime)
+                .await
+                .unwrap();
+            let (context, startup_parent) = observations.lock().last().unwrap().clone();
+            assert_eq!(
+                startup_parent, None,
+                "Ractor has not linked during pre_start"
+            );
+            match lifetime {
+                crate::WorkerLifetime::RunOwned => {
+                    assert_eq!(context.spawn_ownership(), SpawnOwnership::Independent);
+                    assert_eq!(context.supervisor_identity(), None);
+                }
+                _ => {
+                    assert_eq!(
+                        context.spawn_ownership(),
+                        SpawnOwnership::Supervised(parent.identity())
+                    );
+                    assert_eq!(context.supervisor_identity(), Some(parent.identity()));
+                }
+            }
+            children.push((child, context));
+        }
+        let (replacement_parent, replacement_task) = spawn_local_actor_in_directory(
+            None,
+            observed_probe(&observations),
+            crate::Incarnation(1),
+            directory.clone(),
+        )
+        .await
+        .unwrap();
+        let replacement_context = observations.lock().last().unwrap().0.clone();
+        transfer_supervised_children(&parent_context, &replacement_context);
+        assert!(!parent_context.owns_child(children[0].0.identity()));
+        assert!(replacement_context.owns_child(children[0].0.identity()));
+        let child_context = &children[0].1;
+        assert_eq!(
+            child_context.spawn_ownership(),
+            SpawnOwnership::Supervised(parent.identity())
+        );
+        assert_eq!(
+            child_context.supervisor_identity(),
+            Some(replacement_parent.identity())
+        );
+        let (successor, admission) = child_context
+            .spawn_successor(observed_probe(&observations))
+            .await
+            .unwrap();
+        drop(admission);
+        let successor_context = observations.lock().last().unwrap().0.clone();
+        assert_eq!(
+            successor_context.spawn_ownership(),
+            SpawnOwnership::Supervised(replacement_parent.identity())
+        );
+        assert_eq!(
+            successor_context.supervisor_identity(),
+            Some(replacement_parent.identity())
+        );
+        assert!(replacement_context.owns_child(successor.identity()));
+        let batch = directory.seal().cancel_all(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "test retirement",
+        ));
+        let roots = batch.into_roots();
+        assert_eq!(roots.len(), 3, "two parents and the unlinked swarm child");
+        for root in roots {
+            root.shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "test retirement",
+            ))
+            .await
+            .unwrap();
+        }
+        parent_task.await.unwrap();
+        replacement_task.await.unwrap();
+        assert_eq!(
+            successor.terminal().get().unwrap().kind,
+            ActorExitKind::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn admitted_pre_start_is_included_in_sealed_retirement_snapshot() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let directory = LocalActorDirectory::default();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut probe = observed_probe(&observations);
+        probe.startup_gate = Some((entered.clone(), release.clone()));
+        let spawning = {
+            let directory = directory.clone();
+            tokio::spawn(async move {
+                spawn_local_actor_in_directory(None, probe, crate::Incarnation(1), directory).await
+            })
+        };
+        entered.notified().await;
+        let batch = directory.seal().cancel_all(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "closed while starting",
+        ));
+        let roots = batch.into_roots();
+        assert_eq!(roots.len(), 1);
+        assert!(roots[0].terminal().get().is_none());
+        assert!(roots[0].terminal().requested_shutdown().is_some());
+        release.notify_one();
+        let (actor, task) = spawning.await.unwrap().unwrap();
+        task.await.unwrap();
+        assert_eq!(actor.identity(), roots[0].identity());
+        assert_eq!(
+            actor.terminal().get().unwrap().kind,
+            ActorExitKind::Cancelled
+        );
+        assert!(matches!(
+            actor.terminal().cleanup().unwrap().realm,
+            crate::CleanupComponentOutcome::Unsupported
+        ));
+    }
+
+    struct FenceResource;
+
+    impl ractor::Actor for FenceResource {
+        type Msg = ();
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ractor::ActorRef<()>,
+            _arguments: (),
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            Ok(())
+        }
+        async fn handle(
+            &self,
+            _myself: ractor::ActorRef<()>,
+            _message: (),
+            _state: &mut (),
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_child_teardown_fences_siblings_before_resource_cleanup() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (parent, task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let context = observations.lock()[0].0.clone();
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        for _ in 0..2 {
+            let mut child = observed_probe(&observations);
+            child.cleanup_peers = Some(peers.clone());
+            let actor = context.spawn_child(None, child).await.unwrap();
+            peers.lock().push(actor);
+        }
+        let resource_observed = Arc::new(AtomicBool::new(false));
+        context
+            .spawn_resource(None, FenceResource, (), {
+                let peers = peers.clone();
+                let resource_observed = resource_observed.clone();
+                move |_| {
+                    // This is an actual resource-retirement callback, invoked before
+                    // child drain futures. Without the batch neither sibling has
+                    // its retirement intent at this point.
+                    for peer in peers.lock().iter() {
+                        assert!(peer.terminal().requested_shutdown().is_some());
+                    }
+                    resource_observed.store(true, Ordering::SeqCst);
+                    Box::pin(async { crate::CleanupComponentOutcome::Unsupported })
+                }
+            })
+            .await
+            .unwrap();
+        let shutdown = parent
+            .shutdown_with_cleanup(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "owner retirement",
+            ))
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert!(resource_observed.load(Ordering::SeqCst));
+        assert!(matches!(
+            shutdown.cleanup.realm,
+            crate::CleanupComponentOutcome::Unsupported
+        ));
+        // Generic probes cannot issue realm proof. Every sibling nevertheless
+        // has its genuine actor-owned cancellation and component evidence.
+        assert!(matches!(
+            shutdown.cleanup.children,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        for child in peers.lock().iter() {
+            assert_eq!(
+                child.terminal().get().unwrap().kind,
+                ActorExitKind::Cancelled
+            );
+            assert!(child.terminal().cleanup().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_prepared_replacement_accepts_custody_without_running_backlog() {
+        let mut probe = behavior(false);
+        probe.behavior.replacement_staged = true;
+        probe.behavior.mailbox_ready = false;
+        let (actor, task) = spawn_local_actor(None, probe.behavior).await.unwrap();
+        let batch = crate::kernel::RetirementBatch::issue(vec![(
+            actor.clone(),
+            ActorTerminal::new(ActorExitKind::Cancelled, "cancelled before activation"),
+        )]);
+        let caller = ActorRef::first(crate::ActorId(99));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (reply, receive) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::ActivateReplacement {
+                backlog: VecDeque::from([KernelMessage::Call {
+                    caller,
+                    ancestry: crate::CallAncestry::begin(caller),
+                    request: MailboxValue::probe(SessionId(7), dropped.clone()),
+                    reply: reply.into(),
+                }]),
+                draining: false,
+            })
+            .unwrap();
+        task.await.unwrap();
+        assert!(
+            receive.await.is_err(),
+            "cancelled backlog cannot execute authored call"
+        );
+        assert!(probe.mailbox_calls.lock().is_empty());
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            actor.terminal().get().unwrap().kind,
+            ActorExitKind::Cancelled
+        );
+        assert!(matches!(
+            actor.terminal().cleanup().unwrap().realm,
+            crate::CleanupComponentOutcome::Unsupported
+        ));
+        assert_eq!(batch.into_actors().len(), 1);
+    }
+
     #[tokio::test]
     async fn prepared_replacement_defers_shutdown_until_activation() {
         let mut probe = behavior(false);
@@ -6963,6 +7477,8 @@ mod tests {
         assert!(fixture.calls.lock().contains(&"first-start"));
         let context = KernelContext {
             identity: actor.identity(),
+            terminal: actor.terminal().clone(),
+            spawn_ownership: SpawnOwnership::Independent,
             myself: actor.address().clone(),
             children: Arc::new(Mutex::new(HashMap::from([(
                 actor.address().get_id(),
@@ -6998,7 +7514,12 @@ mod tests {
         assert_eq!(observed.cleanup.actor(), actor.identity());
         context
             .directory
-            .insert(actor.clone(), std::sync::Weak::new());
+            .insert(
+                actor.clone(),
+                std::sync::Weak::new(),
+                SpawnOwnership::Independent,
+            )
+            .unwrap();
         assert!(context.forget_terminal_actor(actor.identity()));
         assert!(context.children.lock().is_empty());
         assert!(
@@ -7018,6 +7539,8 @@ mod tests {
                 .unwrap();
             let context = KernelContext {
                 identity: owner.identity(),
+                terminal: owner.terminal().clone(),
+                spawn_ownership: SpawnOwnership::Independent,
                 myself: owner.address().clone(),
                 children: Arc::new(Mutex::new(HashMap::new())),
                 directory: LocalActorDirectory::default(),
@@ -7668,6 +8191,8 @@ mod tests {
 
         let context = std::sync::Arc::new(KernelContext {
             identity: placeholder.identity(),
+            terminal: terminal.clone(),
+            spawn_ownership: SpawnOwnership::Independent,
             myself: placeholder.address().clone(),
             children: Arc::new(Mutex::new(HashMap::new())),
             directory: LocalActorDirectory::default(),

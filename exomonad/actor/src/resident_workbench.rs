@@ -2318,19 +2318,26 @@ pub struct ResidentActorRunner<H, O> {
 
 /// Preparation owns a fresh session until an exact actor takes custody. The
 /// runner's existing synchronous discard operation also covers a dropped await.
+/// Shared preparation custody keeps refusal cleanup ahead of discard;
+/// admission disarms every share when the actor takes ownership.
+#[derive(Clone)]
 pub(crate) struct ChildSessionStartupLease {
-    discard: Option<Box<dyn FnOnce() + Send + Sync>>,
+    custody: Arc<ChildSessionStartupCustody>,
+}
+
+struct ChildSessionStartupCustody {
+    discard: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>,
 }
 
 impl ChildSessionStartupLease {
-    pub(crate) fn admitted(mut self) {
-        self.discard = None;
+    pub(crate) fn admitted(self) {
+        self.custody.discard.lock().take();
     }
 }
 
-impl Drop for ChildSessionStartupLease {
+impl Drop for ChildSessionStartupCustody {
     fn drop(&mut self) {
-        if let Some(discard) = self.discard.take() {
+        if let Some(discard) = self.discard.get_mut().take() {
             discard();
         }
     }
@@ -3734,7 +3741,11 @@ impl<H, O> ResidentActorRunner<H, O> {
     {
         let runner = self.clone();
         ChildSessionStartupLease {
-            discard: Some(Box::new(move || runner.discard_child_session(session_id))),
+            custody: Arc::new(ChildSessionStartupCustody {
+                discard: parking_lot::Mutex::new(Some(Box::new(move || {
+                    runner.discard_child_session(session_id)
+                }))),
+            }),
         }
     }
 

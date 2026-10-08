@@ -985,6 +985,31 @@ impl std::fmt::Debug for LocalActorRef {
     }
 }
 
+/// Actor-owned retirement intent is issued for the entire captured set before
+/// any drain future or resource teardown can settle another member's wait.
+pub(crate) struct RetirementBatch {
+    actors: Vec<(LocalActorRef, ActorTerminal)>,
+}
+
+impl RetirementBatch {
+    pub(crate) fn issue(actors: Vec<(LocalActorRef, ActorTerminal)>) -> Self {
+        let requests = actors
+            .iter()
+            .map(|(actor, terminal)| (actor.terminal.clone(), terminal.clone()))
+            .collect::<Vec<_>>();
+        RetainedActorExit::request_shutdown_batch(&requests, || {
+            for (actor, _) in &actors {
+                actor.admission.close();
+            }
+        });
+        Self { actors }
+    }
+
+    pub(crate) fn into_actors(self) -> Vec<(LocalActorRef, ActorTerminal)> {
+        self.actors
+    }
+}
+
 impl LocalActorRef {
     pub(crate) fn hosted_cell(&self) -> &HostedCellSlot {
         &self.admission.1
@@ -1321,8 +1346,8 @@ impl LocalActorRef {
         &self,
         terminal: ActorTerminal,
     ) -> Result<ActorTerminal, KernelInvocationFailure> {
-        self.admission.close();
-        let terminal = self.terminal.request_shutdown(terminal);
+        let _batch = RetirementBatch::issue(vec![(self.clone(), terminal.clone())]);
+        let terminal = self.terminal.requested_shutdown().unwrap_or(terminal);
         let (reply, receive) = tokio::sync::oneshot::channel();
         if self
             .address

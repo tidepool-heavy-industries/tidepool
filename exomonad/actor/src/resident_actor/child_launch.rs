@@ -455,7 +455,7 @@ where
         behavior.child_placement_custody = Some(continuation.placement_custody.clone());
         behavior.admitted_checkpoint = checkpoint_admission.clone();
         behavior.prepared_workspace = prepared_workspace;
-        behavior.child_session_startup = child_session_startup;
+        behavior.child_session_startup = child_session_startup.clone();
         let startup_admission = match lifetime {
             crate::WorkerLifetime::InvocationOwned | crate::WorkerLifetime::InScope(_) => {
                 Some(invocation_work.clone().ok_or_else(|| {
@@ -487,11 +487,28 @@ where
         let child = match child_result {
             Ok(child) => child,
             Err(error) => {
+                let cleanup = settle_startup_refusal(
+                    &environment.runner,
+                    &kernel,
+                    &continuation.placement_custody,
+                    &error,
+                )
+                .await;
                 if let Some(admission) = &spawn_admission {
                     admission.fail(error.to_string());
-                    admission.retain_cleanup(crate::lineage::SpawnCleanupOutcome::Unconfirmed(
-                        "startup cleanup remains with the kernel owner".into(),
-                    ));
+                    admission.retain_cleanup(match cleanup {
+                        crate::CleanupComponentOutcome::Confirmed => {
+                            crate::lineage::SpawnCleanupOutcome::Confirmed
+                        }
+                        crate::CleanupComponentOutcome::Unconfirmed(detail) => {
+                            crate::lineage::SpawnCleanupOutcome::Unconfirmed(detail)
+                        }
+                        crate::CleanupComponentOutcome::Unsupported => {
+                            crate::lineage::SpawnCleanupOutcome::Unconfirmed(
+                                "startup owner does not support complete cleanup".into(),
+                            )
+                        }
+                    });
                 }
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     error.to_string(),
@@ -540,6 +557,52 @@ where
         continuation,
         result,
     }
+}
+
+/// Await refusal cleanup while the original preparation lease still retains
+/// the native machine. An admitted actor's typed cleanup owns its placement.
+async fn settle_startup_refusal<H, O>(
+    runner: &ResidentActorRunner<H, O>,
+    kernel: &KernelContext,
+    custody: &ChildPlacementCustody,
+    error: &ractor::SpawnErr,
+) -> crate::CleanupComponentOutcome
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    use crate::CleanupComponentOutcome::{Confirmed, Unconfirmed};
+    if let Some(cleanup) = crate::local_actor::startup_cleanup(error) {
+        return crate::local_actor::combine_cleanup(
+            crate::local_actor::combine_cleanup(cleanup.hook().clone(), cleanup.realm().clone()),
+            cleanup.children().clone(),
+        );
+    }
+    let cleanup = if let Some(placement) = custody.take_unadmitted() {
+        let mut attempt = PlacementReclaimAttempt {
+            custody: custody.clone(),
+            placement,
+            confirmed: false,
+        };
+        match runner
+            .retire_root_placement_wait(placement, crate::local_actor::SHUTDOWN_BUDGET)
+            .await
+        {
+            Ok(()) => {
+                attempt.confirmed = true;
+                Confirmed
+            }
+            Err(cleanup) => Unconfirmed(format!(
+                "child startup failed: {error}; placement cleanup: {cleanup}"
+            )),
+        }
+    } else {
+        Unconfirmed(format!(
+            "child startup failed without available preparation custody: {error}"
+        ))
+    };
+    kernel.retain_child_startup_cleanup(cleanup.clone());
+    cleanup
 }
 
 pub(super) fn matches_parent(
@@ -739,6 +802,37 @@ mod tests {
 
     type Machines = ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>;
     type Runner = ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>;
+
+    #[tokio::test]
+    async fn scheduler_refusal_waits_for_original_placement_cleanup() {
+        let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
+        let (runner, machines, placement, captured, _root) = shared_fixture();
+        fixture.environment.runner = runner;
+        let custody = ChildPlacementCustody::new(placement);
+        let error = ractor::SpawnErr::StartupFailed(
+            std::io::Error::other("scheduler refused prepared child").into(),
+        );
+        let checkout = machines.checkout_run(placement.session).unwrap();
+        let mut settling = Box::pin(settle_startup_refusal(
+            &fixture.environment.runner,
+            &fixture.kernel,
+            &custody,
+            &error,
+        ));
+        assert!(matches!(
+            futures_util::poll!(&mut settling),
+            std::task::Poll::Pending
+        ));
+        assert_eq!(
+            *custody.0.lock(),
+            ChildPlacementPhase::Reclaiming(placement)
+        );
+        drop(checkout);
+        assert_eq!(settling.await, crate::CleanupComponentOutcome::Confirmed);
+        assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+        assert!(!capture_is_live(&machines, placement, &captured));
+        fixture.finish().await;
+    }
 
     fn session(
         id: SessionId,

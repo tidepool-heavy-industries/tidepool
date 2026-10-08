@@ -525,6 +525,36 @@ impl RetainedActorExit {
         terminal
     }
 
+    /// Fence every selected incarnation before admission closure can wake work
+    /// that settles a peer. Aliases share one lock; overlapping batches acquire
+    /// their locks in the same order. Existing exits and intents remain intact.
+    ///
+    /// The caller must release directory and request-registry locks first. The
+    /// closure may only close admissions: it must not acquire retirement locks
+    /// or publish cleanup. Intent is not terminal or cleanup evidence.
+    pub(crate) fn request_shutdown_batch(
+        requests: &[(RetainedActorExit, ActorTerminal)],
+        close_admissions: impl FnOnce(),
+    ) {
+        let mut owners: Vec<_> = requests.iter().collect();
+        owners.sort_by_key(|(owner, _)| Arc::as_ptr(&owner.state));
+        owners.dedup_by_key(|(owner, _)| Arc::as_ptr(&owner.state));
+        let mut guards: Vec<_> = owners
+            .iter()
+            .map(|(owner, _)| owner.state.requested_shutdown.lock())
+            .collect();
+        for ((owner, terminal), requested) in owners.iter().zip(&mut guards) {
+            if requested.is_none() && owner.get().is_none() {
+                **requested = Some(terminal.clone().bound_diagnostic());
+            }
+        }
+        close_admissions();
+        drop(guards);
+        for (owner, _) in owners {
+            owner.state.changed.send_modify(|revision| *revision += 1);
+        }
+    }
+
     pub(crate) fn requested_shutdown(&self) -> Option<ActorTerminal> {
         self.state.requested_shutdown.lock().clone()
     }
@@ -1068,6 +1098,147 @@ mod tests {
             owner.claim_before_shutdown(|| panic!("retirement must refuse native wake")),
             Err(terminal)
         );
+    }
+
+    #[test]
+    fn shutdown_batch_holds_every_fence_before_admission_wake() {
+        let target = RetainedActorExit::new();
+        let waiting = RetainedActorExit::new();
+        let terminal = ActorTerminal::new(ActorExitKind::Cancelled, "batch retirement");
+        let target_changes = target.state.changed.subscribe();
+        let waiting_changes = waiting.state.changed.subscribe();
+        let control = crate::WorkbenchExecutionControl::untracked();
+        control.arm_sleep();
+        let claiming_owner = waiting.clone();
+        let claiming_control = control.clone();
+        let (ready, observation) = std::sync::mpsc::channel();
+        let (entered, claiming) = std::sync::mpsc::channel();
+        let claimant = std::thread::spawn(move || {
+            observation.recv_timeout(Duration::from_secs(5)).unwrap();
+            entered.send(()).unwrap();
+            claiming_owner.claim_before_shutdown(|| claiming_control.claim_expiry())
+        });
+
+        RetainedActorExit::request_shutdown_batch(
+            &[
+                (target.clone(), terminal.clone()),
+                (waiting.clone(), terminal.clone()),
+                (
+                    target.clone(),
+                    completed("duplicate must not replace intent"),
+                ),
+            ],
+            || {
+                assert!(target.state.requested_shutdown.try_lock().is_none());
+                assert!(waiting.state.requested_shutdown.try_lock().is_none());
+                assert!(!target_changes.has_changed().unwrap());
+                assert!(!waiting_changes.has_changed().unwrap());
+                // Admission closure can make a peer's observation ready before
+                // the explicit retirement notification reaches that peer.
+                ready.send(()).unwrap();
+                claiming.recv_timeout(Duration::from_secs(5)).unwrap();
+            },
+        );
+
+        assert_eq!(claimant.join().unwrap(), Err(terminal.clone()));
+        assert_eq!(target.requested_shutdown(), Some(terminal.clone()));
+        assert_eq!(waiting.requested_shutdown(), Some(terminal));
+        assert!(target_changes.has_changed().unwrap());
+        assert!(waiting_changes.has_changed().unwrap());
+        assert!(
+            control.request_cancellation(),
+            "ready wake never claimed execution"
+        );
+        assert!(target.get().is_none());
+        assert!(waiting.get().is_none());
+        assert!(target.cleanup().is_none());
+        assert!(waiting.cleanup().is_none());
+    }
+
+    #[test]
+    fn overlapping_shutdown_batches_preserve_one_intent_in_opposite_input_orders() {
+        let first = RetainedActorExit::new();
+        let second = RetainedActorExit::new();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (finished, completions) = std::sync::mpsc::channel();
+        let mut workers = Vec::new();
+        for (requests, summary) in [
+            (vec![first.clone(), second.clone()], "first batch"),
+            (vec![second.clone(), first.clone()], "second batch"),
+        ] {
+            let barrier = barrier.clone();
+            let finished = finished.clone();
+            workers.push(std::thread::spawn(move || {
+                let requests: Vec<_> = requests
+                    .into_iter()
+                    .map(|owner| (owner, ActorTerminal::new(ActorExitKind::Cancelled, summary)))
+                    .collect();
+                barrier.wait();
+                RetainedActorExit::request_shutdown_batch(&requests, || {});
+                finished.send(()).unwrap();
+            }));
+        }
+        for _ in 0..2 {
+            completions.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(first.requested_shutdown(), second.requested_shutdown());
+        assert!(matches!(
+            first.requested_shutdown(),
+            Some(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                ..
+            })
+        ));
+        assert!(first.get().is_none());
+        assert!(second.get().is_none());
+        assert!(first.cleanup().is_none());
+        assert!(second.cleanup().is_none());
+    }
+
+    #[test]
+    fn shutdown_batch_preserves_completed_exit_prior_intent_and_unsettled_work() {
+        let exited = RetainedActorExit::new();
+        let prior = RetainedActorExit::new();
+        let pending = RetainedActorExit::new();
+        exited
+            .publish(completed("completed before cancellation"))
+            .unwrap();
+        let original = ActorTerminal::new(ActorExitKind::Failed, "original retirement");
+        prior.request_shutdown(original.clone());
+        let ticket = admitted_compiler(&pending);
+        let cancellation = ActorTerminal::new(ActorExitKind::Cancelled, "later batch");
+        let mut admissions_closed = false;
+        RetainedActorExit::request_shutdown_batch(
+            &[
+                (exited.clone(), cancellation.clone()),
+                (prior.clone(), cancellation.clone()),
+                (pending.clone(), cancellation.clone()),
+            ],
+            || admissions_closed = true,
+        );
+        assert!(admissions_closed);
+        assert_eq!(
+            exited.get(),
+            Some(completed("completed before cancellation"))
+        );
+        assert!(exited.requested_shutdown().is_none());
+        assert_eq!(prior.requested_shutdown(), Some(original));
+        assert_eq!(pending.requested_shutdown(), Some(cancellation));
+        assert_eq!(
+            pending.compiler_close_observations(),
+            vec![CompilerWorkClose::Pending]
+        );
+        drop(ticket);
+        assert_eq!(
+            pending.compiler_close_observations(),
+            vec![CompilerWorkClose::Abandoned]
+        );
+        assert!(exited.cleanup().is_none());
+        assert!(prior.cleanup().is_none());
+        assert!(pending.cleanup().is_none());
     }
 
     #[test]

@@ -914,6 +914,31 @@ impl InvocationWork {
         self.state.lock().cleanup.clone()
     }
 
+    fn retirement_members(&self, kernel: &KernelContext) -> Vec<LocalActorRef> {
+        let (mut members, pending, scopes) = {
+            let state = self.state.lock();
+            (
+                state.workers.clone(),
+                state
+                    .pending_workers
+                    .iter()
+                    .chain(&state.unresolved_workers)
+                    .copied()
+                    .collect::<Vec<_>>(),
+                state.scopes.clone(),
+            )
+        };
+        members.extend(
+            pending
+                .into_iter()
+                .filter_map(|actor| kernel.resolve(actor)),
+        );
+        for scope in scopes {
+            members.extend(scope.retirement_members(kernel));
+        }
+        members
+    }
+
     pub(super) async fn cleanup<H, O>(
         &self,
         environment: &ResidentEnvironment<H, O>,
@@ -939,6 +964,20 @@ impl InvocationWork {
                 state.launch_revision,
             )
         };
+        self.close();
+        // Scope and Form cleanup can wake authored waits. Fence the complete
+        // retained subtree first, using its existing worker custody.
+        let _retirement = crate::kernel::RetirementBatch::issue(
+            self.retirement_members(kernel)
+                .into_iter()
+                .map(|child| {
+                    (
+                        child,
+                        ActorTerminal::new(ActorExitKind::Cancelled, "owning resource scope ended"),
+                    )
+                })
+                .collect(),
+        );
         let mut cleanup = InvocationCleanup {
             compilers: self.state.lock().compilers.clone(),
             ..InvocationCleanup::default()
@@ -1182,14 +1221,20 @@ impl InvocationWork {
         } else {
             "owning tool invocation ended"
         };
-        let worker_cleanup =
-            futures_util::future::join_all(workers.into_iter().map(|child| async move {
+        let workers = crate::kernel::RetirementBatch::issue(
+            workers
+                .into_iter()
+                .map(|child| {
+                    (
+                        child,
+                        ActorTerminal::new(ActorExitKind::Cancelled, terminal_summary),
+                    )
+                })
+                .collect(),
+        );
+        let worker_cleanup = futures_util::future::join_all(workers.into_actors().into_iter().map(
+            |(child, terminal)| async move {
                 let actor = child.identity();
-                let terminal = ActorTerminal {
-                    kind: ActorExitKind::Cancelled,
-                    summary: terminal_summary.into(),
-                    diagnostic: None,
-                };
                 let (kernel, retained_terminal) = match tokio::time::timeout(
                     crate::local_actor::SHUTDOWN_BUDGET,
                     child.shutdown_with_cleanup(terminal),
@@ -1239,7 +1284,8 @@ impl InvocationWork {
                     kernel,
                     host,
                 }
-            }));
+            },
+        ));
         let (commands, workers) = tokio::join!(command_cleanup, worker_cleanup);
         cleanup.commands = commands;
         cleanup.workers = workers;

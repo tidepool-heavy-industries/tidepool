@@ -20,6 +20,8 @@ mod command_settlement;
 mod commands;
 mod display_settlement;
 mod drain_wait;
+#[cfg(test)]
+mod forest_shutdown_tests;
 pub(crate) mod forms;
 pub(crate) mod green;
 mod green_notebook;
@@ -10904,7 +10906,7 @@ where
                     bound_worktree: self.launch_worktrees.first().cloned(),
                     terminal: None,
                     runtime_observation: self.runtime_observation.clone(),
-                    scheduler_root: kernel.supervisor_identity().is_none(),
+                    scheduler_root: kernel.spawn_ownership().is_independent(),
                     displays: Default::default(),
                 },
             );
@@ -12331,6 +12333,7 @@ where
             ))
             .await;
             let staged_replacement = self.replacement_staged();
+            let staged_placement = self.boot.is_some();
             self.source_connections.take();
             self.sources.clear();
             let context = self.context(kernel.identity());
@@ -12405,25 +12408,27 @@ where
             }
             // Realm retirement obtains its own exclusive checkout. A failed hook
             // does not skip this safe cleanup; it also never becomes success.
-            let realm_result =
-                if staged_replacement || self.descriptor.supervisor_parent().is_none() {
-                    self.environment
-                        .runner
-                        .retire_root_placement_wait(
-                            self.descriptor.placement(),
-                            deadline.saturating_duration_since(tokio::time::Instant::now()),
-                        )
-                        .await
-                } else {
-                    self.environment
-                        .runner
-                        .close_realm_wait(
-                            context,
-                            self.descriptor.placement().resource_scope,
-                            deadline.saturating_duration_since(tokio::time::Instant::now()),
-                        )
-                        .await
-                };
+            let realm_result = if staged_replacement
+                || staged_placement
+                || kernel.spawn_ownership().is_independent()
+            {
+                self.environment
+                    .runner
+                    .retire_root_placement_wait(
+                        self.descriptor.placement(),
+                        deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    )
+                    .await
+            } else {
+                self.environment
+                    .runner
+                    .close_realm_wait(
+                        context,
+                        self.descriptor.placement().resource_scope,
+                        deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    )
+                    .await
+            };
             if let Err(error) = realm_result {
                 retained_errors.push(error.to_string());
             }
@@ -13552,10 +13557,12 @@ where
         {
             Ok(actor) => Ok(actor),
             Err(error) => {
-                self.environment
-                    .runner
-                    .retire_root_placement(placement)
-                    .await?;
+                if crate::local_actor::startup_cleanup(&error).is_none() {
+                    self.environment
+                        .runner
+                        .retire_root_placement(placement)
+                        .await?;
+                }
                 Err(Box::new(error))
             }
         }
@@ -13670,28 +13677,27 @@ where
         {
             Ok(root) => Ok(root),
             Err(error) => {
-                self.environment
-                    .runner
-                    .retire_root_placement(placement)
-                    .await?;
+                if crate::local_actor::startup_cleanup(&error).is_none() {
+                    self.environment
+                        .runner
+                        .retire_root_placement(placement)
+                        .await?;
+                }
                 Err(Box::new(error))
             }
         }
     }
 
-    /// Close root admission and retain each root's actor-owned cleanup evidence.
+    /// Fence every admitted member before draining run and root-owned cleanup.
     /// A forced actor stop remains unconfirmed even after its scheduler task exits.
     pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
+        let retirement = self.directory.seal().cancel_all(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "forest host shutdown",
+        ));
         *self.environment.root_admission_closed.write().await = true;
         self.directory.close_run_admission().await;
-        let roots = self
-            .environment
-            .actors
-            .lock()
-            .iter()
-            .filter(|(_, record)| record.scheduler_root)
-            .filter_map(|(actor, _)| self.directory.resolve(*actor))
-            .collect::<Vec<_>>();
+        let roots = retirement.into_roots();
         let mut outcomes = Vec::with_capacity(roots.len() + 1);
         outcomes.push(crate::ForestRootShutdown::RunResources(
             self.directory.shutdown_run_resources().await,
@@ -13735,10 +13741,12 @@ where
         {
             Ok((actor, _task)) => Ok(actor),
             Err(error) => {
-                self.environment
-                    .runner
-                    .retire_root_placement(placement)
-                    .await?;
+                if crate::local_actor::startup_cleanup(&error).is_none() {
+                    self.environment
+                        .runner
+                        .retire_root_placement(placement)
+                        .await?;
+                }
                 Err(Box::new(error))
             }
         }
