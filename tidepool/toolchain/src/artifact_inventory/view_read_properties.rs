@@ -188,11 +188,24 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
         .collect::<BTreeSet<_>>();
     let mut expected_metadata_entries = BTreeMap::new();
     let mut expected_interfaces = BTreeMap::new();
+    let mut expected_natives = BTreeMap::<ExactModuleIdentity, Vec<Arc<ArtifactEntry>>>::new();
+    // Metadata resolution gives an exact native implementation precedence over
+    // an interface with the same owner; never derive the winner from IDs.
     for entry in &expected.entries {
-        expected_metadata_entries.insert(entry.descriptor.owner.clone(), Arc::clone(entry));
         if !entry.is_native() {
             expected_interfaces.insert(entry.descriptor.owner.clone(), Arc::clone(entry));
+            expected_metadata_entries
+                .insert(entry.descriptor.owner.clone(), Arc::clone(entry));
+        } else {
+            expected_natives
+                .entry(entry.descriptor.owner.clone())
+                .or_default()
+                .push(Arc::clone(entry));
         }
+    }
+    for (owner, native_entries) in expected_natives {
+        prop_assert_eq!(native_entries.len(), 1, "fixture keeps native owners unique");
+        expected_metadata_entries.insert(owner, Arc::clone(&native_entries[0]));
     }
     let mut expected_owners = expected_interfaces
         .values()
@@ -221,6 +234,7 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
     prop_assert_eq!(view.interface_owners(), expected_owners);
     prop_assert_eq!(metadata.dependencies(), exhaustive_oracle(view).dependencies);
     prop_assert_eq!(metadata.selected_native_groups, expected_groups);
+    prop_assert!(metadata.ambiguous_native_owners.is_empty());
     prop_assert_eq!(metadata.artifacts.keys().copied().collect::<BTreeSet<_>>(), expected_id_set);
     prop_assert_eq!(metadata.entries, expected_metadata_entries);
     prop_assert!(root_ids.len() <= expected.closure.len());
@@ -293,11 +307,15 @@ proptest! {
         // A metadata snapshot owns copied Arc payload handles only. It must not
         // keep the graph alive or carry native selection into an interface view.
         let snapshot = extended.metadata_snapshot();
+        prop_assert!(!extended.selected_native_groups().is_empty());
         let interface_owner = catalog.owner(0);
-        let interface = peer.interface_projection(&[interface_owner]).unwrap();
+        let interface = extended.interface_projection(&[interface_owner]).unwrap();
         prop_assert!(interface.selected_native_groups().is_empty());
+        prop_assert!(interface.metadata_snapshot().selected_native_groups.is_empty());
+        prop_assert!(interface.0.parents.is_empty());
         prop_assert!(interface.0.materialization_parents.is_empty());
         prop_assert!(interface.0.materialization.lock().unwrap().is_empty());
+        prop_assert!(interface.entries().iter().all(|entry| !entry.is_native()));
         let initial_indices = left
             .0
             .lock()
