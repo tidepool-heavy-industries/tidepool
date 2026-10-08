@@ -1,4 +1,4 @@
-use super::hosted_test_context::HostedTestRuntime;
+use super::hosted_test_context::{HostedActorContext, HostedTestRuntime};
 use super::*;
 use async_trait::async_trait;
 use harness::{
@@ -7,7 +7,7 @@ use harness::{
     model::AgentPath,
     transport::{ResponsesRequest, ResponsesTurn, TransportError},
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
@@ -130,20 +130,29 @@ impl ResponsesTransport for ScriptedProvider {
     }
 }
 
-async fn next_round(rounds: &mut mpsc::UnboundedReceiver<RequestedRound>) -> RequestedRound {
-    tokio::time::timeout(CELL_TIMEOUT, rounds.recv())
+async fn next_round(
+    rounds: &mut mpsc::UnboundedReceiver<RequestedRound>,
+    context: &HostedActorContext,
+) -> RequestedRound {
+    context
+        .while_root_live("next scripted model request", async {
+            tokio::time::timeout(CELL_TIMEOUT, rounds.recv())
+                .await
+                .expect("real resident cell did not reach the next model request")
+                .expect("scripted provider closed")
+        })
         .await
-        .expect("real resident cell did not reach the next model request")
-        .expect("scripted provider closed")
+        .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
 async fn next_round_with_output(
     rounds: &mut mpsc::UnboundedReceiver<RequestedRound>,
+    context: &HostedActorContext,
     call_id: &str,
 ) -> RequestedRound {
     tokio::time::timeout(CELL_TIMEOUT, async {
         loop {
-            let round = next_round(rounds).await;
+            let round = next_round(rounds, context).await;
             assert!(round.is_root(), "expected root output for {call_id}");
             if output_item(&round.request.input, call_id).is_some() {
                 return round;
@@ -244,12 +253,10 @@ async fn root_and_child_rounds_with_output(
 
 fn assert_before_call_prefix(request: &ResponsesRequest, raw: &[Item], call_id: &str) {
     assert!(raw.iter().all(|item| item.0["call_id"] != call_id));
-    assert!(
-        request
-            .input
-            .iter()
-            .all(|item| item.0["call_id"] != call_id)
-    );
+    assert!(request
+        .input
+        .iter()
+        .all(|item| item.0["call_id"] != call_id));
     assert!(has_user_text(request, "parent-original"));
     assert!(!has_user_text(request, "must-not-publish"));
 }
@@ -646,7 +653,7 @@ async fn start_with_spec_and_model(
 async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
     let (_files, fixture, mut rounds) = start_with_spec(None).await;
     let actor = fixture.context.actor.identity();
-    let first = next_round(&mut rounds).await;
+    let first = next_round(&mut rounds, &fixture.context).await;
     let session = first.request.session_id.clone();
     first.cell(
         "first-sync-publication",
@@ -654,7 +661,7 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
          let notebookSamples = [1, 2, 3] :: [Int]\n\
          notebookAction >>= display",
     );
-    let following = next_round(&mut rounds).await;
+    let following = next_round(&mut rounds, &fixture.context).await;
     let output = successful_output(&following.request, "first-sync-publication");
     assert_eq!(test_campaign::explicit_display_text(&output), "41");
     following.async_cell(
@@ -663,7 +670,8 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
          let asyncAction = (do { value <- notebookAction; pure (value + asyncValue) } :: Eff effects Int)\n\
          asyncAction >>= display",
     );
-    let following = next_round_with_output(&mut rounds, "async-publication").await;
+    let following =
+        next_round_with_output(&mut rounds, &fixture.context, "async-publication").await;
     let output = successful_output(&following.request, "async-publication");
     assert_eq!(test_campaign::explicit_display_text(&output), "42");
     following.cell(
@@ -671,14 +679,14 @@ async fn native_notebook_scheduling_preserves_effects_and_published_bindings() {
         "let syncAction = (do { value <- asyncAction; pure (value + 1) } :: Eff effects Int)\n\
          syncAction >>= display",
     );
-    let following = next_round(&mut rounds).await;
+    let following = next_round(&mut rounds, &fixture.context).await;
     let output = successful_output(&following.request, "sync-publication");
     assert_eq!(test_campaign::explicit_display_text(&output), "43");
     following.async_cell(
         "async-reuse",
         "syncAction >>= \\value -> display (value + 1)",
     );
-    let following = next_round_with_output(&mut rounds, "async-reuse").await;
+    let following = next_round_with_output(&mut rounds, &fixture.context, "async-reuse").await;
     let output = successful_output(&following.request, "async-reuse");
     assert_eq!(test_campaign::explicit_display_text(&output), "44");
     assert_eq!(following.request.session_id, session);
@@ -745,7 +753,7 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
     const SEED: &str = "fresh-idle-context-seed";
     const INPUT: &str = "explicit-idle-child-request";
     let (_files, mut fixture, mut rounds) = start().await;
-    let initial = next_round(&mut rounds).await;
+    let initial = next_round(&mut rounds, &fixture.context).await;
     assert!(initial.is_root());
     initial.cell(
         "fresh-idle-spawn",
@@ -784,12 +792,10 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
         .expect("spawn has installed its conversation");
     let child_path = conversation.identity().actor.clone();
     let installation = fixture.context.observer.installation(child.actor).await;
-    assert!(
-        installation
-            .tools
-            .iter()
-            .any(|tool| tool.name() == "haskell_sync")
-    );
+    assert!(installation
+        .tools
+        .iter()
+        .any(|tool| tool.name() == "haskell_sync"));
     // The real spawn call has completed and its installation is observable;
     // the only provider invocations so far are the two root rounds we hold.
     assert_eq!(installed.provider_calls.load(Ordering::SeqCst), 2);
@@ -807,12 +813,10 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
         !activated.is_root(),
         "parent must await the typed child response"
     );
-    assert!(
-        activated
-            .request
-            .session_id
-            .contains(&format!(":{}:", child_path.0))
-    );
+    assert!(activated
+        .request
+        .session_id
+        .contains(&format!(":{}:", child_path.0)));
     assert_eq!(user_text_occurrences(&activated.request, SEED), 1);
     assert!(!has_user_text(&activated.request, "parent-original"));
     let child_session = activated.request.session_id.clone();
@@ -835,14 +839,14 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
 async fn resident_sync_native_trim_commits_atomically_and_children_reuse_captured_bindings() {
     const TRIMMED: &str = "[Trimmed: repetitive build output]\nBuild succeeded.";
     let (_files, mut fixture, mut rounds) = start().await;
-    let setup = next_round(&mut rounds).await;
+    let setup = next_round(&mut rounds, &fixture.context).await;
     setup.cell_with_reasoning(
         "native-trim-setup",
         &tidepool_testing::fixture_source(
             "bridge/facade/src/actor_host/fixtures/context_acceptance_native_trim_setup.hs",
         ),
     );
-    let parent = next_round(&mut rounds).await;
+    let parent = next_round(&mut rounds, &fixture.context).await;
     assert!(parent.is_root());
     let setup_output = successful_output(&parent.request, "native-trim-setup");
     assert!(
@@ -855,12 +859,10 @@ async fn resident_sync_native_trim_commits_atomically_and_children_reuse_capture
         .find(|(_, _, item)| item == &original_output)
         .expect("setup result has canonical history")
         .1;
-    assert!(
-        original_output.0["output"]
-            .as_str()
-            .unwrap()
-            .contains("native-trim-result-tail")
-    );
+    assert!(original_output.0["output"]
+        .as_str()
+        .unwrap()
+        .contains("native-trim-result-tail"));
     let before = root_context_state(&fixture);
     parent.cell_with_reasoning(
         "native-trim-parent",
@@ -959,7 +961,7 @@ async fn resident_sync_native_trim_commits_atomically_and_children_reuse_capture
 async fn resident_sync_notes_commit_atomically_without_changing_captured_children() {
     let (_files, mut fixture, mut rounds) = start().await;
     let root_identity = fixture.context.actor.identity();
-    let setup = next_round(&mut rounds).await;
+    let setup = next_round(&mut rounds, &fixture.context).await;
     assert!(setup.is_root());
     setup.cell_with_reasoning(
         "context-setup",
@@ -967,7 +969,7 @@ async fn resident_sync_notes_commit_atomically_without_changing_captured_childre
             "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
         ),
     );
-    let parent = next_round(&mut rounds).await;
+    let parent = next_round(&mut rounds, &fixture.context).await;
     assert!(parent.is_root());
     successful_output(&parent.request, "context-setup");
     let root_session = parent.request.session_id.clone();
@@ -1040,27 +1042,23 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     );
     let (_files, fixture, mut rounds) = start_with_spec(Some(&spec)).await;
     let actor = fixture.context.actor.identity();
-    let first = next_round(&mut rounds).await;
+    let first = next_round(&mut rounds, &fixture.context).await;
     assert!(first.is_root());
     assert!(
         has_user_text(&first.request, "parent-original"),
         "initial input: {:?}",
         first.request.input
     );
-    assert!(
-        first
-            .request
-            .tools
-            .iter()
-            .any(|tool| tool["name"] == "haskell")
-    );
-    assert!(
-        first
-            .request
-            .tools
-            .iter()
-            .any(|tool| tool["name"] == "haskell_sync")
-    );
+    assert!(first
+        .request
+        .tools
+        .iter()
+        .any(|tool| tool["name"] == "haskell"));
+    assert!(first
+        .request
+        .tools
+        .iter()
+        .any(|tool| tool["name"] == "haskell_sync"));
     assert!(first.request.tools.iter().any(|tool| {
         tool["name"] == "curate" && tool["type"] == "function" && tool["strict"] == true
     }));
@@ -1068,7 +1066,7 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
     assert_eq!(first.request.model, "gpt-6.1-sol");
     assert_eq!(first.request.pinned_effort, harness::model::Effort::Low);
     first.function_with_reasoning("compiled-context", "curate", json!({"proceed": true}));
-    let successor = next_round(&mut rounds).await;
+    let successor = next_round(&mut rounds, &fixture.context).await;
     assert!(successor.is_root());
     let raw = raw_request_items(&fixture, &successor.request);
     let output = successful_output_items(&raw, "compiled-context");
@@ -1112,7 +1110,7 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
             "bridge/facade/src/actor_host/fixtures/context_acceptance_inspect.hs",
         ),
     );
-    let inspected = next_round(&mut rounds).await;
+    let inspected = next_round(&mut rounds, &fixture.context).await;
     assert!(inspected.is_root());
     assert_eq!(inspected.request.session_id, session);
     assert_eq!(inspected.request.model, "gpt-6.1-sol");
@@ -1152,14 +1150,14 @@ async fn resident_compiled_sync_handler_commits_context_and_model_before_inferen
 #[tokio::test]
 async fn resident_sync_context_failure_rolls_back_edits_and_keeps_activated_child() {
     let (_files, mut fixture, mut rounds) = start().await;
-    let setup = next_round(&mut rounds).await;
+    let setup = next_round(&mut rounds, &fixture.context).await;
     setup.cell(
         "context-setup",
         &tidepool_testing::fixture_source(
             "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
         ),
     );
-    let parent = next_round(&mut rounds).await;
+    let parent = next_round(&mut rounds, &fixture.context).await;
     let setup_output = successful_output(&parent.request, "context-setup");
     assert_eq!(
         test_campaign::explicit_display_text(&setup_output),
@@ -1219,11 +1217,9 @@ async fn resident_sync_context_failure_rolls_back_edits_and_keeps_activated_chil
         tidepool_toolchain::failclass::Phase::Run.tag(),
         "{terminal}"
     );
-    assert!(
-        terminal
-            .to_string()
-            .contains("intentional context transaction failure")
-    );
+    assert!(terminal
+        .to_string()
+        .contains("intentional context transaction failure"));
     // Context edits roll back, while the admitted actor-owned child and its
     // explicit request survive the enclosing invocation's failure.
     prove_child_survives(
@@ -1243,14 +1239,14 @@ async fn resident_sync_context_failure_rolls_back_edits_and_keeps_activated_chil
 async fn resident_async_failure_keeps_bindings_and_activated_child() {
     let (_files, mut fixture, mut rounds) = start().await;
     let actor = fixture.context.actor.identity();
-    let setup = next_round(&mut rounds).await;
+    let setup = next_round(&mut rounds, &fixture.context).await;
     setup.async_cell(
         "async-failure-setup",
         &tidepool_testing::fixture_source(
             "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
         ),
     );
-    let parent = next_round_with_output(&mut rounds, "async-failure-setup").await;
+    let parent = next_round_with_output(&mut rounds, &fixture.context, "async-failure-setup").await;
     assert!(parent.is_root());
     successful_output(&parent.request, "async-failure-setup");
     let original_setup = retained_output_item(&parent.request.input, "async-failure-setup").clone();
@@ -1322,7 +1318,7 @@ async fn resident_async_failure_keeps_bindings_and_activated_child() {
             "bridge/facade/src/actor_host/fixtures/context_acceptance_after_failure.hs",
         ),
     );
-    let reused = next_round_with_output(&mut rounds, "async-failure-reuse").await;
+    let reused = next_round_with_output(&mut rounds, &fixture.context, "async-failure-reuse").await;
     assert!(reused.is_root());
     assert_eq!(reused.request.session_id, session);
     let output = successful_output(&reused.request, "async-failure-reuse");
@@ -1337,14 +1333,14 @@ async fn resident_async_failure_keeps_bindings_and_activated_child() {
 async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child() {
     let (_files, mut fixture, mut rounds) = start().await;
     let root_identity = fixture.context.actor.identity();
-    let setup = next_round(&mut rounds).await;
+    let setup = next_round(&mut rounds, &fixture.context).await;
     setup.cell(
         "context-setup",
         &tidepool_testing::fixture_source(
             "bridge/facade/src/actor_host/fixtures/context_acceptance_setup.hs",
         ),
     );
-    let parent = next_round(&mut rounds).await;
+    let parent = next_round(&mut rounds, &fixture.context).await;
     let setup_output = successful_output(&parent.request, "context-setup");
     assert_eq!(
         test_campaign::explicit_display_text(&setup_output),

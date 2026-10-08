@@ -121,7 +121,7 @@ async fn production_harness_notebook_usecase_phases() {
     let activation_started = Instant::now();
     let activation_requests = tidepool_extract_cmd::extract_spawn_count();
     let (_files, fixture, mut rounds) = start_with_spec(None).await;
-    let mut round = next_round(&mut rounds).await;
+    let mut round = next_round(&mut rounds, &fixture.context).await;
     let actor = fixture.context.actor.identity();
     let session = round.request.session_id.clone();
     println!(
@@ -152,12 +152,12 @@ async fn production_harness_notebook_usecase_phases() {
         let provider_before = round.provider_calls.load(Ordering::SeqCst);
         let started = Instant::now();
         issue(round, phase, &call_id);
-        let successor = next_round(&mut rounds).await;
+        let successor = next_round(&mut rounds, &fixture.context).await;
         let first_successor_ns = started.elapsed().as_nanos();
         let yielded_before_terminal = !has_output(&successor, &call_id);
         round = if phase.asynchronous && yielded_before_terminal {
             successor.wait_for_pending();
-            next_round_with_output(&mut rounds, &call_id).await
+            next_round_with_output(&mut rounds, &fixture.context, &call_id).await
         } else {
             successor
         };
