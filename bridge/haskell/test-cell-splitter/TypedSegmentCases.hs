@@ -6,7 +6,7 @@ module TypedSegmentCases
 import Control.Exception (SomeException, bracket, evaluate, fromException, try)
 import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.IO.Class (liftIO)
-import Data.List (isPrefixOf)
+import Data.List (intercalate, isPrefixOf)
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
@@ -19,13 +19,14 @@ import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
 import GHC.Unit.State (lookupPackageName)
 import GHC.Unit.Module (moduleUnit)
-import GHC.Unit.Types (unitIdString, GenUnit(RealUnit), Definite(Definite))
+import GHC.Unit.Types (unitIdString, unitString, GenUnit(RealUnit), Definite(Definite))
 import GHC.Builtin.Types (intTy, doubleTy)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Types.Name (getOccString, nameModule_maybe)
+import GHC.Types.Name (getOccString, nameModule_maybe, nameUnique)
 import GHC.Types.Avail (availNames)
 import GHC.Types.TypeEnv (typeEnvIds)
-import GHC.Types.Var (varName)
+import GHC.Types.Var (varName, varUnique)
+import GHC.Types.Unique (getKey)
 import GHC.Iface.Syntax (IfaceConDecl(..), IfaceConDecls(..), IfaceDecl(..))
 import GHC.Types.FieldLabel (FieldSelectors(..), flHasFieldSelector, flSelector)
 import GHC.Unit.Module.ModDetails (md_types)
@@ -305,7 +306,12 @@ typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive 
       unless (all (\name -> notElem name exportedNames) selectorNames)
         (fail (owner ++ ": record selectors became lexical module exports"))
       unless (Set.fromList exportedNames == issuedNames)
-        (fail (owner ++ ": finalized exports differ from actual issued typed-segment roots"))
+        (fail (owner ++ ": finalized exports differ from actual issued typed-segment roots"
+          ++ "\n  finalized owner: " ++ renderModuleIdentity moduleOwner
+          ++ "\n  finalized exports:\n    "
+          ++ intercalate "\n    " (map renderNameIdentity (Set.toAscList (Set.fromList exportedNames)))
+          ++ "\n  issued root Ids:\n    "
+          ++ intercalate "\n    " (map renderIdIdentity issued))
   putStrLn ("typed record metadata: " ++ show (length recordMetadataCases)
     ++ " serial generated requests; record/newtype/multi-constructor, used/unused, "
     ++ "Generic/no-Generic, NoFieldSelectors, existential fields, duplicate selector "
@@ -419,6 +425,21 @@ metadataFieldOwners index shape selectors = case shape of
       then [("DuplicateMetadataLeft", "duplicateMetadataField")
            ,("DuplicateMetadataRight", "duplicateMetadataField")]
       else []
+
+renderModuleIdentity :: Module -> String
+renderModuleIdentity owner = unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner)
+
+renderNameIdentity :: Name -> String
+renderNameIdentity name =
+  maybe "<no-module>" renderModuleIdentity (nameModule_maybe name)
+    ++ "." ++ getOccString name
+    ++ " nameUnique=" ++ show (getKey (nameUnique name))
+    ++ " ppr=" ++ showSDocUnsafe (ppr name)
+
+renderIdIdentity :: Id -> String
+renderIdIdentity identifier =
+  renderNameIdentity (varName identifier)
+    ++ " varUnique=" ++ show (getKey (varUnique identifier))
 
 data PreparationExpected = PrepareAccepted | PrepareTypedRefusal | PrepareSourceRefusal
 
