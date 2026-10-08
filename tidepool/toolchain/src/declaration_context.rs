@@ -5650,15 +5650,20 @@ pub(crate) fn certify_artifact_view_groups_with_validation(
     for (artifact, product) in &available {
         original_ids
             .entry(product.owner())
-            .and_modify(|artifact| *artifact = None)
-            .or_insert(Some(*artifact));
+            .or_insert_with(Vec::new)
+            .push(*artifact);
     }
     let selected_key = |group: &PendingCertifiedGroup| {
-        let artifact = match original_ids.get(group.owner()) {
-            Some(Some(artifact)) => *artifact,
-            Some(None) => {
+        let artifact = match original_ids.get(group.owner()).map(Vec::as_slice) {
+            Some([artifact]) => *artifact,
+            Some(artifacts) => {
                 return Err(failure(
-                    "certified group has ambiguous exact original artifacts",
+                    crate::certified_products::CertificationError::OriginalSelectionConflict(
+                        Box::new(crate::certified_products::OriginalSelectionConflict {
+                            selected: group.owner().clone(),
+                            artifacts: artifacts.to_vec(),
+                        }),
+                    ),
                 ));
             }
             None => return Err(failure("certified group has no exact original artifact")),

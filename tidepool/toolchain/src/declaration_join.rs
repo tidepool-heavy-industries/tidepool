@@ -632,7 +632,7 @@ fn certify_authored_declaration_inner(
         .excluding_module(
             &candidates[0].unit,
             crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE,
-        );
+        )?;
     let products = originals.products();
     let matches = products
         .iter()
