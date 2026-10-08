@@ -4648,6 +4648,12 @@ tidepool-target phase=desugar module=Execute\n",
         let detailed = CapturedWriter::default();
         let trace = CapturedWriter::default();
         let raw_filter = "debug,tidepool_extract_cmd::daemon::compiler_detail=off";
+        let worker_stderr = b"tidepool-timing phase=cycle_modules_wall ms=7\n\
+tidepool-timing-detail parent=prepared_recover phase=lookup ms=1\n\
+tidepool-timing-module-detail module=Execute phase=interface ms=1\n\
+tidepool-count name=prepared_recover_rounds count=2\n\
+tidepool-reuse {\"decision\":\"hit\"}\n\
+tidepool-reuse-error: witness failed\n";
         let subscriber = tracing_subscriber_with_trace_filter(
             detailed.clone(),
             CapturedWriter::default(),
@@ -4666,12 +4672,7 @@ tidepool-target phase=desugar module=Execute\n",
             log_compile_timing(
                 "run-filter",
                 "request-filter",
-                b"tidepool-timing phase=cycle_modules_wall ms=7\n\
-tidepool-timing-detail parent=prepared_recover phase=lookup ms=1\n\
-tidepool-timing-module-detail module=Execute phase=interface ms=1\n\
-tidepool-count name=prepared_recover_rounds count=2\n\
-tidepool-reuse {\"decision\":\"hit\"}\n\
-tidepool-reuse-error: witness failed\n",
+                worker_stderr,
             );
             tracing::error!(
                 target: "tidepool_extract_cmd::daemon",
@@ -4693,10 +4694,13 @@ tidepool-reuse-error: witness failed\n",
             .collect::<Vec<_>>();
         assert!(retained_lines.contains(&"tidepool-timing phase=cycle_modules_wall ms=7"));
         assert!(retained_lines.contains(&"tidepool-reuse {\"decision\":\"hit\"}"));
-        assert!(retained_lines.contains(&"tidepool-reuse-error: witness failed"));
         assert!(retained_lines
             .iter()
             .all(|line| !is_raw_compiler_detail(line)));
+        assert!(!retained_lines.contains(&"tidepool-reuse-error: witness failed"));
+        assert!(String::from_utf8(diagnostic_stderr(worker_stderr).to_vec())
+            .unwrap()
+            .contains("tidepool-reuse-error: witness failed"));
         assert!(events.iter().any(|event| {
             event["fields"]["message"] == "compiler request started"
                 && event["fields"]["run_id"] == "run-filter"
@@ -4710,8 +4714,8 @@ tidepool-reuse-error: witness failed\n",
 
         let detailed_text = detailed.text();
         assert!(detailed_text.contains("compiler request started"));
-        assert!(detailed_text.contains("tidepool-reuse-error: witness failed"));
         assert!(detailed_text.contains("compiler request failed"));
+        assert!(!detailed_text.contains("tidepool-reuse-error: witness failed"));
         assert!(!detailed_text.contains("tidepool-timing-detail"));
         assert!(!detailed_text.contains("tidepool-timing-module-detail"));
         assert!(!detailed_text.contains("tidepool-count"));
