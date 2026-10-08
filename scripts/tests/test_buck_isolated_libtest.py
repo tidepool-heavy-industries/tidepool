@@ -497,6 +497,7 @@ class IsolatedLibtestTests(unittest.TestCase):
             'rust_test': lambda **kwargs: calls.append(('test', kwargs)),
             'rust_binary': lambda **kwargs: calls.append(('binary', kwargs)),
             'sh_test': lambda **kwargs: calls.append(('runner', kwargs)),
+            'test_source_requirements': lambda **kwargs: None,
         }
         exec('\n'.join(line for line in definitions.splitlines()
                        if not line.startswith('load(')), namespace)
@@ -521,6 +522,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         namespace = {
             'rust_optimization_level': lambda *_: '1',
             'rust_binary': lambda **kwargs: calls.append(kwargs),
+            'test_source_requirements': lambda **kwargs: None,
         }
         exec('\n'.join(line for line in definitions.splitlines()
                        if not line.startswith('load(')), namespace)

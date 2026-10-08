@@ -1102,6 +1102,21 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             },
         )
 
+    def test_test_module_obligations_do_not_depend_on_current_source_reachability(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        runtime = self.rule("tidepool/runtime", "tidepool_runtime_unit_tests", "tidepool_rust_binary")
+        self.assertIn("tidepool/runtime/src/session/registry_properties.rs",
+                      runtime["required_test_modules"])
+        extractor = self.rule("tidepool/extract-cmd", "tidepool_extract_cmd_unit_tests",
+                              "tidepool_rust_isolated_test")
+        fixture = "tidepool/extract-cmd/src/fixtures/build_products_worker.rs"
+        self.assertIn(fixture, extractor["test_fixtures"])
+        self.assertNotIn(fixture, extractor["required_test_modules"])
+        binary = self.rule("tidepool/extract-cmd", "tidepool-extract_unit_tests",
+                           "tidepool_rust_isolated_test")
+        self.assertEqual(binary["required_test_modules"], ["tidepool/extract-cmd/src/main.rs"])
+
     def test_catalog_resources_reach_the_generated_delegated_child_command(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1114,6 +1129,7 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             "rust_binary": lambda **_: None,
             "sh_test": lambda **arguments: wrappers.append(arguments),
             "read_root_config": lambda *_: "/declared/compiler",
+            "test_source_requirements": lambda **_kwargs: None,
         }
         exec("\n".join(line for line in definitions.read_text().splitlines()
                        if not line.startswith("load(")), namespace)

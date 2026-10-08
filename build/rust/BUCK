@@ -39,6 +39,7 @@ filegroup(
 )
 
 export_file(name = "native_checks_driver", src = "checks.py", visibility = ["PUBLIC"])
+export_file(name = "test_source_rustc", src = "test-source-rustc.py", visibility = ["PUBLIC"])
 
 native_rust_checks(
     name = "native_checks",

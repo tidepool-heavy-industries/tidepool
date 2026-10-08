@@ -1,5 +1,6 @@
 load("@prelude//:rules.bzl", "rust_binary", "rust_library", "rust_test", "sh_test")
 load("//build:native_profile.bzl", "rust_optimization_level")
+load(":test_source_participation.bzl", "test_source_requirements")
 
 def _common(name, package_name, package_dir, version, env, rustc_flags, is_library = False):
     manifest_env = {
@@ -15,10 +16,11 @@ def tidepool_rust_library(name, package_name, package_dir, version, env = {}, ru
     compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags, is_library = True)
     rust_library(name = name, env = compiler_env, rustc_flags = flags, **kwargs)
 
-def tidepool_rust_binary(name, package_name, package_dir, version, env = {}, rustc_flags = [], **kwargs):
+def tidepool_rust_binary(name, package_name, package_dir, version, env = {}, rustc_flags = [], required_test_modules = [], test_fixtures = [], **kwargs):
     compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
     if "--test" in rustc_flags:
         compiler_env = _test_regression_environment(compiler_env, package_dir, name)
+        compiler_env = _test_source_environment(compiler_env, name, package_name, package_dir, required_test_modules, test_fixtures)
     rust_binary(name = name, env = compiler_env, rustc_flags = flags, **kwargs)
 
 def _test_environment(env, haskell_worker):
@@ -41,10 +43,26 @@ def _test_regression_environment(env, package_dir, name):
     env["TIDEPOOL_PROPTEST_REGRESSIONS"] = package_dir + "/proptest-regressions/" + name + ".txt"
     return env
 
-def tidepool_rust_test(name, package_name, package_dir, version, env = {}, rustc_flags = [], haskell_worker = False, **kwargs):
+def _test_source_environment(env, name, package_name, package_dir, modules, fixtures):
+    env = dict(env)
+    if "TIDEPOOL_TEST_SOURCE_REQUIREMENTS" in env:
+        fail("test source obligations are owned by the declared test target")
+    manifest = name + "_source_requirements"
+    test_source_requirements(
+        name = manifest,
+        package = package_name,
+        package_dir = package_dir,
+        modules = modules,
+        fixtures = fixtures,
+    )
+    env["TIDEPOOL_TEST_SOURCE_REQUIREMENTS"] = "$(location :" + manifest + ")"
+    return env
+
+def tidepool_rust_test(name, package_name, package_dir, version, env = {}, rustc_flags = [], haskell_worker = False, required_test_modules = [], test_fixtures = [], **kwargs):
     env = _test_environment(env, haskell_worker)
     compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
     compiler_env = _test_regression_environment(compiler_env, package_dir, name)
+    compiler_env = _test_source_environment(compiler_env, name, package_name, package_dir, required_test_modules, test_fixtures)
     rust_test(name = name, env = compiler_env, rustc_flags = flags, **kwargs)
 
 def tidepool_rust_test_cases(
@@ -128,6 +146,8 @@ def tidepool_rust_isolated_test(
         resource_env = {},
         compile_env = {},
         rustc_flags = [],
+        required_test_modules = [],
+        test_fixtures = [],
         haskell_worker = False,
         exact_tests = [],
         expected_count = None,
@@ -142,6 +162,7 @@ def tidepool_rust_isolated_test(
     # fixture rebuilds its producer and test execution without relinking Rust.
     compiler_env, flags = _common(name, package_name, package_dir, version, compile_env, rustc_flags)
     compiler_env = _test_regression_environment(compiler_env, package_dir, name)
+    compiler_env = _test_source_environment(compiler_env, name, package_name, package_dir, required_test_modules, test_fixtures)
     runtime_env, _flags = _common(name, package_name, package_dir, version, env, rustc_flags)
     rust_binary(
         name = name + "_binary",

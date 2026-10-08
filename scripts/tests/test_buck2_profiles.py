@@ -30,6 +30,7 @@ def resolve(profile):
     for kind in ("library", "binary", "test"):
         namespace["rust_" + kind] = lambda kind=kind, **kwargs: calls.append((kind, kwargs))
     namespace["sh_test"] = lambda **kwargs: calls.append(("runner", kwargs))
+    namespace["test_source_requirements"] = lambda **kwargs: None
     load_definitions(ROOT / "build/rust/defs.bzl", namespace)
     return namespace, calls
 

@@ -11,6 +11,8 @@ load(":tidepool.bzl", "native_catalog_retention", "nix_directory", "nix_haskell_
 nix_rust_toolchain(
     name = "rust",
     rustc = read_root_config("nix", "rustc"),
+    python = read_root_config("nix", "python"),
+    test_source_wrapper = "root//build/rust:test_source_rustc",
     rustdoc = read_root_config("nix", "rustdoc"),
     clippy = read_root_config("nix", "clippy"),
     clippy_toml = "root//:workspace_clippy",

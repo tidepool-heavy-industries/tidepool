@@ -23,7 +23,7 @@ from buck2_cargo_features import (
     reject_forbidden_closure,
     resolve as resolve_cargo_features,
 )
-from test_source_ownership import TEST_ONLY_SOURCES, integration_target_sources, registration_errors
+from test_source_ownership import TEST_ONLY_FIXTURES, TEST_ONLY_MODULES, TEST_ONLY_SOURCES, integration_target_sources, registration_errors
 
 
 def cargo_dependency_key(dependency):
@@ -867,6 +867,23 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
         lines.append("    },")
     if features:
         lines.extend(["    features = [", render_strings(features, 8), "    ],"])
+    if test_target or rule in ("tidepool_rust_test", "tidepool_rust_isolated_test"):
+        modules = {src_root}
+        fixtures = set()
+        if "lib" in target["kind"] or "proc-macro" in target["kind"]:
+            modules.update(TEST_ONLY_MODULES.get(package["name"], ()))
+            fixtures.update(TEST_ONLY_FIXTURES.get(package["name"], ()))
+            if package["name"] == "tidepool-codegen":
+                modules.update(CURRENT_DIR + "/src/prepared_program/" + filename
+                               for filename in CODEGEN_TEST_ONLY_SOURCES)
+        elif "test" in target["kind"]:
+            graph, unknown = integration_target_sources([target])
+            if unknown:
+                raise SystemExit(f"unresolved integration modules for {package['name']}:{target['name']}")
+            modules.update(source.relative_to(ROOT).as_posix() for source in graph)
+        lines.extend(["    required_test_modules = [", render_strings(sorted(modules), 8), "    ],"])
+        if fixtures:
+            lines.extend(["    test_fixtures = [", render_strings(sorted(fixtures), 8), "    ],"])
     if extra:
         lines.append(extra)
     lines.extend(['    visibility = ["PUBLIC"],', ")", ""])

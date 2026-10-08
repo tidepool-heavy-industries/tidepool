@@ -5,7 +5,8 @@ def _nix_rust_toolchain_impl(ctx):
     return [
         DefaultInfo(),
         RustToolchainInfo(
-            compiler = RunInfo(args = [ctx.attrs.rustc]),
+            compiler = RunInfo(args = [ctx.attrs.python, ctx.attrs.test_source_wrapper,
+                                      "--rustc", ctx.attrs.rustc, "--"]),
             rustdoc = RunInfo(args = [ctx.attrs.rustdoc]),
             clippy_driver = RunInfo(args = [ctx.attrs.clippy] + ctx.attrs.clippy_flags),
             default_edition = "2021",
@@ -21,6 +22,8 @@ nix_rust_toolchain = rule(
     impl = _nix_rust_toolchain_impl,
     attrs = {
         "rustc": attrs.string(),
+        "python": attrs.string(),
+        "test_source_wrapper": attrs.source(),
         "rustdoc": attrs.string(),
         "clippy": attrs.string(),
         "linker": attrs.string(),
