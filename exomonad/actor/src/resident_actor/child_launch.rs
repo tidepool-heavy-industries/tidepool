@@ -87,9 +87,18 @@ where
             child_session_startup,
             invocation_work,
         } = admission?;
-        let crate::start::CapturedChildLaunch { lifetime, mut descriptor, entry, mut launch_worktrees, fork_workspace, seed } = child;
+        let crate::start::CapturedChildLaunch {
+            lifetime,
+            mut descriptor,
+            entry,
+            mut launch_worktrees,
+            fork_workspace,
+            seed,
+        } = child;
         let fork_group = descriptor.fork_group();
-        let checkpoint_lease = checkpoint_admission.as_ref().map(|(lease, _)| lease.clone());
+        let checkpoint_lease = checkpoint_admission
+            .as_ref()
+            .map(|(lease, _)| lease.clone());
         let root_admission = environment.root_admission_closed.clone();
         let _root_admission = if descriptor.supervisor_parent().is_none() {
             let admission = root_admission.read().await;
@@ -102,201 +111,202 @@ where
         } else {
             None
         };
-            let prepared_workspace = if let Some(seed) = fork_workspace {
-                let admission = environment.fork_workspaces.clone().ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        "context-fork workspace admission is not installed".into(),
-                    )
-                })?;
-                let owner = context.actor;
-                let actor_path = descriptor.label().to_owned();
-                let admitted = admission
-                    .admit(
-                        owner,
-                        actor_path,
-                        seed,
-                        crate::ForkWorkspacePolicy {
-                            native_tools: descriptor.effective_role().native_tools(),
-                            workspace: descriptor.effective_role().workspace(),
-                        },
-                    )
-                    .await
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "worktree admission for `{}` failed: {}",
-                            descriptor.label(),
-                            error
-                        ))
-                    })?;
-                launch_worktrees = vec![admitted.handle().handle_receipt.tree_id.raw.clone()];
-                Some(admitted)
-            } else {
-                None
-            };
-            // The child may carry declarations that import a helper published by
-            // its parent. Fix its own snapshot and include roots before a fresh
-            // machine bootstraps those declarations.
-            let source_layers = environment.source_layers.clone();
-            let helper_branch = if let Some(layers) = &source_layers {
-                Some(
-                    layers
-                        .prepare_helpers(
-                            context.actor.into(),
-                            &launch_worktrees,
-                            prepared_workspace.is_some(),
-                        )
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+        let prepared_workspace = if let Some(seed) = fork_workspace {
+            let admission = environment.fork_workspaces.clone().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "context-fork workspace admission is not installed".into(),
                 )
-            } else {
-                None
+            })?;
+            let owner = context.actor;
+            let actor_path = descriptor.label().to_owned();
+            let admitted = admission
+                .admit(
+                    owner,
+                    actor_path,
+                    seed,
+                    crate::ForkWorkspacePolicy {
+                        native_tools: descriptor.effective_role().native_tools(),
+                        workspace: descriptor.effective_role().workspace(),
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "worktree admission for `{}` failed: {}",
+                        descriptor.label(),
+                        error
+                    ))
+                })?;
+            launch_worktrees = vec![admitted.handle().handle_receipt.tree_id.raw.clone()];
+            Some(admitted)
+        } else {
+            None
+        };
+        // The child may carry declarations that import a helper published by
+        // its parent. Fix its own snapshot and include roots before a fresh
+        // machine bootstraps those declarations.
+        let source_layers = environment.source_layers.clone();
+        let helper_branch = if let Some(layers) = &source_layers {
+            Some(
+                layers
+                    .prepare_helpers(
+                        context.actor.into(),
+                        &launch_worktrees,
+                        prepared_workspace.is_some(),
+                    )
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+            )
+        } else {
+            None
+        };
+        if let Some(layers) = &source_layers {
+            let layer = match &checkpoint_lease {
+                Some(lease) => layers
+                    .admit_checkpoint_layer(
+                        &lease.issuer_source_layer,
+                        context.actor.into(),
+                        helper_branch.as_deref().unwrap_or_default(),
+                        &launch_worktrees,
+                    )
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+                None => match &inherited_source {
+                    Some(source) => layers.admit_retained_layer(source),
+                    None => layers.layer_include_for(
+                        helper_branch.as_deref().unwrap_or_default(),
+                        &launch_worktrees,
+                    ),
+                }
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
             };
-            if let Some(layers) = &source_layers {
-                let layer = match &checkpoint_lease {
-                    Some(lease) => layers
-                        .admit_checkpoint_layer(
-                            &lease.issuer_source_layer,
-                            context.actor.into(),
-                            helper_branch.as_deref().unwrap_or_default(),
-                            &launch_worktrees,
-                        )
-                        .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-                    None => match &inherited_source {
-                        Some(source) => layers.admit_retained_layer(source),
-                        None => layers.layer_include_for(
-                            helper_branch.as_deref().unwrap_or_default(), &launch_worktrees,
-                        ),
-                    }.map_err(ResidentActorWorkbenchError::ActorProtocol)?,
-                };
-                descriptor = descriptor.with_source_layer(layer);
-            }
-            if let Some(retained_scope) = &retained_checkpoint_scope {
-                let scope = environment
-                    .runner
-                    .remint_checkpoint_child_scope_from_lease(
-                        context.clone(),
-                        retained_scope.clone(),
-                        descriptor.placement().lexical_scope,
+            descriptor = descriptor.with_source_layer(layer);
+        }
+        if let Some(retained_scope) = &retained_checkpoint_scope {
+            let scope = environment
+                .runner
+                .remint_checkpoint_child_scope_from_lease(
+                    context.clone(),
+                    retained_scope.clone(),
+                    descriptor.placement().lexical_scope,
+                )
+                .await?;
+            descriptor = descriptor.with_lexical_scope(scope);
+        }
+        // A launch whose descriptor still names the launching session (the
+        // common case: ineligible, or `InheritedContext`) needs nothing
+        // further — the entry is already resident there. An eligible
+        // `SelectedContext` launch's descriptor names a freshly minted
+        // session instead (`child_session_eligibility`/`capture_decoded`):
+        // provision that session's own dedicated machine now (build,
+        // bootstrap with the run's shared program, install the shared
+        // image registry, mint its own lexical scope), then cross the
+        // entry into it with the same transfer primitive every other
+        // resident-machine-boundary site already uses
+        // (`ResidentActorRunner::transfer_custody`, parcel 6). Failure at
+        // any step here leaves the launching session untouched and starts
+        // nothing; the caller (`start_child`) discards a provisioned but
+        // now-orphaned child session on any error this whole admission
+        // sequence returns from here on, by comparing the ORIGINAL
+        // captured launch's session against the one it actually admits on.
+        let entry = if descriptor.placement().session == context.placement.session {
+            entry
+        } else if !environment.runner.supports_child_sessions() {
+            // Eligible, but this host never installed a child-session
+            // factory/bootstrap program (`ResidentActorRunner::supports_child_sessions`)
+            // — fall back to the launching session, rather than failing an
+            // otherwise-ordinary fork over a capability nothing asked for.
+            // `capture_decoded` minted no real lexical scope for this
+            // (eligible) launch, only a placeholder; mint the actual one
+            // here, on the session this actor is actually falling back to.
+            let lexical_scope = environment
+                .runner
+                .mint_lexical_scope(context.placement.session)
+                .await?;
+            descriptor = descriptor
+                .with_session(context.placement.session)
+                .with_lexical_scope(lexical_scope);
+            entry
+        } else {
+            let child_session = descriptor.placement().session;
+            let lexical_scope = environment
+                .runner
+                .provision_child_session(
+                    child_session,
+                    descriptor.placement().resource_scope,
+                    seed.as_ref(),
+                    descriptor.source_layer(),
+                )
+                .await
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            descriptor = descriptor.with_lexical_scope(lexical_scope);
+            environment
+                .runner
+                .transfer_custody(
+                    entry,
+                    context.placement.session,
+                    child_session,
+                    descriptor.placement().resource_scope,
+                )
+                .await?
+        };
+        // The checkout-derived include roots were fixed before any fresh
+        // child machine bootstrapped inherited declarations.
+        let allocated_label = descriptor.label().to_string();
+        let admitted_worktree = prepared_workspace
+            .as_ref()
+            .map(|prepared| prepared.handle().clone());
+        let bound_worktrees = launch_worktrees.clone();
+        let descriptor_placement = descriptor.placement();
+        let checkpoint_descriptor = fork_group.map(|_| descriptor.clone());
+        let mut behavior =
+            ResidentKernelBehavior::child(descriptor, environment.clone(), entry, launch_worktrees);
+        behavior.admitted_checkpoint = checkpoint_admission.clone();
+        behavior.inherited_host_attachment = inherited_host_attachment;
+        behavior.prepared_workspace = prepared_workspace;
+        // Keep preparation custody until a failed spawn's native cleanup
+        // has finished, even if Ractor already dropped the behavior.
+        behavior.child_session_startup = child_session_startup.clone();
+        let startup_admission = match lifetime {
+            crate::WorkerLifetime::InvocationOwned => {
+                Some(invocation_work.clone().ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "invocation-owned worker has no request owner".into(),
                     )
-                    .await?;
-                descriptor = descriptor.with_lexical_scope(scope);
+                })?)
             }
-            // A launch whose descriptor still names the launching session (the
-            // common case: ineligible, or `InheritedContext`) needs nothing
-            // further — the entry is already resident there. An eligible
-            // `SelectedContext` launch's descriptor names a freshly minted
-            // session instead (`child_session_eligibility`/`capture_decoded`):
-            // provision that session's own dedicated machine now (build,
-            // bootstrap with the run's shared program, install the shared
-            // image registry, mint its own lexical scope), then cross the
-            // entry into it with the same transfer primitive every other
-            // resident-machine-boundary site already uses
-            // (`ResidentActorRunner::transfer_custody`, parcel 6). Failure at
-            // any step here leaves the launching session untouched and starts
-            // nothing; the caller (`start_child`) discards a provisioned but
-            // now-orphaned child session on any error this whole admission
-            // sequence returns from here on, by comparing the ORIGINAL
-            // captured launch's session against the one it actually admits on.
-            let entry = if descriptor.placement().session == context.placement.session {
-                entry
-            } else if !environment.runner.supports_child_sessions() {
-                // Eligible, but this host never installed a child-session
-                // factory/bootstrap program (`ResidentActorRunner::supports_child_sessions`)
-                // — fall back to the launching session, rather than failing an
-                // otherwise-ordinary fork over a capability nothing asked for.
-                // `capture_decoded` minted no real lexical scope for this
-                // (eligible) launch, only a placeholder; mint the actual one
-                // here, on the session this actor is actually falling back to.
-                let lexical_scope = environment
-                    .runner
-                    .mint_lexical_scope(context.placement.session)
-                    .await?;
-                descriptor = descriptor
-                    .with_session(context.placement.session)
-                    .with_lexical_scope(lexical_scope);
-                entry
-            } else {
-                let child_session = descriptor.placement().session;
-                let lexical_scope = environment
-                    .runner
-                    .provision_child_session(
-                        child_session,
-                        descriptor.placement().resource_scope,
-                        seed.as_ref(),
-                        descriptor.source_layer(),
-                    )
+            crate::WorkerLifetime::ActorOwned | crate::WorkerLifetime::SwarmOwned => None,
+        };
+        let child_result = match startup_admission {
+            Some(admission) => {
+                let admission: Arc<dyn crate::local_actor::WorkerStartupAdmission> = admission;
+                kernel
+                    .spawn_worker_scoped(None, behavior, lifetime, admission)
                     .await
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-                descriptor = descriptor.with_lexical_scope(lexical_scope);
-                environment
-                    .runner
-                    .transfer_custody(
-                        entry,
-                        context.placement.session,
-                        child_session,
-                        descriptor.placement().resource_scope,
-                    )
-                    .await?
-            };
-            // The checkout-derived include roots were fixed before any fresh
-            // child machine bootstrapped inherited declarations.
-            let allocated_label = descriptor.label().to_string();
-            let admitted_worktree = prepared_workspace
-                .as_ref()
-                .map(|prepared| prepared.handle().clone());
-            let bound_worktrees = launch_worktrees.clone();
-            let descriptor_placement = descriptor.placement();
-            let checkpoint_descriptor = fork_group.map(|_| descriptor.clone());
-            let mut behavior = ResidentKernelBehavior::child(
-                descriptor,
-                environment.clone(),
-                entry,
-                launch_worktrees,
-            );
-            behavior.admitted_checkpoint = checkpoint_admission.clone();
-            behavior.inherited_host_attachment = inherited_host_attachment;
-            behavior.prepared_workspace = prepared_workspace;
-            // Keep preparation custody until a failed spawn's native cleanup
-            // has finished, even if Ractor already dropped the behavior.
-            behavior.child_session_startup = child_session_startup.clone();
-            let startup_admission = match lifetime {
-                crate::WorkerLifetime::InvocationOwned => Some(
-                    invocation_work.clone().ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "invocation-owned worker has no request owner".into(),
-                        )
-                    })?,
-                ),
-                crate::WorkerLifetime::ActorOwned | crate::WorkerLifetime::SwarmOwned => None,
-            };
-            let child_result = match startup_admission {
-                Some(admission) => {
-                    let admission: Arc<dyn crate::local_actor::WorkerStartupAdmission> = admission;
-                    kernel
-                        .spawn_worker_scoped(None, behavior, lifetime, admission)
-                        .await
-                }
-                None => kernel.spawn_worker(None, behavior, lifetime).await,
-            };
-            let child = match child_result {
-                Ok(child) => child,
-                Err(error) => {
-                    settle_startup_refusal(
-                        &environment.runner,
-                        &kernel,
-                        descriptor_placement,
-                        &error,
-                    )
+            }
+            None => kernel.spawn_worker(None, behavior, lifetime).await,
+        };
+        let child = match child_result {
+            Ok(child) => child,
+            Err(error) => {
+                settle_startup_refusal(&environment.runner, &kernel, descriptor_placement, &error)
                     .await;
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        error.to_string(),
-                    ));
-                }
-            };
-            Ok(LaunchedChild {
-                actor: child, allocated_label, admitted_worktree, checkpoint_descriptor,
-                checkpoint_admission, inherited_source, source_layers, helper_branch, bound_worktrees,
-            })
-    }).await;
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    error.to_string(),
+                ));
+            }
+        };
+        Ok(LaunchedChild {
+            actor: child,
+            allocated_label,
+            admitted_worktree,
+            checkpoint_descriptor,
+            checkpoint_admission,
+            inherited_source,
+            source_layers,
+            helper_branch,
+            bound_worktrees,
+        })
+    })
+    .await;
     CompletedChildLaunch {
         continuation,
         result,
