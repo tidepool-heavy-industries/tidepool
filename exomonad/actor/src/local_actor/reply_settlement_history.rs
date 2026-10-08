@@ -402,23 +402,28 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         )
         .await;
     }
+    // register_watch requires success for its singleton dependency; failure
+    // is Unavailable. Only an explicit allow-failure watch collects failures
+    // into Ready, which is a different request observation contract.
     for subscription in subscriptions {
         let observed = subscription.wait().await.unwrap();
         match history.completion {
             Completion::Success => assert_eq!(observed, WatchObservation::Ready(Vec::new())),
             Completion::Failure => assert_eq!(
                 observed,
-                WatchObservation::Ready(vec![(
+                WatchObservation::Unavailable {
                     request,
-                    ResponseFailure::SettlementFailed("controlled continuation failure".into())
-                )])
+                    failure: ResponseFailure::SettlementFailed(
+                        "controlled continuation failure".into()
+                    ),
+                }
             ),
             Completion::Shutdown => assert_eq!(
                 observed,
-                WatchObservation::Ready(vec![(
+                WatchObservation::Unavailable {
                     request,
-                    ResponseFailure::TargetCancelled("controlled shutdown".into())
-                )])
+                    failure: ResponseFailure::TargetCancelled("controlled shutdown".into()),
+                }
             ),
         }
     }
