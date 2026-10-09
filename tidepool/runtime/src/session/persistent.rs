@@ -2974,6 +2974,12 @@ impl PersistentSession {
             || surface.declaration_root
                 != (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip)
             || surface.epoch != snapshot.epoch
+            || surface.compiler_context
+                != lib
+                    .current_exact_context_in(target)
+                    .as_ref()
+                    .map(|context| super::recovery::RecoveryCompilerContext::capture(context))
+                    .unwrap_or_default()
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }

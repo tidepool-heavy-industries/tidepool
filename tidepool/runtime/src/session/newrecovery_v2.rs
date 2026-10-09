@@ -2930,6 +2930,38 @@ mod tests {
     }
 
     #[test]
+    fn public_compiler_selection_refuses_unrepresented_roles_groups_and_lexical_owners() {
+        let baseline = fixture();
+        for corruption in 0..4 {
+            let mut wire = baseline.clone();
+            let selection = &mut wire.public_surfaces[0].compiler_context;
+            selection.artifact_refs = wire.nodes[0].artifact_refs.clone();
+            selection.compiler_roles = wire.nodes[0].compiler_roles.clone();
+            match corruption {
+                0 => selection.artifact_refs.push(ArtifactId([0xfe; 32])),
+                1 => selection.native_groups.push(
+                    tidepool_toolchain::artifact_inventory::NativeGroupKey {
+                        artifact: ArtifactId([0xfd; 32]),
+                        original_ordinal: 17,
+                    },
+                ),
+                2 => selection.lexical.push(ExactLexicalNode {
+                    owner: module("main", "Unselected"),
+                    imports: vec![],
+                }),
+                3 => selection
+                    .compiler_roles
+                    .push(selection.compiler_roles[0].clone()),
+                _ => unreachable!(),
+            }
+            assert!(
+                wire.seal().is_err(),
+                "invalid public selection {corruption}"
+            );
+        }
+    }
+
+    #[test]
     fn v9_requires_public_compiler_selection_and_refuses_v8_without_rewriting() {
         let root = tempfile::tempdir().unwrap();
         let manifest = root.path().join("declarations.json");
