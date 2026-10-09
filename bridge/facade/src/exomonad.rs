@@ -1426,7 +1426,10 @@ fn compiler_daemon_launch(
             run_id,
             compiler.workers.get(),
             Some(compiler.rss_ceiling_mb.get()),
-            compiler.foreground_jobs,
+            tidepool_extract_cmd::CompilerJobAllowances {
+                foreground: compiler.foreground_jobs,
+                preparation: None,
+            },
         )
         .into_iter()
         .map(|argument| argument.to_string_lossy().into_owned())

@@ -76,16 +76,22 @@ pub const REQUIRED_DAEMON_ENDPOINT_ENV: &str = "TIDEPOOL_EXTRACT_REQUIRED_DAEMON
 /// Per-worker rotation ceiling for the production session's default single worker.
 pub const SESSION_WORKER_RSS_CEILING_MB: u64 = 7 * 1024;
 
+/// Explicit per-request maxima, independently of resident worker process count.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompilerJobAllowances {
+    pub foreground: Option<std::num::NonZeroUsize>,
+    pub preparation: Option<std::num::NonZeroUsize>,
+}
+
 /// Shared persistent daemon command for production and isolated qualification.
-/// The optional foreground allowance selects per-request scheduling width;
-/// omission leaves the daemon's default in force without changing worker count.
+/// Omitted allowances preserve daemon defaults independently of worker count.
 pub fn persistent_daemon_arguments(
     socket: &Path,
     log: &Path,
     run_id: &str,
     workers: usize,
     rss_ceiling_mb: Option<u64>,
-    foreground_jobs: Option<std::num::NonZeroUsize>,
+    allowances: CompilerJobAllowances,
 ) -> Vec<OsString> {
     let mut args = vec![
         "--daemon".into(),
@@ -101,8 +107,14 @@ pub fn persistent_daemon_arguments(
             ceiling.to_string().into(),
         ]);
     }
-    if let Some(jobs) = foreground_jobs {
+    if let Some(jobs) = allowances.foreground {
         args.extend([OsString::from("--foreground-jobs"), jobs.to_string().into()]);
+    }
+    if let Some(jobs) = allowances.preparation {
+        args.extend([
+            OsString::from("--preparation-jobs"),
+            jobs.to_string().into(),
+        ]);
     }
     args.extend([
         OsString::from("--run-id"),

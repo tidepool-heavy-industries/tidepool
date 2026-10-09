@@ -232,8 +232,10 @@ def compiler_events(host_rows, daemon_rows):
                 unidentified_queue_events += 1
                 continue
             entry = queues.setdefault(identity, {"queue_ms": [], "messages": [],
-                                                 "record_count": 0, "invalid_timing_record_count": 0})
+                                                 "record_count": 0, "invalid_timing_record_count": 0, "grants": []})
             entry["record_count"] += 1
+            entry["grants"].append({key: event_fields.get(key) for key in
+                                    ("compiler_workload", "compiler_jobs", "compiler_capabilities")})
             value = nonnegative_integer(event_fields.get("queue_ms"))
             if value is not None:
                 entry["queue_ms"].append(value)
@@ -568,8 +570,24 @@ def analyze(record_path):
             "queue_event_count": details["record_count"],
             "invalid_timing_record_count": details["invalid_timing_record_count"],
             "related_phases": sorted(phase_by_admission.get((epoch, admission), set())),
+            "compiler_grants": details["grants"],
             "attribution_scope": "daemon worker admission; do not add to per-request service",
         })
+    requested_allowances = execution.get("compiler_allowances") or {}
+    compiler_grants = []
+    for observation in queue_output:
+        for grant in observation["compiler_grants"]:
+            workload, jobs, capabilities = (grant[key] for key in
+                                            ("compiler_workload", "compiler_jobs", "compiler_capabilities"))
+            valid = (workload in ("foreground", "preparation") and type(jobs) is int and jobs > 0
+                     and type(capabilities) is int and capabilities > 0)
+            requested = requested_allowances.get("requested_" + str(workload) + "_jobs")
+            compiler_grants.append({"daemon_epoch": observation["daemon_epoch"],
+                                    "admission_id": observation["admission_id"],
+                                    "workload": workload, "jobs": jobs, "capabilities": capabilities,
+                                    "valid": valid, "requested_jobs": requested,
+                                    "below_requested_maximum": jobs < requested if valid and requested is not None else None,
+                                    "exceeds_requested_maximum": jobs > requested if valid and requested is not None else None})
     all_host_identities = {request["identity"] for request in submissions
                            if request["identity"] is not None}
     unattributed_host = []
@@ -776,6 +794,16 @@ def analyze(record_path):
             "ambiguous_requests": ambiguous_owner_submissions,
             "unknown_owner_requests": unknown_owner_submissions,
             "assignment_policy": "exact_declared_phase_or_root_startup_owner; no count or timestamp assignment",
+        },
+        "compiler_allowances": requested_allowances,
+        "compiler_job_grants": {
+            "status": "observed" if (queue_complete and compiler_grants
+                                     and all(row["valid"] and row["exceeds_requested_maximum"] is not True
+                                             for row in compiler_grants)) else "partial_or_unknown",
+            "admissions": compiler_grants,
+            "observed_jobs": sorted({row["jobs"] for row in compiler_grants if row["valid"]}),
+            "observed_capabilities": sorted({row["capabilities"] for row in compiler_grants if row["valid"]}),
+            "interpretation": "Requested widths are maxima; admitted grants may be capacity capped. Worker processes and test concurrency are separate.",
         },
         "queue_observations": queue_output,
         "unattributed_compiler_submissions": unattributed_host,

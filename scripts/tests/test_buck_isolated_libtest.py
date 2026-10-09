@@ -604,6 +604,68 @@ class IsolatedLibtestTests(unittest.TestCase):
                 10, artifact_root=root, compiler_mode='owned-resident')
         self.assertTrue(passed)
 
+    def test_owned_compiler_allowances_forward_without_changing_child_or_worker_count(self):
+        frontend = Path(self.tmp.name) / 'allowance-frontend'
+        frontend.write_text('declared compiler frontend')
+        for width in (2, 8, 16):
+            root = Path(self.tmp.name) / f'allowance-{width}'
+            record = {}
+            def run(args, timeout, environment=None):
+                self.assertEqual(args, [str(frontend), '--owned-daemon-run', str(root / 'compiler'),
+                    '--foreground-jobs', str(width), '--preparation-jobs', str(width + 1),
+                    '--', str(self.binary), '--exact', 'suite::works', '--nocapture'])
+                case = json.loads((root / 'case.json').read_text())
+                self.assertEqual(case['compiler_allowances'], record['compiler_allowances'])
+                (root / 'compiler').mkdir()
+                (root / 'compiler/owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+                return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+            with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': str(frontend)}), \
+                 patch.object(runner, 'execute', side_effect=run):
+                passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False, 10, record,
+                    artifact_root=root, compiler_mode='owned-resident', foreground_jobs=width, preparation_jobs=width + 1)
+            self.assertTrue(passed)
+            self.assertEqual(record['compiler_allowances'], {'requested_foreground_jobs': width,
+                'requested_preparation_jobs': width + 1, 'worker_processes': 1})
+
+    def test_compiler_allowance_parser_refuses_invalid_values_and_direct_mode(self):
+        for flag in ('--foreground-jobs', '--preparation-jobs'):
+            for value in ('0', '-1', 'invalid', str(1 << 64)):
+                with self.subTest(flag=flag, value=value), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    runner.parse_args([str(self.binary), '--compiler-mode', 'owned-resident',
+                                       '--output-dir', self.tmp.name, flag, value])
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                runner.parse_args([str(self.binary), flag, '2'])
+            options = runner.parse_args([str(self.binary), '--compiler-mode', 'owned-resident',
+                                         '--output-dir', self.tmp.name, flag, '16', '--jobs', '3'])
+            self.assertEqual(options.jobs, 3)
+            self.assertEqual(getattr(options, flag[2:].replace('-', '_')), 16)
+
+    def test_compiler_grant_summary_preserves_capacity_caps_and_missing_evidence(self):
+        requested = {'requested_foreground_jobs': 16, 'requested_preparation_jobs': 8}
+        rows = [{'daemon_epoch': 'epoch-a', 'admission_id': i + 1, 'queue_ms': 0,
+                 'row': {'fields': {'compiler_workload': workload, 'compiler_jobs': jobs,
+                                    'compiler_capabilities': capabilities}}}
+                for i, (workload, jobs, capabilities) in enumerate(
+                    [('foreground', 4, 4), ('foreground', 16, 12), ('preparation', 8, 6)])]
+        summary = runner.compiler_job_grants({'records': rows, 'complete': True}, requested)
+        self.assertTrue(summary['complete'])
+        self.assertEqual(summary['observed_jobs'], [4, 8, 16])
+        self.assertEqual([row['below_requested_maximum'] for row in summary['admissions']], [True, False, False])
+        self.assertEqual([row['requested_jobs'] for row in summary['admissions']], [16, 16, 8])
+        for key, values in (('compiler_jobs', [None, 0, True, '16']),
+                            ('compiler_capabilities', [None, 0, False, '8']),
+                            ('compiler_workload', [None, 'Foreground', 'typo'])):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    altered = json.loads(json.dumps(rows))
+                    altered[0]['row']['fields'][key] = value
+                    invalid = runner.compiler_job_grants({'records': altered, 'complete': True}, requested)
+                    self.assertFalse(invalid['complete'])
+                    self.assertEqual(invalid['invalid_grant_count'], 1)
+                    self.assertIsNone(invalid['admissions'][0]['below_requested_maximum'])
+        self.assertFalse(runner.compiler_job_grants({'records': rows, 'complete': False}, requested)['complete'])
+        self.assertFalse(runner.compiler_job_grants({}, requested)['complete'])
+
     def test_launch_hashes_capture_actual_binary_and_compiler_files_before_execution(self):
         frontend, worker = [Path(self.tmp.name) / name for name in ('frontend', 'worker')]
         frontend.write_bytes(b'frontend at launch')
@@ -991,6 +1053,20 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(queue['retained_job_count'], 1)
         self.assertEqual(queue['records'][0]['queue_ms'], 0)
         self.assertTrue(queue['complete'])
+
+    def test_conflicting_duplicate_admission_grants_cannot_be_complete(self):
+        root = Path(self.tmp.name) / 'conflicting-grants'
+        compiler = root / 'compiler'
+        compiler.mkdir(parents=True)
+        fields = {'phase': 'compiler_queue', 'queue_ms': 0, 'daemon_epoch': 'epoch-a',
+                  'admission_id': 7, 'compiler_workload': 'foreground',
+                  'compiler_jobs': 2, 'compiler_capabilities': 2}
+        rows = [{'fields': fields}, {'fields': {**fields, 'compiler_jobs': 8}}]
+        (compiler / 'compiler.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        summary = runner.diagnostic_summaries(root)
+        self.assertFalse(summary['compiler_job_queue']['complete'])
+        self.assertEqual(summary['compiler_job_queue']['unclassified_record_count'], 1)
+        self.assertFalse(runner.compiler_job_grants(summary['compiler_job_queue'], {})['complete'])
 
     def test_nested_owned_control_preserves_job_queue_separately_from_request_service(self):
         root = Path(self.tmp.name) / 'nested-control-artifacts'

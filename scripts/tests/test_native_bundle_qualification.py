@@ -686,7 +686,8 @@ class NativeQualificationTests(unittest.TestCase):
                                       'artifacts_retained_after_success': retained}})
                     return subprocess.CompletedProcess(command, 0)
 
-                def measurement(*args):
+                def measurement(*args, compiler_allowance_selection_confirmed):
+                    self.assertTrue(compiler_allowance_selection_confirmed)
                     records = args[1]
                     paths = args[2]
                     return {'status': 'partial' if records else 'refused', 'completed': False,
@@ -826,6 +827,9 @@ class NativeQualificationTests(unittest.TestCase):
             "missing_wall": "phase_measurements_complete",
             "negative_wall": "phase_measurements_complete",
             "malformed_duplicate_queue": "queue_evidence_complete",
+            "missing_compiler_grant": "compiler_job_grants_complete",
+            "capacity_capped_grant": None,
+            "excessive_compiler_grant": "compiler_job_grants_complete",
             "conflicting_owners": "workload_request_service_joins_complete",
             "wrong_compiler_mode": "resident_compiler_mode_matches_cohort",
         }
@@ -854,6 +858,16 @@ class NativeQualificationTests(unittest.TestCase):
                     duplicate = json.loads(json.dumps(daemon[-1]))
                     duplicate["fields"].pop("queue_ms")
                     fixture.write_jsonl(compiler_path, [*daemon, duplicate])
+                elif mutation in ("missing_compiler_grant", "capacity_capped_grant", "excessive_compiler_grant"):
+                    compiler_path = fixture.root / "artifacts/compiler/compiler.jsonl"
+                    daemon = reporter.read_jsonl(compiler_path)
+                    if mutation == "missing_compiler_grant":
+                        daemon[-1]["fields"].pop("compiler_jobs")
+                    elif mutation == "capacity_capped_grant":
+                        daemon[-1]["fields"].update(compiler_jobs=4, compiler_capabilities=4)
+                    else:
+                        daemon[-1]["fields"].update(compiler_jobs=32, compiler_capabilities=32)
+                    fixture.write_jsonl(compiler_path, daemon)
                 elif mutation == "conflicting_owners":
                     next(phase for phase in phases if phase["phase"] == "first-arithmetic")["logical_compiler_requests"] = 1
                     host_path = fixture.root / "artifacts/host.jsonl"
@@ -862,6 +876,11 @@ class NativeQualificationTests(unittest.TestCase):
                     fixture.write_jsonl(host_path, host)
                 fixture.write_jsonl(phase_path, phases)
                 record = json.loads(runner_path.read_text())
+                if mutation in ("capacity_capped_grant", "excessive_compiler_grant"):
+                    record["execution"]["compiler_allowances"] = {"requested_foreground_jobs": 16,
+                                                                 "requested_preparation_jobs": None,
+                                                                 "worker_processes": 1}
+                    fixture.write_json(runner_path, record)
                 if mutation == "wrong_compiler_mode":
                     record["execution"]["compiler_mode"] = "direct"
                     fixture.write_json(runner_path, record)
@@ -884,7 +903,7 @@ class NativeQualificationTests(unittest.TestCase):
                 measured = qualification.analyze_harness_performance(
                     descriptor, [record], [runner_path], qualification.cohorts()["harness-performance"],
                     True, descriptor_path)
-                self.assertEqual(measured["completed"], mutation == "control")
+                self.assertEqual(measured["completed"], mutation in ("control", "capacity_capped_grant"))
                 self.assertTrue(measured["qualification"]["prerequisites"]["counted_behavior_passed"])
                 if refused_dimension:
                     self.assertFalse(measured["qualification"]["prerequisites"][refused_dimension])
@@ -987,7 +1006,16 @@ class NativeQualificationTests(unittest.TestCase):
             with self.subTest(compiler_mode=compiler_mode):
                 self.assert_run_scheduling(compiler_mode)
 
-    def assert_run_scheduling(self, compiler_mode):
+    def test_run_forwards_compiler_allowance_matrix_separately_from_test_processes(self):
+        for width in (2, 8, 16):
+            with self.subTest(width=width):
+                self.assert_run_scheduling('owned-resident', width, width + 1)
+
+    def test_run_retains_behavior_pass_but_refuses_wrong_compiler_allowance_receipt(self):
+        self.assert_run_scheduling('owned-resident', 16, 8, receipt_foreground_jobs=2, expected_code=1)
+
+    def assert_run_scheduling(self, compiler_mode, foreground_jobs=None, preparation_jobs=None,
+                              receipt_foreground_jobs=None, expected_code=0):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             descriptor_path = root / 'qualification.json'
@@ -1006,7 +1034,10 @@ class NativeQualificationTests(unittest.TestCase):
                 for index, name in enumerate(cohort['tests']):
                     qualification.write_json(tests / f'{index}.json', {
                         'test': name, 'passed': True,
-                        'execution': {'executed_test_count': 1, 'exit_code': 0}})
+                        'execution': {'executed_test_count': 1, 'exit_code': 0,
+                                      'compiler_allowances': {'requested_foreground_jobs': receipt_foreground_jobs if receipt_foreground_jobs is not None else foreground_jobs,
+                                                              'requested_preparation_jobs': preparation_jobs,
+                                                              'worker_processes': 1}}})
                 self.assertEqual(kwargs['env'], qualification.execution_environment(descriptor))
                 self.assertEqual(command[0], '/frozen/runtime-tools/bin/python3')
                 self.assertEqual(kwargs['env']['PATH'], '/frozen/runtime-tools/bin')
@@ -1021,8 +1052,11 @@ class NativeQualificationTests(unittest.TestCase):
                     '--service-slice', 'tidepool-completion-build.slice']
                 if compiler_mode is not None:
                     arguments.extend(['--compiler-mode', compiler_mode])
+                for flag, value in (('--foreground-jobs', foreground_jobs), ('--preparation-jobs', preparation_jobs)):
+                    if value is not None:
+                        arguments.extend([flag, str(value)])
                 code = qualification.main(arguments)
-            self.assertEqual(code, 0)
+            self.assertEqual(code, expected_code)
             report = json.loads((root / 'evidence/report.json').read_text())
             command = report['command']
             self.assertEqual(command[command.index('--jobs') + 1], '4')
@@ -1033,14 +1067,25 @@ class NativeQualificationTests(unittest.TestCase):
                              [f'{name}=900' for name in sorted([qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST])])
             self.assertEqual(report['scheduling'], {
                 'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
-                'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': 'owned-resident', 'timeout_seconds': 600,
+                'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': 'owned-resident',
+                'compiler_allowances': {'requested_foreground_jobs': foreground_jobs,
+                                        'requested_preparation_jobs': preparation_jobs, 'worker_processes': 1},
+                'timeout_seconds': 600,
                 'case_timeout_seconds': {name: 900 for name in [qualification.M2_SURVIVAL_TEST, qualification.M2_NOMINAL_JOIN_TEST, qualification.M2_CHECKPOINT_RELEASE_TEST, qualification.M2_SELECTED_CODING_TEST]}})
+            for flag, value in (('--foreground-jobs', foreground_jobs), ('--preparation-jobs', preparation_jobs)):
+                if value is None:
+                    self.assertNotIn(flag, command)
+                else:
+                    self.assertEqual(command[command.index(flag) + 1], str(value))
             self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
             self.assertEqual(report['executed_test_count'], len(descriptor['cohorts']['m2']['tests']))
-            self.assertTrue(report['completed'])
+            self.assertTrue(report['behavioral_completed'])
+            self.assertEqual(report['compiler_allowance_selection_confirmed'], expected_code == 0)
+            self.assertEqual(report['completed'], expected_code == 0)
 
     def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):
-        invalid = (['--jobs', '0'], ['--jobs', '-1'], ['--service-slice', 'app.slice'],
+        invalid = (['--foreground-jobs', '0'], ['--preparation-jobs', '-1'],
+                   ['--foreground-jobs', str(1 << 64)], ['--jobs', '0'], ['--jobs', '-1'], ['--service-slice', 'app.slice'],
                    ['--delegated-service', '--service-slice', '../unsafe.slice'],
                    ['--delegated-service', '--service-slice', 'not-a-slice'])
         for options in invalid:

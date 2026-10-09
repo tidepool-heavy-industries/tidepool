@@ -416,6 +416,9 @@ def parse_args(argv):
         '--jobs', type=int,
         help='maximum concurrent test processes (focused selection defaults to 1)',
     )
+    for flag in ('foreground-jobs', 'preparation-jobs'):
+        parser.add_argument('--' + flag, type=int,
+                            help='positive per-request compiler allowance; owned-resident only')
     parser.add_argument('--delegated-service', action='store_true',
                         help='run each test alone in a fresh delegated user service')
     parser.add_argument('--service-slice',
@@ -429,6 +432,13 @@ def parse_args(argv):
     options = parser.parse_args(argv)
     if options.compiler_mode == 'owned-resident' and options.output_dir is None:
         parser.error('--compiler-mode owned-resident requires --output-dir')
+    for flag in ('foreground_jobs', 'preparation_jobs'):
+        value = getattr(options, flag)
+        if value is not None:
+            if value <= 0 or value > (1 << 64) - 1:
+                parser.error('--' + flag.replace('_', '-') + ' must be a positive u64')
+            if options.compiler_mode != 'owned-resident':
+                parser.error('compiler job allowances require --compiler-mode owned-resident')
     if options.retain_artifacts and options.output_dir is None:
         parser.error('--retain-artifacts requires --output-dir')
     if (len(options.resource_env) != len(set(options.resource_env))
@@ -551,6 +561,34 @@ def compiler_trace_context(row):
             if key in context:
                 merged[key] = context[key]
     return merged, request
+
+
+def compiler_job_grants(queue, requested):
+    """Summarize exact dequeued admission grants; missing fields stay unknown."""
+    admissions, invalid = [], 0
+    for record in queue.get('records', []):
+        fields = record['row'].get('fields', record['row'])
+        workload, jobs, capabilities = (fields.get(key) for key in
+                                      ('compiler_workload', 'compiler_jobs', 'compiler_capabilities'))
+        valid = (workload in ('foreground', 'preparation') and type(jobs) is int and jobs > 0
+                 and type(capabilities) is int and capabilities > 0)
+        invalid += not valid
+        maximum = requested.get('requested_' + str(workload) + '_jobs')
+        admissions.append({
+            'daemon_epoch': record['daemon_epoch'], 'admission_id': record['admission_id'],
+            'workload': workload, 'jobs': jobs, 'capabilities': capabilities,
+            'requested_jobs': maximum,
+            'below_requested_maximum': jobs < maximum if valid and maximum is not None else None,
+            'exceeds_requested_maximum': jobs > maximum if valid and maximum is not None else None,
+            'valid': valid, 'source': 'compiler job dequeued',
+        })
+    complete = (queue.get('complete') is True and bool(admissions) and invalid == 0
+                and not any(row['exceeds_requested_maximum'] is True for row in admissions))
+    return {'status': 'observed' if complete else 'partial_or_unknown', 'complete': complete,
+            'admissions': admissions, 'invalid_grant_count': invalid,
+            'observed_jobs': sorted({row['jobs'] for row in admissions if row['valid']}),
+            'observed_capabilities': sorted({row['capabilities'] for row in admissions if row['valid']}),
+            'interpretation': 'Requested widths are maxima; admitted grants may be capacity capped. Worker processes and test concurrency are separate.'}
 
 
 def compiler_trace_rows(trace, scan):
@@ -752,7 +790,10 @@ def diagnostic_summaries(artifact_root):
                         else:
                             job = (epoch, admission)
                             if job in queued:
-                                if queued[job]['queue_ms'] != elapsed:
+                                prior = queued[job]['row'].get('fields', queued[job]['row'])
+                                if (queued[job]['queue_ms'] != elapsed
+                                        or any(prior.get(key) != fields.get(key) for key in
+                                               ('compiler_workload', 'compiler_jobs', 'compiler_capabilities'))):
                                     queue_unknown += 1
                             elif len(queued) < TRACE_QUEUE_LIMIT and queue_bytes + line_bytes <= TRACE_QUEUE_BYTE_LIMIT:
                                 queued[job] = {'daemon_epoch': epoch, 'admission_id': admission,
@@ -1024,6 +1065,8 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
         if status is not None and status != 'confirmed':
             cleanup_complete = False
             stderr += f"\nowned compiler cleanup remains {status}: {root['path']}"
+    record['compiler_job_grants'] = compiler_job_grants(
+        summaries.get('compiler_job_queue', {}), record.get('compiler_allowances', {}))
     record['compiler_cleanup_observation_complete'] = (
         summaries.get('owned_compiler_discovery', {}).get('complete') is True
         if artifact_root is not None else None)
@@ -1045,7 +1088,7 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
 
 def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             artifact_root=None, compiler_mode='direct', declared_resources=(),
-            retain_artifacts=False):
+            retain_artifacts=False, foreground_jobs=None, preparation_jobs=None):
     if record is None:
         record = {}
     for key in ('artifact_disposition', 'artifacts_removed_after_success',
@@ -1054,6 +1097,16 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     record.update(schema=1, process_cleanup_status='not_started', hosted_cleanup_status='not_observed',
                   compiler_cleanup_status='not_observed', compiler_cleanup_observation_complete=None,
                   diagnostic_evidence_complete=None)
+    record['compiler_allowances'] = {
+        'requested_foreground_jobs': foreground_jobs,
+        'requested_preparation_jobs': preparation_jobs,
+        'worker_processes': 1 if compiler_mode == 'owned-resident' else None,
+    }
+    if (foreground_jobs is not None or preparation_jobs is not None) and compiler_mode != 'owned-resident':
+        raise ValueError('compiler job allowances require owned-resident mode')
+    for value in (foreground_jobs, preparation_jobs):
+        if value is not None and (type(value) is not int or not 0 < value < 1 << 64):
+            raise ValueError('compiler job allowances must be positive u64 values')
     record['process_cleanup_scope'] = 'delegated_service' if service_slice is not None else 'process_group'
     args = [binary, '--exact', name, '--nocapture']
     if ignored:
@@ -1071,13 +1124,17 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         (artifact_root / 'case.json').write_text(json.dumps({
             'schema': 1, 'test': name, 'scenario': 'running', 'process_cleanup_status': 'not_started',
             'hosted_cleanup_status': 'not_observed', 'compiler_cleanup_status': 'not_observed',
-            'compiler_mode': compiler_mode,
+            'compiler_mode': compiler_mode, 'compiler_allowances': record['compiler_allowances'],
         }, indent=2) + '\n')
     if compiler_mode == 'owned-resident':
         frontend = (environment or os.environ).get('TIDEPOOL_EXTRACT')
         if artifact_root is None or not frontend:
             raise RuntimeError('owned-resident requires a declared compiler and per-case artifact root')
-        args = [frontend, '--owned-daemon-run', str(artifact_root / 'compiler'), '--', *args]
+        options = []
+        for flag, value in (('--foreground-jobs', foreground_jobs), ('--preparation-jobs', preparation_jobs)):
+            if value is not None:
+                options.extend([flag, str(value)])
+        args = [frontend, '--owned-daemon-run', str(artifact_root / 'compiler'), *options, '--', *args]
     # Candidate evidence may name a case's temporary authored sources. Sharing
     # that mutable cache lets another case delete an acquired input mid-compile.
     compile_cache = (artifact_root / 'compile-cache' if artifact_root is not None
@@ -1263,7 +1320,7 @@ def main(argv=None):
                 options.case_timeouts.get(name, options.timeout), record,
                 options.service_slice if options.delegated_service else None,
                 artifact_root, options.compiler_mode, options.resource_env,
-                options.retain_artifacts,
+                options.retain_artifacts, options.foreground_jobs, options.preparation_jobs,
             )
             return name, outcome, record
 

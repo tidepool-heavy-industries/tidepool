@@ -1379,6 +1379,10 @@ def verify(path: Path) -> dict:
 def run_cohort(args) -> int:
     if 'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS' in os.environ:
         raise ValueError('diagnostic startup overrides cannot qualify a frozen cohort')
+    allowances = {name: getattr(args, name, None) for name in ('foreground_jobs', 'preparation_jobs')}
+    for name, value in allowances.items():
+        if value is not None and (type(value) is not int or not 0 < value < 1 << 64):
+            raise ValueError('--' + name.replace('_', '-') + ' must be a positive u64')
     if args.jobs <= 0:
         raise ValueError("--jobs must be positive")
     if args.service_slice is not None and not args.delegated_service:
@@ -1395,6 +1399,8 @@ def run_cohort(args) -> int:
     compiler_mode = getattr(args, "compiler_mode", None) or required_compiler_mode
     if compiler_mode != required_compiler_mode:
         raise ValueError(f"{args.cohort} requires compiler mode {required_compiler_mode}")
+    if any(value is not None for value in allowances.values()) and compiler_mode != "owned-resident":
+        raise ValueError("compiler job allowances require the sealed owned-resident mode")
     if args.jobs > cohort.get("max_jobs", args.jobs):
         raise ValueError(f"{args.cohort} permits at most {cohort['max_jobs']} test process")
     for field in ("stdlib_mode", "startup_mode"):
@@ -1410,6 +1416,9 @@ def run_cohort(args) -> int:
     command = [str(tools / "bin/python3"), descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
                "--expected-count", str(cohort["expected_count"]), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
                "--output-dir", str(output / "tests"), "--compiler-mode", compiler_mode]
+    for name, value in allowances.items():
+        if value is not None:
+            command.extend(["--" + name.replace("_", "-"), str(value)])
     if cohort.get("retain_artifacts", False):
         command.append("--retain-artifacts")
     for name, timeout in sorted(cohort.get("case_timeouts", {}).items()):
@@ -1434,14 +1443,22 @@ def run_cohort(args) -> int:
     confirmed = exact and len(records) == cohort["expected_count"] and all(record["passed"] and record["execution"]["executed_test_count"] == 1
         and record["execution"]["exit_code"] == 0
         and record["execution"].get("startup_diagnostic_seconds") is None for record in records)
+    compiler_allowance_selection_confirmed = True
+    if any(value is not None for value in allowances.values()):
+        compiler_allowance_selection_confirmed = exact and len(records) == cohort["expected_count"] and all(
+            (record.get("execution") or {}).get("compiler_allowances") == {
+                "requested_foreground_jobs": allowances["foreground_jobs"],
+                "requested_preparation_jobs": allowances["preparation_jobs"], "worker_processes": 1}
+            for record in records)
     behavioral_completed = result.returncode == 0 and confirmed
     measurement = None
     if "measurement_reporter" in cohort:
         measurement = analyze_harness_performance(
-            descriptor, records, record_paths, cohort, behavioral_completed, args.descriptor.absolute())
+            descriptor, records, record_paths, cohort, behavioral_completed, args.descriptor.absolute(),
+            compiler_allowance_selection_confirmed=compiler_allowance_selection_confirmed)
         measurement.setdefault("reporter", cohort["measurement_reporter"])
         write_json(output / "harness-usecase-perf-report.json", measurement)
-    completed = behavioral_completed
+    completed = behavioral_completed and compiler_allowance_selection_confirmed
     code = result.returncode if result.returncode else int(not completed)
     report = {"schema": 1, "descriptor": str(args.descriptor.absolute()), "descriptor_sha256": sha256(args.descriptor),
               "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
@@ -1450,17 +1467,22 @@ def run_cohort(args) -> int:
               "scheduling": {"jobs": args.jobs, "effective_jobs": min(args.jobs, cohort["expected_count"]),
                              "delegated_service": args.delegated_service, "service_slice": service_slice,
                              "compiler_mode": compiler_mode,
+                             "compiler_allowances": {"requested_foreground_jobs": allowances["foreground_jobs"],
+                                                     "requested_preparation_jobs": allowances["preparation_jobs"],
+                                                     "worker_processes": 1 if compiler_mode == "owned-resident" else None},
                              "timeout_seconds": cohort["timeout"], "case_timeout_seconds": cohort.get("case_timeouts", {})},
               "elapsed_ns": time.monotonic_ns() - started, "expected_count": cohort["expected_count"],
               "executed_test_count": sum((record.get("execution") or {}).get("executed_test_count") or 0 for record in records),
               "unknown_execution_count": sum((record.get("execution") or {}).get("executed_test_count") is None for record in records),
               "behavioral_completed": behavioral_completed,
+              "compiler_allowance_selection_confirmed": compiler_allowance_selection_confirmed,
               "measurement": measurement, "completed": completed, "tests": records}
     write_json(output / "report.json", report)
     return code
 
 
-def analyze_harness_performance(descriptor, records, record_paths, cohort, behavioral_completed, descriptor_path):
+def analyze_harness_performance(descriptor, records, record_paths, cohort, behavioral_completed, descriptor_path,
+                                compiler_allowance_selection_confirmed=True):
     # Runner records are adjacent to their artifact directories under tests/.
     if not records or len(records) != 1:
         return {"status": "refused", "completed": False,
@@ -1524,6 +1546,8 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
         "all_physical_services_succeeded": (report.get("whole_physical_stream_reconciliation") or {}).get("physical_service_outcome_status") == "all_successful",
         "raw_trace_capture_complete": (report.get("whole_physical_stream_reconciliation") or {}).get("raw_event_capture_status") == "complete",
         "queue_evidence_complete": (report.get("queue_evidence") or {}).get("status") == "complete",
+        "compiler_allowance_selection_confirmed": compiler_allowance_selection_confirmed,
+        "compiler_job_grants_complete": (report.get("compiler_job_grants") or {}).get("status") == "observed",
         "startup_owner_complete": (report.get("startup_scope") or {}).get("owner_status") == "complete",
         "cleanup_confirmed": ((report.get("runner") or {}).get("cleanup") or {}).get("complete") is True,
     }
@@ -1664,6 +1688,9 @@ def main(argv=None) -> int:
     run.add_argument("--output", required=True, type=Path)
     run.add_argument("--jobs", type=int, default=1,
                      help="maximum concurrent test processes (default: 1)")
+    for flag in ("foreground-jobs", "preparation-jobs"):
+        run.add_argument("--" + flag, type=int,
+                         help="positive per-request compiler allowance; independent of --jobs")
     run.add_argument("--compiler-mode", choices=("direct", "owned-resident"),
                      help="isolated per-case compiler lifecycle (default: cohort selection)")
     run.add_argument("--delegated-service", action="store_true",

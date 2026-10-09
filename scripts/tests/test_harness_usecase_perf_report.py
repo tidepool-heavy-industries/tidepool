@@ -74,7 +74,8 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         if queue:
             daemon.append({"target": "tidepool_extract_cmd::daemon", "fields": {
                 "message": "compiler job dequeued", "phase": "compiler_queue",
-                "queue_ms": 11, "daemon_epoch": "epoch-a", "admission_id": 7}})
+                "queue_ms": 11, "daemon_epoch": "epoch-a", "admission_id": 7,
+                "compiler_workload": "foreground", "compiler_jobs": 2, "compiler_capabilities": 2}})
         self.write_jsonl(host_path, host)
         self.write_jsonl(compiler_path, daemon)
         record_path = self.root / "abc.json"
@@ -93,6 +94,31 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                           }},
         })
         return record_path
+
+    def test_report_preserves_requested_width_and_capacity_capped_admission(self):
+        path = self.make_case()
+        record = reporter.read_json(path)
+        record['execution']['compiler_allowances'] = {'requested_foreground_jobs': 16,
+                                                     'requested_preparation_jobs': 8,
+                                                     'worker_processes': 1}
+        self.write_json(path, record)
+        trace = self.root / 'artifacts/compiler/compiler.jsonl'
+        rows = reporter.read_jsonl(trace)
+        rows[-1]['fields'].update(compiler_workload='foreground', compiler_jobs=4, compiler_capabilities=3)
+        self.write_jsonl(trace, rows)
+        report = reporter.analyze(path)
+        self.assertEqual(report['compiler_allowances'], record['execution']['compiler_allowances'])
+        grants = report['compiler_job_grants']
+        self.assertEqual(grants['status'], 'observed')
+        self.assertEqual(grants['observed_jobs'], [4])
+        self.assertEqual(grants['observed_capabilities'], [3])
+        self.assertEqual(grants['admissions'][0]['requested_jobs'], 16)
+        self.assertTrue(grants['admissions'][0]['below_requested_maximum'])
+        rows[-1]['fields'].pop('compiler_jobs')
+        self.write_jsonl(trace, rows)
+        report = reporter.analyze(path)
+        self.assertEqual(report['compiler_job_grants']['status'], 'partial_or_unknown')
+        self.assertIsNone(report['compiler_job_grants']['admissions'][0]['jobs'])
 
     def make_complete_case(self, cohort="harness-eight-phase"):
         record = self.make_case()

@@ -212,23 +212,44 @@ fn worker_count(count: u64) -> Result<usize, FrontendError> {
 struct OwnedInvocation<'a> {
     root: &'a OsStr,
     workers: usize,
+    allowances: crate::CompilerJobAllowances,
     program: &'a OsStr,
     child_args: &'a [OsString],
 }
 
 fn parse_owned_invocation(args: &[OsString]) -> Result<OwnedInvocation<'_>, FrontendError> {
-    let usage =
-        || FrontendError::Usage("--owned-daemon-run ROOT [--workers N] -- PROGRAM [ARGS]".into());
-    let (root, remaining) = args.split_first().ok_or_else(usage)?;
-    let (workers, remaining) = if remaining.first().is_some_and(|arg| arg == "--workers") {
-        let [_, count, rest @ ..] = remaining else {
+    let usage = || {
+        FrontendError::Usage(
+        "--owned-daemon-run ROOT [--workers N] [--foreground-jobs N] [--preparation-jobs N] -- PROGRAM [ARGS]".into(),
+    )
+    };
+    let (root, mut remaining) = args.split_first().ok_or_else(usage)?;
+    let mut workers = None;
+    let mut allowances = crate::CompilerJobAllowances::default();
+    while remaining.first().is_some_and(|arg| arg != "--") {
+        let [flag, count, rest @ ..] = remaining else {
             return Err(usage());
         };
+        let selected = match flag.to_str() {
+            Some("--workers") if workers.is_none() => &mut workers,
+            Some("--foreground-jobs") if allowances.foreground.is_none() => {
+                &mut allowances.foreground
+            }
+            Some("--preparation-jobs") if allowances.preparation.is_none() => {
+                &mut allowances.preparation
+            }
+            _ => return Err(usage()),
+        };
+        let flag = flag.to_str().unwrap();
         let mut count = std::iter::once(count);
-        (worker_count(number(&mut count, "--workers")?)?, rest)
-    } else {
-        (1, remaining)
-    };
+        let count = usize::try_from(number(&mut count, flag)?)
+            .map_err(|_| FrontendError::Usage(format!("{flag} is too large")))?;
+        *selected = Some(
+            std::num::NonZeroUsize::new(count)
+                .ok_or_else(|| FrontendError::Usage(format!("{flag} must be at least 1")))?,
+        );
+        remaining = rest;
+    }
     let [separator, program, child_args @ ..] = remaining else {
         return Err(usage());
     };
@@ -239,7 +260,8 @@ fn parse_owned_invocation(args: &[OsString]) -> Result<OwnedInvocation<'_>, Fron
     }
     Ok(OwnedInvocation {
         root,
-        workers,
+        workers: workers.map_or(1, std::num::NonZeroUsize::get),
+        allowances,
         program,
         child_args,
     })
@@ -255,6 +277,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
     let OwnedInvocation {
         root,
         workers,
+        allowances,
         program,
         child_args,
     } = parse_owned_invocation(args)?;
@@ -312,7 +335,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         "isolated-qualification",
         workers,
         Some(crate::SESSION_WORKER_RSS_CEILING_MB),
-        None,
+        allowances,
     );
     let mut command = owned_timing_command(&frontend, timing.as_deref());
     command
@@ -1280,7 +1303,7 @@ mod tests {
                 "isolated-qualification",
                 invocation.workers,
                 Some(crate::SESSION_WORKER_RSS_CEILING_MB),
-                None,
+                crate::CompilerJobAllowances::default(),
             );
             let config = parse_daemon(&arguments[1..]).unwrap();
             assert_eq!(config.workers, Some(expected));
@@ -1305,6 +1328,59 @@ mod tests {
         }
     }
 
+    proptest::proptest! {
+        #![proptest_config(owned_evidence_property_config())]
+        #[test]
+        fn owned_compiler_allowances_roundtrip_independently_of_worker_count(
+            workers in 1_usize..8,
+            foreground in 1_usize..=64,
+            preparation in 1_usize..=64,
+            reverse in proptest::prelude::any::<bool>(),
+        ) {
+            let mut options = vec![
+                [OsString::from("--workers"), workers.to_string().into()],
+                [OsString::from("--foreground-jobs"), foreground.to_string().into()],
+                [OsString::from("--preparation-jobs"), preparation.to_string().into()],
+            ];
+            if reverse { options.reverse(); }
+            let mut args = vec![OsString::from("/tmp/owned")];
+            args.extend(options.into_iter().flatten());
+            args.extend(["--", "child", "--foreground-jobs", "child-owned"].map(OsString::from));
+            let invocation = parse_owned_invocation(&args).unwrap();
+            let arguments = crate::persistent_daemon_arguments(
+                Path::new("/tmp/owned.sock"), Path::new("/tmp/compiler.jsonl"), "case",
+                invocation.workers, Some(crate::SESSION_WORKER_RSS_CEILING_MB), invocation.allowances,
+            );
+            let config = parse_daemon(&arguments[1..]).unwrap();
+            proptest::prop_assert_eq!(config.workers, Some(workers));
+            proptest::prop_assert_eq!(config.foreground_jobs, Some(foreground));
+            proptest::prop_assert_eq!(config.preparation_jobs, Some(preparation));
+            proptest::prop_assert_eq!(invocation.child_args, &[OsString::from("--foreground-jobs"), OsString::from("child-owned")]);
+        }
+    }
+
+    #[test]
+    fn owned_compiler_allowances_refuse_invalid_or_duplicate_options() {
+        for flag in ["--foreground-jobs", "--preparation-jobs"] {
+            for value in ["0", "-1", "invalid", "18446744073709551616"] {
+                assert!(parse_owned_invocation(
+                    &["/tmp/owned", flag, value, "--", "child"].map(OsString::from)
+                )
+                .is_err());
+            }
+            assert!(parse_owned_invocation(
+                &["/tmp/owned", flag, "2", flag, "8", "--", "child"].map(OsString::from)
+            )
+            .is_err());
+            assert!(parse_owned_invocation(&["/tmp/owned", flag].map(OsString::from)).is_err());
+        }
+        let args = ["/tmp/owned", "--", "child"].map(OsString::from);
+        assert_eq!(
+            parse_owned_invocation(&args).unwrap().allowances,
+            crate::CompilerJobAllowances::default()
+        );
+    }
+
     #[test]
     fn owned_compiler_timing_controls_daemon_and_child_commands() {
         let daemon_arguments = crate::persistent_daemon_arguments(
@@ -1313,7 +1389,7 @@ mod tests {
             "isolated-qualification",
             1,
             Some(crate::SESSION_WORKER_RSS_CEILING_MB),
-            None,
+            crate::CompilerJobAllowances::default(),
         );
         for (timing, expected) in [
             (None, "1"),
@@ -1362,7 +1438,7 @@ mod tests {
             "case",
             1,
             Some(7168),
-            None,
+            crate::CompilerJobAllowances::default(),
         );
         let configuration = parse_daemon(&arguments[1..]).unwrap();
         assert!(configuration.persistent);
@@ -1382,7 +1458,10 @@ mod tests {
                 "case",
                 2,
                 Some(10 * 1024),
-                jobs,
+                crate::CompilerJobAllowances {
+                    foreground: jobs,
+                    preparation: None,
+                },
             );
             let configuration = parse_daemon(&arguments[1..]).unwrap();
             assert_eq!(configuration.foreground_jobs, expected);
