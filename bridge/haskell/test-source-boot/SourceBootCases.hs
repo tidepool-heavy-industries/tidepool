@@ -6102,6 +6102,43 @@ verifyChangedPackageInterface producer identity evidence program global = withSc
     fail "restored standalone package lookup changed its canonical Name"
   putStrLn "package certification: changed interface refused and restored bytes recovered"
 
+resolutionSearchOrderHistory :: IO ()
+resolutionSearchOrderHistory = withScratch $ \work -> do
+  let catalog = work </> "catalog"
+      captured = work </> "captured"
+      selectedPath root = root </> "SearchSelected.hs"
+      target = work </> "SearchRequest.hs"
+      verify compile first second = do
+        prepared <- compile (PreparedProducts Nothing) Set.empty GeneralCompile
+          Nothing target [first, second, work] Nothing
+        let evidence = preparedFreshDependencies prepared
+        row <- case [row | row <- dependencyResolutions evidence
+          , dependencyResolutionModule row == "SearchSelected"
+          , dependencyResolutionQualifier row == DependencyUnqualified
+          , not (dependencyResolutionBoot row)] of
+          [row] -> pure row
+          _ -> fail "request search history omitted one selected home import"
+        negative <- case reverse (dependencyResolutionCandidates row) of
+          chosen : rest | chosen == selectedPath first -> pure (reverse rest)
+          _ -> fail "request search history omitted its selected-source cutoff"
+        unless (dependencyResolutionSelected row == Just (selectedPath first)
+            && selectedPath second `notElem` dependencyResolutionCandidates row) $
+          fail "request search history borrowed another summary's search order"
+        absent <- and <$> mapM (fmap not . doesFileExist) negative
+        unless absent $ fail "request search history issued an existing negative candidate"
+        validateDependencyEvidence evidence
+  mapM_ createDirectory [catalog, captured]
+  forM_ [catalog, captured] $ \root -> writeFile (selectedPath root)
+    "module SearchSelected where\nselected :: Int\nselected = 41\n"
+  writeFile (catalog </> "SearchStable.hs")
+    "module SearchStable where\nstable :: Int\nstable = 1\n"
+  writeFile target (unlines ["module SearchRequest where", "import SearchStable"
+    , "import SearchSelected", "__result :: Int", "__result = stable + selected"])
+  withResidentPipelineSelected [] $ \compile -> do
+    verify compile catalog captured
+    verify compile captured catalog
+    verify compile catalog captured
+
 resolutionPaths :: IO ()
 resolutionPaths = do
   original <- getCurrentDirectory

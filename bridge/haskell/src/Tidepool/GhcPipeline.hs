@@ -4538,7 +4538,10 @@ dependencyEvidenceFor env (sources, sourcesComplete) graph moduleFacts = do
         | summary <- graphSummaries
         , (qualifier, imported) <- ms_srcimps summary
         ]
-      roots = nubOrd (concatMap (importPaths . ms_hspp_opts) graphSummaries)
+      -- GHC's finder selects imports under this request's search order.
+      -- Reused summaries retain preprocessing flags from their issuing
+      -- request; concatenating those flags invents a different search order.
+      roots = nubOrd (importPaths (hsc_dflags env))
       moduleRelative name =
         map (\c -> if c == '.' then pathSeparator else c) (moduleNameString name)
       homeLookup (OtherPkg _) = False
