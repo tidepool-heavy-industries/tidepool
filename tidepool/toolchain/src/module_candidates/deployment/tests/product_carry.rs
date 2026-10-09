@@ -551,8 +551,9 @@ fn synchronized_configured_owner_coalesces_lookups_and_preserves_replacement_and
                         .unwrap();
                     entered.send(()).unwrap();
                     continue_warm.recv().unwrap();
-                    package
-                });
+                    Ok(package)
+                })
+                .unwrap();
                 (package, counter.count())
             });
             holding.recv().unwrap();
