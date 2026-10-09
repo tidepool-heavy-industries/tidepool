@@ -20317,6 +20317,12 @@ pub(crate) mod request_tests {
         source
             .workbench_imports
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Actors.Internal.Agent as Agents");
+        source
+            .workbench_imports
+            .extend_text("qualified Tidepool.Agent.Ref.Internal as Ref");
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(machines, source.clone());
         workbench
@@ -20355,7 +20361,8 @@ pub(crate) mod request_tests {
             .admit_private_cell_for_test(context)
             .await
             .unwrap();
-        let cell = "requestScope <- (TidepoolReply.currentRequest :: Eff '[Exomonad.Replies] (TidepoolReply.RequestScope () ()))".to_owned();
+        let cell =
+            tidepool_testing::fixture_source("exomonad/actor/src/fixtures/request-alias-borrow.hs");
         let (_, prepared) = workbench
             .prepare_cell(context.clone(), cell.clone())
             .await
@@ -20384,6 +20391,25 @@ pub(crate) mod request_tests {
             )
             .await
             .unwrap();
+        let ResidentActorBoundary::RequestReservation(reservation) = boundary else {
+            panic!("the genuine unit request producer must reach reservation")
+        };
+        let outcome = runner
+            .resume_value(
+                context.clone(),
+                reservation.continuation,
+                Err::<crate::RequestId, _>(
+                    crate::request_effect::RequestError::RequestReservationRejected(
+                        crate::ReplyError::Stale,
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+        let boundary = runner
+            .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
+            .await
+            .unwrap();
         let ResidentActorBoundary::CurrentRequest {
             continuation,
             site: Some(site),
@@ -20393,6 +20419,7 @@ pub(crate) mod request_tests {
         };
         let continuation_id = continuation.cont_id().to_owned();
         let pending_id = continuation_id.clone();
+        let evidence_continuation = continuation.clone();
         let (types, custody_before_resume) = workbench
             .access
             .with_machine(context.clone(), move |session, _, _| {
@@ -20400,9 +20427,24 @@ pub(crate) mod request_tests {
                     session.parked_holes().contains(&pending_id.as_str()),
                     "the actual CurrentRequest borrower is pending before resumption"
                 );
+                let program = session
+                    .parked_program_provenance(&evidence_continuation)
+                    .expect("the accessor retains its compiler-issued program");
+                let issued_requests = program
+                    .sites()
+                    .into_iter()
+                    .filter(|candidate| candidate.inputs.len() == 1)
+                    .collect::<Vec<_>>();
+                let [request_site] = issued_requests.as_slice() else {
+                    panic!("the genuine request is the sole one-input site; the accessor has three inputs")
+                };
+                assert_ne!(request_site.site, site);
                 let types = session
-                    .request_site_type_evidence(site)
-                    .expect("closed unit input/reply evidence");
+                    .request_site_type_evidence(request_site.site)
+                    .expect("original unit input and complete reply evidence");
+                assert!(session
+                    .request_scope_types_match(&types, site)
+                    .map_err(ResidentError::Prepared)?);
                 Ok((types, session.outstanding_custody()))
             })
             .await
