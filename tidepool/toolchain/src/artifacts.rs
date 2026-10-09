@@ -3481,8 +3481,8 @@ pub fn compile_invocation_in_context(
 
 /// Compile a declaration probe in full-home-product mode, which produces
 /// original products for every home module, including modules with no
-/// executable references from the probe. The probe bypasses the memo and
-/// candidate path while retaining the shared certification front door.
+/// executable references from the probe. The probe bypasses memo lookup and
+/// candidate publication while retaining the shared certification front door.
 pub(crate) fn compile_authored_products(
     source: &str,
     target: &str,
@@ -4005,7 +4005,7 @@ fn compile_invocation_inner(
                     producer,
                     inv.include,
                     output_owner.path(),
-                    BTreeSet::from([admission.owner.module.clone()]),
+                    BTreeSet::from([admission.owner().module.clone()]),
                 )?;
                 let private = crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
                     context,
