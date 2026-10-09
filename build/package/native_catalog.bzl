@@ -112,28 +112,31 @@ def native_prepared_products(**kwargs):
 
 
 def native_runtime_bundle(name, catalog_backed):
+    bundle_sources = {
+        "host": "//bridge/facade:exomonad",
+        "view-helper": "//bridge/facade:exomonad-view-helper",
+        "libtest": "//bridge/facade:tidepool_unit_tests",
+        "compiler-frontend": "//tidepool/extract-cmd:tidepool-extract",
+        "compiler-worker": "//bridge/haskell:tidepool_extract_bin",
+        "haskell-sources": "//bridge/haskell:facade_embedded_sources",
+        "web-assets": "//web:dist",
+        "browser-driver": "//build/testing/browser:driver_bundle",
+        "web-provenance": ":embedded_web_provenance",
+        "runtime-libraries": ":tidepool_extract_runtime_libraries",
+        "qualification": ":qualification_script",
+        "entrypoint": ":native_entrypoint",
+        "runtime-tools": "toolchains//:exomonad_runtime_tools",
+        "build-sources": "//build/rust:native_qualification_sources",
+        "workspace-gitlink": "//build/rust:workspace_gitlink",
+        "workspace-git-bundle": "//build/rust:workspace_git_bundle",
+        "haskell-test-fixtures": "//bridge/testing:haskell_test_fixtures",
+        "fixture-manifest": "//:test_fixture_manifest",
+    }
+    if catalog_backed:
+        bundle_sources.update({"catalog": ":native_catalog", "root-entry": ":native_root_entry"})
     genrule(
         name = name,
-        srcs = [
-            "//bridge/facade:exomonad",
-            "//bridge/facade:exomonad-view-helper",
-            "//bridge/facade:tidepool_unit_tests",
-            "//tidepool/extract-cmd:tidepool-extract",
-            "//bridge/haskell:tidepool_extract_bin",
-            "//bridge/haskell:facade_embedded_sources",
-            "//web:dist",
-            "//build/testing/browser:driver_bundle",
-            ":embedded_web_provenance",
-            ":tidepool_extract_runtime_libraries",
-            ":qualification_script",
-            ":native_entrypoint",
-            "toolchains//:exomonad_runtime_tools",
-            "//build/rust:native_qualification_sources",
-            "//build/rust:workspace_gitlink",
-            "//build/rust:workspace_git_bundle",
-            "//bridge/testing:haskell_test_fixtures",
-            "//:test_fixture_manifest",
-        ] + ([":native_catalog", ":native_root_entry"] if catalog_backed else []),
+        srcs = bundle_sources,
         out = ".",
         env = {
             "PACKAGE_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),

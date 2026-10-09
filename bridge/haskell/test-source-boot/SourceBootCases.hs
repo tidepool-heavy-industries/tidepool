@@ -102,7 +102,7 @@ import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWith
 import Numeric (showHex)
 import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, removeDirectoryRecursive
-  , removeFile, renameFile, listDirectory, doesFileExist, doesDirectoryExist, getPermissions, setPermissions, executable
+  , removeFile, renameFile, listDirectory, doesFileExist, doesDirectoryExist, doesPathExist, getPermissions, setPermissions, executable
   , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory, canonicalizePath )
 import System.Environment (setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
