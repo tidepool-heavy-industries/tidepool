@@ -35,6 +35,12 @@ class BuckRunnerTests(unittest.TestCase):
         (self.root / "nix").mkdir()
         (self.root / "nix/ghc.patch").write_text("pinned GHC patch\n")
         self.commit(".")
+        self.workspace_revision = "a" * 40
+        self.git_command("update-index", "--add", "--cacheinfo",
+                         f"160000,{self.workspace_revision},.exomonad/workspace")
+        subprocess.run([self.git, "-C", str(self.root), "-c", "user.name=test",
+                        "-c", "user.email=test@invalid", "commit", "-qm",
+                        "record workspace Gitlink"], check=True)
         self.tools = self.root / "tools"
         self.tools.mkdir()
         # Launcher bootstrap receives only its declared Bash/coreutils inputs.
@@ -89,6 +95,17 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
             root = self.generation / "roots" / name
             root.symlink_to(output)
             records.append(f"{name}\t{self.selection.split('#')[0]}#packages.test.{name}\t{output}\t{root}\n")
+        self.workspace_resource_output = self.root / "outputs/workspace-git-resource"
+        self.workspace_resource_output.mkdir(parents=True)
+        (self.workspace_resource_output / "workspace-gitlink.json").write_text(json.dumps({
+            "schema": 1, "path": ".exomonad/workspace", "mode": "160000",
+            "revision": self.workspace_revision,
+        }))
+        workspace_root = self.generation / "roots/workspace-git-resource"
+        workspace_root.symlink_to(self.workspace_resource_output)
+        records.append(
+            f"workspace-git-resource\tgitlink:{self.workspace_revision}\t"
+            f"{self.workspace_resource_output}\t{workspace_root}\n")
         (self.generation / "outputs.tsv").write_text("".join(records))
         self.config = self.root / ".buckconfig.local"
         self.write_config(f"buck2 = {self.buck}\ngit = {self.action_tools}/git\naction_path = {self.action_tools}\n")
@@ -299,6 +316,15 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         self.assert_refused("changed toolchain inputs")
         self.commit("flake.nix")
         self.assert_refused("changed toolchain input pin")
+
+    def test_changed_committed_workspace_gitlink_refuses_before_buck(self):
+        revision = "b" * 40
+        self.git_command("update-index", "--cacheinfo",
+                         f"160000,{revision},.exomonad/workspace")
+        subprocess.run([self.git, "-C", str(self.root), "-c", "user.name=test",
+                        "-c", "user.email=test@invalid", "commit", "-qm",
+                        "change workspace Gitlink"], check=True)
+        self.assert_refused("changed workspace Gitlink")
 
     def input_tree(self, revision="HEAD"):
         return subprocess.check_output(
