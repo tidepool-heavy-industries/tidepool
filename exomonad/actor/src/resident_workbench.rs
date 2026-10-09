@@ -20731,8 +20731,8 @@ pub(crate) mod request_tests {
             ParsedBlock {
                 ordinal: 1,
                 total: 1,
-                source: "notified <- maybe (pure (Left NotificationUnauthorized)) \
-                          (\\p -> Exomonad.sendMessage p \"hello\") =<< Exomonad.parentAgent"
+                source: "notified <- maybe (pure Nothing) \
+                          (\\p -> Just <$> Exomonad.sendMessage p \"hello\") =<< Exomonad.parentAgent"
                     .into(),
             },
             TurnClassification {
