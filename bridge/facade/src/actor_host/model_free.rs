@@ -4,7 +4,10 @@ use super::*;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-const ROOT_POLICY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+// Cold semantic acceptance includes toolset compilation and native attachment.
+// This bounded installation watchdog follows the hosted startup allowance;
+// performance gates retain their own budgets.
+const ROOT_POLICY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 const FAILED_START_FOREST_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(35);
 const FAILED_START_HOSTED_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
