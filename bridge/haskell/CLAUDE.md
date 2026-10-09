@@ -109,6 +109,10 @@ consumption stays independent of transient producer-path mutations. Prepared
 candidate results retain the issuer's opaque admission through certification and
 program retention. Durable support copies bind explicit path aliases to that
 same captured payload and budget; terminal publication observes both paths.
+Retention and checked receipt publication capture source evidence before one
+terminal proof over their required scopes. That proof shares current path
+observations only across its read-only checks; no observations survive into
+publication, cancellation recovery or further compiler work.
 
 Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
 original references. Exact-scope graph paths come from the retained immutable

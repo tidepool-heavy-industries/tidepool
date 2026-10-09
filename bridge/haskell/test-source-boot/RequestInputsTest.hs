@@ -1,15 +1,253 @@
-module RequestInputsTest (requestInputHistories, requestInputBoundaries) where
+module RequestInputsTest (requestInputHistories, requestInputBoundaries, retainedCompilationPublication) where
 
-import Control.Exception (AsyncException(ThreadKilled), IOException, bracket, throwIO, try)
-import Control.Monad (foldM, unless)
+import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, fromException, throwIO, try)
+import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
+import Control.Monad (foldM, forM, forM_, unless, when)
 import qualified Data.ByteString as BS
+import Data.IORef (newIORef, modifyIORef', readIORef)
+import Data.List (isInfixOf, isPrefixOf, nub, stripPrefix)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.Directory (removeFile)
-import System.FilePath ((</>))
+import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFileExist, listDirectory, removeFile)
+import System.FilePath ((</>), takeDirectory)
+import System.Timeout (timeout)
 import Test.QuickCheck
+import GHC.Driver.Env (HscEnv(..))
+import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
+import GHC.Unit.Finder.Types (FinderCache(..))
+import GHC.Unit.Module (mkModule, mkModuleName)
+import GHC.Unit.Module.Location (ml_hi_file)
+import GHC.Unit.Types (stringToUnit, GenWithIsBoot(..))
+import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
+import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue)
+import Tidepool.DependencyEvidence
+  ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..) )
+import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.ExactScope
+  ( ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
+  , scopeInterfaces, scopeModuleInterfaceProofs, canonicalCertificatePath
+  , canonicalCoreArtifact, canonicalCorePath, readExactScope, revalidateExactScope
+  , writeCheckedExactCompilation, writeRetainedExactCompilation )
+import Tidepool.FatIface (readExactInterface)
+import Tidepool.GhcPipeline
+  ( PipelineSelection(..), CompilePurpose(..), PreparedPipelineResult(..), PipelineResult(..)
+  , runPipelineSessionSelected, preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents )
+import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.RequestInputs
-import SourceBootFixtureSupport (withScratch, digest)
+import Tidepool.Session (SessionScope(..), emptySessionScope)
+import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope)
+import SourceBootCases (admitCheckedScope, counterValues)
+import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics)
+
+data PublicationStep
+  = RestorePublicationInputs
+  | RestorePublicationInput (NonNegative Int)
+  | ChangePublicationInput (NonNegative Int)
+  | RemovePublicationInput (NonNegative Int)
+  deriving Show
+
+instance Arbitrary PublicationStep where
+  arbitrary = frequency
+    [(2,pure RestorePublicationInputs), (3,RestorePublicationInput <$> arbitrary)
+    ,(3,ChangePublicationInput <$> arbitrary), (2,RemovePublicationInput <$> arbitrary)]
+  shrink RestorePublicationInputs = []
+  shrink (RestorePublicationInput index) = RestorePublicationInput <$> shrink index
+  shrink (ChangePublicationInput index) = ChangePublicationInput <$> shrink index
+  shrink (RemovePublicationInput index) = RemovePublicationInput <$> shrink index
+
+-- One real compiler cohort supplies both scopes and current source selection.
+-- Histories mutate only private issued paths; the model compares raw payloads
+-- and absent lookup candidates, independently of the production capture maps.
+retainedCompilationPublication :: IO ()
+retainedCompilationPublication = withTiming $ withScratch $ \work -> do
+  forM_ ["CanonicalSource.hs","CanonicalDependency.hs","CanonicalConsumer.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "CanonicalSource.hs") [work] Nothing
+  fixture <- capturePreparedFixture work original
+  scopePath <- writeGenuineMetadataScope work ["CanonicalSource","CanonicalDependency"] fixture
+  retained <- readExactScope scopePath >>= either fail pure
+  let emptyRoot = work </> "empty-root"
+      source = work </> "CanonicalConsumer.hs"
+      includes = [emptyRoot,work]
+  createDirectory emptyRoot
+  admitted <- admitCheckedScope retained includes []
+  plan <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
+    "import CanonicalSource as Source (Answer)\nimport CanonicalSource (Answer)\n(1 :: Answer)"
+    >>= either (fail . show) pure
+  prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
+    (ExactScopeCompile (withSourceImportIntents (cellPlanPrologue plan) GeneralCompile) admitted)
+    (Just emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)})
+    source includes Nothing
+  compilation <- maybe (fail "publication fixture has no exact completion") pure
+    (preparedExactCompilation prepared)
+  selected <- maybe (fail "publication fixture has no current source selection") pure
+    (compilationSourceSelection compilation)
+  let environment = prHscEnv (pprPipelineResult prepared)
+      evidence = preparedFreshDependencies prepared
+      checked = compilationScope compilation
+      paths scope = scopeManifestPath scope
+        : concat [[exactPath iface,packages] | (iface,packages,_) <- scopeInterfaces scope]
+        ++ concat [[canonicalCertificatePath proof]
+             ++ maybe [] (pure . canonicalCorePath) (canonicalCoreArtifact proof)
+            | proof <- Map.elems (scopeModuleInterfaceProofs scope)]
+      observed = nub (paths retained ++ paths checked
+        ++ map dependencySourcePath (dependencySources evidence)
+        ++ map dependencySourcePath (dependencySources (selectedOriginalEvidence selected)))
+      absent = nub [path | resolution <- dependencyResolutions (selectedOriginalEvidence selected)
+        , path <- case dependencyResolutionSelected resolution of
+            Nothing -> dependencyResolutionCandidates resolution
+            Just chosen -> takeWhile (/= chosen) (dependencyResolutionCandidates resolution)]
+      parent = takeDirectory source </> ".exact-compilations"
+      receipts = doesDirectoryExist parent >>= \exists -> if exists then listDirectory parent else pure []
+      publish env = writeRetainedExactCompilation env retained compilation evidence
+  unless (not (null absent) && scopeRequestSha256 retained /= scopeRequestSha256 checked)
+    (fail "publication fixture lacks negative candidates or distinct scope manifests")
+  forM_ absent $ \path -> doesFileExist path >>= \exists ->
+    when exists (fail "publication negative candidate was already present")
+  originals <- Map.fromList <$> ((++)
+    <$> mapM (\path -> (path,) . Just <$> BS.readFile path) observed
+    <*> pure [(path,Nothing) | path <- absent])
+  unless (all (isPrefixOf (work ++ "/")) (Map.keys originals))
+    (fail "publication mutation escaped its private fixture")
+  sourceBytes <- BS.readFile source
+  shared <- case [(iface,packages) | (iface,packages,_) <- scopeInterfaces retained
+      , any (\(other,_,_) -> exactPath other == exactPath iface) (scopeInterfaces checked)] of
+    value:_ -> pure value
+    _ -> fail "publication fixture lacks an actual shared interface path"
+  verdicts <- newIORef (0::Int,0::Int)
+  let remove path = doesFileExist path >>= \exists -> when exists (removeFile path)
+      write path = maybe (remove path) (BS.writeFile path)
+      restore = mapM_ (uncurry write) (Map.toAscList originals)
+      changed value = Just (maybe (BS.singleton 0) (<> BS.singleton 0) value)
+      proofRows diagnostics = [line | line <- lines diagnostics
+        , "tidepool-timing-detail parent=exact_scope phase=revalidate " `isPrefixOf` line]
+      measurement variant diagnostics = putStrLn ("publication-proof variant=" ++ variant
+        ++ " proofs=" ++ show (length (proofRows diagnostics))
+        ++ " wall_ns=" ++ show (sum [read value :: Integer | line <- proofRows diagnostics
+              , word <- words line, Just value <- [stripPrefix "wall_ns=" word]])
+        ++ " observed_files=" ++ show (length [() | line <- lines diagnostics
+              , "tidepool-count name=hash_bytes.observed_file." `isPrefixOf` line]))
+      check env current = do
+        before <- receipts
+        (result,diagnostics) <- captureDiagnostics
+          (try (publish env) :: IO (Either IOException ()))
+        after <- receipts
+        let expected = current == originals
+            added = filter (`notElem` before) after
+        case result of
+          Left _ -> do
+            unless (not expected && null added) (fail "refused publication exposed a receipt or rejected unchanged inputs")
+            modifyIORef' verdicts (\(accepted,refused) -> (accepted,refused+1))
+          Right () -> do
+            unless (expected && length added == 1) (fail "publication accepted drift or failed to issue one receipt")
+            let output = parent </> head added
+            snapshot <- BS.readFile (output </> "source.hs")
+            receipt <- BS.readFile (output </> "receipt.cbor")
+            unless (snapshot == sourceBytes && not (BS.null receipt)) (fail "publication lost its captured source or receipt")
+            unless (length (proofRows diagnostics) == 1
+                && length (counterValues ("hash_bytes.observed_file." ++ exactSha256 (fst shared)) diagnostics) == 1
+                && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 retained) diagnostics) == 1
+                && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 checked) diagnostics) == 1)
+              (fail "publication repeated a shared path observation or omitted one of its scopes")
+            modifyIORef' verdicts (\(accepted,refused) -> (accepted+1,refused))
+        pure ()
+      input (NonNegative index) = Map.toAscList originals !! (index `mod` Map.size originals)
+      step current operation = do
+        next <- case operation of
+          RestorePublicationInputs -> restore >> pure originals
+          RestorePublicationInput index -> do
+            let (path,value) = input index
+            write path value
+            pure (Map.insert path value current)
+          ChangePublicationInput index -> do
+            let (path,value) = input index
+            write path (changed value)
+            pure (Map.insert path (changed value) current)
+          RemovePublicationInput index -> do
+            let (path,_) = input index
+            remove path
+            pure (Map.insert path Nothing current)
+        check environment next
+        pure next
+  -- The prior two-proof sequence is an independent full-validation control on
+  -- the same issued inputs, environment and publication mechanism.
+  (_,separateDiagnostics) <- captureDiagnostics $ do
+    revalidateExactScope environment retained >>= either fail pure
+    writeCheckedExactCompilation environment compilation evidence
+  unless (length (proofRows separateDiagnostics) == 2
+      && length (counterValues ("hash_bytes.observed_file." ++ exactSha256 (fst shared)) separateDiagnostics) == 2)
+    (fail "separate validation control did not observe the shared original twice")
+  measurement "separate" separateDiagnostics
+  (_,combinedDiagnostics) <- captureDiagnostics (publish environment)
+  measurement "combined" combinedDiagnostics
+  check environment originals
+  -- Every issued file and negative candidate must reach the publication owner.
+  forM_ (Map.toAscList originals) $ \(path,value) -> bracket (pure ()) (const restore) $ \_ -> do
+    write path (changed value)
+    check environment (Map.insert path (changed value) originals)
+    write path value
+    check environment originals
+    remove path
+    check environment (Map.insert path Nothing originals)
+    write path value
+  result <- quickCheckWithResult stdArgs {maxSuccess=80,maxSize=20} $ \operations ->
+    let selectedSteps = take 20 (operations :: [PublicationStep])
+    in classify (any (\case RestorePublicationInputs -> True; _ -> False) selectedSteps) "whole-input restoration"
+      $ classify (length selectedSteps > 3) "interacting publication history"
+      $ ioProperty $ bracket (restore >> pure ()) (const restore) $ \_ ->
+          foldM step originals selectedSteps >> pure True
+  unless (isSuccess result) (fail "retained compilation publication histories failed")
+  -- A pending fresh Finder observation establishes the cancellation boundary.
+  entered <- newEmptyMVar
+  blocked <- newEmptyMVar
+  finished <- newEmptyMVar
+  let finder = hsc_FC environment
+      cancelledEnvironment = environment {hsc_FC=finder {lookupFinderCache = \owner -> do
+        putMVar entered ()
+        takeMVar blocked
+        lookupFinderCache finder owner}}
+  beforeCancellation <- receipts
+  settled <- bracket
+    (forkIO $ (try (publish cancelledEnvironment) :: IO (Either SomeException ())) >>= putMVar finished)
+    killThread $ \thread -> do
+      reached <- timeout 5000000 (takeMVar entered)
+      when (case reached of Nothing -> True; _ -> False) (fail "publication never reached its fresh Finder check")
+      killThread thread
+      timeout 5000000 (takeMVar finished)
+  unless (case settled of Just (Left failure) -> fromException failure == Just ThreadKilled; _ -> False)
+    (fail "publication swallowed cancellation or failed to settle")
+  afterCancellation <- receipts
+  unless (beforeCancellation == afterCancellation) (fail "cancelled publication exposed a receipt")
+  let sharedPath = exactPath (fst shared)
+      sharedBytes = originals Map.! sharedPath
+  write sharedPath (changed sharedBytes)
+  check environment (Map.insert sharedPath (changed sharedBytes) originals)
+  restore
+  check environment originals
+  -- Equal installed bytes at another selected path must still refuse.
+  roots <- concat <$> forM (scopeInterfaces retained) (\(iface,path,_) ->
+    BS.readFile path >>= either fail (pure . packageInterfaces) . decodeCapturedPackageImports iface)
+  root <- case roots of value:_ -> pure value; _ -> fail "publication fixture has no installed package root"
+  let owner = mkModule (stringToUnit (packageUnit root)) (mkModuleName (packageModule root))
+      alternate = work </> "alternate-package.hi"
+  (_,location) <- readExactInterface environment owner >>= either (fail . show) pure
+  copyFile (packagePath root) alternate
+  isolatedFinder <- initFinderCache
+  addModuleToFinder isolatedFinder (GWIB owner NotBoot) (location {ml_hi_file=alternate})
+  beforeSelection <- receipts
+  wrongSelection <- try (publish environment {hsc_FC=isolatedFinder}) :: IO (Either IOException ())
+  afterSelection <- receipts
+  unless (case wrongSelection of
+      Left failure -> beforeSelection == afterSelection
+        && "package selection or interface bytes differ from the certified import root" `isInfixOf` show failure
+      _ -> False)
+    (fail "publication accepted an equal-byte alternate package selection")
+  check environment originals
+  (accepted,refused) <- readIORef verdicts
+  putStrLn ("retained publication inputs=" ++ show (Map.size originals) ++ " accepted=" ++ show accepted
+    ++ " refused=" ++ show refused ++ "; cancellation and current package selection controls")
 
 -- The model owns values, independently of the implementation's custody map.
 -- Every step writes a producer path, then either captures a new original or

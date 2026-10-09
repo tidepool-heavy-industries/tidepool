@@ -19,7 +19,7 @@ module Tidepool.ExactScope
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , readExactScope, revalidateExactScope, validateExactScopeEnvironment, scopeValueInterfaces
   , scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes
-  , writeExactCompilation, writeCheckedExactCompilation, extendSourceSelectedOriginals
+  , writeExactCompilation, writeCheckedExactCompilation, writeRetainedExactCompilation, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
   , scopeAvailableOriginalProducts
@@ -1479,10 +1479,16 @@ isCanonicalDigest value = length value == 64 && value /= replicate 64 '0'
 -- Recheck the entire producer-owned closure in the consuming transaction;
 -- no source file is a substitute for an admitted original interface.
 revalidateExactScope :: HscEnv -> ExactScope -> IO (Either String ())
-revalidateExactScope env scope = do
+revalidateExactScope env scope = revalidateExactScopes env [scope]
+
+-- A terminal operation can own several scopes with shared paths. These checks
+-- only observe inputs; their observations end before publication or any further
+-- compiler work. Every scope still checks its own seals, bounds and selection.
+revalidateExactScopes :: HscEnv -> [ExactScope] -> IO (Either String ())
+revalidateExactScopes env scopes = do
   timing <- readTimingEnabled
   timeDetailPhase timing "exact_scope" "revalidate" $ do
-    result <- try (withFileObservations $ \observations -> do
+    result <- try (withFileObservations $ \observations -> forM_ scopes $ \scope -> do
       observeSeal observations (scopeManifestPath scope) (Just (4 * 1024 * 1024))
         (scopeRequestSha256 scope) "exact scope request changed"
       forM_ (scopeCapturedInputs scope) $ \inputs ->
@@ -1522,11 +1528,22 @@ writeExactCompilation compilation evidence =
 -- proof; publishing the receipt afterwards consumes only captured bytes.
 writeCheckedExactCompilation
   :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO ()
-writeCheckedExactCompilation env compilation evidence = do
+writeCheckedExactCompilation env = writeCheckedExactCompilationWithScopes env []
+
+-- Retention and the checked receipt share this final publication boundary.
+-- Capture source evidence first, then check both original and retained paths in
+-- one fresh proof. No observation or validation token reaches the publisher.
+writeRetainedExactCompilation
+  :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO ()
+writeRetainedExactCompilation env retained = writeCheckedExactCompilationWithScopes env [retained]
+
+writeCheckedExactCompilationWithScopes
+  :: HscEnv -> [ExactScope] -> ExactCompilation -> DependencyEvidence -> IO ()
+writeCheckedExactCompilationWithScopes env retained compilation evidence = do
   selected <- either fail pure (extendSourceSelectedOriginals
     (compilationSourceSelection compilation) (compilationScope compilation))
   receipt <- captureExactCompilationReceipt compilation evidence
-  revalidateExactScope env selected >>= either fail pure
+  revalidateExactScopes env (retained ++ [selected]) >>= either fail pure
   publishExactCompilationReceipt receipt
 
 -- Kept private so a receipt cannot be constructed from unobserved inputs.

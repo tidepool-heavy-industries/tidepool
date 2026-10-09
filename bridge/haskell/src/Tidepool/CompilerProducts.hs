@@ -57,7 +57,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
-  , revalidateExactScope, writeCheckedExactCompilation, scopeCanonicalInterfaces, scopeInterfaceBytes, scopeOriginalBytes, canonicalProofInterfaceBytes, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
+  , revalidateExactScope, writeCheckedExactCompilation, writeRetainedExactCompilation, scopeCanonicalInterfaces, scopeInterfaceBytes, scopeOriginalBytes, canonicalProofInterfaceBytes, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
   , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalSourceSha256 )
@@ -971,9 +971,10 @@ retainProgramProducts directory prepared certified target initial = do
     OrdinaryExecutionSource -> fail "exact program products lack exact source recipe outcome"
   revalidatePreparedCandidateInputs prepared
   let env = prHscEnv (pprPipelineResult prepared)
-  revalidateExactScope env retained >>= either fail pure
-  forM_ (preparedExactCompilation prepared) $ \compilation ->
-    writeCheckedExactCompilation env compilation (preparedFreshDependencies prepared)
+  case preparedExactCompilation prepared of
+    Nothing -> revalidateExactScope env retained >>= either fail pure
+    Just compilation -> writeRetainedExactCompilation env retained compilation
+      (preparedFreshDependencies prepared)
   pure retained
   where
     localInterfaces = Map.filterWithKey (\(_,owner) _ -> owner /= target)

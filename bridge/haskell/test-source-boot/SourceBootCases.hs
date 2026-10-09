@@ -1095,7 +1095,12 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
       unless (copied == candidateIfaceBytes
           && case refused of Left exception -> "request original input" `isInfixOf` show exception; Right _ -> False)
         (fail "retention reopened candidate originals or published persistent producer drift")
-    retained <- retainProgramProducts directory completed certified "CompletedOriginalConsumer" admitted
+    (retained,retentionDiagnostics) <- captureDiagnostics $
+      retainProgramProducts directory completed certified "CompletedOriginalConsumer" admitted
+    let finalProofs = length [() | line <- lines retentionDiagnostics
+          , "tidepool-timing-detail parent=exact_scope phase=revalidate " `isPrefixOf` line]
+    unless (finalProofs == 1) (fail ("retention final proof count: " ++ show finalProofs))
+    hPutStrLn stderr ("completed retention final proofs=" ++ show finalProofs ++ " candidates=" ++ show reuseCandidate)
     let inheritedCandidateParcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates completed)
     when reuseCandidate $ bracket (disturbCandidates True) (const restoreCandidates) $ \_ -> do
       let rows = [artifact | (artifact,_,_) <- scopeInterfaces retained

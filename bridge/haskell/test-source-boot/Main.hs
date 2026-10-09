@@ -4,7 +4,7 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredIn
 import Test.Tasty (withResource)
 import SourceBootCases
 import BoundedReadTest (boundedReadChecks)
-import RequestInputsTest (requestInputHistories, requestInputBoundaries)
+import RequestInputsTest (requestInputHistories, requestInputBoundaries, retainedCompilationPublication)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
@@ -18,6 +18,7 @@ main = runTests tests
 tests :: TestTree
 tests = testGroup "source-boot"
   [ testCase "request input custody histories" requestInputHistories
+  , testCase "retained compilation publication" retainedCompilationPublication
   , testCase "request input admission boundaries" requestInputBoundaries
   , testCase "bounded artifact reads" boundedReadChecks
   , testCase "resident source summary continuation" sourceSummaryContinuation
