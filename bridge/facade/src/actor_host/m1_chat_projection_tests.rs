@@ -97,12 +97,15 @@ proptest! {
             let (_mailbox, incoming) = tokio::sync::mpsc::unbounded_channel();
             tokio::time::timeout(std::time::Duration::from_secs(5), engine.run(None, vec![], cancellation, incoming)).await.unwrap().unwrap()
         });
+        prop_assert!(store.recover_pending().unwrap().is_empty());
 
         let mut expected_pages = Vec::new();
         let mut request = Some(completion.head_request.clone());
         while let Some(id) = request {
             let page = store.history_page(&id, 0, 100).unwrap();
-            expected_pages.push(page.items.into_iter().map(|entry| (id.0.clone(), entry.position as i64, entry.hash, entry.item.0)).collect::<Vec<_>>());
+            // Configuration records control inference; Chat excludes them.
+            expected_pages.push(page.items.into_iter().filter(|entry| entry.item.0["type"] != "configuration_update")
+                .map(|entry| (id.0.clone(), entry.position as i64, entry.hash, entry.item.0)).collect::<Vec<_>>());
             request = store.request(&id).unwrap().unwrap().parent;
         }
         let expected = expected_pages.into_iter().rev().flatten().collect::<Vec<_>>();
