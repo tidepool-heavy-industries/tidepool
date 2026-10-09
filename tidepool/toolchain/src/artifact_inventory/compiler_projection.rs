@@ -133,6 +133,30 @@ impl CompilerInputProjection {
         }
     }
 
+    /// A transient source-support view owns only its exact retained carriers.
+    /// Persistent published policy stays in the parent declaration namespace;
+    /// a canonical dependency here does not offer its absent implementation.
+    pub(crate) fn for_program_support(&self, view: &ArtifactView) -> Self {
+        let ids = view.artifact_ids().into_iter().collect::<BTreeSet<_>>();
+        Self {
+            roles: self
+                .roles
+                .iter()
+                .filter_map(|(owner, role)| {
+                    ids.contains(&role.interface()).then(|| {
+                        let selected = match role.original() {
+                            Some(original) if ids.contains(&original) => role.clone(),
+                            _ => CompilerInputRole::InterfaceOnly {
+                                interface: role.interface(),
+                            },
+                        };
+                        (owner.clone(), selected)
+                    })
+                })
+                .collect(),
+        }
+    }
+
     pub(crate) fn admit_role(
         &mut self,
         owner: ExactModuleIdentity,
