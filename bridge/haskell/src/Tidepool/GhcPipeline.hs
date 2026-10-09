@@ -5504,8 +5504,11 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
       root : _ -> do
         includes <- maybe (liftIO (throwIO (ExecutionSourceUnavailable root))) pure
           (scopeIncludePaths admitted)
-        unless (all ((== includes) . importPaths . ms_hspp_opts) sourceSummaries) $
-          liftIO (throwIO (ExecutionSourceUnsupported root))
+        -- The Finder uses this request's session roots. Unchanged summaries
+        -- can retain flags from an earlier request; those historical roots
+        -- neither extend nor replace the current sealed search order.
+        unless (importPaths (hsc_dflags initial) == includes) $
+          liftIO (throwIO (ExecutionSourceSearchChanged root (importPaths (hsc_dflags initial))))
         (validation,selectedKeys) <- validateCurrentCanonicalSources admitted interfaces sourceGraph roots
         let selectedGraph = mkModuleGraph [node | node@(ModuleNode _ summary) <-
               mgModSummaries' (validatedOriginalGraph validation)
@@ -5523,9 +5526,6 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
                 , key `Set.member` authoredOwners || not (permitsGeneratedScaffoldImport scaffold summary key imported)]
             relevant resolution = (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,
               dependencyResolutionBoot resolution) `Set.member` relevantImports
-        unless (all ((== includes) . importPaths . ms_hspp_opts)
-            [summary | ModuleNode _ summary <- mgModSummaries' selectedGraph]) $
-          liftIO (throwIO (ExecutionSourceUnsupported root))
         (sources,complete) <- liftIO (captureDependencySources selectedGraph)
         unless complete $ liftIO (throwIO (ExecutionSourceChangedDuring root CurrentSourceSelectionIncomplete))
         forM_ (filter relevant (dependencyResolutions current)) $ \resolution -> do

@@ -1148,24 +1148,31 @@ impl std::fmt::Debug for ArtifactInventory {
 }
 impl ArtifactInventory {
     pub fn empty_view(&self) -> ArtifactView {
-        self.retain(Vec::new(), Vec::new(), Vec::new())
+        self.retain(Vec::new(), Vec::new(), Vec::new(), Vec::new())
     }
     fn retain(
         &self,
         roots: Vec<InventoryNodeKey>,
+        native_custody: Vec<ArtifactId>,
         parents: Vec<Arc<ViewLease>>,
         materialization_parents: Vec<
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
     ) -> ArtifactView {
         let mut state = self.0.lock().expect("inventory lock");
-        for id in &roots {
-            *state.roots.entry(*id).or_default() += 1;
+        for id in roots.iter().copied().chain(
+            native_custody
+                .iter()
+                .copied()
+                .map(InventoryNodeKey::Artifact),
+        ) {
+            *state.roots.entry(id).or_default() += 1;
         }
         drop(state);
         ArtifactView::new(ViewLease {
             inventory: self.clone(),
             roots,
+            native_custody,
             parents,
             materialization_parents,
             materialization: Mutex::new(BTreeMap::new()),
@@ -1283,12 +1290,15 @@ impl ArtifactInventory {
             return Ok(parent.clone());
         }
         let mut materialization_parents = Vec::new();
-        let retained_roots = match root_intent {
-            ArtifactRootIntent::SuppliedArtifacts => None,
+        let (retained_roots, native_custody) = match root_intent {
+            ArtifactRootIntent::SuppliedArtifacts => (None, Vec::new()),
             ArtifactRootIntent::RetainedView(source) => {
                 source
                     .collect_materializations(&mut materialization_parents, &mut BTreeSet::new())?;
-                Some(source.roots().to_vec())
+                (
+                    Some(source.roots().to_vec()),
+                    source.native_custody().to_vec(),
+                )
             }
         };
         let mut expanded = entries;
@@ -1356,7 +1366,8 @@ impl ArtifactInventory {
         if roots.iter().any(|root| match root {
             InventoryNodeKey::Artifact(id) => !selected.contains_key(id),
             InventoryNodeKey::Group(group) => !selected_groups.contains(group),
-        }) {
+        }) || native_custody.iter().any(|id| !selected.contains_key(id))
+        {
             return Err(failure("retained merge root outside copied selection"));
         }
         let (edges, closed_groups) = owners.planned_edges(&state, &selected, &selected_groups)?;
@@ -1380,13 +1391,19 @@ impl ArtifactInventory {
                 state.entry_handle_copies.fetch_add(1, Ordering::Relaxed);
             }
         }
-        for key in &roots {
-            *state.roots.entry(*key).or_default() += 1;
+        for key in roots.iter().copied().chain(
+            native_custody
+                .iter()
+                .copied()
+                .map(InventoryNodeKey::Artifact),
+        ) {
+            *state.roots.entry(key).or_default() += 1;
         }
         drop(state);
         Ok(ArtifactView::new(ViewLease {
             inventory: self.clone(),
             roots,
+            native_custody,
             parents: vec![Arc::clone(&parent.lease)],
             materialization_parents,
             materialization: Mutex::new(BTreeMap::new()),
@@ -1415,6 +1432,9 @@ impl ArtifactInventory {
 struct ViewLease {
     inventory: ArtifactInventory,
     roots: Vec<InventoryNodeKey>,
+    /// Exact dependency carriers needed by currently unselected bodies. These
+    /// retain bytes without becoming source roots or executable group demand.
+    native_custody: Vec<ArtifactId>,
     parents: Vec<Arc<ViewLease>>,
     // Projected selection must retain issued files without importing its
     // source view's selection roots or executable authority.
@@ -1428,6 +1448,7 @@ struct ViewLease {
 #[derive(Default)]
 struct ViewReadCache {
     canonical_roots: OnceLock<Vec<InventoryNodeKey>>,
+    canonical_native_custody: OnceLock<Vec<ArtifactId>>,
     read_projection: OnceLock<ViewReadProjection>,
     #[cfg(test)]
     root_parent_visits: AtomicU64,
@@ -1505,12 +1526,17 @@ impl Drop for ViewLease {
     fn drop(&mut self) {
         let mut state = self.inventory.0.lock().expect("inventory lock");
         let mut lost_roots = Vec::new();
-        for id in &self.roots {
-            let count = state.roots.get_mut(id).expect("retained root");
+        for id in self.roots.iter().copied().chain(
+            self.native_custody
+                .iter()
+                .copied()
+                .map(InventoryNodeKey::Artifact),
+        ) {
+            let count = state.roots.get_mut(&id).expect("retained root");
             *count -= 1;
             if *count == 0 {
-                state.roots.remove(id);
-                lost_roots.push(*id);
+                state.roots.remove(&id);
+                lost_roots.push(id);
             }
         }
         if lost_roots.is_empty() {
@@ -1689,7 +1715,15 @@ impl ArtifactView {
     // reads and admission always take inventory -> projection in that order.
     fn read_projection(&self, state: &InventoryState) -> &ViewReadProjection {
         self.reads.read_projection.get_or_init(|| {
-            let nodes = admitted_closure(state, self.roots().iter().copied());
+            let nodes = admitted_closure(
+                state,
+                self.roots().iter().copied().chain(
+                    self.native_custody()
+                        .iter()
+                        .copied()
+                        .map(InventoryNodeKey::Artifact),
+                ),
+            );
             let mut entries = artifact_ids(&nodes)
                 .iter()
                 .map(|id| Arc::clone(&state.payloads[id]))
@@ -2000,6 +2034,9 @@ impl ArtifactView {
                             ArtifactInventoryFailure::NativeRootOutsideView { artifact: id },
                         ));
                     }
+                    if !state.payloads[&id].is_native() {
+                        return Err(failure("native root lacks an original native carrier"));
+                    }
                     (id, state.payloads[&id].native_group_ordinals.clone())
                 }
                 NativeRequirementRoot::Group {
@@ -2112,6 +2149,20 @@ impl ArtifactView {
             roots.into_iter().collect()
         })
     }
+    fn native_custody(&self) -> &[ArtifactId] {
+        self.reads.canonical_native_custody.get_or_init(|| {
+            let mut pending = vec![&self.lease];
+            let mut custody = BTreeSet::new();
+            let mut seen = BTreeSet::new();
+            while let Some(lease) = pending.pop() {
+                if seen.insert(Arc::as_ptr(lease)) {
+                    custody.extend(lease.native_custody.iter().copied());
+                    pending.extend(lease.parents.iter());
+                }
+            }
+            custody.into_iter().collect()
+        })
+    }
     /// Retain exactly these reachable artifact roots, independently of the
     /// source view's lifetime. Hidden dependencies remain graph-owned.
     pub fn select_roots(&self, roots: Vec<ArtifactId>) -> Result<Self, CompileError> {
@@ -2129,11 +2180,39 @@ impl ArtifactView {
             .map(InventoryNodeKey::Artifact)
             .collect::<Vec<_>>();
         selected.extend(owned.iter().filter(|key| matches!(key, InventoryNodeKey::Group(group) if ids.contains(&group.artifact))).copied());
+        // A complete carrier can expose another body on a later request. Keep
+        // its already issued native dependencies, including exact historical
+        // versions, without promoting their groups or compiler input roles.
+        // Resolve only inside this view; ambient inventory payloads grant no
+        // custody and an unavailable body remains unavailable.
+        let native_owners = artifact_ids(owned)
+            .into_iter()
+            .filter_map(|id| {
+                let ArtifactPayload::Original(product) = &state.payloads[&id].payload else {
+                    return None;
+                };
+                Some((NativeOwnerKey::from_owner(product.owner()), id))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let initial = artifact_ids(&admitted_closure(&state, selected.iter().copied()));
+        let mut retained_ids = initial.clone();
+        let mut pending = initial.iter().copied().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            for required in state.payloads[&id].native_owners.values() {
+                let Some(required_id) = native_owners.get(required).copied() else {
+                    continue;
+                };
+                if retained_ids.insert(required_id) {
+                    pending.push(required_id);
+                }
+            }
+        }
+        let native_custody = retained_ids.difference(&initial).copied().collect();
         drop(state);
-        let mut retained = self
-            .lease
-            .inventory
-            .retain(selected, Vec::new(), Vec::new());
+        let mut retained =
+            self.lease
+                .inventory
+                .retain(selected, native_custody, Vec::new(), Vec::new());
         let mut materializations = Vec::new();
         if !retained.is_empty() {
             self.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
@@ -2180,6 +2259,7 @@ impl ArtifactView {
             Ok(ArtifactView::new(ViewLease {
                 inventory: self.lease.inventory.clone(),
                 roots: Vec::new(),
+                native_custody: Vec::new(),
                 parents: vec![Arc::clone(&self.lease), Arc::clone(&other.lease)],
                 materialization_parents: Vec::new(),
                 materialization: Mutex::new(BTreeMap::new()),
@@ -2977,6 +3057,187 @@ mod tests {
     }
 
     #[test]
+    fn projected_original_preserves_unselected_exact_native_dependency_custody() {
+        let leaf = issued_native_groups("Leaf", vec![(7, Vec::new())], &[], &BTreeMap::new());
+        let old = issued_native_groups(
+            "Helper",
+            vec![(7, vec![issued_source(&leaf, 7)])],
+            &[&leaf],
+            &BTreeMap::new(),
+        );
+        let root = issued_native_groups(
+            "Root",
+            vec![(3, Vec::new()), (29, vec![issued_source(&old, 7)])],
+            &[&old],
+            &BTreeMap::new(),
+        );
+        let ArtifactPayload::Original(root_product) = &root.payload else {
+            unreachable!()
+        };
+        let root = ArtifactEntry::original(
+            [2; 32],
+            crate::certified_products::tests::recovered_witness_fixtures(&[root_product.clone()])
+                .remove(0)
+                .product,
+        )
+        .unwrap();
+        let new = ArtifactEntry::original(
+            [2; 32],
+            crate::certified_products::fixture_finalized_product_with_requirements(
+                crate::certified_products::tests::original_groups_fixture(
+                    "Helper",
+                    vec![(7, vec![issued_source(&leaf, 7)])],
+                    2,
+                    &BTreeMap::new(),
+                ),
+                [2; 32],
+                Some(BTreeMap::from([(
+                    (
+                        leaf.descriptor.owner.unit.clone(),
+                        leaf.descriptor.owner.module.clone(),
+                    ),
+                    leaf.descriptor.interface_sha256,
+                )])),
+            ),
+        )
+        .unwrap();
+        assert_ne!(old.descriptor.id, new.descriptor.id);
+        assert_eq!(
+            old.descriptor.interface_sha256,
+            new.descriptor.interface_sha256
+        );
+        let early = NativeGroupKey {
+            artifact: root.descriptor.id,
+            original_ordinal: 3,
+        };
+        let late = NativeGroupKey {
+            artifact: root.descriptor.id,
+            original_ordinal: 29,
+        };
+        let unavailable_inventory = ArtifactInventory::default();
+        let ambient = unavailable_inventory
+            .admit(
+                &unavailable_inventory.empty_view(),
+                vec![old.clone(), leaf.clone()],
+            )
+            .unwrap();
+        let unavailable = unavailable_inventory
+            .admit_recovery_selection(
+                &unavailable_inventory.empty_view(),
+                vec![root.clone(), new.clone(), leaf.clone()]
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect(),
+                &BTreeSet::from([early]),
+            )
+            .unwrap()
+            .select_roots(vec![root.descriptor.id])
+            .unwrap();
+        assert!(!unavailable.artifact_ids().contains(&old.descriptor.id));
+        assert!(!unavailable.artifact_ids().contains(&new.descriptor.id));
+        assert!(matches!(
+            unavailable_inventory.admit_shared_with_demand(
+                &unavailable,
+                vec![Arc::new(root.clone())],
+                NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&root, 29)]),
+            ),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { .. })
+        ));
+        drop(unavailable);
+        drop(ambient);
+        assert_eq!(unavailable_inventory.node_count(), 0);
+        for cross_inventory in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let available = inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    vec![root.clone(), old.clone(), leaf.clone()]
+                        .into_iter()
+                        .map(Arc::new)
+                        .collect(),
+                    &BTreeSet::from([early]),
+                )
+                .unwrap();
+            let selected = available.select_roots(vec![root.descriptor.id]).unwrap();
+            assert_eq!(selected.selected_native_groups(), BTreeSet::from([early]));
+            assert_eq!(
+                selected
+                    .root_entries()
+                    .iter()
+                    .map(|entry| entry.descriptor.id)
+                    .collect::<Vec<_>>(),
+                [root.descriptor.id]
+            );
+            assert!(selected.artifact_ids().contains(&old.descriptor.id));
+            assert!(selected.artifact_ids().contains(&leaf.descriptor.id));
+            let types = selected
+                .interface_projection(&[root.descriptor.owner.clone()])
+                .unwrap();
+            assert!(types.entries().iter().all(|entry| !entry.is_native()));
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[Arc::new(root.clone())]).unwrap();
+            assert_eq!(
+                projection.roles().len(),
+                1,
+                "custody grants no compiler namespace role"
+            );
+            let destination = ArtifactInventory::default();
+            let retained = if cross_inventory {
+                let existing = destination
+                    .admit(&destination.empty_view(), vec![entry("Unrelated", &[])])
+                    .unwrap();
+                existing.merge(&selected).unwrap()
+            } else {
+                selected.clone()
+            };
+            drop(types);
+            drop(selected);
+            drop(available);
+            if cross_inventory {
+                assert_eq!(inventory.node_count(), 0);
+            }
+            let branch = retained
+                .inventory()
+                .admit_shared_with_demand(
+                    &retained,
+                    vec![Arc::new(new.clone())],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let demanded = branch
+                .inventory()
+                .admit_shared_with_demand(
+                    &branch,
+                    vec![Arc::new(root.clone())],
+                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&root, 29)]),
+                )
+                .unwrap();
+            assert_eq!(
+                demanded.selected_native_groups(),
+                BTreeSet::from([
+                    early,
+                    late,
+                    NativeGroupKey {
+                        artifact: old.descriptor.id,
+                        original_ordinal: 7
+                    },
+                    NativeGroupKey {
+                        artifact: leaf.descriptor.id,
+                        original_ordinal: 7
+                    },
+                ])
+            );
+            assert!(demanded.artifact_ids().contains(&new.descriptor.id));
+            drop(demanded);
+            drop(branch);
+            drop(retained);
+            assert_eq!(inventory.node_count(), 0);
+            assert_eq!(destination.node_count(), 0);
+        }
+    }
+
+    #[test]
     fn native_requirement_cannot_select_an_ambient_exact_native_key() {
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
@@ -3119,9 +3380,7 @@ mod tests {
         assert_eq!(retained.interface_dependencies().len(), 1);
         assert!(retained
             .native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(published)])
-            .unwrap()
-            .bindings
-            .is_empty());
+            .is_err());
         drop(retained);
         assert_eq!(inventory.node_count(), 0);
     }
@@ -3731,8 +3990,7 @@ mod tests {
             .unwrap();
         assert!(view
             .native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(type_id)])
-            .unwrap()
-            .is_empty());
+            .is_err());
         let selected = view
             .native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(
                 consumer_id,

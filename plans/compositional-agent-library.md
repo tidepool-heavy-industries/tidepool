@@ -84,10 +84,13 @@ Implementation checkouts and evidence live in
 | Integration/build/review | root | this plan, joins, generated manifests and accepted verification |
 
 Owners coordinate shared-file edits directly before changing another parcel's
-methods. Publish concrete schema/signature changes early. No worker writes main,
-starts a heavy build without admission coordination, or claims source checks as
-executed runtime evidence. Small independent tests are encouraged. Each owner
-commits its parcel with focused tests and records unexecuted gates explicitly.
+methods. Publish concrete schema/signature changes early. No worker writes main
+or claims source checks as executed runtime evidence. Each worker compiles its
+affected targets and runs focused tests through the admitted repository commands.
+Use measured resource headroom to run independent checks concurrently; coordinate
+concrete checkout, configuration and output conflicts. Each owner commits its
+parcel with focused tests and records unexecuted gates and their blockers
+explicitly.
 
 ## Acceptance
 
