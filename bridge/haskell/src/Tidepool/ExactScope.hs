@@ -9,7 +9,7 @@ module Tidepool.ExactScope
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
-  , admittedInterfaceRequirements, admittedInterfaceCore
+  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes
   , captureFinalizedSourceOriginals, compilationOriginalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
@@ -56,7 +56,7 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isAlreadyExistsError)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
 import GHC.Unit.Module.ModIface (ModIface)
-import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, CapturedRequestInput, capturedInputBytes, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, capturedRequestInput, revalidateRequestInputsWith)
+import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, CapturedRequestInput, capturedInputBytes, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, mergeRequestInputs, capturedRequestInput, revalidateRequestInputsWith)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -67,7 +67,7 @@ import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
 import Tidepool.ModuleCandidates
   ( CandidateGroup(..), CandidateGlobal(..), ModuleCandidate(..)
-  , candidateCertificatePath, candidateCertificateSha256, candidateCoreDescriptor )
+  , candidateCertificatePath, candidateCertificateSha256, candidateCoreDescriptor, candidateExecutionSources )
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceDescriptors, decodeExecutionSourceReferences
@@ -249,9 +249,16 @@ data CanonicalInterfaceProof = CanonicalInterfaceProof
   { proofCertificatePath :: FilePath
   , proofCertificateSha256 :: String
   , proofCoreArtifact :: Maybe CanonicalCoreArtifact
-  , proofCapturedCore :: Maybe BS.ByteString
+  , proofInterfaceInput :: InterfaceRow
+  , proofNativeInput :: Maybe (FilePath,String)
+  , proofExecutionGraphs :: [ExecutionSourceGraph]
+  , proofInputCustody :: CanonicalInputCustody
   , canonicalFacts :: CanonicalModuleCertificate
   }
+
+-- Metadata validation grants no executable bytes. Promotion and exact-scope
+-- admission bind a proof to the single budgeted request input owner.
+data CanonicalInputCustody = DescriptorInputs | CapturedCanonicalInputs RequestOriginalInputs
 
 -- Encoded Core is excluded from proof comparisons: its artifact digest already
 -- certifies equality. Comparing the retained payload would turn every scope
@@ -308,7 +315,7 @@ data ExactInterfaceEvidence
 -- certificate/Core files. Complete certificate facts contain no such paths.
 normalizeInterfaceEvidence :: ExactInterfaceEvidence -> ExactInterfaceEvidence
 normalizeInterfaceEvidence (ModuleInterfaceEvidence proof) = ModuleInterfaceEvidence (proof
-  { proofCertificatePath="", proofCapturedCore=Nothing
+  { proofCertificatePath="", proofInputCustody=DescriptorInputs
   , proofCoreArtifact=(\(CanonicalCoreArtifact _ sha) -> CanonicalCoreArtifact "" sha) <$> proofCoreArtifact proof })
 normalizeInterfaceEvidence evidence = evidence
 
@@ -345,7 +352,15 @@ retainCapturedInputs :: RequestOriginalInputs -> ExactScope -> IO ExactScope
 retainCapturedInputs custody scope = do
   let AdmittedScopeInputs order inputs roots census previous = scopeInputs scope
   decoder <- maybe newRequestIfaceDecoder (\(CapturedScopeInputs _ retained) -> pure retained) previous
-  pure scope {scopeInputs=AdmittedScopeInputs order inputs roots census (Just (CapturedScopeInputs custody decoder))}
+  pure scope {scopeInputs=AdmittedScopeInputs order (bindCapturedProofs custody inputs) roots census (Just (CapturedScopeInputs custody decoder))}
+
+bindCapturedProofs :: RequestOriginalInputs -> Map.Map InterfaceOwner ScopeInterfaceInput
+  -> Map.Map InterfaceOwner ScopeInterfaceInput
+bindCapturedProofs custody = Map.map bind
+  where
+    bind (ScopeInterfaceInput row (ModuleInterfaceEvidence proof)) =
+      ScopeInterfaceInput row (ModuleInterfaceEvidence proof {proofInputCustody=CapturedCanonicalInputs custody})
+    bind input = input
 
 scopeInterfaces :: ExactScope -> [InterfaceRow]
 scopeInterfaces scope = inputRows (scopeInputs scope)
@@ -425,7 +440,11 @@ extendExactScopeInputs scope offered = do
     (inputs,added) <- foldM insert (previous,[]) offered
     let prospective = AdmittedScopeInputs (order ++ map (rowOwner . fst) added) inputs roots census custody
     validateInputClosure (scopeProducerSha256 scope) prospective (scopeProducts scope)
-    (union,captured) <- captureRequestInputs (scopeCapturedInputs scope) $ \readInput -> do
+    (_,base) <- captureRequestInputs (scopeCapturedInputs scope) (const (pure ()))
+    transferred <- either fail pure (mergeRequestInputs base
+      [owner | (_,ModuleInterfaceEvidence proof) <- offered
+      , CapturedCanonicalInputs owner <- [proofInputCustody proof]])
+    (union,captured) <- captureRequestInputs (Just transferred) $ \readInput -> do
       forM_ added $ \((iface,packages,sha),evidence) -> do
         payload <- readInput (exactPath iface) (32 * 1024 * 1024)
         unless (digest payload == exactSha256 iface) (fail "extended interface bytes differ from their seal")
@@ -646,13 +665,63 @@ admittedInterfaceCore (ModuleInterfaceAdmission proof) =
 admittedInterfaceCore (LocalInterfaceAdmission proof) = localFinalizedCore proof
 admittedInterfaceCore (CapturedInterfaceAdmission proof _) = admittedInterfaceCore proof
 
-admittedInterfaceCoreBytes :: CanonicalInterfaceAdmission -> IO (Maybe BS.ByteString)
+-- An uncaptured descriptor can be inspected but cannot reach an executable
+-- consumer. Every executable entry point requires explicitly acquired custody.
+admittedInterfaceCoreBytes :: CanonicalInterfaceAdmission -> IO BS.ByteString
 admittedInterfaceCoreBytes (CapturedInterfaceAdmission proof inputs) = do
   (path,sha) <- maybe (fail "admitted interface has no defining Core") pure (admittedInterfaceCore proof)
-  Just <$> capturedRequestInput inputs path sha
-admittedInterfaceCoreBytes (ModuleInterfaceAdmission proof) =
-  Just <$> maybe (fail "canonical defining Core custody was not retained") pure (proofCapturedCore proof)
-admittedInterfaceCoreBytes (LocalInterfaceAdmission _) = pure Nothing
+  capturedRequestInput inputs path sha
+admittedInterfaceCoreBytes (ModuleInterfaceAdmission proof) = case proofInputCustody proof of
+  CapturedCanonicalInputs inputs -> admittedInterfaceCoreBytes (CapturedInterfaceAdmission (ModuleInterfaceAdmission proof) inputs)
+  DescriptorInputs -> fail "canonical defining Core has not been captured for execution"
+admittedInterfaceCoreBytes (LocalInterfaceAdmission _) =
+  fail "local defining Core has not been captured for execution"
+
+data CanonicalInterfaceUse = MetadataInterfaceUse | ExecutableInterfaceUse
+  deriving (Eq, Show)
+
+-- Optional metadata validation retains no payload. Promotion captures every
+-- selected original input in one owner; only executable use requires Core.
+captureCanonicalProofs :: Maybe ExactScope -> [(CanonicalInterfaceProof,CanonicalInterfaceUse)]
+  -> IO [CanonicalInterfaceProof]
+captureCanonicalProofs scope selections = do
+  let proofs = map fst selections
+  (_,base) <- captureRequestInputs (scope >>= scopeCapturedInputs) (const (pure ()))
+  transferred <- either fail pure (mergeRequestInputs base
+    [owner | proof <- proofs, CapturedCanonicalInputs owner <- [proofInputCustody proof]])
+  (_,captured) <- captureRequestInputs (Just transferred) $ \reader ->
+    forM_ selections $ \(proof,use) -> do
+      let (iface,packages,packageSha) = proofInterfaceInput proof
+      sealedInput reader (canonicalCertificatePath proof) (4 * 1024 * 1024)
+        (canonicalCertificateSha256 proof)
+      sealedInput reader (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
+      sealedInput reader packages (4 * 1024 * 1024) packageSha
+      forM_ (proofNativeInput proof) $ \(path,sha) ->
+        sealedInput reader path (32 * 1024 * 1024) sha
+      case use of
+        MetadataInterfaceUse -> pure ()
+        ExecutableInterfaceUse -> captureCoreWith reader (ModuleInterfaceAdmission proof)
+  owner <- maybe (fail "canonical execution graphs exceed request capture budget") pure
+    (retainRequestEncodedBytes (concatMap (map executionGraphBytes . proofExecutionGraphs) proofs) captured)
+  pure [proof {proofInputCustody=CapturedCanonicalInputs owner} | proof <- proofs]
+  where
+    sealedInput reader path bound sha = do
+      bytes <- reader path bound
+      unless (digest bytes == sha) (fail ("canonical original input changed during capture: " ++ path))
+
+canonicalProofInterfaceBytes :: CanonicalInterfaceProof -> ExactIfaceArtifact -> IO BS.ByteString
+canonicalProofInterfaceBytes proof iface = do
+  let (selected,_,_) = proofInterfaceInput proof
+  unless (selected == iface) (fail "canonical interface leaves its captured original owner")
+  case proofInputCustody proof of
+    CapturedCanonicalInputs owner -> capturedRequestInput owner (exactPath iface) (exactSha256 iface)
+    DescriptorInputs -> fail "canonical interface has not been captured for consumption"
+
+captureCoreWith :: RequestInputReader -> CanonicalInterfaceAdmission -> IO ()
+captureCoreWith reader admission = do
+  (path,sha) <- maybe (fail "admitted interface has no defining Core") pure (admittedInterfaceCore admission)
+  bytes <- reader path (32 * 1024 * 1024)
+  unless (digest bytes == sha) (fail ("admitted defining Core changed during capture: " ++ path))
 
 scopeInterfaceBytes :: ExactScope -> ExactIfaceArtifact -> IO BS.ByteString
 scopeInterfaceBytes scope iface = capturedInputBytes <$> scopeInterfaceToken scope iface
@@ -817,7 +886,7 @@ extendExactExecutionSourcesWithinBudget offeredGraphs offeredRefs scope = do
               , executionGraphSha256 graph `Set.notMember` existing]
         in pure $ (\next -> scope
           { ownedScopeExecutionGraphs=graphs,ownedScopeExecutionOwners=Map.elems retainedReferences
-          , scopeInputs=AdmittedScopeInputs order inputs roots census
+          , scopeInputs=AdmittedScopeInputs order (bindCapturedProofs next inputs) roots census
               (Just (CapturedScopeInputs next decoder)) })
           <$> retainRequestEncodedBytes newlyRetained captured
       _ -> Left (ExecutionSourceConflicting ("","missing request input custody"))
@@ -964,6 +1033,10 @@ readExactScope path = do
          _ <- readInput packages (4 * 1024 * 1024)
          pure ()
        evidence <- validateInterfaceEvidenceWith readInput producer rows interfaceEvidence
+       forM_ (Map.elems evidence) $ \entry -> case entry of
+         ModuleInterfaceEvidence proof -> forM_ (canonicalCoreArtifact proof) $ \_ ->
+           captureCoreWith readInput (ModuleInterfaceAdmission proof)
+         _ -> pure ()
        forM_ products $ \product -> do
          payload <- readInput (originalProductPath product) (32 * 1024 * 1024)
          unless (digest payload == originalProductSha256 product) (fail "exact original product changed")
@@ -1034,7 +1107,7 @@ validateExecutionSources scope graphs = do
 
 -- Validate canonical certificates before any interface hydration. The complete
 -- home-unit census is producer evidence, not a classification inferred from the
--- retained subset. Core bytes are loaded only by their demanding recovery owner.
+-- retained subset. Core bytes are decoded only by their demanding recovery owner.
 validateInterfaceEvidenceWith :: RequestInputReader -> String -> [InterfaceRow]
   -> [(InterfaceOwner,ParsedInterfaceEvidence)] -> IO (Map.Map InterfaceOwner ExactInterfaceEvidence)
 validateInterfaceEvidenceWith readInput producer rows offered = do
@@ -1190,6 +1263,8 @@ validateCandidateCanonicalInterfaceProof producer interfaces candidate = do
                 && Map.keys (canonicalRequirements proof) == candidateInterfaceRequirements candidate)
               (Left "candidate canonical proof differs from source, producer or requirements")
             pure proof
+              {proofNativeInput=Just (candidateProductPath candidate,candidateProductSha256 candidate)
+              ,proofExecutionGraphs=maybe [] fst (candidateExecutionSources candidate)}
     _ -> pure (Left "candidate canonical proof lacks its selected exact interface")
 
 validateCanonicalInterfaces
@@ -1255,15 +1330,14 @@ validateCanonicalInterfacesWithReader readInput producer selectedInterfaces valu
     unless (digest interfaceBytes == certificateInterface certificate
         && digest packageBytes == certificatePackages certificate)
       (fail "canonical module interface or package imports changed")
-    coreBytes <- forM (descriptorCore descriptor) $ \core -> do
-      payload <- readInput (canonicalCorePath core) (32 * 1024 * 1024)
-      unless (digest payload == canonicalCoreSha256 core) (fail "canonical Core bytes changed")
-      pure payload
     pure (key, CanonicalInterfaceProof
       { proofCertificatePath = descriptorCertificatePath descriptor
       , proofCertificateSha256 = descriptorCertificateSha256 descriptor
       , proofCoreArtifact = descriptorCore descriptor
-      , proofCapturedCore = coreBytes
+      , proofInterfaceInput = (iface,packages,packageSha)
+      , proofNativeInput = Nothing
+      , proofExecutionGraphs = []
+      , proofInputCustody = DescriptorInputs
       , canonicalFacts = certificate
       })
   pure (Map.fromList proofs)

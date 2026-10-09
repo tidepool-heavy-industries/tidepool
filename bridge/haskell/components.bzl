@@ -3476,6 +3476,8 @@ def declare_haskell_components():
         "test-source-boot/fixtures/CanonicalUnusedDependency.hs": "test-source-boot/fixtures/CanonicalUnusedDependency.hs",
         "test-source-boot/fixtures/CanonicalUnusedDependencyChanged.hs": "test-source-boot/fixtures/CanonicalUnusedDependencyChanged.hs",
         "test-source-boot/fixtures/CanonicalUnusedSource.hs": "test-source-boot/fixtures/CanonicalUnusedSource.hs",
+        "test-source-boot/fixtures/CapturedCoreConsumer.hs": "test-source-boot/fixtures/CapturedCoreConsumer.hs",
+        "test-source-boot/fixtures/CapturedCoreQuoter.hs": "test-source-boot/fixtures/CapturedCoreQuoter.hs",
         "test-source-boot/fixtures/CheckedCommandConsumer.hs": "test-source-boot/fixtures/CheckedCommandConsumer.hs",
         "test-source-boot/fixtures/CheckedNativeSignatures.hs": "test-source-boot/fixtures/CheckedNativeSignatures.hs",
         "test-source-boot/fixtures/CheckedNativeTypeOwner.hs": "test-source-boot/fixtures/CheckedNativeTypeOwner.hs",

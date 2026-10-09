@@ -121,9 +121,13 @@ Candidate offers use strict `TPMCAN` version 10 with seven fields and sixteen-fi
 module rows. Its execution parcel uses graph-file descriptors beside the candidate
 manifest, with the same graph bounds as exact scopes and a separate four MiB
 metadata limit. This requires a matched producer/consumer deployment. Each native row retains its exact canonical requirements and sealed
-module certificate/Core descriptor. Offers remain cache suggestions: admission
-checks them against the request's independently admitted compiler producer and
-complete selected interface closure before promoting their durable proof.
+module certificate/Core descriptor. Optional proof validation retains metadata
+and permits absent Core. Admission captures selected interfaces, certificates,
+package sidecars, native products and graphs under the request byte budget;
+executable promotion also requires Core. Hydration and scope extension consume
+that shared owner. Offers remain cache suggestions, checked against the request's
+independently admitted compiler producer and complete selected interface closure
+before promotion.
 
 ## Checked inspection inputs
 

@@ -191,7 +191,7 @@ import Tidepool.FinalizedModuleArtifacts
   , matchesCapturedFinalization )
 import Tidepool.HomeProducts
   ( hydrateCandidateHomeProductsWithOriginalsUsing, materializeCandidateCompilerView, admittedCompilerInterface
-  , validateCandidateInterfaceRequirements, revalidateAdmittedCore )
+  , validateCandidateInterfaceRequirements, validateCapturedAdmittedCore )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
   ( PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, transformProgramDeclarationImports, hydratePlannedDeclarationInventory )
@@ -257,7 +257,7 @@ import Tidepool.ExactScope
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
-  , validateCandidateCanonicalInterfaceProof
+  , validateCandidateCanonicalInterfaceProof, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements
   , scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
@@ -4345,11 +4345,18 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
                   (validateCandidateCanonicalInterfaceProof producer canonicalRows candidate)
           case proofsResult of
             Left reason -> recordAdmitted CandidateCanonicalProof (Just reason) >> pure Map.empty
-            Right proofs -> do
+            Right descriptors -> do
+              promoted <- liftIO (captureCanonicalProofs exactScope
+                [(descriptors Map.! name, if backendGeneratesCode (backend (ms_hspp_opts summary))
+                    then ExecutableInterfaceUse else MetadataInterfaceUse)
+                | (name,(_,summary,_,_)) <- Map.toAscList admitted])
+              let proofs = Map.fromList (zip (Map.keys admitted) promoted)
               captured <- liftIO $ readVerifiedExactIfaceClosureWithCheckedValuesReader
                 (\artifact -> case exactScope of
                   Just scope | artifact `elem` (originals ++ values) -> scopeInterfaceBytes scope artifact
-                  _ -> BS.readFile (exactPath artifact)) env
+                  _ -> case Map.lookup (mkModuleName (exactModule artifact)) proofs of
+                    Just proof | artifact `elem` candidates' -> canonicalProofInterfaceBytes proof artifact
+                    _ -> fail "candidate hydration leaves its captured interface closure") env
                 (candidates' ++ originals) values
               let loaded = captured >>= \verified -> selectVerifiedExactInterfaces verified candidates'
                   originalInterfaces = captured >>= \verified -> selectVerifiedExactInterfaces verified originals
@@ -5737,9 +5744,9 @@ sessionVariant purpose scope path = do
         _ -> []
   exact <- case purposeExactScope purpose of
     Just admitted -> do
-      -- The compiler entry revalidates this manifest's current digest and
-      -- entire closure before exposing it to compiler/plugin execution.
-      -- Path equality also binds the carried scope to this SessionScope offer.
+      -- Bind the captured input owner to this SessionScope offer. Current
+      -- package selection remains environment-specific; terminal publication
+      -- independently observes original-path and manifest drift.
       unless (ssExactScope scope == Just (scopeManifestPath admitted))
         (ioError (userError "planned declaration leaves its original compiler offer"))
       pure (Just admitted)
@@ -5905,7 +5912,7 @@ sessionVariant purpose scope path = do
                          name = ms_mod_name summary
                      home <- maybe (liftIO (throwIO (FinalizedExecutionHomeMissing key))) pure
                        (lookupHpt (hsc_HPT current) name)
-                     liftIO (revalidateAdmittedCore (retainedCompilerAdmission selectedModule))
+                     liftIO (validateCapturedAdmittedCore (retainedCompilerAdmission selectedModule))
                      unless (isJust (homeMod_bytecode (hm_linkable home))) $ do
                        attached <- liftIO (admittedCompilerInterface current
                          (retainedCompilerAdmission selectedModule) (ms_mod summary))

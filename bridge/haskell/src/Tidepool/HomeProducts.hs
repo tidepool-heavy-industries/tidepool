@@ -10,7 +10,7 @@ module Tidepool.HomeProducts
   , admittedOriginalModule, admittedOriginalProof, admittedOriginalInterface
   , admittedOriginalLocation, OriginalVersion, originalVersionOwner, originalVersionInScope, originalVersionLookup, originalVersionSeal
   , OriginalRecoveryScope, admitOriginalRecoveryScope, originalVersionInRecoveryScope, recoverAdmittedFinalizedOriginalWithPrevious
-  , revalidateAdmittedCore ) where
+  , validateCapturedAdmittedCore ) where
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, bracket, displayException, fromException, throwIO, try )
@@ -24,8 +24,6 @@ import Tidepool.ExtractUtil (shaHex)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Data.ByteString qualified as BS
 import Crypto.Hash.SHA256 qualified as SHA256
-import Numeric (showHex)
-import Tidepool.BoundedRead (readFileAtMost)
 import GHC
   ( Ghc, ModSummary(..), getSession, parseModule, setSession, typecheckModule
   , tm_internals_, ms_mod_name, LoadHowMuch(LoadAllTargets), SuccessFlag(..)
@@ -90,8 +88,6 @@ import System.Posix.Temp (mkdtemp)
 data CandidateCoreFailure
   = CandidateInterfaceRequirementsMismatch
   | CandidateCoreMissing
-  | CandidateCoreTooLarge
-  | CandidateCoreBytesMismatch
   | CandidateCoreDecodeFailure FinalizedCoreFailure
   | CandidateCoreHomeMissing
   | CandidateCompilerViewUnsupportedProfile
@@ -174,8 +170,8 @@ recoverAdmittedFinalizedOriginal env scope owner =
     fmap (fmap snd) (recoverAdmittedFinalizedOriginalWithPrevious admitted owner Nothing)
 
 -- Whole-scope certificate/interface validation is shared by one immutable
--- acquisition stage. Defining Core bytes are still checked on every lookup,
--- including hits; only their decoding and native lowering can be retained.
+-- acquisition stage. Defining Core is consumed from the captured input owner;
+-- its decoded body and native lowering can be retained.
 data OriginalRecoveryScope = OriginalRecoveryScope HscEnv ExactScope
   (Map.Map (String,String) [(ExactIfaceArtifact,FilePath,String)])
   (Map.Map (String,String) String)
@@ -192,9 +188,9 @@ originalVersionInRecoveryScope :: OriginalRecoveryScope -> Module -> Maybe Origi
 originalVersionInRecoveryScope (OriginalRecoveryScope _ scope interfaces _) owner =
   originalVersionFromRows scope owner (Map.findWithDefault [] (originalOwnerKey owner) interfaces)
 
--- A retained body never suppresses current artifact validation. On a hit only
--- immutable decoded Core is reused; proof, interface row and location belong
--- to the current consuming scope, including relocated identical artifacts.
+-- A retained body never replaces captured input authority. On a hit decoded
+-- Core is reused; proof, interface row and location belong to the consuming
+-- scope, including relocated identical artifacts.
 recoverAdmittedFinalizedOriginalWithPrevious
   :: OriginalRecoveryScope -> Module -> Maybe (OriginalVersion,AdmittedFinalizedOriginal)
   -> IO (Maybe (OriginalVersion,AdmittedFinalizedOriginal))
@@ -299,24 +295,15 @@ materializeInterfaceView directory index interface summary = do
     , ms_iface_date = Just modified
     }
 
-revalidateAdmittedCore :: CanonicalInterfaceAdmission -> IO ()
-revalidateAdmittedCore = fmap (const ()) . readCurrentAdmittedCore
+-- This hook checks executable custody without reopening producer paths.
+-- Terminal scope publication independently observes persistent input drift.
+validateCapturedAdmittedCore :: CanonicalInterfaceAdmission -> IO ()
+validateCapturedAdmittedCore = fmap (const ()) . readAdmittedCore
 
 readAdmittedCore :: CanonicalInterfaceAdmission -> IO BS.ByteString
 readAdmittedCore proof = case admittedInterfaceCore proof of
   Nothing -> throwIO CandidateCoreMissing
-  Just _ -> admittedInterfaceCoreBytes proof >>= maybe (readCurrentAdmittedCore proof) pure
-
-readCurrentAdmittedCore :: CanonicalInterfaceAdmission -> IO BS.ByteString
-readCurrentAdmittedCore proof = do
-  (path, sha) <- maybe (throwIO CandidateCoreMissing) pure (admittedInterfaceCore proof)
-  bytes <- readFileAtMost path (32 * 1024 * 1024 + 1)
-  unless (BS.length bytes <= 32 * 1024 * 1024) (throwIO CandidateCoreTooLarge)
-  unless (digest bytes == sha) (throwIO CandidateCoreBytesMismatch)
-  pure bytes
-  where
-    digest = concatMap (\byte -> let rendered = showHex byte ""
-      in replicate (2 - length rendered) '0' ++ rendered) . BS.unpack . SHA256.hash
+  Just _ -> admittedInterfaceCoreBytes proof
 
 -- Every ordinary summary and every boot summary is from the current
 -- downsweep. The caller has already checked source/package witnesses and

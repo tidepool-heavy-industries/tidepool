@@ -1,8 +1,8 @@
 {-# LANGUAGE GADTs #-}
 
-module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory) where
+module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook) where
 
-import Control.Exception (bracket, try)
+import Control.Exception (IOException, bracket, try)
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
@@ -65,7 +65,8 @@ import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
   , ExactScope, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
-  , canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope )
+  , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
+  , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, extendExactScopeInputs, ExactInterfaceEvidence(..) )
 import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)
 import Tidepool.GhcPipeline
@@ -74,10 +75,10 @@ import Tidepool.GhcPipeline
   , withResidentPipelineSelected )
 import Tidepool.Test.GenuineCandidate
   ( FixtureCompilerInput(..), captureCompilerFixture, capturedCertifiedProducts
-  , writeGenuineMetadataScope )
+  , writeGenuineMetadataScope, writeGenuineEmptyMetadataScope )
 import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
-  , admittedCompilerInterface, revalidateAdmittedCore, validateAdmittedInterfaceRequirements
+  , admittedCompilerInterface, validateCapturedAdmittedCore, validateAdmittedInterfaceRequirements
   , validateCandidateInterfaceRequirements )
 import Tidepool.PreparedStg (pmBindings, prepareModule)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
@@ -166,6 +167,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
     (Map.lookup key (scopeModuleInterfaceProofs makeScope))
   assert (canonicalCertificateSha256 makeProof == canonicalCertificateSha256 proof)
     "independent delivery changed the original canonical identity"
+  promotionScopeChecks env work scope proof
   capturedConsumerChecks libdir work scope artifact bytes summary proof
   removeFile source
   exists <- doesFileExist source
@@ -198,24 +200,23 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
             (set_mi_usages (usage : mi_usages (hm_iface home)) (hm_iface home))
               == Left CandidateInterfaceRequirementsMismatch)
             "admitted interface usage escaped canonical requirement checks"
-        attached <- admittedCompilerInterface env admission (ms_mod summary)
-        assert (mi_module attached == ms_mod summary && case mi_extra_decls attached of
-            Just _ -> True; Nothing -> False)
-          "admitted executable interface lost its original owner or defining Core"
-        wrongOwner <- try (admittedCompilerInterface env admission
-          (mkModule (stringToUnit "another-home-unit") (ms_mod_name summary)))
-          :: IO (Either CandidateCoreFailure ModIface)
-        assert (case wrongOwner of Left CandidateCoreHomeMissing -> True; _ -> False)
-          "admitted executable interface accepted a different exact unit"
-      (localCorePath,_) <- maybe (fail "local capture lost its canonical Core") pure
-        (admittedInterfaceCore (LocalInterfaceAdmission localProof))
-      localBytes <- BS.readFile localCorePath
-      bracket (BS.writeFile localCorePath (BS.take 1 localBytes))
-        (\_ -> BS.writeFile localCorePath localBytes) $ \_ -> do
-          changed <- try (admittedCompilerInterface env (LocalInterfaceAdmission localProof)
-            (ms_mod summary)) :: IO (Either CandidateCoreFailure ModIface)
-          assert (case changed of Left CandidateCoreBytesMismatch -> True; _ -> False)
-            "local admitted executable interface accepted substituted Core"
+      -- Raw local finalization expresses proof metadata, not request input
+      -- ownership. The production local-native issuer joins it through scope
+      -- extension; an executable consumer must not acquire it implicitly.
+      unowned <- try (admittedCompilerInterface env (LocalInterfaceAdmission localProof) (ms_mod summary))
+        :: IO (Either IOException ModIface)
+      assert (case unowned of
+        Left failure -> "local defining Core has not been captured for execution" `isInfixOf` show failure
+        _ -> False) "raw local finalization silently acquired executable inputs"
+      attached <- admittedCompilerInterface env (ModuleInterfaceAdmission proof) (ms_mod summary)
+      assert (mi_module attached == ms_mod summary && case mi_extra_decls attached of
+          Just _ -> True; Nothing -> False)
+        "captured executable interface lost its original owner or defining Core"
+      wrongOwner <- try (admittedCompilerInterface env (ModuleInterfaceAdmission proof)
+        (mkModule (stringToUnit "another-home-unit") (ms_mod_name summary)))
+        :: IO (Either CandidateCoreFailure ModIface)
+      assert (case wrongOwner of Left CandidateCoreHomeMissing -> True; _ -> False)
+        "captured executable interface accepted a different exact unit"
       finalized <- requireRight =<< decodeFinalizedCore env home (ms_location summary) bytes
       let guts = finalizedTidyGuts finalized
       assert (bindingGroups guts == groups) "canonical binding order or recursive groups changed"
@@ -256,8 +257,8 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       malformed <- decodeFinalizedCore env home (ms_location summary) (BS.take 1 bytes)
       assert (case malformed of Left FinalizedCoreDecodeFailure{} -> True; _ -> False)
         "truncated canonical companion did not fail closed"
-  directBytecodeChecks libdir work artifact summary (LocalInterfaceAdmission localProof)
-  makeViewChecks libdir work artifact bytes summary makeProof
+  directBytecodeChecks libdir work artifact summary (ModuleInterfaceAdmission proof)
+  makeViewChecks libdir work makeScope artifact bytes summary makeProof
   putStrLn "finalized Core: executed one case; source-free STG, direct bytecode and GHC make execution with zero module frontends; staged type-only/Core views, durable interface, native requirements, Core seal and unsupported metadata checked"
   where
     scratch = do
@@ -355,9 +356,9 @@ directBytecodeChecks libdir work artifact summary proof = runGhc (Just libdir) $
 
 -- This qualifies GHC's make handoff using a genuine finalized pair and the
 -- Rust-issued canonical proof from the same immutable compiler capture.
-makeViewChecks :: FilePath -> FilePath -> ExactIfaceArtifact -> BS.ByteString
+makeViewChecks :: FilePath -> FilePath -> ExactScope -> ExactIfaceArtifact -> BS.ByteString
   -> ModSummary -> CanonicalInterfaceProof -> IO ()
-makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $ do
+makeViewChecks libdir work scope artifact bytes summary proof = runGhc (Just libdir) $ do
   flags <- getSessionDynFlags
   _ <- setSessionDynFlags (ms_hspp_opts summary)
     { importPaths = [work], hiDir = Just work, objectDir = Just work
@@ -391,8 +392,9 @@ makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $
     capturedView <- materializeCandidateCompilerView executableDirectory 0 admitted proof executableSummary
     assert (ml_hi_file (ms_location capturedView) /= exactPath artifact)
       "captured executable make view retained its producer path"
-    refused <- try (revalidateAdmittedCore (ModuleInterfaceAdmission proof)) :: IO (Either CandidateCoreFailure ())
-    assert (case refused of Left CandidateCoreBytesMismatch -> True; _ -> False)
+    validateCapturedAdmittedCore (ModuleInterfaceAdmission proof)
+    refused <- revalidateExactScope admitted scope
+    assert (either (const True) (const False) refused)
       "terminal defining Core validation accepted persistent drift"
     BS.writeFile corePath bytes
   -- A genuine pipeline original seals its module-scoped retained policy even
@@ -603,3 +605,121 @@ memoIngressSelectionHistory = withTiming $ bracket (lookupEnv "TIDEPOOL_MEMO_TRA
       assert (firstA /= Text.pack "none" && returnedA == firstA)
         "return to byte-exact A selected another originating cycle"
   putStrLn "memo ingress A,A,B,A: absent/selected/changed-ingress/original-selected and actual frontend1/0/1/0 passed"
+
+-- Drive the actual cpAfterLoad executable hook with missing and replaced Core
+-- paths. The fresh quoter observes retained bytecode, then optionally restores
+-- the producer before the real terminal scope check.
+snapshotExecutableHook :: IO ()
+snapshotExecutableHook = withTiming $ withScratch $ \producer -> withScratch $ \work -> do
+  let fixtures = "test-source-boot/fixtures"
+      source = producer </> "MetadataQuoteSupport.hs"
+      target = work </> "CapturedCoreConsumer.hs"
+      saved = work </> "saved-original.core"
+      marker = work </> "executed-original"
+  copyFile (fixtures </> "MetadataQuoteSupport.hs") source
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing source [producer] Nothing
+  fixture <- capturePreparedFixture producer original
+  path <- writeExecutionScope work fixture ["MetadataQuoteSupport"]
+  scope <- requireRight =<< readExactScope path
+  proof <- maybe (fail "executable hook fixture lacks its original") pure
+    (Map.lookup ("main","MetadataQuoteSupport") (scopeModuleInterfaceProofs scope))
+  (corePath,_) <- maybe (fail "executable hook fixture lacks Core") pure
+    (admittedInterfaceCore (ModuleInterfaceAdmission proof))
+  bytes <- BS.readFile corePath
+  copyFile corePath saved
+  copyFile (fixtures </> "CapturedCoreQuoter.hs") (work </> "CapturedCoreQuoter.hs")
+  template <- Text.pack <$> readFile (fixtures </> "CapturedCoreConsumer.hs")
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just path}
+      settings restore = show (marker, if restore then Just (saved,corePath) else Nothing)
+      consume replace restore = bracket
+        (replace corePath >> writeFile marker "" >> writeFile target
+          (Text.unpack (Text.replace "{{SNAPSHOT_SETTINGS}}" (Text.pack (settings restore)) template)))
+        (\_ -> BS.writeFile corePath bytes) $ \_ -> do
+          checked <- try (runPipelineSessionSelected CheckedEnvironment Set.empty
+            (ExactScopeCompile GeneralCompile scope) (Just session) target [work] Nothing)
+            :: IO (Either IOException CheckedEnvironmentResult)
+          observed <- lines <$> readFile marker
+          assert (observed == ["42"])
+            "actual executable hook failed to supply original bytecode before quoter restoration"
+          case checked of
+            Right result | restore -> do
+              terminal <- revalidateExactScope (crHscEnv result) scope
+              requireRight terminal
+            Left failure | not restore && (corePath `isInfixOf` show failure
+                || "request original input changed before publication" `isInfixOf` show failure) -> pure ()
+            Left failure -> fail ("snapshot hook failed outside terminal drift refusal: " ++ show failure)
+            Right _ -> fail "terminal checked receipt accepted persistent producer mutation/deletion"
+  forM_ [removeFile, \path' -> BS.writeFile path' (BS.singleton 0)] $ \replace -> do
+    consume replace True
+    consume replace False
+  putStrLn "snapshot executable hook: deleted/replaced Core consumed through actual post-load bytecode; restored publication and persistent terminal refusals passed"
+
+
+-- Metadata proof validation, executable promotion and scope extension form one
+-- custody history. Exact byte budgets cover every captured interface, certificate, sidecar and Core.
+promotionScopeChecks :: HscEnv -> FilePath -> ExactScope -> CanonicalInterfaceProof -> IO ()
+promotionScopeChecks env work scope proof = do
+  let key = ("main","FinalizedCoreFixture")
+  row@(iface,packages,_) <- case scopeInterfaces scope of
+    [row] -> pure row
+    _ -> fail "promotion fixture requires one original interface"
+  core@(corePath,_) <- maybe (fail "promotion fixture lacks defining Core") pure
+    (admittedInterfaceCore (ModuleInterfaceAdmission proof))
+  bytes <- BS.readFile corePath
+  let config = "TIDEPOOL_REQUEST_CAPTURE_BYTES"
+      restoreConfig = maybe (unsetEnv config) (setEnv config)
+      metadataProof = requireRight =<< validateCanonicalInterfaceProof scope key
+        (canonicalCertificatePath proof) (canonicalCertificateSha256 proof) (Just core)
+  bracket (lookupEnv config) restoreConfig $ \_ -> do
+    descriptor <- bracket (removeFile corePath) (\_ -> BS.writeFile corePath bytes) $ \_ -> do
+      descriptor <- metadataProof
+      metadata <- captureCanonicalProofs Nothing [(descriptor,MetadataInterfaceUse)]
+      assert (length metadata == 1) "metadata-only promotion required absent Core"
+      unowned <- try (admittedInterfaceCoreBytes (ModuleInterfaceAdmission descriptor))
+        :: IO (Either IOException BS.ByteString)
+      assert (either (const True) (const False) unowned)
+        "raw metadata descriptor silently acquired executable Core"
+      unavailable <- try (captureCanonicalProofs Nothing [(descriptor,ExecutableInterfaceUse)])
+        :: IO (Either IOException [CanonicalInterfaceProof])
+      assert (either (const True) (const False) unavailable)
+        "executable promotion accepted missing defining Core"
+      pure descriptor
+    originalFiles <- mapM BS.readFile [exactPath iface,packages,canonicalCertificatePath proof]
+    let promotionBudget = sum (map BS.length originalFiles) + BS.length bytes
+    setEnv config (show (promotionBudget - 1))
+    exceeded <- try (captureCanonicalProofs Nothing [(descriptor,ExecutableInterfaceUse)])
+      :: IO (Either IOException [CanonicalInterfaceProof])
+    assert (either (const True) (const False) exceeded)
+      "canonical proof inputs bypassed request capture budget"
+    setEnv config (show promotionBudget)
+    promoted <- captureCanonicalProofs Nothing [(descriptor,ExecutableInterfaceUse),(descriptor,ExecutableInterfaceUse)]
+    emptyPath <- writeGenuineEmptyMetadataScope work
+    metadataBytes <- mapM BS.readFile
+      [emptyPath,exactPath iface,packages,canonicalCertificatePath proof]
+    let fullBudget = sum (map BS.length metadataBytes) + BS.length bytes
+        offered = [(row,ModuleInterfaceEvidence captured) | captured <- promoted]
+        extend limit = do
+          setEnv config (show limit)
+          base <- requireRight =<< readExactScope emptyPath
+          extendExactScopeInputs base offered
+    let paths = [exactPath iface,packages,canonicalCertificatePath proof,corePath]
+        originals = originalFiles ++ [bytes]
+    extended <- bracket (mapM_ removeFile paths) (\_ -> sequence_ (zipWith BS.writeFile paths originals)) $ \_ -> do
+      extended <- requireRight =<< extend fullBudget
+      selected <- maybe (fail "scope extension lost its captured proof") pure
+        (Map.lookup key (scopeModuleInterfaceProofs extended))
+      consumed <- admittedInterfaceCoreBytes (ModuleInterfaceAdmission selected)
+      assert (consumed == bytes)
+        "scope extension reread deleted promoted Core instead of transferring its owner"
+      interfaces <- requireRight =<< readScopedInterfaces env extended [iface]
+      assert (map fst interfaces == [iface]) "promoted interface hydration reopened deleted producer metadata"
+      terminal <- revalidateExactScope env extended
+      assert (either (const True) (const False) terminal)
+        "scope extension publication accepted deleted producer metadata"
+      smaller <- extend (fullBudget - 1)
+      assert (either (const True) (const False) smaller)
+        "scope extension ignored receiving aggregate budget"
+      pure extended
+    requireRight =<< revalidateExactScope env extended
+  putStrLn "canonical proof history: absent metadata Core, explicit promotion, shared exact budget and transfer across deleted producer paths passed"

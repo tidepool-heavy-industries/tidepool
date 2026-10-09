@@ -4,10 +4,10 @@
 module Tidepool.RequestInputs
   ( RequestOriginalInputs, RequestInputReader, captureRequestInputs
   , CapturedRequestInput, capturedInputBytes, capturedInputSha256, capturedRequestInputToken
-  , capturedRequestInput, requestInputRetained, retainRequestEncodedBytes, requestInputBytes, revalidateRequestInputs, revalidateRequestInputsWith ) where
+  , capturedRequestInput, mergeRequestInputs, requestInputRetained, retainRequestEncodedBytes, requestInputBytes, revalidateRequestInputs, revalidateRequestInputsWith ) where
 
 import Control.Exception (IOException, try, finally)
-import Control.Monad (unless, when, forM_)
+import Control.Monad (unless, when, forM_, foldM)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import Control.Concurrent.MVar (newMVar, modifyMVar, modifyMVar_, readMVar)
@@ -85,6 +85,33 @@ capturedRequestInputToken (RequestOriginalInputs _ _ inputs _) path expected =
   case Map.lookup path inputs of
     Just (CapturedInput bytes actual) | actual == expected -> pure (CapturedRequestInput bytes actual)
     _ -> fail "request input is absent or differs from its admitted seal"
+
+-- Transfer existing captures into the receiving request's budget. Equal paths
+-- share their retained payload; conflicting captures cannot replace originals.
+-- The receiver's allowance governs the union, regardless of donor allowances.
+mergeRequestInputs :: RequestOriginalInputs -> [RequestOriginalInputs]
+  -> Either String RequestOriginalInputs
+mergeRequestInputs = foldM merge
+  where
+    merge receiving (RequestOriginalInputs _ _ files encoded) = do
+      withFiles <- foldM addFile receiving (Map.toAscList files)
+      foldM addEncoded withFiles (Map.toAscList encoded)
+    addFile owner@(RequestOriginalInputs limit used files encoded) (path,input@(CapturedInput bytes _)) =
+      case Map.lookup path files of
+        Just old | old == input -> Right owner
+        Just _ -> Left "request capture transfer conflicts with an admitted path"
+        Nothing | used + toInteger (BS.length bytes) <= limit ->
+          Right (RequestOriginalInputs limit (used + toInteger (BS.length bytes))
+            (Map.insert path input files) encoded)
+        _ -> Left "request capture transfer exceeds the receiving byte budget"
+    addEncoded owner@(RequestOriginalInputs limit used files encoded) (sha,input@(CapturedInput bytes _)) =
+      case Map.lookup sha encoded of
+        Just old | old == input -> Right owner
+        Just _ -> Left "request capture transfer conflicts with an encoded input"
+        Nothing | used + toInteger (BS.length bytes) <= limit ->
+          Right (RequestOriginalInputs limit (used + toInteger (BS.length bytes))
+            files (Map.insert sha input encoded))
+        _ -> Left "request capture transfer exceeds the receiving byte budget"
 
 -- An encoded graph issued inside the request has no mutable producer path.
 -- Its owning scope retains the bytes and facts together; charge those bytes in

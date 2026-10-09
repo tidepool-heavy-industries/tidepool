@@ -5,6 +5,7 @@ import Control.Monad (foldM, unless)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Directory (removeFile)
 import System.FilePath ((</>))
 import Test.QuickCheck
 import Tidepool.RequestInputs
@@ -52,6 +53,15 @@ requestInputHistories = do
       (_,independent) <- captureRequestInputs Nothing (\reader -> reader path 64)
       fresh <- capturedRequestInput independent path (digest bytes)
       unless (fresh == bytes) (fail "independent request inherited another request's snapshot")
+      case mergeRequestInputs next [independent,independent] of
+        Left _ | bytes /= expected -> pure ()
+        Right transferred | bytes == expected -> do
+          removeFile path
+          shared <- capturedRequestInput transferred path (digest expected)
+          unless (shared == expected && requestInputBytes transferred == requestInputBytes next)
+            (fail "duplicate capture transfer reread producer bytes or changed aggregate accounting")
+          BS.writeFile path bytes
+        _ -> fail "capture transfer disagreed with independent path ownership model"
       pure (updated,admitted,next)
     historyFlags steps =
       let (_,_,extended,changed,restored) =
@@ -113,6 +123,24 @@ requestInputBoundaries = withScratch $ \directory -> do
     unless (requestInputBytes graphOwner == 5
         && fmap requestInputBytes (retainRequestEncodedBytes [graphBytes] graphOwner) == Just 5)
       (fail "encoded graph generations lost accounting or charged the same graph again")
+    -- A donor allowance cannot enlarge the receiver. Transfer shares bytes,
+    -- including duplicate donors, and observes no current producer path.
+    setEnv config "64"
+    (_,donor) <- captureRequestInputs Nothing (\reader -> reader other 3)
+    setEnv config "5"
+    (_,receiving) <- captureRequestInputs Nothing (const (pure ()))
+    removeFile other
+    transferred <- either fail pure (mergeRequestInputs receiving [donor,donor])
+    transferredBytes <- capturedRequestInput transferred other (digest bytes)
+    unless (transferredBytes == bytes && requestInputBytes transferred == 3)
+      (fail "capture transfer reread deleted producer bytes or charged a duplicate owner")
+    unless (case mergeRequestInputs bounded [donor] of Left _ -> True; _ -> False)
+      (fail "capture transfer inherited donor allowance instead of receiving budget")
+    BS.writeFile other (BS.singleton 7)
+    (_,conflicting) <- captureRequestInputs Nothing (\reader -> reader other 3)
+    unless (case mergeRequestInputs transferred [conflicting] of Left _ -> True; _ -> False)
+      (fail "capture transfer replaced an admitted path with conflicting owner bytes")
+    BS.writeFile other bytes
     setEnv config "0"
     invalid <- try (captureRequestInputs Nothing (const (pure ())))
       :: IO (Either IOException ((),RequestOriginalInputs))

@@ -8,7 +8,7 @@ import RequestInputsTest (requestInputHistories, requestInputBoundaries)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
-import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory)
+import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook)
 import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks)
 import PhysicalExecutableEpochTest (exactInterfaceOwnerReuse, physicalExecutableEpoch, sourceSummaryContinuation)
 
@@ -23,6 +23,7 @@ tests = testGroup "source-boot"
   , testCase "resident source summary continuation" sourceSummaryContinuation
   , testCase "physical native executable epoch" physicalExecutableEpoch
   , testCase "exact interface compiler owner reuse" exactInterfaceOwnerReuse
+  , testCase "snapshot executable hook" snapshotExecutableHook
   , testCase "finalized Core" $ finalizedCoreChecks
   , testCase "finalized frontend once" $ finalizedFrontendOnce
   , testCase "post-load provider frontend once" postloadProviderFrontendOnce

@@ -109,7 +109,7 @@ import System.Environment (setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeBaseName, takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
 import System.IO (hPutStrLn, hSetFileSize, withBinaryFile, IOMode(WriteMode), stderr, openBinaryTempFile, hClose)
-import System.IO.Error (isDoesNotExistError, ioeGetFileName)
+import System.IO.Error (isUserError, ioeGetErrorString)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
@@ -179,7 +179,7 @@ import Tidepool.ExactHydration
   , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
 import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface, ExactContextForkFailure(..))
 import Tidepool.ExtractUtil (getLibdir)
-import Tidepool.HomeProducts (hydrateCandidateHomeProducts, CandidateCoreFailure(..))
+import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
@@ -694,7 +694,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
       $ \(input,purpose) -> do
         capture <- admitCheckedScope base [work,"lib",effects] [input]
         checked <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose capture)
-          (Just scope) consumerPath [work,"lib",effects] Nothing
+          (Just scope {ssExactScope=Just (scopeManifestPath capture)}) consumerPath [work,"lib",effects] Nothing
         unless (fmap renderType (crResultType checked) == Just "Command") $
           fail "dependency-ordered command value injection changed its captured type"
   putStrLn "checked command value: complete type closure, delayed injection and missing/changed-owner refusal passed"
@@ -745,7 +745,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
   unless (null (scopeProducts base) && null (scopeExecutionOwners base) && null (scopeExecutionGraphs base)) $
     fail "canonical current-source fixture unexpectedly retained native execution authority"
   admitted <- admitCheckedScope base includes []
-  let session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       check compile purpose = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
         (Just session) consumer includes Nothing
   parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
@@ -782,7 +782,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
       let checkCurrent = do
             previousReceipts <- listDirectory (work </> ".exact-compilations")
             _ <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose currentScope)
-              (Just session) consumer search Nothing
+              (Just session {ssExactScope=Just (scopeManifestPath currentScope)}) consumer search Nothing
             currentReceipts <- listDirectory (work </> ".exact-compilations")
             currentReceipt <- case filter (`notElem` previousReceipts) currentReceipts of
               [entry] -> pure (work </> ".exact-compilations" </> entry </> "receipt.cbor")
@@ -790,7 +790,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
             codecReceiptSourceSelected <$> readReceiptCodecFacts work currentReceipt
           prepareCurrent = do
             selected <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose currentScope)
-              (Just session) consumer search Nothing
+              (Just session {ssExactScope=Just (scopeManifestPath currentScope)}) consumer search Nothing
             currentCompilation <- maybe (fail "search transition omitted exact compilation") pure
               (preparedExactCompilation selected)
             unless (null (scopeProducts (compilationScope currentCompilation))
@@ -962,7 +962,7 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
   admitted <- admitCheckedScope base includes []
-  let session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       parsedPurpose flags source = do
         plan <- analyzeCellWithFlags flags "" source >>= either (fail . show) pure
         pure (withSourceImportIntents (cellPlanPrologue plan) GeneralCompile)
@@ -1139,7 +1139,7 @@ completedProgramSourceImportPairing = withTiming $ withScratch $ \work -> do
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
   admitted <- admitCheckedScope base includes []
-  let session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
   flags <- defaultParserDynFlags
   parsed <- analyzeCellWithFlags flags "" "import MetadataQuotedTarget\n(7 :: Int)"
     >>= either (fail . show) pure
@@ -1223,7 +1223,7 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
     "import CanonicalUnusedSource (Answer)\n(1 :: Answer)" >>= either (fail . show) pure
   admitted <- admitCheckedScope base includes []
   let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
-      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+      session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       check compile = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
         (Just session) consumer includes Nothing
   originalBytes <- BS.readFile dependency
@@ -1786,15 +1786,19 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
           refused <- try (void (compile CheckedEnvironment Set.empty GeneralCompile
             (Just scope) target [work] Nothing)) :: IO (Either IOException ())
           unless (case refused of
-            Left reason -> isDoesNotExistError reason && ioeGetFileName reason == Just (canonicalCorePath core)
+            Left reason -> isUserError reason && canonicalCorePath core `isInfixOf` ioeGetErrorString reason
+              && "withBinaryFile: does not exist" `isInfixOf` ioeGetErrorString reason
             _ -> False) $
             fail "retained compiler execution did not refuse its exact missing Core path"
     bracket (BS.writeFile (canonicalCorePath core) (BSC.pack "corrupt retained Core"))
       (const (BS.writeFile (canonicalCorePath core) coreBytes)) $ \_ ->
         runRequest (pure ()) $ \compile -> do
           refused <- try (void (compile CheckedEnvironment Set.empty GeneralCompile
-            (Just scope) target [work] Nothing)) :: IO (Either CandidateCoreFailure ())
-          unless (refused == Left CandidateCoreBytesMismatch) $
+            (Just scope) target [work] Nothing)) :: IO (Either IOException ())
+          unless (case refused of
+            Left reason -> isUserError reason && canonicalCorePath core `isInfixOf` ioeGetErrorString reason
+              && "admitted defining Core changed during capture" `isInfixOf` ioeGetErrorString reason
+            Right _ -> False) $
             fail "retained compiler execution did not refuse corrupted authenticated Core bytes"
     -- Both certificate descriptors are genuine; only this negative association
     -- places the dependency's certificate under the helper's exact owner.
@@ -2374,7 +2378,7 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
   admitted <- admitCheckedScope base [work] [value]
-  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath,ssValIfaces=[valueOwner]}
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted),ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
     positive <- compile CheckedEnvironment Set.empty GeneralCompile Nothing ordinaryTarget [work] Nothing
     case crResultType positive of
@@ -3460,17 +3464,22 @@ originalProjectionProducts = withScratch $ \work -> do
     case changedOwner of
       Just (Right groups) | bad `notElem` concatMap projectedBinders groups -> pure ()
       other -> fail ("recovered-only generation change adopted stale original groups: " ++ show other)
-    -- A completed cached body is not authority to use changed artifacts.
+    -- Cached recovery consumes the admitted snapshot; persistent producer
+    -- drift is independently refused at terminal publication.
     ownerProof <- maybe (fail "cache fixture lacks its canonical owner") pure
       (Map.lookup ("main","ProjectionOwner") (scopeModuleInterfaceProofs capturedScope))
     core <- maybe (fail "cache fixture lacks original Core") pure (canonicalCoreArtifact ownerProof)
     originalCore <- BS.readFile (canonicalCorePath core)
-    changed <- (BS.appendFile (canonicalCorePath core) "changed" >>
-      try (demand executor)) `finally` BS.writeFile (canonicalCorePath core) originalCore
-    case changed of
-      Left CandidateCoreBytesMismatch -> pure ()
-      Left failure -> fail ("cached original Core change returned another refusal: " ++ show failure)
-      Right _ -> fail "cached original preparation bypassed current Core artifact validation"
+    (do
+      BS.appendFile (canonicalCorePath core) "changed"
+      (snapshotDemand,_) <- demand executor
+      snapshotBodies <- recoveredIdentities snapshotDemand
+      unless (snapshotBodies == firstBodies)
+        (fail "cached original recovery replaced captured Core after producer mutation")
+      terminal <- revalidateExactScope capturedEnv capturedScope
+      unless (either (const True) (const False) terminal)
+        (fail "terminal original publication accepted changed Core")
+      ) `finally` BS.writeFile (canonicalCorePath core) originalCore
   let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
   case requireOriginalExecutableGlobals pairedEnv (Set.union wrongUnitBinders incompleteBinders)
       (programGlobals badProgram) of
