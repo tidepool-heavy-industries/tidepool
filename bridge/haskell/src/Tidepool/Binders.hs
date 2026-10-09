@@ -63,6 +63,7 @@ module Tidepool.Binders
   ) where
 
 import GHC
+import Tidepool.ExactHydration (depanalSourceModules)
 import GHC.Driver.Session (xopt, xopt_set, parseDynamicFilePragma)
 import GHC.Utils.Outputable (showSDocOneLine, defaultSDocContext, ppr)
 import GHC.LanguageExtensions (Extension(..))
@@ -147,7 +148,7 @@ extractBindersNamedGhc path includes expectedModuleName = do
   _ <- setSessionDynFlags dflags { importPaths = includes }
   target <- guessTarget path Nothing Nothing
   setTargets [target]
-  _ <- depanal [] False
+  _ <- depanalSourceModules []
   graph <- getModuleGraph
   case filter isExpected (mgModSummaries graph) of
     (chosen : _) -> do

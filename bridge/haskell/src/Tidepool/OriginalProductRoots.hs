@@ -17,7 +17,7 @@ import Tidepool.ExecutionSchema
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
 import Tidepool.ExactScope
-  ( ExactScope(..), ExactProduct(..), ExactOriginalGroup(..)
+  ( ExactScope, ExactProduct(..), ExactOriginalGroup(..)
   , scopeAvailableOriginalProducts )
 
 -- Package demand and certification share one validated original index. Native

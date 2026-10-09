@@ -1,24 +1,29 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module CellProgramStateTest (cellProgramStateChecks) where
 
 import Control.Monad (unless)
+import Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
+import System.Directory (getTemporaryDirectory, removeFile, createDirectory, removeDirectoryRecursive)
+import System.IO (openBinaryTempFile, hClose)
 import Tidepool.Binders
 import Tidepool.TurnSource (emptyCompilerDefaultRecipe)
 import Tidepool.CellProgramState
 import Tidepool.CheckedCell (CheckedSignature(..))
-import Tidepool.ExactScope (ExactScope(..), emptyScopeInputs, ExactScopePurpose(..))
+import Tidepool.ExactScope (readExactScope)
+import Tidepool.Test.CandidateCodec (writeEmptyScopeCodecFixture)
 import Tidepool.TypedSegment
   ( TypedItemPlan(..), TypedItemBody(..), typedSegmentPlan )
 
 -- Component accumulation only: these inert signature bytes are never given
 -- to a compiler decoder or used to issue capture/execution authority.
 cellProgramStateChecks :: IO ()
-cellProgramStateChecks = do
+cellProgramStateChecks = bracket acquire removeDirectoryRecursive $ \work -> do
+  path <- writeEmptyScopeCodecFixture work
+  exact <- readExactScope path >>= either fail pure
   let prologue = SourcePrologue [] [] emptyCompilerDefaultRecipe
-      exact = ExactScope "" "" "" "" emptyScopeInputs [] [] [] []
-        NoCheckedPurpose Nothing Set.empty Set.empty
       initial = initialProgramCellState prologue exact Map.empty
       item index kind names form = CellAnalysisItem (CellSourceSpan index 1 index 2) (show index)
         (StmtBinders kind names []) [] False form
@@ -66,3 +71,12 @@ cellProgramStateChecks = do
       && programOriginal final == Nothing && Map.null (programRetained final)
       && programSourceImports final == Nothing)
   putStrLn "cell accumulation: 8 checks passed"
+
+  where
+    acquire = do
+      temporary <- getTemporaryDirectory
+      (path,handle) <- openBinaryTempFile temporary "cell-program-state-scope.cbor"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path

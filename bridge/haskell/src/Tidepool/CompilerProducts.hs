@@ -54,10 +54,10 @@ import Tidepool.OriginalProductRoots
   ( ReconciledOriginalProducts, reconcileOriginalProducts )
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithSessionOutputs )
+  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
-  ( ExactScope(..), scopeInterfaces, ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
-  , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces
+  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
+  , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces, scopeInterfaceBytes
   , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
@@ -578,10 +578,15 @@ retainedOriginalInterfaces prepared =
 -- | Share the selected interfaces with finalization and type-witness sealing.
 newPreparedOriginalInterfaceArtifacts :: PreparedPipelineResult -> FilePath -> IO OriginalInterfaceArtifacts
 newPreparedOriginalInterfaceArtifacts prepared directory =
-  newOriginalInterfaceArtifactsWithSessionOutputs (prHscEnv result)
+  newOriginalInterfaceArtifactsWithReader readRetained (prHscEnv result)
     (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared)
     (prInjectedSessionInterfaces result) (prProducedSessionInterfaces result) directory
-  where result = pprPipelineResult prepared
+  where
+    result = pprPipelineResult prepared
+    readRetained artifact = case compilationScope <$> preparedExactCompilation prepared of
+      Just scope | artifact `elem` ([iface | (iface,_,_) <- scopeInterfaces scope] ++ scopeValueInterfaces scope) ->
+        scopeInterfaceBytes scope artifact
+      _ -> BS.readFile (exactPath artifact)
 
 writeCertifiedProductsKeeping
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedModuleProducts

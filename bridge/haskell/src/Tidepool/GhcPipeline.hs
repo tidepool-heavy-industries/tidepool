@@ -242,14 +242,14 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , sourceEvidenceWithFingerprint, selectedFreshHomeRequirements )
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
-  , readVerifiedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
+  , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope(..), scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, revalidateExactScope, writeCheckedExactCompilation, scopeValueInterfaces
+  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
@@ -484,7 +484,7 @@ retainProgramSourceImports previous prepared captured retained = do
         Just identity -> do
           unless (programImportIdentity retained == Just identity)
             (fail "completed program imports leave their checked cell")
-          either fail pure =<< revalidateExactScope env retained
+          either fail pure =<< validateExactScopeEnvironment env retained
           let freshNodes = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node)
                 | node <- dependencyModules fresh, not (dependencyModuleBoot node)]
               sourceMatches key originalRow@(ProgramImportOriginal row@(iface,_,packageSha) evidence lexical) =
@@ -2009,20 +2009,6 @@ frontFacts front = pure ModuleFacts
 
 type GutsMemo = Map.Map ModuleName GutsMemoEntry
 
--- GHC downsweep indexes every retained summary by its source path. Exact
--- lexical/linker nodes have no source and belong only to their admitted graph.
--- CPP summaries also need fresh preprocessing to observe changed includes.
-depanalSourceModules :: [ModuleName] -> Ghc ModuleGraph
-depanalSourceModules excluded = do
-  env <- getSession
-  let sourceSummary (ModuleNode _ summary) =
-        isJust (ml_hs_file (ms_location summary))
-          && not (xopt LangExt.Cpp (ms_hspp_opts summary))
-      sourceSummary _ = True
-  setSession env {hsc_mod_graph = mkModuleGraph
-    (filter sourceSummary (mgModSummaries' (hsc_mod_graph env)))}
-  depanal excluded False
-
 -- | One compile cycle in an already-open 'Ghc' session. Loaded sources
 -- finalize in the typed phase hooks; deferred sources finalize in dependency
 -- order before their importers. The caller owns session bootstrap and decides
@@ -2110,7 +2096,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       setSession current {hsc_hooks=(hsc_hooks current) {runMetaHook=Just observe}}
     forM_ (pvExactScope variant) $ \scope -> do
       env <- getSession
-      verified <- liftIO (revalidateExactScope env scope)
+      verified <- liftIO (validateExactScopeEnvironment env scope)
       either (liftIO . ioError . userError) pure verified
     capturedTarget <- forM (pvGeneratedScaffold variant) $ \recipe ->
       liftIO (captureGeneratedScaffoldTarget recipe path) >>= either (liftIO . fail) pure
@@ -4360,7 +4346,10 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
           case proofsResult of
             Left reason -> recordAdmitted CandidateCanonicalProof (Just reason) >> pure Map.empty
             Right proofs -> do
-              captured <- liftIO $ readVerifiedExactIfaceClosureWithCheckedValues env
+              captured <- liftIO $ readVerifiedExactIfaceClosureWithCheckedValuesReader
+                (\artifact -> case exactScope of
+                  Just scope | artifact `elem` (originals ++ values) -> scopeInterfaceBytes scope artifact
+                  _ -> BS.readFile (exactPath artifact)) env
                 (candidates' ++ originals) values
               let loaded = captured >>= \verified -> selectVerifiedExactInterfaces verified candidates'
                   originalInterfaces = captured >>= \verified -> selectVerifiedExactInterfaces verified originals
@@ -5475,7 +5464,7 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
           || key `Set.member` authoredOwners)
         , key `Set.notMember` checkedOwners]
   if null hiddenImports && Set.null reloadOwners then pure Nothing else do
-    closure' <- liftIO (readVerifiedExactIfaceClosureWithCheckedValues initial
+    closure' <- liftIO (readScopedInterfaceClosure initial admitted
       (Map.elems exactOwners) (scopeValueInterfaces admitted))
       >>= either (liftIO . fail) pure
     interfaces <- either (liftIO . fail) pure
@@ -5836,7 +5825,7 @@ sessionVariant purpose scope path = do
           env <- getSession
           let originals = [iface | (iface,_,_) <- scopeInterfaces admitted]
               values = scopeValueInterfaces admitted
-          closure' <- liftIO (readVerifiedExactIfaceClosureWithCheckedValues env originals values)
+          closure' <- liftIO (readScopedInterfaceClosure env admitted originals values)
             >>= either (liftIO . ioError . userError) pure
           interfaces <- either (liftIO . ioError . userError) pure (selectVerifiedExactInterfaces closure' originals)
           checkedValues <- either (liftIO . ioError . userError) pure
@@ -6055,7 +6044,7 @@ sessionVariant purpose scope path = do
                  CheckedReceiptBoundary -> pure ()
                  NativeMergeBoundary -> forM_ selectedExact $ \admitted -> do
                    env <- getSession
-                   verified <- liftIO (revalidateExactScope env admitted)
+                   verified <- liftIO (validateExactScopeEnvironment env admitted)
                    either (liftIO . fail) pure verified
         , cpInjectedSessionInterfaces = readIORef injectedInterfacesRef
         , cpFinalEnv = \env -> hscUpdateFlags canonicalizeDFlags env {hsc_hooks=originalHooks}

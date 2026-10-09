@@ -4,19 +4,23 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredIn
 import Test.Tasty (withResource)
 import SourceBootCases
 import BoundedReadTest (boundedReadChecks)
+import RequestInputsTest (requestInputHistories, requestInputBoundaries)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
 import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory)
 import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks)
-import PhysicalExecutableEpochTest (exactInterfaceOwnerReuse, physicalExecutableEpoch)
+import PhysicalExecutableEpochTest (exactInterfaceOwnerReuse, physicalExecutableEpoch, sourceSummaryContinuation)
 
 main :: IO ()
 main = runTests tests
 
 tests :: TestTree
 tests = testGroup "source-boot"
-  [ testCase "bounded artifact reads" boundedReadChecks
+  [ testCase "request input custody histories" requestInputHistories
+  , testCase "request input admission boundaries" requestInputBoundaries
+  , testCase "bounded artifact reads" boundedReadChecks
+  , testCase "resident source summary continuation" sourceSummaryContinuation
   , testCase "physical native executable epoch" physicalExecutableEpoch
   , testCase "exact interface compiler owner reuse" exactInterfaceOwnerReuse
   , testCase "finalized Core" $ finalizedCoreChecks

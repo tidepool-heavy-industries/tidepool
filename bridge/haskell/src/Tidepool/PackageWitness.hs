@@ -4,7 +4,7 @@ module Tidepool.PackageWitness
   , emptyPackageImports, encodeCompilerProvidedImport, packageImportRoot, validatePackageImportRoot
   , sealPackageImports, readPackageImports, revalidatePackageImports, encodePackageImports, decodeCapturedPackageImports
   , AdmittedPackageImports, emptyAdmittedPackageImports, extendAdmittedPackageImports
-  , revalidateAdmittedPackageImports
+  , revalidateAdmittedPackageImports, validateAdmittedPackageSelection, extendAdmittedPackageImportsWith
   , packageInputClosure ) where
 
 import Codec.CBOR.Decoding
@@ -58,8 +58,10 @@ data PackageImportEvidence = PackageImportEvidence
 emptyPackageImports :: PackageImportEvidence
 emptyPackageImports = PackageImportEvidence [] []
 
--- Issued only from authenticated canonical sidecars. Extensions append exact
--- owners; each current proof still resolves and hashes all selected roots.
+-- Issued only from authenticated canonical sidecars. Installed packages belong
+-- to the matched pinned compiler universe, rather than home-original custody.
+-- Admission observes new roots; environment checks resolve them freshly and
+-- terminal validation observes every selected root again.
 data AdmittedPackageImports = AdmittedPackageImports
   (Map.Map (String,String) PackageImportRoot) Integer Int deriving (Eq, Show)
 
@@ -68,7 +70,11 @@ emptyAdmittedPackageImports = AdmittedPackageImports Map.empty 0 0
 
 extendAdmittedPackageImports :: AdmittedPackageImports
   -> [(ExactIfaceArtifact, FilePath, String)] -> IO (Either String AdmittedPackageImports)
-extendAdmittedPackageImports initial witnesses = do
+extendAdmittedPackageImports = extendAdmittedPackageImportsWith (\path bound -> readFileAtMost path (bound + 1))
+
+extendAdmittedPackageImportsWith :: (FilePath -> Int -> IO BS.ByteString) -> AdmittedPackageImports
+  -> [(ExactIfaceArtifact, FilePath, String)] -> IO (Either String AdmittedPackageImports)
+extendAdmittedPackageImportsWith readInput initial witnesses = do
   result <- foldM authenticate (Right initial) witnesses
   case result of
     Right _ | not (null witnesses) -> do
@@ -79,12 +85,21 @@ extendAdmittedPackageImports initial witnesses = do
   where
     authenticate (Left reason) _ = pure (Left reason)
     authenticate (Right (AdmittedPackageImports selected references count)) (iface,path,sha) = do
-      authenticated <- readAuthenticatedPackageImports path sha iface
-      pure $ do
-        evidence <- authenticated
-        staged <- foldM insertRoot selected (packageInterfaces evidence)
-        let total = references + fromIntegral (length (packageInterfaces evidence))
-        total `seq` pure (AdmittedPackageImports staged total (count + 1))
+      authenticated <- readAuthenticatedPackageImportsWith readInput path sha iface
+      case authenticated of
+        Left reason -> pure (Left reason)
+        Right evidence -> do
+          let fresh = [root | root <- packageInterfaces evidence
+                , Map.notMember (packageUnit root,packageModule root) selected]
+          checked <- try (mapM (\root -> do
+            bytes <- readFileAtMost (packagePath root) (32 * 1024 * 1024 + 1)
+            when (BS.length bytes > 32 * 1024 * 1024) (fail "installed package interface exceeds 32 MiB")
+            unless (digest bytes == packageSha256 root) (fail "selected package interface bytes changed")) fresh) :: IO (Either IOException [()])
+          pure $ do
+            either (Left . show) (const (Right ())) checked
+            staged <- foldM insertRoot selected (packageInterfaces evidence)
+            let total = references + fromIntegral (length (packageInterfaces evidence))
+            total `seq` pure (AdmittedPackageImports staged total (count + 1))
     insertRoot selected root = case Map.lookup (packageUnit root,packageModule root) selected of
       Just previous | previous /= root -> Left "conflicting package import witnesses for one owner"
                     | otherwise -> Right selected
@@ -110,6 +125,21 @@ revalidateAdmittedPackageImports observations env (AdmittedPackageImports roots 
             Right actual | observedSha256 actual == packageSha256 expected -> Right ()
             _ -> Left "package selection or interface bytes differ from the certified import root"
         _ -> pure (Left "package selection or interface bytes differ from the certified import root")
+
+-- Fresh environment selection is checked at each compiler environment boundary;
+-- installed bytes remain in the pinned universe and terminal validation
+-- observes their seals independently.
+validateAdmittedPackageSelection :: HscEnv -> AdmittedPackageImports -> IO (Either String ())
+validateAdmittedPackageSelection env (AdmittedPackageImports roots _ _) =
+  foldM validate (Right ()) (Map.elems roots)
+  where
+    validate (Left reason) _ = pure (Left reason)
+    validate (Right ()) expected = do
+      let owner = mkModule (stringToUnit (packageUnit expected)) (mkModuleName (packageModule expected))
+      selected <- selectedPackageInterface env owner
+      pure $ case selected of
+        Right path | path == packagePath expected -> Right ()
+        _ -> Left "package selection differs from the certified import root"
 
 encodeCompilerProvidedImport :: CompilerProvidedImport -> Encoding
 encodeCompilerProvidedImport CompilerPrimitive = encodeListLen 3
@@ -203,7 +233,11 @@ revalidatePackageImports env witnesses = do
 -- authenticate the strict union before they return success.
 readAuthenticatedPackageImports
   :: FilePath -> String -> ExactIfaceArtifact -> IO (Either String PackageImportEvidence)
-readAuthenticatedPackageImports path expectedDigest iface = do
+readAuthenticatedPackageImports = readAuthenticatedPackageImportsWith (\path bound -> readFileAtMost path (bound + 1))
+
+readAuthenticatedPackageImportsWith :: (FilePath -> Int -> IO BS.ByteString)
+  -> FilePath -> String -> ExactIfaceArtifact -> IO (Either String PackageImportEvidence)
+readAuthenticatedPackageImportsWith readInput path expectedDigest iface = do
   timing <- readTimingEnabled
   timeDetailPhase timing "package_imports" "authenticate" $ do
     result <- readEvidence timing
@@ -213,9 +247,9 @@ readAuthenticatedPackageImports path expectedDigest iface = do
   where
     readEvidence timing = do
       captured <- try (do
-        bytes <- readFileAtMost path (4 * 1024 * 1024 + 1)
+        bytes <- readInput path (4 * 1024 * 1024)
         when (BS.length bytes > 4 * 1024 * 1024) (fail "package import evidence exceeds four MiB")
-        (,) bytes <$> BS.readFile (exactPath iface))
+        (,) bytes <$> readInput (exactPath iface) (32 * 1024 * 1024))
         :: IO (Either IOException (BS.ByteString, BS.ByteString))
       case captured of
         Left (_ :: IOException) -> pure (Left "sealed package import evidence is unavailable")

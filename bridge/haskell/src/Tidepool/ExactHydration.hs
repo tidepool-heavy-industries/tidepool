@@ -4,22 +4,24 @@
 
 module Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
-  , newOriginalInterfaceArtifactsWithSessionOutputs
+  , newOriginalInterfaceArtifactsWithSessionOutputs, newOriginalInterfaceArtifactsWithReader
   , originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces, serializeOriginalInterface
   , ExactIfaceArtifact(..)
   , ExactInterfaceOperations, exactInterfaceOperations, runExactInterfaceOperation
-  , freshExactState, freshExactContext, forkExactContext
+  , depanalSourceModules, freshExactState, freshExactContext, forkExactContext
   , PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts
   , ExactContextForkFailure(..)
-  , readExactIfaceArtifacts
+  , readExactIfaceArtifacts, readExactIfaceArtifactsWith
+  , RequestIfaceDecoder, newRequestIfaceDecoder, readCapturedExactIfaceArtifacts
+  , readCapturedExactIfaceClosureWithCheckedValues
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
   , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
-  , noCheckedValueImports
+  , checkedValueOwner, noCheckedValueImports
   , readCheckedValueImportAuthority
   , VerifiedExactIfaceClosure
   , readVerifiedExactIfaceClosure
-  , readVerifiedExactIfaceClosureWithCheckedValues
+  , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader
   , selectVerifiedExactInterfaces
   , selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
@@ -37,14 +39,17 @@ module Tidepool.ExactHydration
   , installExactLexicalGraph
   ) where
 
+import Tidepool.RequestInputs (CapturedRequestInput, capturedInputBytes, capturedInputSha256)
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.TypedSegment.Types (GeneratedSegmentOperations, generatedSegmentQualifier)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence)
 import Control.Monad (forM, forM_, unless)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
+import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (mapAccumL, stripPrefix)
 import Control.Exception
-  ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO )
+  ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO, evaluate )
 import Data.Char (isHexDigit, isSpace, toLower)
 import Data.Maybe (isJust, isNothing)
 import qualified Data.ByteString as BS
@@ -68,7 +73,7 @@ import GHC.Unit.Home.ModInfo
   , lookupHpt )
 import GHC.Iface.Load (readIface, loadInterface, WhereFrom(..))
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
-import GHC.Driver.Session (DynFlags, importPaths, targetProfile, ghcMode, GhcMode(CompManager))
+import GHC.Driver.Session (DynFlags, importPaths, targetProfile, ghcMode, GhcMode(CompManager), xopt)
 import GHC.Driver.Config.Parser (initParserOpts)
 import qualified GHC.Parser as Parser (parseImport)
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
@@ -96,7 +101,8 @@ import Tidepool.ExecutionSource (ExecutionSourceIdentity(..))
 import Tidepool.DependencyEvidence (sourceEvidenceWithFingerprint, dependencySourceSha256)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import GHC (Ghc, ParsedModule(..), getSession, setSession)
+import GHC (Ghc, ParsedModule(..), getSession, setSession, depanal)
+import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Driver.Monad (reifyGhc, reflectGhc)
 import GHC.Unit.Module.ModDetails (ModDetails(..))
 import GHC.Core.InstEnv (instEnvElts, is_dfun_name, mkInstEnv)
@@ -171,21 +177,39 @@ newtype VerifiedExactIfaceClosure = VerifiedExactIfaceClosure
 
 readVerifiedExactIfaceClosure
   :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
-readVerifiedExactIfaceClosure env artifacts = fmap (VerifiedExactIfaceClosure . Map.fromList
+readVerifiedExactIfaceClosure = readVerifiedExactIfaceClosureWith (BS.readFile . exactPath)
+
+readVerifiedExactIfaceClosureWith :: (ExactIfaceArtifact -> IO BS.ByteString)
+  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
+readVerifiedExactIfaceClosureWith readInput = readVerifiedExactIfaceClosureUsing (readOneWith readInput)
+
+readVerifiedExactIfaceClosureUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface)))
+  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
+readVerifiedExactIfaceClosureUsing readInterface env artifacts = fmap (VerifiedExactIfaceClosure . Map.fromList
   . map (\(artifact,iface) -> ((exactUnit artifact,exactModule artifact),(artifact,iface,[artifact]))))
-  <$> readExactIfaceArtifacts env artifacts
+  <$> readExactIfaceArtifactsUsing readInterface env artifacts
 
 readVerifiedExactIfaceClosureWithCheckedValues
   :: HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact]
   -> IO (Either String VerifiedExactIfaceClosure)
-readVerifiedExactIfaceClosureWithCheckedValues env originals values
+readVerifiedExactIfaceClosureWithCheckedValues = readVerifiedExactIfaceClosureWithCheckedValuesReader (BS.readFile . exactPath)
+
+readVerifiedExactIfaceClosureWithCheckedValuesReader :: (ExactIfaceArtifact -> IO BS.ByteString)
+  -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact]
+  -> IO (Either String VerifiedExactIfaceClosure)
+readVerifiedExactIfaceClosureWithCheckedValuesReader readInput = readVerifiedExactIfaceClosureWithCheckedValuesUsing (readOneWith readInput)
+
+readVerifiedExactIfaceClosureWithCheckedValuesUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface)))
+  -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact]
+  -> IO (Either String VerifiedExactIfaceClosure)
+readVerifiedExactIfaceClosureWithCheckedValuesUsing readInterface env originals values
   | any (not . checkedValueOwner) values = pure (Left "checked value import has another owner")
   | length (map key values) /= Set.size (Set.fromList (map key values)) =
       pure (Left "duplicate checked value owner")
   | otherwise = do
       let originalKeys = Set.fromList (map key originals)
           inputs = originals ++ [value | value <- values, key value `Set.notMember` originalKeys]
-      verified <- readVerifiedExactIfaceClosure env inputs
+      verified <- readVerifiedExactIfaceClosureUsing readInterface env inputs
       case verified of
         Left reason -> pure (Left reason)
         Right (VerifiedExactIfaceClosure captured) -> do
@@ -197,7 +221,7 @@ readVerifiedExactIfaceClosureWithCheckedValues env originals values
                   -- The closed original supplies the type dependency proof.
                   -- Verify this protected value's separate capture before its
                   -- path becomes an alias for those exact original bytes.
-                  alias <- readOne env value
+                  alias <- readInterface env value
                   pure ((\_ -> (key value,(original,iface,value:known))) <$> alias)
             _ -> pure (Left "checked value alias conflicts with its captured original")
           pure $ do
@@ -769,7 +793,15 @@ forkExactContextWithPackageFacts (PackageFinderFacts packageHomes packages) env 
 -- member of an implementation SCC from partially mutating the HPT.
 readExactIfaceArtifacts
   :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact, ModIface)])
-readExactIfaceArtifacts env artifacts
+readExactIfaceArtifacts = readExactIfaceArtifactsWith (BS.readFile . exactPath)
+
+readExactIfaceArtifactsWith :: (ExactIfaceArtifact -> IO BS.ByteString)
+  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact, ModIface)])
+readExactIfaceArtifactsWith readInput = readExactIfaceArtifactsUsing (readOneWith readInput)
+
+readExactIfaceArtifactsUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface)))
+  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)])
+readExactIfaceArtifactsUsing readInterface env artifacts
   | Set.size moduleNames /= length artifacts = pure (Left "duplicate exact interface owner")
   | any (\artifact -> length (exactSha256 artifact) /= 64
       || not (all isHexDigit (exactSha256 artifact))) artifacts =
@@ -779,16 +811,67 @@ readExactIfaceArtifacts env artifacts
   | otherwise = do
       timing <- readTimingEnabled
       timeDetailPhase timing "exact_scope" "verify_interfaces" $
-        sequence <$> forM artifacts (readOne env)
+        sequence <$> forM artifacts (readInterface env)
   where
     moduleNames = Set.fromList (map exactModule artifacts)
     owners = Set.fromList [(exactUnit artifact, exactModule artifact) | artifact <- artifacts]
 
-readOne :: HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact, ModIface))
-readOne env artifact = do
+-- A physical request owns lazy decoded interfaces separately from encoded
+-- custody. ModIface retains Names but no HscEnv or captured-file path. Sharing
+-- is valid only for the actual NameCache that issued those Names; a fresh cache
+-- decodes independently even when every input digest is identical.
+newtype RequestIfaceDecoder = RequestIfaceDecoder
+  (MVar [((Char,MVar OrigNameCache),Map.Map (String,String,String) ModIface)])
+
+instance Show RequestIfaceDecoder where show _ = "RequestIfaceDecoder"
+
+newRequestIfaceDecoder :: IO RequestIfaceDecoder
+newRequestIfaceDecoder = RequestIfaceDecoder <$> newMVar []
+
+readCapturedExactIfaceArtifacts :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
+  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)])
+readCapturedExactIfaceArtifacts decoder readInput = readExactIfaceArtifactsUsing (readCapturedOne decoder readInput)
+
+readCapturedExactIfaceClosureWithCheckedValues :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
+  -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
+readCapturedExactIfaceClosureWithCheckedValues decoder readInput =
+  readVerifiedExactIfaceClosureWithCheckedValuesUsing (readCapturedOne decoder readInput)
+
+readCapturedOne :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
+  -> HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface))
+readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
+  -- HscEnv unpacks NameCache: its selector can rebox the record on every
+  -- call. The mutable intern-table cell has identity even across that reboxing;
+  -- the unique character also belongs to the name issuer.
+  let names = hsc_NC env
+      cache = (nsUniqChar names, nsNames names)
+  let key = (exactUnit artifact,exactModule artifact,exactSha256 artifact)
+  modifyMVar state $ \universes -> do
+    let known = maybe Map.empty id (lookup cache universes)
+    case Map.lookup key known of
+      Just iface -> do
+        -- Authorization and a relocated alias's seal still belong to the
+        -- consuming scope, even though decoding has already completed.
+        token <- readInput artifact
+        unless (capturedInputSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
+        timing <- readTimingEnabled
+        emitCount timing ("exact_iface_decode_reuse." ++ exactModule artifact) 1
+        pure (universes,Right (artifact,iface))
+      Nothing -> do
+        token <- readInput artifact
+        unless (capturedInputSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
+        result <- readOneWith (const (pure (capturedInputBytes token))) env artifact
+        let retained = case result of
+              Right (_,iface) -> (cache,Map.insert key iface known) : filter ((/= cache) . fst) universes
+              Left _ -> universes
+        pure (retained,result)
+
+readOneWith :: (ExactIfaceArtifact -> IO BS.ByteString) -> HscEnv -> ExactIfaceArtifact
+  -> IO (Either String (ExactIfaceArtifact, ModIface))
+readOneWith readInput env artifact = do
   timing <- readTimingEnabled
   emitCount timing ("exact_iface_read_calls." ++ exactModule artifact) 1
-  readResult <- try (BS.readFile (exactPath artifact)) :: IO (Either IOException BS.ByteString)
+  readResult <- try (readInput artifact) :: IO (Either IOException BS.ByteString)
   case readResult of
     Left _ -> pure (Left ("interface unavailable: " ++ exactModule artifact))
     Right bytes -> do
@@ -874,9 +957,15 @@ newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained injected
 newOriginalInterfaceArtifactsWithSessionOutputs :: HscEnv -> Map.Map ModuleName FinalizedModule
   -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> [CapturedSessionInterface]
   -> FilePath -> IO OriginalInterfaceArtifacts
-newOriginalInterfaceArtifactsWithSessionOutputs env finalized retained injected produced directory = do
+newOriginalInterfaceArtifactsWithSessionOutputs = newOriginalInterfaceArtifactsWithReader (BS.readFile . exactPath)
+
+newOriginalInterfaceArtifactsWithReader :: (ExactIfaceArtifact -> IO BS.ByteString)
+  -> HscEnv -> Map.Map ModuleName FinalizedModule
+  -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> [CapturedSessionInterface]
+  -> FilePath -> IO OriginalInterfaceArtifacts
+newOriginalInterfaceArtifactsWithReader readInput env finalized retained injected produced directory = do
   captures <- forM retained $ \artifact -> do
-    bytes <- BS.readFile (exactPath artifact)
+    bytes <- readInput artifact
     unless (hexBytes (SHA256.hash bytes) == exactSha256 artifact) $
       throwIO (OriginalInterfaceChanged (exactUnit artifact) (exactModule artifact))
     let owner = mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
@@ -1242,6 +1331,20 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
     virtualNodes =
       [ ModuleNode (map nodeKey deps) (exactInterfaceSummary env artifact)
       | (artifact, deps) <- virtualRows ]
+
+-- GHC downsweep indexes every retained summary by its source path. Exact
+-- lexical/linker nodes have no source and belong only to their admitted graph.
+-- CPP summaries also need fresh preprocessing to observe changed includes.
+depanalSourceModules :: [ModuleName] -> Ghc ModuleGraph
+depanalSourceModules excluded = do
+  env <- getSession
+  let sourceSummary (ModuleNode _ summary) =
+        isJust (ml_hs_file (ms_location summary))
+          && not (xopt LangExt.Cpp (ms_hspp_opts summary))
+      sourceSummary _ = True
+  setSession env {hsc_mod_graph = mkModuleGraph
+    (filter sourceSummary (mgModSummaries' (hsc_mod_graph env)))}
+  depanal excluded False
 
 -- This node describes admitted interface dependencies for scope/linker graphs.
 -- It is not a source summary and must never be sent through GHC make.

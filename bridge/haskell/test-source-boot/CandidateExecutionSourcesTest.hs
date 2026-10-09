@@ -12,7 +12,7 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import System.Directory (copyFile, createDirectory, listDirectory, removeDirectoryRecursive, removeFile)
 import System.FilePath ((</>), takeDirectory, takeFileName)
-import System.IO (IOMode(WriteMode), hSetFileSize, withBinaryFile)
+import System.IO (IOMode(WriteMode), hSetFileSize, withBinaryFile, openBinaryTempFile, hClose)
 import System.Timeout (timeout)
 import Tidepool.DependencyEvidence
 import Tidepool.ExactScope
@@ -50,19 +50,22 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   originalFixture <- capturePreparedFixture work original
   sourceScopePath <- writeExecutionScope work originalFixture ["ExecutionReexportFacade"]
   originalScope <- readExactScope sourceScopePath >>= either fail pure
+  emptyExecution <- scopeVariant originalScope (\fields -> take 7 fields ++ [TNull] ++ drop 8 fields)
+    >>= either fail pure
   -- Budget policies consume genuinely admitted original owners. Alter only
   -- the graph envelope; no synthetic interface/Core authority is constructed.
   case scopeExecutionGraphs originalScope of
     graph:_ -> do
       let oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
-          overBudget = originalScope {scopeExecutionGraphs=
-            oversized : tail (scopeExecutionGraphs originalScope)}
-      bounded <- either (fail . show) pure (extendExactExecutionSourcesWithinBudget [] [] overBudget)
-      unless (isNothing bounded && case extendExactExecutionSources [] [] overBudget of
+          offeredBudget = oversized : tail (scopeExecutionGraphs originalScope)
+          references = scopeExecutionOwners originalScope
+      bounded <- either (fail . show) pure
+        (extendExactExecutionSourcesWithinBudget offeredBudget references emptyExecution)
+      unless (isNothing bounded && case extendExactExecutionSources offeredBudget references emptyExecution of
           Left _ -> True; _ -> False) $ fail "optional/advertised aggregate budget policies diverged"
       case scopeExecutionOwners originalScope of
-        reference:_ -> unless (case extendExactExecutionSourcesWithinBudget []
-            [reference {executionRefGraph=replicate 64 'b'}] overBudget of Left _ -> True; _ -> False) $
+        reference:_ -> unless (case extendExactExecutionSourcesWithinBudget offeredBudget
+            [reference {executionRefGraph=replicate 64 'b'}] emptyExecution of Left _ -> True; _ -> False) $
           fail "aggregate budget withholding hid corrupt advertised graph"
         [] -> fail "budget fixture lacks its admitted original references"
     [] -> fail "budget fixture lacks its admitted original graph"
@@ -143,8 +146,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   unless (null (pprAcceptedCandidates changed)) $
     fail "candidate execution provenance bypassed current source validation"
   copyFile "test-source-boot/fixtures/MetadataQuoteSupport.hs" helperSource
-  let emptyExecution = originalScope {scopeExecutionGraphs=[],scopeExecutionOwners=[]}
-      parcels = [value | candidate <- pprAcceptedCandidates accepted, Just value <- [candidateExecutionSources candidate]]
+  let parcels = [value | candidate <- pprAcceptedCandidates accepted, Just value <- [candidateExecutionSources candidate]]
   promoted <- either (fail . show) pure
     (extendExactExecutionSources (concatMap fst parcels) (map snd parcels) emptyExecution)
   unless (length (scopeExecutionOwners promoted) == 2
@@ -274,20 +276,21 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     (scopeExecutionOwners local) (scopeExecutionNativeOwners local) [("main","MetadataQuoter")])
   unless (length (scopeExecutionOwners local) == 1 && length localNodes == 2) $
     fail "fresh local source recipe incorrectly required a separately published helper capability"
-  let missingHelper = emptyExecution {scopeProducts=
-        filter ((/= "MetadataQuoteSupport") . originalModule) (scopeProducts emptyExecution)}
+  missingHelper <- scopeVariant emptyExecution (mapNativeRows (filter (\case
+    TList (_:TString name:_) -> name /= "MetadataQuoteSupport"
+    _ -> True))) >>= either fail pure
   unavailable <- either (fail . show) pure
     (extendExactExecutionSources (concatMap fst parcels) providerRefs missingHelper)
   unless (null (scopeExecutionOwners unavailable) && scopeProducts unavailable == scopeProducts missingHelper
       && case executionSourceClosure (scopeExecutionGraphs unavailable) (scopeExecutionOwners unavailable)
           (scopeExecutionNativeOwners unavailable) [("main","MetadataQuoter")] of Left _ -> True; _ -> False) $
     fail "missing dependency capability either rejected native inventory or authorized an unavailable execution root"
-  let noProducts = emptyExecution {scopeProducts=[]}
+  noProducts <- scopeVariant emptyExecution (mapNativeRows (const [])) >>= either fail pure
   unless (case extendExactExecutionSources (concatMap fst parcels) (map snd parcels) noProducts of Left _ -> True; _ -> False) $
     fail "prospective candidate recipe entered a scope before native promotion"
-  unless (case extendExactExecutionSources (concatMap fst parcels) (map snd parcels)
-      emptyExecution {scopeProducerSha256=replicate 64 'f'} of Left _ -> True; _ -> False) $
-    fail "candidate recipe promoted another compiler producer"
+  let foreignGraphs = [graph {executionGraphProducer=replicate 64 'f'} | graph <- concatMap fst parcels]
+  unless (case extendExactExecutionSources foreignGraphs (map snd parcels) emptyExecution of
+      Left _ -> True; _ -> False) $ fail "candidate recipe promoted another compiler producer"
   -- Execute the retained production scope through its thin reexport facade.
   -- The typed promotion controls above prove that candidate recipes add no
   -- lexical/interface authority; executable delivery remains the Rust owner's.
@@ -303,7 +306,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     TList [_,_,_,_,_,value,_] -> pure value
     _ -> fail "production candidate offer has another current envelope"
   allOriginals <- case originalTerm of
-    TList [_,_,_,_,_,_,_,value,_] -> pure value
+    TList fields -> pure (fields !! 7)
     _ -> fail "production original scope has another current envelope"
   let envelope value = case offerTerm of
         TList fields -> TList (take 5 fields ++ [value] ++ drop 6 fields)
@@ -403,7 +406,7 @@ executionScopeDescriptorChecks path = do
   bytes <- BS.readFile path
   original <- readExactScope path >>= either fail pure
   fields <- decode bytes >>= \case
-    TList values | length values == 9 -> pure values
+    TList values -> pure values
     _ -> fail "genuine exact scope has another current envelope"
   parcel <- case fields !! 7 of
     TList [TList descriptors,refs] -> pure (descriptors,refs)
@@ -448,7 +451,17 @@ executionScopeDescriptorChecks path = do
             entries <- listDirectory request
             selectedBytes <- BS.readFile requestPath
             retainedBytes <- BS.readFile graphPath
-            unless (selected {scopeManifestPath=scopeManifestPath original} == original
+            unless (scopeRequestSha256 selected == scopeRequestSha256 original
+                && scopeProducerSha256 selected == scopeProducerSha256 original
+                && scopeSemanticSha256 selected == scopeSemanticSha256 original
+                && scopeInterfaces selected == scopeInterfaces original
+                && scopeInterfaceEvidence selected == scopeInterfaceEvidence original
+                && scopeLexical selected == scopeLexical original
+                && scopeProducts selected == scopeProducts original
+                && scopePurpose selected == scopePurpose original
+                && scopeRequestTypes selected == scopeRequestTypes original
+                && scopeExecutionGraphs selected == scopeExecutionGraphs original
+                && scopeExecutionOwners selected == scopeExecutionOwners original
                 && selectedFacts == originalFacts
                 && selectedBytes == bytes && retainedBytes == graphBytes
                 && entries == [takeFileName path]
@@ -476,3 +489,22 @@ executionScopeDescriptorChecks path = do
   where
     decode bytes = either (fail . show) (pure . snd)
       (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
+
+-- Variants retain the exact issuer-owned original rows; only admission metadata
+-- changes. Invalid wire metadata must be refused before a scope is returned.
+scopeVariant :: ExactScope -> ([Term] -> [Term]) -> IO (Either String ExactScope)
+scopeVariant original change = do
+  bytes <- BS.readFile (scopeManifestPath original)
+  fields <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes)) >>= \case
+      TList values -> pure values
+      _ -> fail "genuine scope variant has another envelope layout"
+  (path,handle) <- openBinaryTempFile (takeDirectory (scopeManifestPath original)) "execution-variant.cbor"
+  BS.hPut handle (toStrictByteString (encodeTerm (TList (change fields))))
+  hClose handle
+  readExactScope path
+
+mapNativeRows :: ([Term] -> [Term]) -> [Term] -> [Term]
+mapNativeRows change fields = take 6 fields ++ [case fields !! 6 of
+  TList rows -> TList (change rows)
+  field -> field] ++ drop 7 fields

@@ -1,4 +1,4 @@
-module PhysicalExecutableEpochTest (physicalExecutableEpoch, exactInterfaceOwnerReuse) where
+module PhysicalExecutableEpochTest (physicalExecutableEpoch, exactInterfaceOwnerReuse, sourceSummaryContinuation) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar, takeMVar)
@@ -11,6 +11,11 @@ import Data.List (isInfixOf)
 import Data.Maybe (isJust, isNothing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
+import GHC (getSession, setSession)
+import Control.Monad.IO.Class (liftIO)
+import Tidepool.Binders (ExportItem, extractBindersNamedGhc, exportItemName)
+import GHC.Unit.Module.Location (ml_hs_file)
+import GHC.Unit.Module.ModSummary (ms_location)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscEPS)
 import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Linker.Loader qualified as Linker
@@ -24,7 +29,7 @@ import GHC.Unit.External (ExternalUnitCache(..), ExternalPackageState(..))
 import GHC.Unit.Module (Module, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.Env (moduleEnvElts)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
-import GHC.Unit.Module.Graph (mgModSummaries')
+import GHC.Unit.Module.Graph (mgModSummaries', mkModuleGraph, ModuleGraphNode(..))
 import GHC.Unit.Types (unitString)
 import SourceBootFixtureSupport (captureDiagnostics, withScratch, withTiming)
 import System.Directory (copyFile, doesFileExist)
@@ -40,7 +45,7 @@ import Tidepool.GhcPipeline
   , withResidentCompilerScopes, withScopedExactInterfaceTransaction )
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), ExactInterfaceOperations, runExactInterfaceOperation
-  , serializeOriginalInterface )
+  , serializeOriginalInterface, readExactIfaceArtifacts, hydrateExactScope, exactInterfaceSummary )
 import Tidepool.DeclarationJoin
   ( DeclarationArtifact(..), DeclarationJoinInput(..), DeclarationInventory(..), DeclarationInventoryOutcome(..)
   , DeclarationJoinOutcome(..), InstanceInventory(..), JoinDecision(..), JoinRejection(..), ModuleSnapshot(..)
@@ -295,6 +300,58 @@ exactInterfaceOwnerReuse = withTiming $ withScratch $ \work -> do
     Left failure | Just CompilerTransactionReleased <- fromException failure -> pure ()
     other -> fail ("exact operation capability survived its compiler scope: " ++ showResult other)
   putStrLn "exact interface owner: real join and inspection retained fixed package state and native image; changed artifact, reentrancy, cancellation, lifetime and recovery checks passed"
+
+-- Exercise the real parse-only consumer after an exact home context has
+-- retained a source-free interface summary. CPP includes are current source;
+-- neither that graph node nor a failed parse can become a later source choice.
+sourceSummaryContinuation :: IO ()
+sourceSummaryContinuation = withTiming $ withScratch $ \work -> do
+  let fixtures = "test-source-boot/fixtures"
+      provider = work </> "RetainedSummaryProvider.hs"
+      target = work </> "RetainedSummaryBinders.hs"
+      header = work </> "RetainedSummaryName.h"
+      original = work </> "RetainedSummaryProvider.original.hi"
+      requireBinders expected binders = unless (map exportItemName binders == [expected])
+        (fail ("parse-only continuation selected another source: " ++ show binders))
+  copyFile (fixtures </> "RetainedSummaryProvider.hs") provider
+  copyFile (fixtures </> "RetainedSummaryBinders.hs") target
+  writeFile header "#define BINDER next\n"
+  withResidentCompilerScopes [work] $ \runScope ->
+    runScope (pure ()) $ \compiler -> do
+      checked <- scopedCompile compiler CheckedEnvironment Set.empty GeneralCompile
+        Nothing target [work] Nothing
+      home <- maybe (fail "source-summary control has no genuine home interface") pure
+        (lookupHpt (hsc_HPT (crHscEnv checked)) (mkModuleName "RetainedSummaryProvider"))
+      bytes <- serializeOriginalInterface (crHscEnv checked) work (hm_iface home)
+      BS.writeFile original bytes
+      let artifact = ExactIfaceArtifact "main" "RetainedSummaryProvider" original (digest bytes) []
+          installOriginal = do
+            environment <- getSession
+            captured <- liftIO (readExactIfaceArtifacts environment [artifact]) >>= either (liftIO . fail) pure
+            retained <- liftIO (hydrateExactScope environment captured)
+            let virtual = exactInterfaceSummary retained artifact
+            unless (isNothing (ml_hs_file (ms_location virtual))) (liftIO (fail "exact summary acquired a source path"))
+            setSession retained {hsc_mod_graph=mkModuleGraph [ModuleNode [] virtual]}
+          parse = extractBindersNamedGhc target [work] "RetainedSummaryBinders"
+      scopedRunGhc compiler $ do
+        installOriginal
+        first <- parse
+        liftIO (requireBinders "next" first)
+        after <- getSession
+        unless (isJust (lookupHpt (hsc_HPT after) (mkModuleName "RetainedSummaryProvider")))
+          (liftIO (fail "source-only downsweep discarded the retained home interface"))
+        liftIO (writeFile header "#define BINDER continued\n")
+        second <- parse
+        liftIO (requireBinders "continued" second)
+      copyFile (fixtures </> "RetainedSummaryInvalid.hs") target
+      failed <- try (scopedRunGhc compiler (installOriginal >> parse))
+        :: IO (Either SomeException [ExportItem])
+      unless (either (const True) (const False) failed)
+        (fail "invalid source unexpectedly passed the parse-only consumer")
+      copyFile (fixtures </> "RetainedSummaryBinders.hs") target
+      recovered <- scopedRunGhc compiler (installOriginal >> parse)
+      requireBinders "continued" recovered
+  putStrLn "source summary continuation: exact home interface, fresh CPP include, refusal and subsequent valid parse"
 
 requireEmptyExactHome :: HscEnv -> IO ()
 requireEmptyExactHome environment = unless

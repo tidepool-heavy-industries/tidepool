@@ -50,6 +50,7 @@ import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hsc_dflags, hsc_home_u
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.ForeignSrcLang (ForeignSrcLang(..))
 import Numeric (showHex)
+import Data.List (isInfixOf)
 import System.Directory
   ( copyFile, createDirectory, doesFileExist, getTemporaryDirectory
   , removeDirectoryRecursive, removeFile )
@@ -63,8 +64,8 @@ import Tidepool.FinalizedCore
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
-  , ExactScope(..), scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
-  , canonicalCertificateSha256 )
+  , ExactScope, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
+  , canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope )
 import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)
 import Tidepool.GhcPipeline
@@ -76,7 +77,7 @@ import Tidepool.Test.GenuineCandidate
   , writeGenuineMetadataScope )
 import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
-  , admittedCompilerInterface, validateAdmittedInterfaceRequirements
+  , admittedCompilerInterface, revalidateAdmittedCore, validateAdmittedInterfaceRequirements
   , validateCandidateInterfaceRequirements )
 import Tidepool.PreparedStg (pmBindings, prepareModule)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
@@ -165,6 +166,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
     (Map.lookup key (scopeModuleInterfaceProofs makeScope))
   assert (canonicalCertificateSha256 makeProof == canonicalCertificateSha256 proof)
     "independent delivery changed the original canonical identity"
+  capturedConsumerChecks libdir work scope artifact bytes summary proof
   removeFile source
   exists <- doesFileExist source
   assert (not exists) "source-free roundtrip kept its source"
@@ -266,6 +268,40 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       createDirectory path
       pure path
 
+-- The real interface and executable consumers must use admitted bytes even
+-- when producer paths drift. Publication observes those paths separately. The
+-- second decode in one NameCache reuses the iface; another NameCache cannot.
+capturedConsumerChecks :: FilePath -> FilePath -> ExactScope -> ExactIfaceArtifact
+  -> BS.ByteString -> ModSummary -> CanonicalInterfaceProof -> IO ()
+capturedConsumerChecks libdir work scope artifact coreBytes summary proof = do
+  original <- BS.readFile (exactPath artifact)
+  (corePath,_) <- maybe (fail "snapshot consumer omitted defining Core") pure
+    (admittedInterfaceCore (ModuleInterfaceAdmission proof))
+  (_,diagnostics) <- withTiming $ captureDiagnostics $
+    bracket (BS.writeFile (exactPath artifact) (BS.singleton 0) >> BS.writeFile corePath (BS.singleton 0))
+      (\_ -> BS.writeFile (exactPath artifact) original >> BS.writeFile corePath coreBytes) $ \_ -> do
+        let consume = runGhc (Just libdir) $ do
+              _ <- setSessionDynFlags (ms_hspp_opts summary)
+                {backend=noBackend,ghcLink=NoLink,importPaths=[work],hiDir=Just work,objectDir=Just work}
+              fresh <- getSession
+              loaded <- liftIO (requireRight =<< readScopedInterfaces fresh scope [artifact])
+              _ <- liftIO (requireRight =<< readScopedInterfaces fresh scope [artifact])
+              admitted <- liftIO (hydrateExactScope fresh loaded)
+              liftIO $ do
+                attached <- admittedCompilerInterface admitted (ModuleInterfaceAdmission proof) (ms_mod summary)
+                assert (mi_module attached == ms_mod summary && case mi_extra_decls attached of
+                    Just _ -> True; Nothing -> False) "snapshot executable consumer reopened changed Core"
+                terminal <- revalidateExactScope admitted scope
+                assert (either (const True) (const False) terminal) "publication accepted persistent original drift"
+        consume
+        consume
+  let count marker = length [() | line <- lines diagnostics, marker `isInfixOf` line]
+  assert (count "exact_iface_read_calls.FinalizedCoreFixture" == 2
+      && count "exact_iface_decode_reuse.FinalizedCoreFixture" == 2)
+    ("request decoder crossed a NameCache boundary or repeated an admitted interface decode: "
+      ++ show (count "exact_iface_read_calls.FinalizedCoreFixture",count "exact_iface_decode_reuse.FinalizedCoreFixture")
+      ++ "\n" ++ diagnostics)
+
 -- One cold compiler consumes the same captured local original through GHC's
 -- supported bytecode API, without a make node or another fixture compilation.
 directBytecodeChecks
@@ -352,10 +388,12 @@ makeViewChecks libdir work artifact bytes summary proof = runGhc (Just libdir) $
         [(_,iface)] -> case mi_extra_decls iface of Nothing -> True; _ -> False
         _ -> False) "type-only make view loaded defining Core"
     BS.writeFile corePath (BS.take 1 bytes)
-    refused <- try (materializeCandidateCompilerView executableDirectory 0
-      admitted proof executableSummary) :: IO (Either CandidateCoreFailure ModSummary)
+    capturedView <- materializeCandidateCompilerView executableDirectory 0 admitted proof executableSummary
+    assert (ml_hi_file (ms_location capturedView) /= exactPath artifact)
+      "captured executable make view retained its producer path"
+    refused <- try (revalidateAdmittedCore (ModuleInterfaceAdmission proof)) :: IO (Either CandidateCoreFailure ())
     assert (case refused of Left CandidateCoreBytesMismatch -> True; _ -> False)
-      "make executable view accepted changed Core bytes"
+      "terminal defining Core validation accepted persistent drift"
     BS.writeFile corePath bytes
   -- A genuine pipeline original seals its module-scoped retained policy even
   -- when the selected retained set is empty. An ordinary cold GHC session is a

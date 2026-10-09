@@ -345,6 +345,12 @@ def render(metadata=None):
             runtime.append(":" + child)
         elif declared_tools:
             raise ValueError(f"{component.name} needs a native runtime binding for its Cabal build tools")
+        if name == "cell_splitter_test":
+            env["TIDEPOOL_CANDIDATE_FIXTURE_ISSUER"] = RuntimeInput(
+                literal("$(exe //tidepool/toolchain:candidate_fixture_issuer)"),
+                RuntimeInputRole.EXECUTABLE,
+            )
+            runtime.append("//tidepool/toolchain:candidate_fixture_issuer")
         if name in {"source_boot_product_reuse_test", "prepared_stg_pipeline_test"}:
             env.update({
                 "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER": RuntimeInput(literal("$(exe //tidepool/toolchain:candidate_fixture_issuer)"), RuntimeInputRole.EXECUTABLE),

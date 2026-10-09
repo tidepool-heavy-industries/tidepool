@@ -67,10 +67,10 @@ import Tidepool.Session
   , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence )
 import Tidepool.Session (sessionHiPath)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), ExactInterfaceOperations, runExactInterfaceOperation, readExactIfaceArtifacts, hydrateExactScope
-  , newOriginalInterfaceArtifacts )
+  ( ExactIfaceArtifact(..), ExactInterfaceOperations, runExactInterfaceOperation, hydrateExactScope
+  , newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
-  ( CanonicalInterfaceAdmission, ExactScope(..), scopeInterfaces, readExactScope, revalidateExactScope, scopeCanonicalInterfaces )
+  ( CanonicalInterfaceAdmission, ExactScope , scopeProducerSha256, scopeInterfaces, readExactScope, revalidateExactScope, scopeCanonicalInterfaces, readScopedInterfaces, scopeInterfaceBytes, validateExactScopeEnvironment )
 import Tidepool.CheckedCell (CheckedSignature, resolveCheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
   , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes)
@@ -288,7 +288,7 @@ emitHostBindingInterface
 emitHostBindingInterface operations producer generation name signature manifest root purpose = runExactInterfaceOperation operations $ \initial -> do
   scope <- readExactScope manifest >>= either fail pure
   unless (scopeProducerSha256 scope == producer) (fail "host interface producer differs from exact scope")
-  revalidateExactScope initial scope >>= either fail pure
+  validateExactScopeEnvironment initial scope >>= either fail pure
   let artifacts = [artifact | (artifact, _, _) <- scopeInterfaces scope]
       sessionModule = SessionModule ValMod (Generation generation)
       path = sessionHiPath root sessionModule
@@ -297,7 +297,7 @@ emitHostBindingInterface operations producer generation name signature manifest 
   forM_ [path, path ++ ".packages", path ++ ".requirements"] $ \output -> do
     exists <- doesPathExist output
     when exists (fail "host interface reservation output already exists")
-  loaded <- readExactIfaceArtifacts initial artifacts >>= either fail pure
+  loaded <- readScopedInterfaces initial scope artifacts >>= either fail pure
   hydrated <- hydrateExactScope initial loaded
   (ty, _) <- resolveCheckedSignature hydrated signature
   (representation, issuedPurpose) <- case purpose of
@@ -307,7 +307,7 @@ emitHostBindingInterface operations producer generation name signature manifest 
         (hostBindingRepresentationForType authorities ty)
       pure (Just representation, HostBuilt)
     OriginalLiveInput offered -> withWitnessScratch $ \scratch -> do
-      originalInterfaces <- newOriginalInterfaceArtifacts hydrated Map.empty artifacts scratch
+      originalInterfaces <- newOriginalInterfaceArtifactsWithReader (scopeInterfaceBytes scope) hydrated Map.empty artifacts [] [] scratch
       witness <- captureCheckedTypeWitness hydrated ty
         >>= maybe (fail "original input type has no canonical witness") pure
       sealed <- sealCheckedTypeWitness originalInterfaces witness

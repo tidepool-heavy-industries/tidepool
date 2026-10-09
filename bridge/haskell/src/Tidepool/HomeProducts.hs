@@ -14,7 +14,7 @@ module Tidepool.HomeProducts
 
 import Control.Exception
   ( Exception, SomeException, SomeAsyncException, bracket, displayException, fromException, throwIO, try )
-import Control.Monad (forM, forM_, unless, when, void)
+import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -77,10 +77,10 @@ import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv, scopeRetainedModuleGraph)
 import Tidepool.Timing (emitCount, readTimingEnabled, timeDetailPhase)
 import Tidepool.ExactScope
-  ( ExactScope(..), scopeInterfaces, CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
+  ( ExactScope , scopeProducerSha256, scopeInterfaces, CanonicalInterfaceProof, CanonicalInterfaceAdmission(..)
   , admittedInterfaceCore, admittedInterfaceHomeUnits, admittedInterfaceRequirements
   , scopeModuleInterfaceProofs, canonicalOrigin, isSourceOriginal, canonicalCoreArtifact
-  , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, revalidateExactScope )
+  , canonicalCoreSha256, canonicalCertificateSha256, canonicalRequirements, validateExactScopeEnvironment, admittedInterfaceCoreBytes )
 import Tidepool.FinalizedCore (FinalizedCoreFailure, attachFinalizedCore, decodeFinalizedCore)
 import Tidepool.FinalizedModule (FinalizedModule)
 import System.Directory (getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
@@ -182,7 +182,7 @@ data OriginalRecoveryScope = OriginalRecoveryScope HscEnv ExactScope
 
 admitOriginalRecoveryScope :: HscEnv -> ExactScope -> IO OriginalRecoveryScope
 admitOriginalRecoveryScope env scope = do
-  either (ioError . userError) pure =<< revalidateExactScope env scope
+  either (ioError . userError) pure =<< validateExactScopeEnvironment env scope
   let interfaces = originalInterfaceRows scope
       seals = Map.fromList [((exactUnit artifact,exactModule artifact),exactSha256 artifact)
         | (artifact,_,_) <- scopeInterfaces scope]
@@ -300,10 +300,15 @@ materializeInterfaceView directory index interface summary = do
     }
 
 revalidateAdmittedCore :: CanonicalInterfaceAdmission -> IO ()
-revalidateAdmittedCore = void . readAdmittedCore
+revalidateAdmittedCore = fmap (const ()) . readCurrentAdmittedCore
 
 readAdmittedCore :: CanonicalInterfaceAdmission -> IO BS.ByteString
-readAdmittedCore proof = do
+readAdmittedCore proof = case admittedInterfaceCore proof of
+  Nothing -> throwIO CandidateCoreMissing
+  Just _ -> admittedInterfaceCoreBytes proof >>= maybe (readCurrentAdmittedCore proof) pure
+
+readCurrentAdmittedCore :: CanonicalInterfaceAdmission -> IO BS.ByteString
+readCurrentAdmittedCore proof = do
   (path, sha) <- maybe (throwIO CandidateCoreMissing) pure (admittedInterfaceCore proof)
   bytes <- readFileAtMost path (32 * 1024 * 1024 + 1)
   unless (BS.length bytes <= 32 * 1024 * 1024) (throwIO CandidateCoreTooLarge)

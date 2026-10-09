@@ -11,7 +11,7 @@ module Tidepool.ExecutionSource
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
   , executionSourceProspectiveReferences
   , executionNodeOriginalResolutions
-  , ExecutionSourceFiles(..), decodeExecutionSourceDescriptors, readExecutionSourceGraphs, executionSourceGraphsFit
+  , ExecutionSourceFiles(..), decodeExecutionSourceDescriptors, readExecutionSourceGraphs, readExecutionSourceGraphsWith, executionSourceGraphsFit
   , executionSourceGraphBytesLimit
   , WorkerExecutionSource(..), SourceRecipeUnavailable(..), encodeWorkerExecutionSource
   ) where
@@ -588,6 +588,22 @@ readExecutionSourceGraphs files known descriptors = do
       Nothing -> either fail pure (decodeExecutionSourceGraph sha bytes)
     emitCount timing ("hash_bytes.execution_graph." ++ sha) (fromIntegral (BS.length bytes))
     pure graph
+
+-- Admission reads through the request capture owner. Retained bytes and decoded
+-- graphs share custody; per-graph and aggregate graph bounds remain independent
+-- of the encompassing request budget.
+readExecutionSourceGraphsWith :: (FilePath -> Int -> IO BS.ByteString)
+  -> FilePath -> [(String, FilePath)] -> IO [ExecutionSourceGraph]
+readExecutionSourceGraphsWith readInput manifest descriptors = do
+  unless (isAbsolute manifest && length descriptors <= executionSourceGraphsLimit
+      && Set.size (Set.fromList (map fst descriptors)) == length descriptors
+      && all (isAbsolute . snd) descriptors)
+    (fail "invalid original execution graph descriptor inventory")
+  bytes <- mapM (\(_,path) -> readInput path executionSourceGraphBytesLimit) descriptors
+  when (sum (map (toInteger . BS.length) bytes) > toInteger executionSourceGraphBytesLimit)
+    (fail "original execution graphs exceed their retained byte bound")
+  sequence [either fail pure (decodeExecutionSourceGraph sha payload)
+    | ((sha,_),payload) <- zip descriptors bytes]
 
 -- Both candidate parcels and exact-scope graph files consume the same bytes.
 decodeExecutionSourceGraph :: String -> BS.ByteString -> Either String ExecutionSourceGraph

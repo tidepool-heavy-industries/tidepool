@@ -9,6 +9,7 @@ import SourceBootFixtureSupport
 
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import CodecFixtureSupport
+import Tidepool.Test.CandidateCodec (writeCellPurposeCodecFixture)
 import Tidepool.Test.GenuineCandidate
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
   , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope
@@ -107,7 +108,7 @@ import System.Directory
 import System.Environment (setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeBaseName, takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
-import System.IO (hPutStrLn, hSetFileSize, withBinaryFile, IOMode(WriteMode), stderr)
+import System.IO (hPutStrLn, hSetFileSize, withBinaryFile, IOMode(WriteMode), stderr, openBinaryTempFile, hClose)
 import System.IO.Error (isDoesNotExistError, ioeGetFileName)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
@@ -202,9 +203,11 @@ import Tidepool.DeclarationJoin (HostBindingInterfaceInput(..), BindingInterface
   , DeclarationOperation(..), encodeHostBindingInterface, readDeclarationOperation)
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
 import Tidepool.ExactScope
-  ( ExactScope(..), scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, extendExactScopeInputs, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
-  , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
-  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope
+  ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
+  , scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
+  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  , CheckedCellAdmission(checkedValueInterfaces), CheckedItemAdmission(..), CheckedItemPurpose(..)
+  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope, validateExactScopeEnvironment
   , scopeModuleInterfaceProofs, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
@@ -550,8 +553,29 @@ writeGenuineEmptyScopeFields work = do
   bytes <- BS.readFile path
   either (fail . show) (pure . snd)
     (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes)) >>= \case
-      TList values | length values == 9 -> pure values
+      TList values -> pure values
       _ -> fail "genuine exact scope has another envelope layout"
+
+-- Purpose variants enter through the real request decoder. The base envelope
+-- keeps its production-issued interface/native certificates and graph custody.
+readScopeVariant :: ExactScope -> ([Term] -> [Term]) -> IO (Either String ExactScope)
+readScopeVariant original change = do
+  bytes <- BS.readFile (scopeManifestPath original)
+  fields <- either (fail . show) (pure . snd)
+    (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes)) >>= \case
+      TList values -> pure values
+      _ -> fail "genuine exact scope has another envelope layout"
+  (path,handle) <- openBinaryTempFile (takeDirectory (scopeManifestPath original)) "scope-variant.cbor"
+  BS.hPut handle (toStrictByteString (encodeTerm (TList (change fields))))
+  hClose handle
+  readExactScope path
+
+admitCheckedScope :: ExactScope -> [FilePath] -> [ExactIfaceArtifact] -> IO ExactScope
+admitCheckedScope original paths values = do
+  authorizationPath <- writeCellPurposeCodecFixture
+    (takeDirectory (scopeManifestPath original)) paths values
+  authorization <- readCodecTerm authorizationPath
+  readScopeVariant original (\fields -> take 8 fields ++ [authorization] ++ drop 9 fields) >>= either fail pure
 
 exactScopeBinders :: IO ()
 exactScopeBinders = withScratch $ \work -> do
@@ -633,10 +657,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   base <- readExactScope scopePath >>= either fail pure
   let originals = scopeInterfaces base
       value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G7" valuePath (digest valueBytes) requirements
-  let admitted = base
-        { scopePurpose = ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-            (replicate 64 '0') [] ["Tidepool.Session.Val.G7"] [] [value] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) [work,"lib",effects] }
-      scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath, ssValIfaces = [valueOwner] }
+  let scope = emptySessionScope { ssRoot = work, ssExactScope = Just scopePath, ssValIfaces = [valueOwner] }
   isolated <- readCheckedValueImportAuthority environment [value]
   unless (case isolated of Left "incomplete exact interface dependency closure" -> True; _ -> False) $
     fail "a checked value authorized its absent type owner"
@@ -671,9 +692,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
     forM_ [(value,GeneralCompile),(alias,CheckedItemCompile [] Nothing
         [CompletedValueImport "main" "Tidepool.Session.Val.G7" aliasPath (digest valueBytes) [("cmd",identifier)]])]
       $ \(input,purpose) -> do
-        let capture = admitted {scopePurpose = case scopePurpose admitted of
-              ExactCellPurpose admission paths -> ExactCellPurpose (admission {checkedValueInterfaces=[input]}) paths
-              purpose' -> purpose'}
+        capture <- admitCheckedScope base [work,"lib",effects] [input]
         checked <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose capture)
           (Just scope) consumerPath [work,"lib",effects] Nothing
         unless (fmap renderType (crResultType checked) == Just "Command") $
@@ -725,9 +744,8 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     fail "canonical input extension admitted an incomplete required owner closure"
   unless (null (scopeProducts base) && null (scopeExecutionOwners base) && null (scopeExecutionGraphs base)) $
     fail "canonical current-source fixture unexpectedly retained native execution authority"
-  let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
-        (replicate 64 '0') (replicate 64 '0') [] [] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) includes}
-      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+  admitted <- admitCheckedScope base includes []
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
       check compile purpose = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
         (Just session) consumer includes Nothing
   parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
@@ -760,8 +778,8 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     -- Finder selection is the oracle: the empty root supplies no provider,
     -- and both operations must retain the same original type-only closure.
     forM_ [[emptyRoot,work],[work,emptyRoot],[work,work]] $ \search -> do
-      let currentScope = admitted {scopePurpose=ExactCellPurpose admission search}
-          checkCurrent = do
+      currentScope <- admitCheckedScope base search (checkedValueInterfaces admission)
+      let checkCurrent = do
             previousReceipts <- listDirectory (work </> ".exact-compilations")
             _ <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose currentScope)
               (Just session) consumer search Nothing
@@ -820,8 +838,8 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
       fail "captured original lost its exact retained-home import receipt"
     let row = localFinalizedInterface localAdmission
         localLexical = scopeLexical inherited ++ [(localOwner,[("main","CanonicalDependency")])]
-    selectedScope <- extendExactScopeInputs (inherited {scopeLexical=localLexical})
-      [(row,ModuleInterfaceEvidence localProof)] >>= either fail pure
+    selectedScope <- extendExactScopeGeneration inherited
+      [(row,ModuleInterfaceEvidence localProof)] [] localLexical >>= either fail pure
     completedImports <- retainProgramSourceImports Nothing captured
       (certifiedFinalizedArtifacts emitted) selectedScope
     unless (isNothing completedImports)
@@ -845,8 +863,8 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
         && normalizeInterfaceEvidence (ModuleInterfaceEvidence relocated)
           == normalizeInterfaceEvidence (ModuleInterfaceEvidence localProof)) $
       fail "canonical source identity depends on its capture/persistence locator"
-    relocatedScope <- extendExactScopeInputs (inherited {scopeLexical=localLexical})
-      [(row,ModuleInterfaceEvidence relocated)] >>= either fail pure
+    relocatedScope <- extendExactScopeGeneration inherited
+      [(row,ModuleInterfaceEvidence relocated)] [] localLexical >>= either fail pure
     _ <- checkLocal relocatedScope
     let wrongOwner = ("main","CanonicalWrongOwner")
         (localIface,packages,seal) = row
@@ -943,9 +961,8 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     (T.unpack (T.replace "module MetadataQuotedTarget" "module MetadataHiddenQuoted" quoted))
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
-  let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
-        (replicate 64 '0') (replicate 64 '0') [] [] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) includes}
-      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+  admitted <- admitCheckedScope base includes []
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
       parsedPurpose flags source = do
         plan <- analyzeCellWithFlags flags "" source >>= either (fail . show) pure
         pure (withSourceImportIntents (cellPlanPrologue plan) GeneralCompile)
@@ -988,8 +1005,9 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
         >>= either fail pure
       pure ((candidateUnit candidate,candidateModule candidate),proof)
     let allProofs = Map.union proofs (Map.fromList cachedProofs)
-    retained <- extendExactScopeInputs (admitted {scopeLexical=[(key,lexical) | (key,_,lexical) <- allRows]})
-      [(row,ModuleInterfaceEvidence (allProofs Map.! key)) | (key,row,_) <- allRows] >>= either fail pure
+    retained <- extendExactScopeGeneration admitted
+      [(row,ModuleInterfaceEvidence (allProofs Map.! key)) | (key,row,_) <- allRows]
+      [] [(key,lexical) | (key,_,lexical) <- allRows] >>= either fail pure
     when reuseCandidate $ do
       unaccepted <- retainProgramSourceImports Nothing (completed {pprAcceptedCandidates=[]})
         (certifiedFinalizedArtifacts certified) retained
@@ -1120,9 +1138,8 @@ completedProgramSourceImportPairing = withTiming $ withScratch $ \work -> do
     ]
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
-  let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
-        (replicate 64 '0') (replicate 64 '0') [] [] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) includes}
-      session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
+  admitted <- admitCheckedScope base includes []
+  let session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
   flags <- defaultParserDynFlags
   parsed <- analyzeCellWithFlags flags "" "import MetadataQuotedTarget\n(7 :: Int)"
     >>= either (fail . show) pure
@@ -1147,8 +1164,9 @@ completedProgramSourceImportPairing = withTiming $ withScratch $ \work -> do
             (Map.lookup key admissions)
           lexical <- either fail pure (preparedHomeRequirements prepared (fst key) (snd key))
           pure (key,localFinalizedInterface capture,lexical)
-        retained <- extendExactScopeInputs (admitted {scopeLexical=[(key,lexical) | (key,_,lexical) <- rows]})
-          [(row,ModuleInterfaceEvidence (proofs Map.! key)) | (key,row,_) <- rows] >>= either fail pure
+        retained <- extendExactScopeGeneration admitted
+          [(row,ModuleInterfaceEvidence (proofs Map.! key)) | (key,row,_) <- rows]
+          [] [(key,lexical) | (key,_,lexical) <- rows] >>= either fail pure
         pure (prepared,certifiedFinalizedArtifacts certified,retained)
   (first,captureA,scopeA) <- prepare 41
   (second,captureB,scopeB) <- prepare 42
@@ -1203,9 +1221,8 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
     fail "unused import scope invented an interface or native obligation"
   parsed <- analyzeCellWithFlags (hsc_dflags environment) ""
     "import CanonicalUnusedSource (Answer)\n(1 :: Answer)" >>= either (fail . show) pure
+  admitted <- admitCheckedScope base includes []
   let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
-      admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0')
-        (replicate 64 '0') (replicate 64 '0') [] [] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) includes}
       session = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath}
       check compile = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
         (Just session) consumer includes Nothing
@@ -1794,7 +1811,7 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
       Right _ -> fail "genuine retained scope has trailing CBOR bytes"
       Left failure -> fail (show failure)
     wrongOwnerTerm <- case originalTerm of
-      TList fields | length fields == 9 -> case fields !! 4 of
+      TList fields -> case fields !! 4 of
         TList rows -> pure (TList [if index == 4 then TList (map wrongOwner rows) else field
           | (index,field) <- zip [0::Int ..] fields])
         _ -> fail "genuine retained interface inventory changed framing"
@@ -2356,9 +2373,8 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G8" valuePath (digest bytes) []
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
-  let admitted = base {scopePurpose=ExactCellPurpose (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0')
-        (replicate 64 '0') [] ["Tidepool.Session.Val.G8"] [] [value] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) [work]}
-      scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath,ssValIfaces=[valueOwner]}
+  admitted <- admitCheckedScope base [work] [value]
+  let scope = emptySessionScope {ssRoot=work,ssExactScope=Just scopePath,ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
     positive <- compile CheckedEnvironment Set.empty GeneralCompile Nothing ordinaryTarget [work] Nothing
     case crResultType positive of
@@ -2909,11 +2925,27 @@ originalNativeAvailabilityChecks environment scope emitted = do
         _ -> fail "native census fixture lost its unique admitted carrier"
       normalizedGroups = sortOn originalOrdinal . map (\group -> group
         {originalGlobals=Set.toAscList (Set.fromList (originalGlobals group))})
-      replaceOwner selected = scope {scopeProducts=
-        [if productOwner value == owner then selected else value | value <- scopeProducts scope]}
-      requireInvalid selected = revalidateExactScope environment selected >>= \case
+      replaceOwner selected = readScopeVariant scope (\fields ->
+        [if index == 6 then case field of
+            TList rows -> TList (map (replaceRow selected) rows)
+            _ -> field
+          else field | (index,field) <- zip [0::Int ..] fields])
+      replaceRow selected entry = case entry of
+        TList [TString unit,TString name,_,_,_,_,_,descriptor]
+          | (T.unpack unit,T.unpack name) == owner -> TList
+            [text (originalUnit selected),text (originalModule selected),text (originalVersion selected)
+            ,text (originalIfaceSha256 selected),text (originalProductSha256 selected)
+            ,text (originalProductPath selected),TList (map groupTerm (originalGroups selected)),descriptor]
+        _ -> entry
+      text = TString . T.pack
+      identityTerm value = TList [TString (symbolUnit value),TString (symbolModule value)
+        ,TString (symbolNamespace value),TString (symbolOccurrence value),maybe TNull TString (symbolRecordParent value)]
+      groupTerm group = TList [TInteger (fromIntegral (originalOrdinal group))
+        ,TList (map identityTerm (originalBinders group))
+        ,TList [TList [identityTerm identity,TBool required] | (identity,required) <- originalGlobals group]]
+      requireInvalid action = action >>= \case
         Left _ -> pure ()
-        Right () -> fail "altered native selection retained its admitted census"
+        Right _ -> fail "altered native selection retained its admitted census"
   full <- groupsOf owner
   snapshot <- productOf owner
   unless (normalizedGroups full == normalizedGroups (originalGroups snapshot)
@@ -2926,9 +2958,9 @@ originalNativeAvailabilityChecks environment scope emitted = do
   (reference,required,remaining) <- case originalGlobals selected of
     (reference,required) : remaining -> pure (reference,required,remaining)
     [] -> fail "selected native group lost its reference"
-  let selectedScope = replaceOwner (snapshot {originalGroups=[selected]})
-      zeroScope = replaceOwner (snapshot {originalGroups=[]})
-      row groups = [(fst owner,snd owner,groups)]
+  selectedScope <- replaceOwner (snapshot {originalGroups=[selected]}) >>= either fail pure
+  zeroScope <- replaceOwner (snapshot {originalGroups=[]}) >>= either fail pure
+  let row groups = [(fst owner,snd owner,groups)]
   forM_ [selectedScope,zeroScope] $ \selection -> do
     revalidateExactScope environment selection >>= either fail pure
     unchanged <- either fail pure (reconcile selection [])
@@ -2960,8 +2992,7 @@ originalNativeAvailabilityChecks environment scope emitted = do
   unless (case reconcileOriginalProducts Nothing (fresh ++ fresh) of
       Left _ -> True; Right _ -> False) $
     fail "ordinary original inventory admitted duplicate fresh owners"
-  -- These mutations reach the retained selection validator against its
-  -- immutable issued census, rather than an overlap-replacement exception.
+  -- Serialized mutations reach admission against the issuer's original census.
   let altered group = replaceOwner (snapshot {originalGroups=[group]})
       absentOrdinal = 1 + foldr (max . originalOrdinal) 0 full
       changedReference = reference {symbolOccurrence=symbolOccurrence reference <> "_changed"}
@@ -2981,11 +3012,16 @@ originalNativeAvailabilityChecks environment scope emitted = do
         , snapshot {originalIfaceSha256=changedDigest (originalIfaceSha256 snapshot)}
         , snapshot {originalProductSha256=changedDigest (originalProductSha256 snapshot)}
         ] (requireInvalid . replaceOwner)
-  requireInvalid (selectedScope {scopeProducerSha256=changedDigest (scopeProducerSha256 selectedScope)})
+  requireInvalid (readScopeVariant selectedScope (\fields -> take 3 fields
+    ++ [TString (T.pack (changedDigest (scopeProducerSha256 selectedScope)))] ++ drop 4 fields))
   let normalized = selected {originalGlobals=reverse (originalGlobals selected) ++ [(reference,required)]}
-  revalidateExactScope environment (altered normalized) >>= either fail pure
+  normalizedScope <- altered normalized >>= either fail pure
+  revalidateExactScope environment normalizedScope >>= either fail pure
   productBytes <- BS.readFile (originalProductPath snapshot)
-  (BS.writeFile (originalProductPath snapshot) (BS.snoc productBytes 0) >> requireInvalid selectedScope)
+  (BS.writeFile (originalProductPath snapshot) (BS.snoc productBytes 0)
+      >> revalidateExactScope environment selectedScope >>= \case
+        Left _ -> pure ()
+        Right _ -> fail "changed native payload passed terminal revalidation")
     `finally` BS.writeFile (originalProductPath snapshot) productBytes
   revalidateExactScope environment selectedScope >>= either fail pure
   originalNativeCensusRoundTripChecks environment scope owner available
@@ -4970,9 +5006,7 @@ exactLegacyValueIsolation = withTiming $ withScratch $ \work -> do
   base <- readExactScope scopePath >>= either fail pure
   let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G2"
         (sessionHiPath work valueOwner) (digest intBytes) []
-      admitted = base {scopePurpose=ExactCellPurpose
-        (CheckedCellAdmission (replicate 64 '0') (replicate 64 '0') (replicate 64 '0')
-          [] ["Tidepool.Session.Val.G2"] [] [value] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck) [work]}
+  admitted <- admitCheckedScope base [work] [value]
   withResidentPipelineSelected [work] $ \compile -> do
     let native session = compile (PreparedProducts Nothing) Set.empty GeneralCompile
           (Just session) target [work] Nothing
@@ -5691,10 +5725,9 @@ verifyCollectivePackageProof work prepared = withTiming $ do
   unless (count "package_proof.sidecar_decodes" admissionDiagnostics == 1) $
     fail "input extension did not decode its new authenticated sidecar once"
   let (firstArtifact,firstSidecar,firstSidecarSha) = firstWitness
-      inspected = admitted {scopePurpose=ExactInspectionPurpose [firstArtifact] [work]}
   forM_ [1::Int .. 3] $ \_ -> do
     writeIORef resolverCalls 0
-    (result,diagnostics) <- captureDiagnostics (revalidateExactScope environment inspected)
+    (result,diagnostics) <- captureDiagnostics (revalidateExactScope environment admitted)
     requireRight "admitted input snapshot" result
     calls <- readIORef resolverCalls
     unless (calls == 1 && count "package_proof.sidecar_decodes" diagnostics == 0
@@ -5737,8 +5770,10 @@ verifyCollectivePackageProof work prepared = withTiming $ do
   BS.writeFile snapshotAlternate rootBytes
   addModuleToFinder finder (GWIB snapshotOwner NotBoot) (location {ml_hi_file=snapshotAlternate})
   revalidateExactScope environment admitted >>= requireLeft "snapshot current Finder selection"
+  validateExactScopeEnvironment environment admitted >>= requireLeft "current environment package selection"
   addModuleToFinder finder (GWIB snapshotOwner NotBoot) location
   revalidateExactScope environment admitted >>= requireRight "snapshot restored current Finder"
+  validateExactScopeEnvironment environment admitted >>= requireRight "restored environment package selection"
   forM_ [1,8,64] $ \size -> do
     writeIORef resolverCalls 0
     (result, diagnostics) <- captureDiagnostics (revalidatePackageImports environment (take size fanout))

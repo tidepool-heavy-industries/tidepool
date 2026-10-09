@@ -4,7 +4,7 @@
 -- The constructor is private so callers cannot mint or alter native evidence.
 module Tidepool.NativeOriginalCensus
   ( OriginalNativeCensus
-  , readOriginalNativeCensus
+  , readOriginalNativeCensus, readOriginalNativeCensusWith
   , nativeCensusOwner
   , nativeCensusGroups
   , nativeCensusRequirements
@@ -77,10 +77,13 @@ data ParsedCensus = ParsedCensus
   }
 
 readOriginalNativeCensus :: FilePath -> String -> IO OriginalNativeCensus
-readOriginalNativeCensus path expectedSha = do
+readOriginalNativeCensus = readOriginalNativeCensusWith (\path bound -> readFileAtMost path (bound + 1))
+
+readOriginalNativeCensusWith :: (FilePath -> Int -> IO BS.ByteString) -> FilePath -> String -> IO OriginalNativeCensus
+readOriginalNativeCensusWith readInput path expectedSha = do
   unless (isAbsolute path) (fail "native original census path must be absolute")
   unless (canonicalDigest expectedSha) (fail "invalid native original census descriptor SHA256")
-  bytes <- readFileAtMost path (censusByteLimit + 1)
+  bytes <- readInput path censusByteLimit
   when (BS.length bytes > censusByteLimit) (fail "native original census exceeds 32 MiB")
   unless (sha256 bytes == expectedSha) (fail "native original census descriptor SHA256 mismatch")
   case deserialiseFromBytes decodeCensus (BL.fromStrict bytes) of

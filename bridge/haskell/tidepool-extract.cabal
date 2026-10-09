@@ -186,6 +186,8 @@ test-suite cell-splitter-test
                     TypedSessionCases
                     UnreachableCompileTimeTest
                     CellProgramStateTest
+                    Tidepool.Test.CandidateCodec
+                    Tidepool.Test.FixturePacket
                     CheckedAdmissionTest
                     HarnessSourceTest
                     InspectionRunnerTest
@@ -196,6 +198,7 @@ test-suite cell-splitter-test
     ghc >= 9.12 && < 9.13,
     ghc-boot >= 9.12 && < 9.13,
     directory,
+    process,
     bytestring,
     cborg,
     containers,

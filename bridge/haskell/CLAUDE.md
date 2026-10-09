@@ -52,9 +52,9 @@ qualification.
 
 ## Exact-scope transport
 
-Exact-scope manifests use strict `TPEXACTSCOPE` version 10 with nine fields. The final
-fields contain an execution parcel or null and a compiler-purpose authorization
-or null. Interface rows have eight fields; their final field declares one
+Exact-scope manifests use strict `TPEXACTSCOPE` version 11 with ten fields. The final
+fields contain an execution parcel or null, a compiler-purpose authorization
+or null, and the exact published source selection roots. Interface rows have eight fields; their final field declares one
 closed artifact role: `["module", certificate path, certificate SHA, optional
 Core path, optional Core SHA]`, the same five-field `["native-declaration", ...]`
 for native authored originals, `["join"]`, or `["value"]`. Native product
@@ -71,9 +71,34 @@ Canonical module certificates bind the compiler producer, finalized interface
 and package bytes, original source digest, exact dependency seals, optional
 Core digest, and complete compiler home-unit inventory. The worker checks this
 proof against the selected interface closure before hydration. A Core companion
-is a separate compiler input; reading a type context does not load it or grant
-native execution or lexical imports. Its demanding recovery owner verifies and
-decodes the compiler-native payload without replaying source or Template Haskell.
+is a separate compiler input: admission captures its encoded bytes without
+loading defining Core or granting native execution or lexical imports. Its
+recovery owner decodes those bytes only on demand, without replaying source or
+Template Haskell.
+
+A physical request owns immutable captured home originals, checked interfaces,
+certificates, Core and graphs. Scope generations extend that opaque owner; they
+cannot replace an admitted owner or expose a partially assembled closure. The
+encoded byte budget defaults to four GiB and is configured by the trusted host's
+`TIDEPOOL_REQUEST_CAPTURE_BYTES` positive integer. Decoded GHC data is accounted
+separately. Interface decoding uses a disposable captured-file adapter and a
+request-owned memo tied to the GHC NameCache's mutable intern-table cell and
+unique issuer character. Identity of a reboxed GHC record is not owner identity.
+Neither a retained cache nor an EPS lazy closure may retain a temporary path;
+executable GHC make views are separate disposable materializations.
+
+All source downsweeps use `depanalSourceModules`. Exact interface summaries have
+no source path and belong to admitted instance/linker graphs; the source boundary
+preserves their home interfaces. CPP summaries require fresh preprocessing so
+changed include files cannot survive in a retained source summary.
+
+Installed packages belong to the matched pinned immutable compiler universe.
+Their exact resolution is checked in each consuming environment, with fresh
+interface seal observations at admission and terminal publication. Package
+objects and shared libraries are not request snapshots. Current source selection,
+source/dependency and negative-candidate checks remain fresh. Terminal publication
+also re-observes captured original paths, refusing persistent drift while snapshot
+consumption stays independent of transient producer-path mutations.
 
 Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
 original references. Exact-scope graph paths come from the retained immutable

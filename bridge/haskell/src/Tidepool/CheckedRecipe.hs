@@ -14,7 +14,7 @@ import GHC (ModuleName)
 import System.FilePath ((</>))
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.ExactScope
-  ( ExactScope(..), CheckedItemAdmission(..) )
+  ( ExactScope , scopeRequestSha256, CheckedItemAdmission(..) )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.GhcPipeline (CompilePurpose(..))
 import Tidepool.TurnSource

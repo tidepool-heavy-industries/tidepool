@@ -133,13 +133,13 @@ import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, Wor
 import Tidepool.Introspection (encodeInspectionResults, runInspectionGhc)
 import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
-  ( ExactCompilation(..), ExactScope(..), ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  ( ExactCompilation(..), ExactScope , scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , originalGroupFromProjected, originalGroupFromCandidate
   , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), validateCandidateCanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256
-  , readExactScope, revalidateExactScope, scopeInterfaces, scopeInterfaceEvidence, extendExactScopeInputs
+  , readExactScope, revalidateExactScope, scopeInterfaces, scopeInterfaceEvidence, extendExactScopeGeneration, extendCheckedValueScope
   , scopeAvailableOriginalProducts
   , extendSourceSelectedOriginals, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
@@ -1643,13 +1643,8 @@ addProgramValue root generation binders@(firstBinder:_) state = do
       selection = CompletedValueImport "main" (bbModule firstBinder) path digest
         [(bbName binder,bbVarId binder) | binder <- binders, not ("__tidepoolMetadata" `isPrefixOf` bbName binder)]
   lexicalRequirements <- programLexicalRequirements exact [] requirements
-  extendedPurpose <- case scopePurpose exact of
-    ExactCellPurpose admission paths -> pure (ExactCellPurpose
-      (admission { checkedValueInterfaces = checkedValueInterfaces admission ++ [artifact] }) paths)
-    _ -> fail "compiled cell lost admission"
-  extended <- extendExactScopeInputs (exact {scopePurpose=extendedPurpose,
-      scopeLexical=scopeLexical exact ++ [(("main",bbModule firstBinder),lexicalRequirements)]})
-    [((artifact,path ++ ".packages",shaHex packages),CheckedValueEvidence)] >>= either fail pure
+  extended <- extendCheckedValueScope exact
+    (artifact,path ++ ".packages",shaHex packages) lexicalRequirements >>= either fail pure
   let retained = foldr (\binder -> Map.insert
           (SymbolIdentity "main" (T.pack (bbModule binder)) "value" (T.pack (bbName binder)) Nothing) generation)
         (programRetained state) binders
@@ -1731,10 +1726,9 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
         <> text (scopeRequestSha256 exact) <> text reserved <> text (plannedSource original)
         <> text (shaHex interfaceBytes) <> text (renderPlannedDeclarationInventory inventory)
         <> text "planned-declaration"
-  extended <- extendExactScopeInputs (supportScope
-    { scopeProducts=scopeProducts supportScope ++ [originalProduct]
-    , scopeLexical=scopeLexical supportScope ++ [((unit,reserved),lexicalRequirements)] })
-    [((interface,packagesPath,packagesSha),LocalNativeDeclarationEvidence nativeEvidence)] >>= either fail pure
+  extended <- extendExactScopeGeneration supportScope
+    [((interface,packagesPath,packagesSha),LocalNativeDeclarationEvidence nativeEvidence)]
+    [originalProduct] [((unit,reserved),lexicalRequirements)] >>= either fail pure
   BS.writeFile (outDir </> "planned-declaration.cbor") (toStrictByteString receipt)
   pure (finalized, original, inventory, extended, (prepared,certified))
   where
@@ -1754,9 +1748,9 @@ retainProgramProducts
 retainProgramProducts directory prepared certified target initial = do
   selected <- either fail pure (extendSourceSelectedOriginals
     (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
-  finalized <- foldM retainInterface (selected,[]) (Map.toAscList localInterfaces)
-  (cached,additions) <- foldM retainCached finalized (zip [0::Int ..] (pprAcceptedCandidates prepared))
-  admitted <- extendExactScopeInputs cached additions >>= either fail pure
+  finalized <- foldM retainInterface (selected,[],[],[]) (Map.toAscList localInterfaces)
+  (cached,additions,pendingProducts,pendingLexical) <- foldM retainCached finalized (zip [0::Int ..] (pprAcceptedCandidates prepared))
+  admitted <- extendExactScopeGeneration cached additions pendingProducts pendingLexical >>= either fail pure
   promoted <- foldM retain admitted (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
   inherited <- either throwIO pure
@@ -1781,7 +1775,7 @@ retainProgramProducts directory prepared certified target initial = do
     supportOwners = [(candidateUnit candidate,candidateModule candidate)
       | candidate <- pprAcceptedCandidates prepared]
       ++ Map.keys localInterfaces
-    retainInterface (scope,additions) (key,proof) = do
+    retainInterface (scope,additions,stagedProducts,stagedLexical) (key,proof) = do
       canonical <- maybe (fail "supporting source original lacks complete canonical proof") pure
         (Map.lookup key (certifiedSourceOriginals certified))
       let row@(interface,_,packagesSha) = localFinalizedInterface proof
@@ -1790,17 +1784,17 @@ retainProgramProducts directory prepared certified target initial = do
       lexicalRequirements <- programSourceRequirements prepared (fst key) (snd key)
         >>= programLexicalRequirements scope supportOwners
       case existing of
-        [] -> pure (scope {scopeLexical=scopeLexical scope ++ [(key,lexicalRequirements)]},
-          additions ++ [(row,ModuleInterfaceEvidence canonical)])
+        [] -> pure (scope, additions ++ [(row,ModuleInterfaceEvidence canonical)],
+          stagedProducts,stagedLexical ++ [(key,lexicalRequirements)])
         [(old,_,oldPackagesSha)]
           | exactSha256 old == exactSha256 interface
           , exactRequirements old == exactRequirements interface
           , oldPackagesSha == packagesSha
-          , lookup key (scopeLexical scope) == Just lexicalRequirements
+          , lookup key (scopeLexical scope ++ stagedLexical) == Just lexicalRequirements
           , Just (ModuleInterfaceEvidence oldCanonical) <- Map.lookup key (selectedEvidenceOf scope additions)
-          , canonicalCertificateSha256 oldCanonical == canonicalCertificateSha256 canonical -> pure (scope,additions)
+          , canonicalCertificateSha256 oldCanonical == canonicalCertificateSha256 canonical -> pure (scope,additions,stagedProducts,stagedLexical)
         _ -> fail "fresh finalization conflicts with an admitted original owner"
-    retainCached (scope,additions) (index, candidate) = do
+    retainCached (scope,additions,stagedProducts,stagedLexical) (index, candidate) = do
       let unit = candidateUnit candidate
           owner = candidateModule candidate
           key = (unit,owner)
@@ -1821,7 +1815,7 @@ retainProgramProducts directory prepared certified target initial = do
           existingInterfaces = [(artifact,packages,sha)
             | (artifact,packages,sha) <- selectedInterfacesOf scope additions
             , (exactUnit artifact,exactModule artifact) == key]
-          existingProducts = [original | original <- scopeProducts scope
+          existingProducts = [original | original <- scopeProducts scope ++ stagedProducts
             , (originalUnit original,originalModule original) == key]
       case (existingInterfaces,existingProducts) of
         ([],[]) -> do
@@ -1838,11 +1832,10 @@ retainProgramProducts directory prepared certified target initial = do
           BS.writeFile interfacePath interfaceBytes
           BS.writeFile packagesPath packageBytes
           BS.writeFile productPath productBytes
-          pure (scope {scopeProducts=scopeProducts scope ++ [original],
-            scopeLexical=scopeLexical scope ++ [(key,lexicalRequirements)]},
-            additions ++ [((interface,packagesPath,candidatePackageImportsSha256 candidate),ModuleInterfaceEvidence proof)])
+          pure (scope,additions ++ [((interface,packagesPath,candidatePackageImportsSha256 candidate),ModuleInterfaceEvidence proof)],
+            stagedProducts ++ [original],stagedLexical ++ [(key,lexicalRequirements)])
         ([(interface,packagesPath,packagesSha)],[original])
-          | lookup key (scopeLexical scope) == Just lexicalRequirements
+          | lookup key (scopeLexical scope ++ stagedLexical) == Just lexicalRequirements
           , exactRequirements interface == requirements
           , exactSha256 interface == candidateInterfaceSha256 candidate
           , packagesSha == candidatePackageImportsSha256 candidate
@@ -1858,7 +1851,7 @@ retainProgramProducts directory prepared certified target initial = do
                 fail "retained cached supporting original changed between cell slots"
               case Map.lookup key (selectedEvidenceOf scope additions) of
                 Just (ModuleInterfaceEvidence retained)
-                  | canonicalCertificateSha256 retained == canonicalCertificateSha256 proof -> pure (scope,additions)
+                  | canonicalCertificateSha256 retained == canonicalCertificateSha256 proof -> pure (scope,additions,stagedProducts,stagedLexical)
                 _ -> fail "cached source product conflicts with retained canonical evidence"
         _ -> fail "cached source product conflicts with an admitted original owner"
     selectedInterfacesOf scope additions = scopeInterfaces scope ++ map fst additions
@@ -1922,7 +1915,7 @@ retainProgramProducts directory prepared certified target initial = do
             (shaHex interfaceBytes) (shaHex productBytes) productPath
             (map originalGroupFromProjected groups)
       BS.writeFile productPath productBytes
-      pure scope { scopeProducts = scopeProducts scope ++ [original] }
+      extendExactScopeGeneration scope [] [original] [] >>= either fail pure
 
 -- Interface requirements retain every exact hydration owner. Only selected
 -- lexical owners contribute edges to the instance/family traversal graph.

@@ -147,6 +147,8 @@ enum CodecOperation {
     CandidateStructuralGroup,
     CandidateCompact,
     CandidateExpandedWithinBound,
+    ScopeEmpty,
+    CellPurpose,
     ReceiptFacts,
     CertificateFacts,
     SegmentItemFacts,
@@ -188,8 +190,13 @@ fn deserialize_bytes<'de, D: serde::Deserializer<'de>>(
     }
     deserializer.deserialize_byte_buf(Bytes)
 }
+#[derive(Deserialize)]
+struct ValueInterfaceInput(String, String, PathBuf, String);
+
 enum CodecRequest {
     Candidate(CandidateCase),
+    ScopeEmpty,
+    CellPurpose(Vec<PathBuf>, Vec<ValueInterfaceInput>),
     ReceiptFacts(PathBuf),
     CertificateFacts(PathBuf),
     SegmentItemFacts(PathBuf),
@@ -238,6 +245,14 @@ fn packet_request(root: &Path) -> CodecRequest {
                 _ => CandidateCase::ExpandedWithinBound,
             })
         }
+        CodecOperation::ScopeEmpty => {
+            let _: [String; 0] = decode_arguments(&arguments, 0);
+            CodecRequest::ScopeEmpty
+        }
+        CodecOperation::CellPurpose => {
+            let (includes, values) = decode_arguments(&arguments, 2);
+            CodecRequest::CellPurpose(includes, values)
+        }
         CodecOperation::ReceiptFacts => {
             let [path] = decode_arguments(&arguments, 1);
             CodecRequest::ReceiptFacts(path)
@@ -284,6 +299,14 @@ fn source_boot_codec_packet_producer() {
             tidepool_atomic_write::write_best_effort(&root.join("module-candidates.cbor"), &bytes)
                 .unwrap();
         }
+        CodecRequest::ScopeEmpty => {
+            let producer = b"tidepool-structural-codec-scope";
+            let context = Arc::new(super::empty_fixture_scope(Sha256::digest(producer).into()));
+            context
+                .prepare_fixture_compilation(&root.join("scope"), producer)
+                .expect("owning empty scope serializer");
+        }
+        CodecRequest::CellPurpose(includes, values) => cell_purpose(&root, &includes, values),
         CodecRequest::ReceiptFacts(path) => receipt_facts(&root, absolute_path(&path)),
         CodecRequest::CertificateFacts(path) => certificate_facts(&root, absolute_path(&path)),
         CodecRequest::SegmentItemFacts(path) => segment_item_facts(&root, absolute_path(&path)),
@@ -708,6 +731,45 @@ fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Opti
         }
     };
     let value = checked_search_authorization(body, includes).expect("purpose search encoder");
+    let mut bytes = vec![];
+    ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+    tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
+}
+
+fn cell_purpose(root: &Path, includes: &[PathBuf], values: Vec<ValueInterfaceInput>) {
+    let injected_modules = values.iter().map(|value| value.1.clone()).collect();
+    let baseline = Value::Array(
+        values
+            .into_iter()
+            .map(|ValueInterfaceInput(unit, module, path, sha)| {
+                assert_eq!(unit, "main", "checked fixture value home unit");
+                absolute_path(&path);
+                assert!(parse_sha(&sha).is_some(), "checked fixture value seal");
+                Value::Array(vec![
+                    Value::Text(unit),
+                    Value::Text(module),
+                    Value::Text(path.to_str().expect("UTF-8 fixture value path").into()),
+                    Value::Text(sha),
+                ])
+            })
+            .collect(),
+    );
+    let body = crate::artifacts::encode_cell_authorization(
+        crate::checked_cell::CheckedCellManifestPurpose::Authored,
+        &crate::checked_cell::CheckedCellSpecification {
+            admission_digest: [0xaa; 32],
+            cell_source: "codec cell".into(),
+            template_source: "codec template".into(),
+            turn_templates: vec![],
+            injected_modules,
+            reserved_declaration_modules: vec![],
+        },
+        baseline,
+        &crate::declaration_context::SelectedTemplateImports::default(),
+    )
+    .expect("owning checked cell serializer");
+    let value = crate::artifacts::checked_search_authorization(body, includes)
+        .expect("purpose search encoder");
     let mut bytes = vec![];
     ciborium::ser::into_writer(&value, &mut bytes).unwrap();
     tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();

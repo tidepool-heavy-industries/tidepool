@@ -8,7 +8,6 @@ import Control.Exception (IOException, bracket, try)
 import Control.Monad (unless, forM_)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Numeric (readHex)
@@ -24,6 +23,7 @@ import Tidepool.CheckedRecipe (writeCheckedItemReceipt, checkedRecipeSource)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ExactHydration (CheckedTemplateImports(..))
 import Tidepool.ExactScope
+import Tidepool.Test.CandidateCodec (writeEmptyScopeCodecFixture)
 import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), InspectionRequest(..), workerArgv, workerRequestFromArgv)
 import Tidepool.ExtractUtil (shaHex)
 
@@ -123,21 +123,24 @@ withScratch = bracket acquire removeDirectoryRecursive
 
 receiptChecks :: FilePath -> CheckedItemAdmission -> IO ()
 receiptChecks root item = do
-  let scope = ExactScope "manifest" "request" "producer" "semantic" emptyScopeInputs [] [] [] []
-        NoCheckedPurpose Nothing Set.empty Set.empty
-      source = "recipe λ"
+  path <- writeEmptyScopeCodecFixture root
+  let source = "recipe λ"
+  scope <- readExactScope path >>= either fail pure
   writeCheckedItemReceipt root scope item source
-  check "checked-item.cbor" itemGolden
+  check "checked-item.cbor" (unhex itemGoldenPrefix
+    <> Cbor.toStrictByteString (Cbor.encodeString (T.pack (scopeRequestSha256 scope)))
+    <> unhex itemGoldenSuffix)
   where
     check file golden = do
       actual <- BS.readFile (root </> file)
-      unless (actual == unhex golden) (fail (file ++ " changed its protected receipt bytes"))
+      unless (actual == golden) (fail (file ++ " changed its protected receipt bytes"))
     unhex [] = BS.empty
     unhex (a:b:rest) = case readHex [a,b] of
       [(byte,"")] -> BS.cons byte (unhex rest)
       _ -> error "invalid receipt golden"
     unhex _ = error "odd receipt golden"
-    itemGolden = "886b545045584143544954454d613167726571756573746e6974656d2d61646d697373696f6e6c63656c6c2d7265636569707402784033323839613431343939636133623538653566653036353137386231343138373535303363323639663330356430323630336464383133616563313863656638781974696465706f6f6c2d636865636b65642d7265636970652d32"
+    itemGoldenPrefix = "886b545045584143544954454d6131"
+    itemGoldenSuffix = "6e6974656d2d61646d697373696f6e6c63656c6c2d7265636569707402784033323839613431343939636133623538653566653036353137386231343138373535303363323639663330356430323630336464383133616563313863656638781974696465706f6f6c2d636865636b65642d7265636970652d32"
 
 inspectionScopeChecks :: FilePath -> IO ()
 inspectionScopeChecks root = do
