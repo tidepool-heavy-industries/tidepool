@@ -3,12 +3,12 @@ pub mod proxy;
 pub mod wire;
 
 use axum::{
-    body::{to_bytes, Body},
+    Json, Router,
+    body::{Body, to_bytes},
     extract::{Path as RoutePath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use exomonad_actor::{
     ActorExitKind, ActorTerminal, KernelInvocationFailure, KernelMessage, LocalActorRef,
@@ -21,7 +21,11 @@ use std::{
     sync::Arc,
 };
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus};
-use tokio::{net::UnixListener, sync::Mutex};
+use tokio::{
+    net::UnixListener,
+    sync::{Mutex, watch},
+};
+use uuid::Uuid;
 use wire::*;
 
 /// Keep the directory descriptor alive while a client can open connections.
@@ -86,15 +90,56 @@ enum LocalOperator {
     StopRequested(LocalActorRef),
 }
 
+type ProvisionCompletion = watch::Receiver<Option<Result<Attachment, String>>>;
+
 #[derive(Clone)]
 struct AttachmentState {
     sessions: Arc<Mutex<BTreeMap<String, LocalOperator>>>,
+    service: ServiceIdentity,
+    provisions: Arc<Mutex<BTreeMap<Uuid, ProvisionCompletion>>>,
     open: Arc<std::sync::atomic::AtomicBool>,
     provision: Arc<Provision>,
     inspect_graph: Arc<InspectGraph>,
     inspect_artifact: Arc<InspectArtifact>,
     socket: PathBuf,
 }
+/// This process-local owner never carries admissions across a service restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceIdentity {
+    incarnation: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProvisionRequest {
+    service: ServiceIdentity,
+    operation: Uuid,
+}
+
+impl ProvisionRequest {
+    fn new(service: ServiceIdentity) -> Self {
+        Self {
+            service,
+            operation: Uuid::new_v4(),
+        }
+    }
+}
+
+async fn service_identity(client: &reqwest::Client) -> Result<ServiceIdentity, proxy::ProxyError> {
+    let response = client
+        .get("http://localhost/host/operators/service")
+        .send()
+        .await
+        .map_err(|error| format!("cannot inspect operator service: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("cannot inspect operator service: {error}"))?;
+    response
+        .json()
+        .await
+        .map_err(|error| format!("cannot decode operator service identity: {error}").into())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub session: String,
@@ -123,6 +168,10 @@ impl OperatorService {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         let state = AttachmentState {
             sessions: Arc::default(),
+            service: ServiceIdentity {
+                incarnation: Uuid::new_v4(),
+            },
+            provisions: Arc::default(),
             open: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             provision,
             inspect_graph,
@@ -131,6 +180,7 @@ impl OperatorService {
         };
         let app = Router::new()
             .route("/host/operators", get(list).post(new))
+            .route("/host/operators/service", get(service))
             .route("/host/operators/{session}/stop", post(stop))
             .route("/host/artifacts", post(artifact))
             .route("/v1/sessions/{session}", get(inspect))
@@ -184,7 +234,7 @@ async fn artifact(State(state): State<AttachmentState>, body: Body) -> Response 
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_too_large",
                 "Artifact query exceeds 8 KiB",
-            )
+            );
         }
     };
     let request: ArtifactRequest = match serde_json::from_slice(&bytes) {
@@ -217,52 +267,96 @@ fn error(status: StatusCode, code: &str, message: impl Into<String>) -> Response
     )
         .into_response()
 }
-async fn new(State(state): State<AttachmentState>) -> Response {
-    // Provisioning, like execution, survives loss of the HTTP observer.
-    let task = tokio::spawn(async move {
-        match (state.provision)().await {
-            Ok(actor) => {
-                let mut sessions = state.sessions.lock().await;
-                if !state.open.load(std::sync::atomic::Ordering::SeqCst) {
-                    drop(sessions);
-                    if let Err(shutdown_error) = actor
-                        .shutdown(ActorTerminal {
-                            kind: ActorExitKind::Cancelled,
-                            summary: "host attachment service closed".into(),
-                            diagnostic: None,
-                        })
-                        .await
-                    {
-                        tracing::warn!(error = %shutdown_error, "cannot shut down actor provisioned after attachment service closed");
-                    }
-                    return error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "unavailable",
-                        "Host is shutting down",
-                    );
-                }
-                let session = format!(
-                    "operator-{}-{}",
-                    actor.identity().id.0,
-                    actor.identity().incarnation.0
-                );
-                sessions.insert(session.clone(), LocalOperator::Available(actor));
-                Json(Attachment {
-                    session,
-                    socket: state.socket,
-                })
-                .into_response()
-            }
-            Err(detail) => error(StatusCode::SERVICE_UNAVAILABLE, "unavailable", detail),
+async fn service(State(state): State<AttachmentState>) -> Json<ServiceIdentity> {
+    Json(state.service)
+}
+
+async fn provision_once(state: AttachmentState) -> Result<Attachment, String> {
+    let actor = (state.provision)().await?;
+    let mut sessions = state.sessions.lock().await;
+    if !state.open.load(std::sync::atomic::Ordering::SeqCst) {
+        drop(sessions);
+        if let Err(error) = actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "host attachment service closed".into(),
+                diagnostic: None,
+            })
+            .await
+        {
+            tracing::warn!(%error, "cannot shut down actor provisioned after attachment service closed");
         }
-    });
-    task.await.unwrap_or_else(|e| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            e.to_string(),
-        )
+        return Err("Host is shutting down".into());
+    }
+    let session = format!(
+        "operator-{}-{}-{}",
+        state.service.incarnation,
+        actor.identity().id.0,
+        actor.identity().incarnation.0
+    );
+    sessions.insert(session.clone(), LocalOperator::Available(actor));
+    Ok(Attachment {
+        session,
+        socket: state.socket,
     })
+}
+
+async fn new(
+    State(state): State<AttachmentState>,
+    Json(request): Json<ProvisionRequest>,
+) -> Response {
+    if request.service != state.service {
+        return error(
+            StatusCode::CONFLICT,
+            "service_changed",
+            "Operator service incarnation changed; reconcile the saved operation before provisioning",
+        );
+    }
+    if !state.open.load(std::sync::atomic::Ordering::SeqCst) {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "Host is shutting down",
+        );
+    }
+    let mut result = {
+        let mut provisions = state.provisions.lock().await;
+        provisions
+            .entry(request.operation)
+            .or_insert_with(|| {
+                let (completion, result) = watch::channel(None);
+                let owner = state.clone();
+                // Admission is retained before spawning. Observer loss, provider
+                // failure, and retirement never free the identity for another actor.
+                tokio::spawn(async move {
+                    let outcome = match tokio::spawn(provision_once(owner)).await {
+                        Ok(outcome) => outcome,
+                        Err(error) => Err(format!(
+                            "operator provisioning outcome unavailable: {error}"
+                        )),
+                    };
+                    completion.send_replace(Some(outcome));
+                });
+                result
+            })
+            .clone()
+    };
+    loop {
+        let observed = result.borrow().clone();
+        if let Some(observed) = observed {
+            return match observed {
+                Ok(attachment) => Json(attachment).into_response(),
+                Err(detail) => error(StatusCode::SERVICE_UNAVAILABLE, "unavailable", detail),
+            };
+        }
+        if result.changed().await.is_err() {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "Operator provisioning outcome unavailable",
+            );
+        }
+    }
 }
 async fn list(State(state): State<AttachmentState>) -> Response {
     let sessions = state.sessions.lock().await;
@@ -365,6 +459,18 @@ async fn inspect(
             })
             .into_response()
         }
+        Some(LocalOperator::Available(actor))
+            if !actor
+                .terminal()
+                .cleanup()
+                .is_some_and(|cleanup| cleanup.is_confirmed()) =>
+        {
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "Session retirement cleanup remains unconfirmed",
+            )
+        }
         Some(LocalOperator::StopRequested(_)) => error(
             StatusCode::SERVICE_UNAVAILABLE,
             "unavailable",
@@ -408,7 +514,7 @@ async fn graph(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 error_value.to_string(),
-            )
+            );
         }
     };
     if bytes.len() > MAX_RESPONSE_BYTES {
@@ -437,7 +543,7 @@ async fn expand_display(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_too_large",
                 "Display expansion request exceeds the request budget",
-            )
+            );
         }
     };
     let input: DisplayExpansionRequest = match serde_json::from_slice(&bytes) {
@@ -447,7 +553,7 @@ async fn expand_display(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 error_value.to_string(),
-            )
+            );
         }
     };
     submit_invocation(
@@ -470,7 +576,7 @@ async fn submit(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_too_large",
                 "Request body exceeds 1 MiB or could not be read",
-            )
+            );
         }
     };
     let input: SubmitRequest = match serde_json::from_slice(&bytes) {
@@ -555,8 +661,20 @@ fn invocation_error(failure: KernelInvocationFailure) -> Response {
     };
     let bytes = match serde_json::to_vec(&response) {
         Ok(bytes) if bytes.len() <= MAX_RESPONSE_BYTES => bytes,
-        Ok(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Execution ended but its required receipt exceeds the response budget; execution is unknown to this connection"),
-        Err(error_value) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", error_value.to_string()),
+        Ok(_) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Execution ended but its required receipt exceeds the response budget; execution is unknown to this connection",
+            );
+        }
+        Err(error_value) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                error_value.to_string(),
+            );
+        }
     };
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -587,7 +705,9 @@ fn map_failure(failure: exomonad_actor::KernelWorkbenchFailure) -> SubmitRespons
             tidepool_runtime::session::WorkbenchFailurePoint::Publication {
                 completed_input_units,
             } if durability_unconfirmed => {
-                format!("Publication durability remains unconfirmed after {completed_input_units} completed input units")
+                format!(
+                    "Publication durability remains unconfirmed after {completed_input_units} completed input units"
+                )
             }
             tidepool_runtime::session::WorkbenchFailurePoint::Publication {
                 completed_input_units,
@@ -668,12 +788,16 @@ fn bounded_response(mut result: SubmitResponse) -> Response {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
                     error_value.to_string(),
-                )
+                );
             }
         };
     }
     if bytes.len() > MAX_RESPONSE_BYTES {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Execution ended but its required receipt exceeds the response budget; execution is unknown to this connection");
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Execution ended but its required receipt exceeds the response budget; execution is unknown to this connection",
+        );
     }
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -721,7 +845,10 @@ pub async fn command(
             actor,
             relative_path,
         }),
-        OperatorAction::New | OperatorAction::Stop { .. } => client.post(url),
+        OperatorAction::New => client
+            .post(url)
+            .json(&ProvisionRequest::new(service_identity(&client).await?)),
+        OperatorAction::Stop { .. } => client.post(url),
     }
     .send()
     .await?;
@@ -871,15 +998,19 @@ mod artifact_tests {
             detail: "journal outcome unknown".into(),
             diagnostic: None,
         };
-        assert!(uncertain_failure
-            .to_string()
-            .contains("publication durability remains unconfirmed"));
+        assert!(
+            uncertain_failure
+                .to_string()
+                .contains("publication durability remains unconfirmed")
+        );
         let uncertain_response = map_failure(uncertain_failure);
-        assert!(uncertain_response
-            .receipt
-            .unwrap()
-            .display
-            .contains("Publication durability remains unconfirmed"));
+        assert!(
+            uncertain_response
+                .receipt
+                .unwrap()
+                .display
+                .contains("Publication durability remains unconfirmed")
+        );
         assert_eq!(structured["items"][2]["output"], "private result 2");
         assert_eq!(
             structured["items"][2]["operations"][0]["effect"],
@@ -1003,7 +1134,7 @@ mod lifecycle_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Semaphore;
 
-    struct LifecycleBehavior {
+    pub(super) struct LifecycleBehavior {
         entered: Arc<Semaphore>,
         release: Arc<Semaphore>,
         shutdown_calls: Arc<AtomicUsize>,
@@ -1149,6 +1280,9 @@ mod lifecycle_tests {
             .unwrap();
         let attachment: Attachment = client
             .post("http://localhost/host/operators")
+            .json(&ProvisionRequest::new(
+                service_identity(&client).await.unwrap(),
+            ))
             .send()
             .await
             .unwrap()
@@ -1158,7 +1292,7 @@ mod lifecycle_tests {
         (service, client, attachment.session)
     }
 
-    fn behavior(
+    pub(super) fn behavior(
         confirmed: bool,
         fail_shutdown: bool,
     ) -> (

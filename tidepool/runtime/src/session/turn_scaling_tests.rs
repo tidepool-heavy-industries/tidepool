@@ -1483,44 +1483,20 @@ where
             None,
         )
         .unwrap();
-    let view = admission.view();
-    let include = view.include_paths(effects.include_paths());
-    let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    let injected = view.injected_module_names();
     let compile_cell = || {
-        let request = CellCheckRequest {
-            exact_context: view.exact_compile_context(),
-            session_id: Some(view.session()),
-            cell_text: source,
-            template: &template,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &injected,
-            compile_generation: admission.initial_value_generation().0,
-            compile_view_evidence: "",
-        };
         match authority_checks {
             AuthorityChecks::NativeEmissionOwnersAbsent(old_owners) => {
                 compile_cell_program_admitted_native_emission_controls(
-                    request,
                     admission.clone(),
-                    &templates,
                     old_owners,
                 )
             }
             AuthorityChecks::TypedEntryRefusalBranches => {
-                compile_cell_program_admitted_receipt_controls(
-                    request,
-                    admission.clone(),
-                    &templates,
-                )
+                compile_cell_program_admitted_receipt_controls(admission.clone())
             }
-            AuthorityChecks::FreshTargetWork => compile_cell_program_admitted_work_controls(
-                request,
-                admission.clone(),
-                &templates,
-                None,
-            ),
+            AuthorityChecks::FreshTargetWork => {
+                compile_cell_program_admitted_work_controls(admission.clone(), None)
+            }
             AuthorityChecks::SegmentWorkCounts(count) => {
                 // Item certification and its ledger events run on this thread.
                 let subscriber = tracing_subscriber::registry().with(
@@ -1531,15 +1507,10 @@ where
                         )),
                 );
                 tracing::subscriber::with_default(subscriber, || {
-                    compile_cell_program_admitted_work_controls(
-                        request,
-                        admission.clone(),
-                        &templates,
-                        Some(count),
-                    )
+                    compile_cell_program_admitted_work_controls(admission.clone(), Some(count))
                 })
             }
-            _ => compile_cell_program_admitted(request, admission.clone(), &templates),
+            _ => compile_cell_program_admitted(admission.clone()),
         }
     };
     if matches!(authority_checks, AuthorityChecks::RefusalBranches) {

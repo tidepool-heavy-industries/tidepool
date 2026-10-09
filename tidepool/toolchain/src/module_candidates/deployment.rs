@@ -19,6 +19,8 @@ pub use source_selection::{NativeCatalogSourceSelection, NativeSourceRole};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModulePackageError {
+    #[error("compiler host work interrupted: {0}")]
+    Interrupted(#[source] std::io::Error),
     #[error("module package {}: {source}", path.display())]
     Io {
         path: PathBuf,
@@ -65,7 +67,13 @@ fn canonical_error(error: crate::recovery_artifacts::RecoveryArtifactError) -> M
         | Error::CertifiedOwnersDigestMismatch(path)
         | Error::InvalidCapturedPayload(path)
         | Error::InvalidModuleCertificate(path) => ModulePackageError::ArtifactChanged(path),
+        Error::Unreadable { error, .. } if error.kind() == std::io::ErrorKind::Interrupted => {
+            ModulePackageError::Interrupted(error)
+        }
         Error::Unreadable { path, error } => io(&path, error),
+        Error::Io(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+            ModulePackageError::Interrupted(error)
+        }
         _ => ModulePackageError::Format("canonical module interface"),
     }
 }
@@ -85,6 +93,9 @@ fn certification_error(
     format: &'static str,
 ) -> ModulePackageError {
     match error {
+        crate::certified_products::CertificationError::Interrupted(error) => {
+            ModulePackageError::Interrupted(error)
+        }
         crate::certified_products::CertificationError::Product(error) => {
             decode_error(error, format)
         }
@@ -96,6 +107,9 @@ fn certification_error(
 }
 
 fn io(path: &Path, source: std::io::Error) -> ModulePackageError {
+    if source.kind() == std::io::ErrorKind::Interrupted {
+        return ModulePackageError::Interrupted(source);
+    }
     ModulePackageError::Io {
         path: path.to_owned(),
         source,
@@ -159,7 +173,9 @@ pub(crate) fn prepare_build_roots(
 fn reject_source_aliases(root: &Path) -> Result<(), ModulePackageError> {
     let mut directories = vec![root.to_owned()];
     while let Some(directory) = directories.pop() {
+        crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
         for entry in fs::read_dir(&directory).map_err(|e| io(&directory, e))? {
+            crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
             let entry = entry.map_err(|e| io(&directory, e))?;
             let path = entry.path();
             let kind = entry.file_type().map_err(|e| io(&path, e))?;
@@ -186,6 +202,9 @@ fn read(
     }
     crate::certified_products::read_bounded_with_operation(path, limit as u64, inventory).map_err(
         |error| match error {
+            crate::certified_products::CertificationError::Interrupted(error) => {
+                ModulePackageError::Interrupted(error)
+            }
             crate::certified_products::CertificationError::Product(_) => ModulePackageError::Bounds,
             _ => ModulePackageError::ArtifactChanged(path.to_owned()),
         },
@@ -325,7 +344,71 @@ pub struct DeploymentModulePackage {
     artifact_root: PathBuf,
     catalog_identity: String,
     source_identity: String,
-    records: Vec<DecodedDeploymentRecord>,
+    records: Vec<Arc<DecodedDeploymentRecord>>,
+}
+
+/// One current configured selection; replacement never accumulates packages.
+/// Failed loads and freshness checks cannot publish a new owner.
+#[derive(Default)]
+pub(crate) struct ConfiguredModulePackageOwner {
+    current: Option<(
+        PathBuf,
+        CompilerDeploymentAuthority,
+        Arc<DeploymentModulePackage>,
+    )>,
+}
+
+impl ConfiguredModulePackageOwner {
+    pub(crate) const fn new() -> Self {
+        Self { current: None }
+    }
+    pub(crate) fn clear(&mut self) {
+        self.current = None;
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        path: &Path,
+        authority: &CompilerDeploymentAuthority,
+    ) -> Result<Arc<DeploymentModulePackage>, ModulePackageError> {
+        self.load_under(path, authority, RootPolicy::NixStore)
+    }
+
+    fn load_under(
+        &mut self,
+        path: &Path,
+        authority: &CompilerDeploymentAuthority,
+        policy: RootPolicy,
+    ) -> Result<Arc<DeploymentModulePackage>, ModulePackageError> {
+        crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
+        let started = std::time::Instant::now();
+        if let Some((selected, configured, package)) = &self.current {
+            if selected == path && configured == authority {
+                let work = package.revalidate(path, policy)?;
+                tracing::info!(target: "tidepool_toolchain::module_candidates",
+                    phase = "configured_package", reused = true,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    hydrated_modules = 0, retained_modules = package.records.len(),
+                    reauthenticated_artifact_files = work.artifact_files,
+                    reauthenticated_artifact_bytes = work.artifact_bytes,
+                    source_read_attempts = work.evidence.source_read_attempts,
+                    source_read_bytes = work.evidence.source_read_bytes,
+                    negative_metadata_calls = work.evidence.negative_metadata_calls,
+                    revalidated_source_proofs = package.records.len(),
+                    revalidated_package_imports = package.records.len());
+                return Ok(Arc::clone(package));
+            }
+        }
+        let package = Arc::new(DeploymentModulePackage::load_under(
+            path, authority, policy,
+        )?);
+        tracing::info!(target: "tidepool_toolchain::module_candidates",
+            phase = "configured_package", reused = false,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            hydrated_modules = package.records.len(), retained_modules = package.records.len());
+        self.current = Some((path.to_owned(), authority.clone(), Arc::clone(&package)));
+        Ok(package)
+    }
 }
 
 /// The loader owns both the original bytes and their single decoded product.
@@ -334,7 +417,7 @@ pub struct DeploymentModulePackage {
 #[cfg_attr(test, derive(Clone))]
 pub(super) struct DecodedDeploymentRecord {
     record: Record,
-    product: tidepool_repr::execution_schema::RawModuleProduct,
+    product: Arc<tidepool_repr::execution_schema::RawModuleProduct>,
 }
 
 impl DecodedDeploymentRecord {
@@ -348,15 +431,18 @@ impl DecodedDeploymentRecord {
         )
         .map_err(|error| decode_error(error, "original module products"))?
         .ok_or(ModulePackageError::Format("original module owner"))?;
-        Ok(Self { record, product })
+        Ok(Self {
+            record,
+            product: Arc::new(product),
+        })
     }
 
     pub(super) fn record(&self) -> &Record {
         &self.record
     }
 
-    pub(super) fn into_parts(self) -> (Record, tidepool_repr::execution_schema::RawModuleProduct) {
-        (self.record, self.product)
+    pub(super) fn product(&self) -> &Arc<tidepool_repr::execution_schema::RawModuleProduct> {
+        &self.product
     }
 }
 
@@ -367,7 +453,130 @@ impl std::ops::Deref for DecodedDeploymentRecord {
     }
 }
 
+#[derive(Debug)]
+struct PackageRevalidationWork {
+    artifact_files: u64,
+    artifact_bytes: u64,
+    evidence: crate::cache::DependencyEvidenceWork,
+}
+
 impl DeploymentModulePackage {
+    /// Retained decoded objects do not make a mutable package path immutable.
+    /// Reauthenticate physical bytes before reusing semantic admission, including
+    /// canonical companions that are not listed as native module files.
+    fn revalidate(
+        &self,
+        path: &Path,
+        policy: RootPolicy,
+    ) -> Result<PackageRevalidationWork, ModulePackageError> {
+        let inventory = Arc::new(InventoryOperation::new(Default::default()));
+        if absolute(path).as_ref() != Some(&self.artifact_root.join("catalog.json"))
+            || absolute(&self.artifact_root).as_ref() != Some(&self.artifact_root)
+        {
+            return Err(ModulePackageError::RootMoved);
+        }
+        let catalog = read(path, inventory.limits().max_bytes, &inventory)?;
+        if sha(&catalog) != self.catalog_identity {
+            return Err(ModulePackageError::ArtifactChanged(path.to_owned()));
+        }
+        self.catalog.source_selection.validate_under(policy)?;
+        let mut files = 1;
+        let mut bytes = catalog.len() as u64;
+        for (reference, limit) in self
+            .catalog
+            .execution_graphs
+            .iter()
+            .map(|reference| (reference, crate::execution_source::GRAPH_BYTES_LIMIT))
+            .chain(self.catalog.modules.iter().flat_map(|module| {
+                [
+                    (&module.owner, RECORD_LIMIT),
+                    (&module.products, inventory.limits().max_module_bytes),
+                    (&module.interface, RECORD_LIMIT),
+                    (&module.packages, RECORD_LIMIT),
+                    (&module.evidence, RECORD_LIMIT),
+                    (&module.certification, RECORD_LIMIT),
+                ]
+            }))
+        {
+            let observed = self.read_ref(reference, limit, &inventory)?;
+            files += 1;
+            bytes += observed.len() as u64;
+        }
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+            Arc::clone(&inventory),
+        );
+        for module in &self.catalog.modules {
+            let reference = &module.module_interface;
+            let companions = [
+                (
+                    &reference.interface.interface_path,
+                    reference.interface.skinny_iface_sha256,
+                    None,
+                    crate::recovery_artifacts::PACKAGE_INTERFACE_LIMIT,
+                ),
+                (
+                    &reference.interface.package_imports_path,
+                    reference.interface.package_imports_sha256,
+                    None,
+                    crate::recovery_artifacts::PACKAGE_IMPORTS_LIMIT,
+                ),
+                (
+                    &reference.certificate_path,
+                    reference.certificate_sha256,
+                    None,
+                    crate::recovery_artifacts::CERTIFICATION_LIMIT,
+                ),
+            ];
+            for (relative, digest, length, limit) in
+                companions
+                    .into_iter()
+                    .chain(reference.core.iter().map(|core| {
+                        (
+                            &core.path,
+                            core.sha256,
+                            Some(core.bytes),
+                            crate::recovery_artifacts::PACKAGE_INTERFACE_LIMIT,
+                        )
+                    }))
+            {
+                let path = self.artifact_root.join(relative);
+                if absolute(&path).as_ref() != Some(&path) {
+                    return Err(ModulePackageError::RootMoved);
+                }
+                let observed = crate::recovery_artifacts::capture_module_payload(
+                    &self.artifact_root,
+                    relative,
+                    &digest,
+                    length,
+                    limit,
+                    &mut validation,
+                )
+                .map_err(canonical_error)?;
+                files += 1;
+                bytes += observed.len() as u64;
+            }
+        }
+        let mut evidence_validation = super::shared_evidence::ValidationStage::configured_package();
+        for record in &self.records {
+            validate_dependency_evidence(&mut evidence_validation, record)?;
+            crate::recovery_artifacts::validate_package_imports_with_validation(
+                &record.package_imports,
+                &record.unit,
+                &record.module,
+                &record.original_owner.skinny_iface_sha256,
+                &self.artifact_root,
+                &mut validation,
+            )
+            .map_err(canonical_error)?;
+        }
+        crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
+        Ok(PackageRevalidationWork {
+            artifact_files: files,
+            artifact_bytes: bytes,
+            evidence: evidence_validation.work(),
+        })
+    }
+
     pub fn source_selection(&self) -> &NativeCatalogSourceSelection {
         &self.catalog.source_selection
     }
@@ -407,9 +616,11 @@ impl DeploymentModulePackage {
         policy: RootPolicy,
         inventory: Arc<InventoryOperation>,
     ) -> Result<Self, ModulePackageError> {
+        crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
         let mut package = Self::read_catalog_with_inventory(path, authority, policy, &inventory)?;
         // Validate configured products before candidate admission.
         package.records = package.read_records(package.producer_identity(), inventory)?;
+        crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
         Ok(package)
     }
 
@@ -535,8 +746,8 @@ impl DeploymentModulePackage {
             .collect())
     }
 
-    pub(super) fn into_candidates(
-        self,
+    pub(super) fn candidates(
+        &self,
         producer: &[u8],
     ) -> Result<Vec<(CandidateRecord, super::CandidateOrigin)>, ModulePackageError> {
         if producer != self.catalog.producer_identity {
@@ -544,14 +755,14 @@ impl DeploymentModulePackage {
         }
         Ok(self
             .records
-            .into_iter()
-            .zip(self.catalog.modules)
+            .iter()
+            .zip(&self.catalog.modules)
             .map(|(record, files)| {
                 (
-                    CandidateRecord::Deployment(record),
+                    CandidateRecord::Deployment(Arc::clone(record)),
                     super::CandidateOrigin::Deployment {
-                        interface: self.artifact_root.join(files.interface.path),
-                        packages: self.artifact_root.join(files.packages.path),
+                        interface: self.artifact_root.join(&files.interface.path),
+                        packages: self.artifact_root.join(&files.packages.path),
                     },
                 )
             })
@@ -562,7 +773,7 @@ impl DeploymentModulePackage {
         &self,
         producer: &[u8],
         inventory: Arc<InventoryOperation>,
-    ) -> Result<Vec<DecodedDeploymentRecord>, ModulePackageError> {
+    ) -> Result<Vec<Arc<DecodedDeploymentRecord>>, ModulePackageError> {
         if producer != self.catalog.producer_identity {
             return Err(ModulePackageError::CompilerMismatch);
         }
@@ -577,11 +788,19 @@ impl DeploymentModulePackage {
             .map_err(|_| ModulePackageError::Bounds)?;
         let mut records = Vec::with_capacity(self.catalog.modules.len());
         let mut owners = BTreeSet::new();
+        // Every physical evidence file is authenticated even when its exact
+        // immutable proof is already owned by another module in this package.
+        let mut evidence_proofs = std::collections::BTreeMap::<
+            (String, u64),
+            super::shared_evidence::SharedEvidence,
+        >::new();
+        let mut evidence_validation = super::shared_evidence::ValidationStage::configured_package();
         let mut graphs = std::collections::BTreeMap::new();
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
             inventory.clone(),
         );
         for reference in &self.catalog.execution_graphs {
+            crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
             let bytes = self.read_ref(
                 reference,
                 crate::execution_source::GRAPH_BYTES_LIMIT,
@@ -605,6 +824,7 @@ impl DeploymentModulePackage {
             }
         }
         for files in &self.catalog.modules {
+            crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
             let owner: Owner = decode_json(
                 &self.read_ref(&files.owner, RECORD_LIMIT, &inventory)?,
                 &inventory,
@@ -623,11 +843,21 @@ impl DeploymentModulePackage {
             if !owners.insert((owner.unit.clone(), owner.module.clone())) {
                 return Err(ModulePackageError::Format("duplicate module owner"));
             }
-            let evidence: super::shared_evidence::SharedEvidence = decode_json(
-                &self.read_ref(&files.evidence, RECORD_LIMIT, &inventory)?,
-                &inventory,
-                "dependency evidence JSON",
-            )?;
+            let evidence_bytes = self.read_ref(&files.evidence, RECORD_LIMIT, &inventory)?;
+            let evidence_key = (files.evidence.sha256.clone(), files.evidence.length);
+            let evidence = if let Some(proof) = evidence_proofs.get(&evidence_key) {
+                proof.clone()
+            } else {
+                inventory
+                    .reserve::<((String, u64), super::shared_evidence::SharedEvidence)>(1)
+                    .and_then(|_| inventory.charge(evidence_key.0.len()))
+                    .map_err(|_| ModulePackageError::Bounds)?;
+                let proof: super::shared_evidence::SharedEvidence =
+                    decode_json(&evidence_bytes, &inventory, "dependency evidence JSON")?;
+                evidence_proofs.insert(evidence_key, proof.clone());
+                proof
+            };
+            drop(evidence_bytes);
             let mut record = Record {
                 evidence: evidence.clone(),
                 module_interface_proof: None,
@@ -736,6 +966,7 @@ impl DeploymentModulePackage {
                     .ok_or(ModulePackageError::Format("execution source owner"))?;
                 record.execution_source = Some(graph);
             }
+            validate_dependency_evidence(&mut evidence_validation, &record)?;
             if owner.module_version != version_hash(&record)
                 || record.include != self.catalog.source_selection.include_roots()
                 || !self
@@ -743,9 +974,9 @@ impl DeploymentModulePackage {
                     .source_selection
                     .contains_source(&record.source)
                 || absolute(&record.source).as_ref() != Some(&record.source)
-                || !record.evidence.valid(&record.target_source)
                 || !record.evidence.selection_complete
             {
+                crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
                 return Err(ModulePackageError::OpenCohort);
             }
             let decoded = DecodedDeploymentRecord::decode(record, &inventory)?;
@@ -787,19 +1018,40 @@ impl DeploymentModulePackage {
                 &mut validation,
             )
             .map_err(canonical_error)?;
-            records.push(decoded);
+            records.push(Arc::new(decoded));
         }
         for record in &records {
             require_complete_cohort(
-                records.iter().map(DecodedDeploymentRecord::record),
+                records.iter().map(|record| record.record()),
                 &record.record().evidence,
             )?;
         }
         validate_closed(
-            records.iter().map(DecodedDeploymentRecord::record),
+            records.iter().map(|record| record.record()),
             &self.catalog.source_selection,
         )?;
+        tracing::info!(target: "tidepool_toolchain::module_candidates",
+            phase = "configured_package_evidence", evidence_files = self.catalog.modules.len(),
+            decoded_proofs = evidence_proofs.len(),
+            shared_proof_reuses = self.catalog.modules.len() - evidence_proofs.len());
         Ok(records)
+    }
+}
+
+fn validate_dependency_evidence(
+    stage: &mut super::shared_evidence::ValidationStage,
+    record: &Record,
+) -> Result<(), ModulePackageError> {
+    crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
+    match stage.validate(&record.evidence, &record.target_source) {
+        Ok(()) => Ok(()),
+        Err(crate::cache::DependencyEvidenceFailure::Interrupted) => {
+            Err(ModulePackageError::Interrupted(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "compiler host validation interrupted",
+            )))
+        }
+        Err(_) => Err(ModulePackageError::OpenCohort),
     }
 }
 
@@ -807,16 +1059,17 @@ fn validate_closed<'a>(
     records: impl IntoIterator<Item = &'a Record> + Clone,
     selection: &NativeCatalogSourceSelection,
 ) -> Result<(), ModulePackageError> {
+    let mut evidence_validation = super::shared_evidence::ValidationStage::configured_package();
     let owners: std::collections::BTreeMap<_, _> = records
         .clone()
         .into_iter()
         .map(|r| ((r.unit.as_str(), r.module.as_str()), r.source.as_path()))
         .collect();
     for record in records {
+        validate_dependency_evidence(&mut evidence_validation, record)?;
         if record.include != selection.include_roots()
             || !selection.contains_source(&record.source)
             || absolute(&record.source).as_ref() != Some(&record.source)
-            || !record.evidence.valid(&record.target_source)
             || !record.evidence.selection_complete
             || record.evidence.modules.iter().any(|module| {
                 module.source != Path::new("@generated-source")
@@ -883,7 +1136,9 @@ fn require_complete_cohort<'a>(
 mod tests {
     mod product_carry;
 
-    use super::super::tests::{package_bundle, product_bytes};
+    use super::super::tests::{
+        package_bundle, package_bundle_with_sidecars, package_imports_with_roots, product_bytes,
+    };
     use super::*;
     use crate::cache::{DependencyEvidence, ModuleEvidence, ProductAvailability, SourceEvidence};
     use tidepool_repr::execution_schema::InventoryDecodeLimits;
@@ -905,6 +1160,34 @@ mod tests {
         }
 
         fn with_modules_and_execution(names: &[&str], with_execution: bool) -> Self {
+            Self::with_modules_execution_and_packages(names, with_execution, &Default::default())
+        }
+
+        fn with_modules_execution_and_packages(
+            names: &[&str],
+            with_execution: bool,
+            package_witnesses: &std::collections::BTreeMap<
+                (String, String),
+                crate::certified_products::PackageInterfaceWitness,
+            >,
+        ) -> Self {
+            Self::with_modules_execution_packages_and_shadow(
+                names,
+                with_execution,
+                package_witnesses,
+                None,
+            )
+        }
+
+        fn with_modules_execution_packages_and_shadow(
+            names: &[&str],
+            with_execution: bool,
+            package_witnesses: &std::collections::BTreeMap<
+                (String, String),
+                crate::certified_products::PackageInterfaceWitness,
+            >,
+            shadow: Option<&Path>,
+        ) -> Self {
             let root = tempfile::tempdir().unwrap();
             let source = root.path().join("sources");
             let output = root.path().join("products");
@@ -971,18 +1254,48 @@ mod tests {
                     })
                     .collect(),
                 packages: vec![],
-                resolutions: vec![],
+                resolutions: shadow
+                    .into_iter()
+                    .map(|shadow| {
+                        let selected = module_source(names[0]);
+                        crate::cache::ResolutionEvidence {
+                            qualifier: crate::cache::ImportQualifier::Unqualified,
+                            module: names[0].to_owned(),
+                            boot: false,
+                            selected: Some(selected.clone()),
+                            candidates: vec![shadow.to_owned(), selected],
+                        }
+                    })
+                    .collect(),
             };
             let bytes = combine_rows(
                 names
                     .iter()
                     .map(|name| product_bytes("u", name, name.as_bytes())),
             );
-            let packages = combine_rows(
-                names
+            let packages = combine_rows(names.iter().map(|name| {
+                if package_witnesses.is_empty() {
+                    return package_bundle("u", name, name.as_bytes());
+                }
+                let roots = package_witnesses
                     .iter()
-                    .map(|name| package_bundle("u", name, name.as_bytes())),
-            );
+                    .map(|((unit, module), witness)| {
+                        ciborium::value::Value::Array(vec![
+                            ciborium::value::Value::Text(unit.clone()),
+                            ciborium::value::Value::Text(module.clone()),
+                            ciborium::value::Value::Text(
+                                witness.selected_path.to_str().unwrap().into(),
+                            ),
+                            ciborium::value::Value::Text(super::super::hex(&witness.sha256)),
+                        ])
+                    })
+                    .collect();
+                package_bundle_with_sidecars(vec![(
+                    "u".into(),
+                    (*name).into(),
+                    package_imports_with_roots("u", name, name.as_bytes(), roots),
+                )])
+            }));
             let parsed =
                 crate::certified_products::ParsedModuleProducts::decode(&bytes, &packages).unwrap();
             let selection =
@@ -1008,7 +1321,7 @@ mod tests {
                         crate::certified_products::encode_home_certification(
                             &owner,
                             &[],
-                            &std::collections::BTreeMap::new(),
+                            package_witnesses,
                         )
                         .unwrap(),
                     )
@@ -1046,7 +1359,7 @@ mod tests {
                     producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer_identity),
                     semantic_sha256: None, include: &include, source_path: &input, source: "target", evidence: &evidence,
                     exact_imports: &std::collections::BTreeMap::new(), owners: &owners, fresh_owners: &fresh,
-                    retained_sources: &std::collections::BTreeMap::new(), packages: &std::collections::BTreeMap::new(),
+                    retained_sources: &std::collections::BTreeMap::new(), packages: package_witnesses,
                 }).unwrap() else { panic!("graph"); };
                 for record in &mut prepared.records {
                     let owner = record.original_owner.owner();
@@ -1116,6 +1429,35 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&Value::Array(fields), &mut bytes).unwrap();
         bytes
+    }
+
+    #[test]
+    fn interrupted_package_authentication_refuses_and_fresh_load_recovers() {
+        let fixture = Fixture::new();
+        let cancellation = tidepool_extract_cmd::CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let outcome = tidepool_extract_cmd::with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || fixture.load(),
+        );
+        assert!(
+            matches!(outcome.action, Err(ModulePackageError::Interrupted(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        assert_eq!(
+            outcome.close,
+            tidepool_extract_cmd::CompilerTransactionClose::NotStarted
+        );
+        let outcome = tidepool_extract_cmd::with_compiler_transaction_cancellable(
+            tidepool_extract_cmd::CompilerTransactionCancellation::new(),
+            |_| {},
+            || fixture.load(),
+        );
+        assert!(!outcome.action.unwrap().records.is_empty());
+        assert_eq!(
+            outcome.close,
+            tidepool_extract_cmd::CompilerTransactionClose::NotStarted
+        );
     }
 
     #[test]
@@ -1272,7 +1614,7 @@ mod tests {
             &[3; 32],
             &current,
             scratch.path(),
-            package.into_candidates(&[3; 32]).unwrap(),
+            package.candidates(&[3; 32]).unwrap(),
             None,
         )
         .unwrap();
@@ -1440,7 +1782,7 @@ mod tests {
             after[0].original_owner.owner()
         );
 
-        let candidates = relocated.into_candidates(&[3; 32]).unwrap();
+        let candidates = relocated.candidates(&[3; 32]).unwrap();
         let super::super::CandidateOrigin::Deployment {
             interface,
             packages,

@@ -20,7 +20,7 @@ class BuckRunnerTests(unittest.TestCase):
         self.addCleanup(self.storage.cleanup)
         self.root = Path(self.storage.name) / "checkout with spaces"
         (self.root / "scripts").mkdir(parents=True)
-        for script in ("buck2-run.sh", "toolchain-inputs.sh"):
+        for script in ("buck2-run.sh", "toolchain-inputs.sh", "buck2-config-args.py"):
             shutil.copyfile(SCRIPT.parent / script, self.root / "scripts" / script)
         self.git = shutil.which("git")
         self.git_command("init", "-q")
@@ -35,6 +35,12 @@ class BuckRunnerTests(unittest.TestCase):
         (self.root / "nix").mkdir()
         (self.root / "nix/ghc.patch").write_text("pinned GHC patch\n")
         self.commit(".")
+        self.workspace_revision = "a" * 40
+        self.git_command("update-index", "--add", "--cacheinfo",
+                         f"160000,{self.workspace_revision},.exomonad/workspace")
+        subprocess.run([self.git, "-C", str(self.root), "-c", "user.name=test",
+                        "-c", "user.email=test@invalid", "commit", "-qm",
+                        "record workspace Gitlink"], check=True)
         self.tools = self.root / "tools"
         self.tools.mkdir()
         # Launcher bootstrap receives only its declared Bash/coreutils inputs.
@@ -52,7 +58,7 @@ class BuckRunnerTests(unittest.TestCase):
         # Real declared utilities only serve the stub's Git/config checks.
         self.action_tools = self.action_output / "bin"
         self.action_tools.mkdir()
-        for name in ("git", "mktemp", "rm"):
+        for name in ("git", "mktemp", "rm", "python3"):
             (self.action_tools / name).symlink_to(shutil.which(name))
         self.shell_log = self.root / "dev-shell.log"
         self.buck_log = self.root / "buck.json"
@@ -89,6 +95,17 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
             root = self.generation / "roots" / name
             root.symlink_to(output)
             records.append(f"{name}\t{self.selection.split('#')[0]}#packages.test.{name}\t{output}\t{root}\n")
+        self.workspace_resource_output = self.root / "outputs/workspace-git-resource"
+        self.workspace_resource_output.mkdir(parents=True)
+        (self.workspace_resource_output / "workspace-gitlink.json").write_text(json.dumps({
+            "schema": 1, "path": ".exomonad/workspace", "mode": "160000",
+            "revision": self.workspace_revision,
+        }))
+        workspace_root = self.generation / "roots/workspace-git-resource"
+        workspace_root.symlink_to(self.workspace_resource_output)
+        records.append(
+            f"workspace-git-resource\tgitlink:{self.workspace_revision}\t"
+            f"{self.workspace_resource_output}\t{workspace_root}\n")
         (self.generation / "outputs.tsv").write_text("".join(records))
         self.config = self.root / ".buckconfig.local"
         self.write_config(f"buck2 = {self.buck}\ngit = {self.action_tools}/git\naction_path = {self.action_tools}\n")
@@ -115,13 +132,19 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         path.write_text(f"#!{shutil.which('bash')}\nset -euo pipefail\n" + body + "\n")
         path.chmod(0o755)
 
-    def run_runner(self, *args, **environment):
+    def run_runner(self, *args, timeout_seconds=10, **environment):
         with subprocess.Popen(
             ["bash", str(self.root / "scripts/buck2-run.sh"), *args], cwd="/",
             env=dict(self.env, **environment), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
         ) as process:
             self.launch_pid = process.pid
-            stdout, stderr = process.communicate()
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                self.fail(f"Buck launcher did not finish within {timeout_seconds} seconds")
             return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
     def assert_no_shell_or_buck(self):
@@ -164,6 +187,73 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.shell_log.exists())
         self.assertEqual(json.loads(self.buck_log.read_text())["args"], args)
+
+    def test_private_shared_configuration_is_added_for_every_buck_command(self):
+        config_file = self.root / "retained-buck-config.json"
+        config_file.write_text(json.dumps({
+            "nix.native_catalog_source_root": "/nix/store/catalog-snapshot",
+            "nix.native_catalog_retention_record": "/evidence/retained.json",
+            "nix.native_catalog_retention": '{"gc_roots": []}',
+        }))
+        config_file.chmod(0o600)
+        result = self.run_runner(
+            "build", "--local-only", "-c", "remote.enabled=false",
+            TIDEPOOL_BUCK_CONFIG_FILE=str(config_file),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(self.buck_log.read_text())["args"]
+        self.assertEqual(args[0], "build")
+        self.assertEqual(args.count("-c"), 4)
+        self.assertIn("nix.native_catalog_source_root=/nix/store/catalog-snapshot", args)
+        self.assertIn("nix.native_catalog_retention_record=/evidence/retained.json", args)
+        self.assertIn('nix.native_catalog_retention={"gc_roots": []}', args)
+
+    def test_shared_configuration_requires_matching_explicit_values(self):
+        config_file = self.root / "retained-buck-config.json"
+        config_file.write_text(json.dumps({"tidepool.profile": "fast-dev"}))
+        config_file.chmod(0o600)
+        result = self.run_runner(
+            "build", "-c", "tidepool.profile=production",
+            TIDEPOOL_BUCK_CONFIG_FILE=str(config_file),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("conflicts with command-line configuration", result.stderr)
+        self.assertFalse(self.buck_log.exists())
+
+    def test_shared_configuration_refuses_group_readable_files(self):
+        config_file = self.root / "retained-buck-config.json"
+        config_file.write_text(json.dumps({"tidepool.profile": "fast-dev"}))
+        config_file.chmod(0o640)
+        result = self.run_runner(
+            "build", TIDEPOOL_BUCK_CONFIG_FILE=str(config_file),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shared Buck configuration is invalid", result.stderr)
+        self.assertFalse(self.buck_log.exists())
+
+    def test_shared_configuration_refuses_a_private_fifo_without_blocking(self):
+        config_file = self.root / "retained-buck-config.json"
+        os.mkfifo(config_file, mode=0o600)
+        config_file.chmod(0o600)
+        result = self.run_runner(
+            "build", TIDEPOOL_BUCK_CONFIG_FILE=str(config_file), timeout_seconds=2,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shared Buck configuration is invalid", result.stderr)
+        self.assertFalse(self.buck_log.exists())
+
+    def test_shared_configuration_refuses_symlinks_to_private_regular_files(self):
+        target = self.root / "actual-config.json"
+        target.write_text(json.dumps({"tidepool.profile": "fast-dev"}))
+        target.chmod(0o600)
+        config_file = self.root / "retained-buck-config.json"
+        config_file.symlink_to(target)
+        result = self.run_runner(
+            "build", TIDEPOOL_BUCK_CONFIG_FILE=str(config_file),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shared Buck configuration is invalid", result.stderr)
+        self.assertFalse(self.buck_log.exists())
 
     def test_buck_exit_status_and_signal_are_preserved(self):
         result = self.run_runner("build", BUCK_EXIT="37")
@@ -226,6 +316,34 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         self.assert_refused("changed toolchain inputs")
         self.commit("flake.nix")
         self.assert_refused("changed toolchain input pin")
+
+    def test_changed_committed_workspace_gitlink_refuses_before_buck(self):
+        revision = "b" * 40
+        self.git_command("update-index", "--cacheinfo",
+                         f"160000,{revision},.exomonad/workspace")
+        subprocess.run([self.git, "-C", str(self.root), "-c", "user.name=test",
+                        "-c", "user.email=test@invalid", "commit", "-qm",
+                        "change workspace Gitlink"], check=True)
+        self.assert_refused("changed workspace Gitlink")
+
+    def test_changed_staged_workspace_gitlink_refuses_before_buck(self):
+        self.git_command("update-index", "--cacheinfo",
+                         f"160000,{'b' * 40},.exomonad/workspace")
+        self.assert_refused("workspace Gitlink index differs from retained pin")
+
+    def test_missing_index_workspace_gitlink_refuses_before_buck(self):
+        self.git_command("update-index", "--force-remove", ".exomonad/workspace")
+        self.assert_refused("workspace Gitlink index differs from retained pin")
+
+    def test_unmerged_workspace_gitlink_refuses_before_buck(self):
+        self.git_command("update-index", "--force-remove", ".exomonad/workspace")
+        entries = "".join(
+            f"160000 {revision * 40} {stage}\t.exomonad/workspace\n"
+            for stage, revision in ((1, "a"), (2, "b"), (3, "c"))
+        )
+        subprocess.run([self.git, "-C", str(self.root), "update-index", "--index-info"],
+                       input=entries.encode(), check=True, capture_output=True)
+        self.assert_refused("workspace Gitlink index differs from retained pin")
 
     def input_tree(self, revision="HEAD"):
         return subprocess.check_output(

@@ -225,6 +225,8 @@ tidepool_rust_isolated_test(
     required_test_modules = [
         "tidepool/extract-cmd/tests/build_products_frontend.rs",
     ],
+
+    compile_env = {"CARGO_BIN_EXE_tidepool-extract": "$(location //tidepool/extract-cmd:tidepool-extract)"},
     visibility = ["PUBLIC"],
 )
 
@@ -260,6 +262,8 @@ tidepool_rust_isolated_test(
     required_test_modules = [
         "tidepool/extract-cmd/tests/build_products_ownership.rs",
     ],
+
+    compile_env = {"CARGO_BIN_EXE_tidepool-extract": "$(location //tidepool/extract-cmd:tidepool-extract)"},
     visibility = ["PUBLIC"],
 )
 
@@ -393,6 +397,8 @@ tidepool_rust_isolated_test(
     required_test_modules = [
         "tidepool/extract-cmd/tests/response_cleanup.rs",
     ],
+
+    compile_env = {"CARGO_BIN_EXE_tidepool-extract": "$(location //tidepool/extract-cmd:tidepool-extract)"},
     visibility = ["PUBLIC"],
 )
 

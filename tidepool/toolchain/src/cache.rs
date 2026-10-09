@@ -198,6 +198,7 @@ fn collect_dependency_sources<D>(
     selection: SourceSelection,
     digest: &impl Fn(&[u8]) -> D,
 ) -> Result<(), SourceManifestError> {
+    crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
     let canonical = fs::canonicalize(dir).map_err(|error| source_error(dir, error))?;
     if !ancestors.insert(canonical.clone()) {
         return Err(source_error(
@@ -211,6 +212,7 @@ fn collect_dependency_sources<D>(
         .map_err(|error| source_error(dir, error))?;
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {
+        crate::host_work::checkpoint().map_err(|error| source_error(dir, error))?;
         let path = entry.path();
         if !selection.includes_directory(&path) {
             continue;
@@ -219,7 +221,8 @@ fn collect_dependency_sources<D>(
         if metadata.is_dir() {
             collect_dependency_sources(root, &path, out, ancestors, selection, digest)?;
         } else if selection.includes_file(&path) {
-            let bytes = fs::read(&path).map_err(|error| source_error(&path, error))?;
+            let bytes =
+                crate::host_work::read(&path).map_err(|error| source_error(&path, error))?;
             let rel = path.strip_prefix(root).map_err(|error| {
                 source_error(
                     &path,
@@ -443,6 +446,7 @@ impl ModuleEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DependencyEvidenceFailure {
+    Interrupted,
     WorkerDecode {
         message: String,
     },
@@ -487,6 +491,14 @@ pub enum ResolutionWitnessFailure {
     SelectedSource,
     NonAbsoluteCandidate { index: usize },
     NegativeCandidateUnavailable { index: usize },
+}
+
+/// Physical source observations made by a fresh dependency validation stage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DependencyEvidenceWork {
+    pub source_read_attempts: u64,
+    pub source_read_bytes: u64,
+    pub negative_metadata_calls: u64,
 }
 
 impl DependencyEvidence {
@@ -535,19 +547,36 @@ impl DependencyEvidence {
     }
 
     pub(crate) fn validate(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
+        self.validate_with_work(source, &mut DependencyEvidenceWork::default())
+    }
+
+    pub(crate) fn validate_with_work(
+        &self,
+        source: &str,
+        work: &mut DependencyEvidenceWork,
+    ) -> Result<(), DependencyEvidenceFailure> {
         if !self.cache_safe {
             return Err(DependencyEvidenceFailure::Header);
         }
-        self.validate_consumed_sources(source)
+        self.validate_consumed_sources_with_work(source, work)
     }
 
     fn validate_consumed_sources(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
+        self.validate_consumed_sources_with_work(source, &mut DependencyEvidenceWork::default())
+    }
+
+    fn validate_consumed_sources_with_work(
+        &self,
+        source: &str,
+        work: &mut DependencyEvidenceWork,
+    ) -> Result<(), DependencyEvidenceFailure> {
         if self.version != 4 || self.sources.is_empty() || self.modules.is_empty() {
             return Err(DependencyEvidenceFailure::Header);
         }
         let mut paths = std::collections::HashSet::new();
         let mut target = false;
         for (index, item) in self.sources.iter().enumerate() {
+            crate::host_work::checkpoint().map_err(|_| DependencyEvidenceFailure::Interrupted)?;
             if !paths.insert(&item.path) || item.sha256.len() != 64 {
                 return Err(DependencyEvidenceFailure::Source {
                     index,
@@ -564,12 +593,20 @@ impl DependencyEvidence {
                         reason: SourceWitnessFailure::Malformed,
                     });
                 }
-                let Ok(bytes) = fs::read(&item.path) else {
-                    return Err(DependencyEvidenceFailure::Source {
-                        index,
-                        reason: SourceWitnessFailure::Unavailable,
-                    });
+                work.source_read_attempts += 1;
+                let bytes = match crate::host_work::read(&item.path) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        return Err(DependencyEvidenceFailure::Interrupted);
+                    }
+                    Err(_) => {
+                        return Err(DependencyEvidenceFailure::Source {
+                            index,
+                            reason: SourceWitnessFailure::Unavailable,
+                        })
+                    }
                 };
+                work.source_read_bytes += bytes.len() as u64;
                 hex_digest(&Sha256::digest(bytes))
             };
             if digest != item.sha256 {
@@ -587,6 +624,7 @@ impl DependencyEvidence {
         }
         let mut modules = std::collections::HashSet::new();
         for (module_index, module) in self.modules.iter().enumerate() {
+            crate::host_work::checkpoint().map_err(|_| DependencyEvidenceFailure::Interrupted)?;
             if module.unit.is_empty()
                 || module.module.is_empty()
                 || !paths.contains(&module.source)
@@ -617,6 +655,7 @@ impl DependencyEvidence {
         }
         let mut resolutions = std::collections::HashMap::new();
         for (index, resolution) in self.resolutions.iter().enumerate() {
+            crate::host_work::checkpoint().map_err(|_| DependencyEvidenceFailure::Interrupted)?;
             if resolution.module.is_empty()
                 || !resolution.qualifier.valid()
                 || (resolution.qualifier.is_external_package() != resolution.candidates.is_empty())
@@ -648,6 +687,8 @@ impl DependencyEvidence {
                 }
             }
             for (candidate_index, candidate) in resolution.candidates.iter().enumerate() {
+                crate::host_work::checkpoint()
+                    .map_err(|_| DependencyEvidenceFailure::Interrupted)?;
                 if !candidate.is_absolute() {
                     return Err(DependencyEvidenceFailure::Resolution {
                         index,
@@ -659,6 +700,7 @@ impl DependencyEvidence {
                 if Some(candidate) == resolution.selected.as_ref() {
                     continue;
                 }
+                work.negative_metadata_calls += 1;
                 match fs::metadata(candidate) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     _ => {
@@ -673,6 +715,7 @@ impl DependencyEvidence {
             }
         }
         for (module_index, module) in self.modules.iter().enumerate() {
+            crate::host_work::checkpoint().map_err(|_| DependencyEvidenceFailure::Interrupted)?;
             for (import_index, imported) in module.imports.iter().enumerate() {
                 if resolutions
                     .get(&(&imported.qualifier, &imported.module, imported.boot))
@@ -798,23 +841,45 @@ pub(crate) fn artifacts_load(
     key: &InvocationKey,
     names: &[&str],
     source: &str,
-) -> Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)> {
-    let bytes = fs::read(crate::paths::compile_cache_dir().join(format!("{key}.bundle"))).ok()?;
-    decode_bundle(&bytes, names, source)
+) -> std::io::Result<Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)>> {
+    crate::host_work::checkpoint()?;
+    let bytes = match crate::host_work::read(
+        &crate::paths::compile_cache_dir().join(format!("{key}.bundle")),
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Err(error),
+        Err(_) => return Ok(None),
+    };
+    let result = decode_bundle(&bytes, names, source)?;
+    if result.is_none() {
+        crate::host_work::checkpoint()?;
+    }
+    Ok(result)
 }
 
 fn decode_bundle(
     bytes: &[u8],
     names: &[&str],
     source: &str,
-) -> Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)> {
+) -> std::io::Result<Option<(Vec<Option<Vec<u8>>>, DependencyEvidence)>> {
+    macro_rules! present {
+        ($value:expr) => {
+            match $value {
+                Some(value) => value,
+                None => return Ok(None),
+            }
+        };
+    }
+    crate::host_work::checkpoint()?;
     let mut remaining = bytes;
-    let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(
-        take_frame(&mut remaining)?,
-    )
-    .ok()?;
+    let manifest = present!(
+        tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(present!(take_frame(
+            &mut remaining
+        )),)
+        .ok()
+    );
     if manifest.entries().len() != names.len() + 1 {
-        return None;
+        return Ok(None);
     }
     let mut out = Vec::with_capacity(names.len());
     let mut recorded_evidence = None;
@@ -824,24 +889,29 @@ fn decode_bundle(
         .chain(std::iter::once("dependencies.json"))
         .zip(manifest.entries())
     {
+        crate::host_work::checkpoint()?;
         if name != entry.name() || entry.digest().is_none() {
-            return None;
+            return Ok(None);
         }
-        let value = take_frame(&mut remaining)?;
+        let value = present!(take_frame(&mut remaining));
         if !entry.matches(value) {
-            return None;
+            return Ok(None);
         }
         if name == "dependencies.json" {
-            let evidence: DependencyEvidence = serde_json::from_slice(value).ok()?;
+            let evidence: DependencyEvidence = present!(serde_json::from_slice(value).ok());
             if !evidence.reusable_without_worker(source) {
-                return None;
+                // Source authentication can observe cancellation during its read.
+                crate::host_work::checkpoint()?;
+                return Ok(None);
             }
             recorded_evidence = Some(evidence);
         } else {
             out.push(Some(value.to_vec()));
         }
     }
-    remaining.is_empty().then_some(out).zip(recorded_evidence)
+    // This is the completion cutoff for the fully authenticated immutable memo.
+    crate::host_work::checkpoint()?;
+    Ok(remaining.is_empty().then_some(out).zip(recorded_evidence))
 }
 
 pub(crate) fn artifacts_store(
@@ -1335,6 +1405,39 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_bundle_lookup_is_a_refusal_and_fresh_decode_recovers() {
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose,
+        };
+        let cancellation = CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let stopped = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || {
+                artifacts_load(
+                    &InvocationKey("cancelled-lookup-must-not-read".into()),
+                    &["meta.cbor"],
+                    "target",
+                )
+            },
+        );
+        assert_eq!(
+            stopped.action.unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert_eq!(stopped.close, CompilerTransactionClose::NotStarted);
+        let recovered = with_compiler_transaction_cancellable(
+            CompilerTransactionCancellation::new(),
+            |_| {},
+            || decode_bundle(b"malformed", &["meta.cbor"], "target"),
+        );
+        assert!(recovered.action.unwrap().is_none());
+        assert_eq!(recovered.close, CompilerTransactionClose::NotStarted);
+    }
+
+    #[test]
     fn bundle_integrity_binds_evidence_and_exact_named_artifacts() {
         let root = tempfile::tempdir().unwrap();
         let evidence_bytes = serde_json::to_vec(&evidence(root.path())).unwrap();
@@ -1349,13 +1452,23 @@ mod tests {
         for (_, value) in artifacts {
             append_frame(&mut bytes, value.unwrap());
         }
-        assert!(decode_bundle(&bytes, &["meta.cbor"], "target").is_some());
-        assert!(decode_bundle(&bytes, &["other.cbor"], "target").is_none());
-        assert!(decode_bundle(&bytes, &["meta.cbor"], "other source").is_none());
+        assert!(decode_bundle(&bytes, &["meta.cbor"], "target")
+            .unwrap()
+            .is_some());
+        assert!(decode_bundle(&bytes, &["other.cbor"], "target")
+            .unwrap()
+            .is_none());
+        assert!(decode_bundle(&bytes, &["meta.cbor"], "other source")
+            .unwrap()
+            .is_none());
         let end = bytes.len() - 1;
         bytes[end] ^= 1;
-        assert!(decode_bundle(&bytes, &["meta.cbor"], "target").is_none());
-        assert!(decode_bundle(&bytes[..end], &["meta.cbor"], "target").is_none());
+        assert!(decode_bundle(&bytes, &["meta.cbor"], "target")
+            .unwrap()
+            .is_none());
+        assert!(decode_bundle(&bytes[..end], &["meta.cbor"], "target")
+            .unwrap()
+            .is_none());
 
         let mut package_evidence = evidence(root.path());
         package_evidence.packages.push("Data.List".into());
@@ -1373,6 +1486,8 @@ mod tests {
         for (_, value) in package_artifacts {
             append_frame(&mut package_bytes, value.unwrap());
         }
-        assert!(decode_bundle(&package_bytes, &["meta.cbor"], "target").is_none());
+        assert!(decode_bundle(&package_bytes, &["meta.cbor"], "target")
+            .unwrap()
+            .is_none());
     }
 }

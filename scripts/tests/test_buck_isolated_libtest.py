@@ -39,6 +39,83 @@ class IsolatedLibtestTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_concurrent_cases_keep_candidate_sources_and_cache_reuse_in_their_own_scope(self):
+        for diagnostic in (False, True):
+            with self.subTest(diagnostic=diagnostic):
+                rendezvous = Path(self.tmp.name) / f'cache-race-{diagnostic}'
+                rendezvous.mkdir()
+                ambient = rendezvous / 'ambient-cache'
+                ambient.mkdir()
+                (ambient / 'candidate').write_text('ambient must remain untouched')
+                self.binary.write_text('#!' + sys.executable + '\n' +
+                    'import os, pathlib, subprocess, sys, time\n' +
+                    f'root = pathlib.Path({str(rendezvous)!r})\n' +
+                    'name = sys.argv[2]\n' +
+                    'cache = pathlib.Path(os.environ["TIDEPOOL_COMPILE_CACHE_DIR"])\n' +
+                    'source = root / (name + ".hs")\n' +
+                    'source.write_text(name)\n' +
+                    '(cache / "candidate").write_text(str(source))\n' +
+                    '(root / (name + ".ready")).touch()\n' +
+                    'deadline = time.monotonic() + 3\n' +
+                    'while len(list(root.glob("*.ready"))) != 2:\n' +
+                    '    assert time.monotonic() < deadline, "other case did not arrive"\n' +
+                    '    time.sleep(0.005)\n' +
+                    'assert (cache / "candidate").read_text() == str(source)\n' +
+                    'if name == "suite::first":\n' +
+                    '    source.unlink()\n' +
+                    '    (root / "first-released").touch()\n' +
+                    'else:\n' +
+                    '    while not (root / "first-released").exists():\n' +
+                    '        assert time.monotonic() < deadline, "first case did not release"\n' +
+                    '        time.sleep(0.005)\n' +
+                    '    assert pathlib.Path((cache / "candidate").read_text()).read_text() == name\n' +
+                    'observed = subprocess.check_output([sys.executable, "-c",\n' +
+                    '    "import os,pathlib;print((pathlib.Path(os.environ[\\\"TIDEPOOL_COMPILE_CACHE_DIR\\\"])/\\\"candidate\\\").read_text())"], text=True)\n' +
+                    'assert observed.strip() == str(source), "same case lost its cache reuse"\n' +
+                    'print("test result: ok. 1 passed; 0 failed; 0 ignored;")\n')
+                self.binary.chmod(0o700)
+                records = [{}, {}]
+                def run(index):
+                    root = rendezvous / f'artifacts-{index}' if diagnostic else None
+                    return runner.run_one(str(self.binary), ('suite::first', 'suite::second')[index],
+                        False, 5, records[index], artifact_root=root, retain_artifacts=diagnostic)
+                with patch.dict(os.environ, {'TIDEPOOL_COMPILE_CACHE_DIR': str(ambient)}), \
+                     runner.concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    outcomes = list(pool.map(run, range(2)))
+                for outcome in outcomes:
+                    self.assertTrue(outcome[0], outcome[1:])
+                caches = [Path(record['compile_cache_root']) for record in records]
+                self.assertNotEqual(caches[0], caches[1])
+                self.assertNotIn(ambient, caches)
+                self.assertEqual((ambient / 'candidate').read_text(), 'ambient must remain untouched')
+                for cache, record in zip(caches, records):
+                    self.assertEqual(cache.is_dir(), diagnostic)
+                    self.assertEqual(record['compile_cache_disposition'],
+                                     'retained' if diagnostic else 'removed')
+
+    def test_case_cache_selection_crosses_delegation_exactly(self):
+        selected = '/case/artifacts/compile-cache'
+        record = {}
+        command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', record,
+            environment={'TIDEPOOL_COMPILE_CACHE_DIR': selected, 'UNDECLARED_CACHE': '/ambient'})
+        self.assertIn(f'--setenv=TIDEPOOL_COMPILE_CACHE_DIR={selected}', command)
+        self.assertIn('TIDEPOOL_COMPILE_CACHE_DIR', record['environment_names'])
+        self.assertFalse(any('UNDECLARED_CACHE' in word for word in command))
+
+    def test_missing_case_cache_is_not_reported_as_runner_cleanup(self):
+        root = Path(self.tmp.name) / 'missing-cache-artifacts'
+        record = {}
+        def run(args, timeout, environment=None):
+            Path(environment['TIDEPOOL_COMPILE_CACHE_DIR']).rmdir()
+            return completed_process(args, 101,
+                'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n', '')
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::failure', False,
+                5, record, artifact_root=root)
+        self.assertFalse(passed)
+        self.assertTrue(root.is_dir())
+        self.assertEqual(record['compile_cache_disposition'], 'missing')
+
     def test_failure_and_timeout_preserve_preexecution_case_evidence(self):
         for timed_out in (False, True):
             with self.subTest(timed_out=timed_out):
@@ -47,6 +124,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                     'import os, pathlib, time\n' +
                     'root = pathlib.Path(os.environ["TIDEPOOL_TEST_ARTIFACT_ROOT"])\n' +
                     'assert os.environ["TIDEPOOL_TEST_DIAGNOSTIC_SCOPE"] == "1"\n' +
+                    'cache = pathlib.Path(os.environ["TIDEPOOL_COMPILE_CACHE_DIR"])\n' +
+                    '(cache / "candidate").write_text("retained failed input")\n' +
                     '(root / "completed-compile.txt").write_text("retained before execution")\n' +
                     ('time.sleep(30)\n' if timed_out else
                      'print("test result: FAILED. 0 passed; 1 failed; 0 ignored;")\nraise SystemExit(101)\n'))
@@ -57,6 +136,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                 self.assertFalse(passed)
                 self.assertTrue((root / 'case.json').is_file())
                 self.assertEqual((root / 'completed-compile.txt').read_text(), 'retained before execution')
+                self.assertEqual((root / 'compile-cache/candidate').read_text(), 'retained failed input')
+                self.assertEqual(record['compile_cache_disposition'], 'retained')
                 self.assertEqual(record['status'], 'timeout' if timed_out else 'finished')
                 self.assertEqual(record['executed_test_count'], None if timed_out else 1)
                 self.assertEqual(record['process_cleanup_status'], 'confirmed')
@@ -98,6 +179,56 @@ class IsolatedLibtestTests(unittest.TestCase):
                         self.assertFalse(record['diagnostic_evidence_complete'])
                         self.assertTrue(record['diagnostic_summaries']['issues'])
                         self.assertNotIn('artifacts_removed_after_success', record)
+                        self.assertTrue(record['artifacts_retained_after_success'])
+                        self.assertEqual(record['artifact_disposition'], 'retained')
+
+    def test_artifact_disposition_matches_observed_outcomes_across_operation_combinations(self):
+        # Independently classify filesystem disposition after each run. Reusing
+        # the outcome record must not carry a previous case's retention claim.
+        record = {}
+        for index, (libtest_passes, cleanup, complete, diagnostic, retain) in enumerate(
+                itertools.product((False, True), repeat=5)):
+            with self.subTest(libtest_passes=libtest_passes, cleanup=cleanup,
+                              complete=complete, diagnostic=diagnostic, retain=retain):
+                root = Path(self.tmp.name) / f'disposition-{index}'
+                result = completed_process([], 0 if libtest_passes else 101,
+                    'test result: ok. 1 passed; 0 failed; 0 ignored;\n' if libtest_passes else
+                    'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n', '')
+                result.cleanup_confirmed = cleanup
+                with patch.object(runner, 'execute', return_value=result), \
+                     patch.object(runner, 'case_artifact_evidence',
+                                  return_value=(cleanup, False, complete, '')), \
+                     patch.dict(os.environ):
+                    if diagnostic:
+                        os.environ['TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS'] = '1'
+                    else:
+                        os.environ.pop('TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', None)
+                    passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                        10, record, artifact_root=root, retain_artifacts=retain)
+                expected_pass = libtest_passes and cleanup
+                expected_retained = not (expected_pass and complete and not diagnostic and not retain)
+                self.assertEqual(passed, expected_pass)
+                self.assertEqual(root.is_dir(), expected_retained)
+                self.assertEqual(record['artifact_disposition'], 'retained' if expected_retained else 'removed')
+                self.assertEqual(record.get('artifacts_retained_after_success', False),
+                                 expected_retained and expected_pass)
+                self.assertEqual(record.get('artifacts_retained_after_failure', False),
+                                 expected_retained and not expected_pass)
+                self.assertEqual(record.get('artifacts_removed_after_success', False), not expected_retained)
+
+    def test_missing_artifact_root_never_claims_retention(self):
+        root = Path(self.tmp.name) / 'missing-artifacts'
+        def run(args, timeout, environment=None):
+            import shutil
+            shutil.rmtree(root)
+            return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        record = {}
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                10, record, artifact_root=root, retain_artifacts=True)
+        self.assertTrue(passed)
+        self.assertEqual(record['artifact_disposition'], 'missing')
+        self.assertNotIn('artifacts_retained_after_success', record)
 
     def test_scratch_without_capture_markers_has_no_transaction_report_obligation(self):
         root = Path(self.tmp.name) / 'unstarted-scratch'
@@ -478,7 +609,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         frontend.write_bytes(b'frontend at launch')
         worker.write_bytes(b'worker at launch')
         record = {}
-        def run(args, timeout):
+        def run(args, timeout, environment=None):
             captured = record['launch_inputs']
             self.assertEqual(captured['executable']['sha256'], hashlib.sha256(self.binary.read_bytes()).hexdigest())
             self.assertEqual(captured['resources']['TIDEPOOL_EXTRACT']['sha256'], hashlib.sha256(frontend.read_bytes()).hexdigest())
@@ -1114,6 +1245,93 @@ class IsolatedLibtestTests(unittest.TestCase):
                 execute.assert_not_called()
                 self.assertIn('declared resource', errors.getvalue())
 
+    def test_compiler_selection_is_equal_for_direct_and_delegated_libtest(self):
+        catalog = Path(self.tmp.name) / 'declared-catalog.json'
+        catalog.write_text('{}')
+        root_entry = Path(self.tmp.name) / 'declared-root-entry'
+        root_entry.mkdir()
+        daemon = Path(self.tmp.name) / 'declared-daemon.sock'
+        daemon.touch()
+        declared = {
+            'TIDEPOOL_COMPILER_MODULES': str(catalog),
+            'TIDEPOOL_PREPARED_ROOT_ENTRY': str(root_entry),
+            'TIDEPOOL_EXTRACT_DAEMON_SOCKET': str(daemon),
+        }
+        poisoned = {
+            'TIDEPOOL_COMPILER_MODULES': '/ambient/catalog',
+            'TIDEPOOL_PREPARED_ROOT_ENTRY': '/ambient/root-entry',
+            'TIDEPOOL_EXTRACT_DAEMON_SOCKET': '/ambient/daemon.sock',
+            'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT': 'ambient-endpoint',
+            'TIDEPOOL_EXTRACT_NO_DAEMON': '1',
+        }
+        self.binary.write_text(
+            '#!' + sys.executable + '\n'
+            'import json, os, pathlib, sys\n'
+            'if "--list" in sys.argv:\n'
+            '    print("suite::ignored: test" if "--ignored" in sys.argv else "suite::works: test\\nsuite::ignored: test")\n'
+            'elif "--exact" in sys.argv:\n'
+            '    keys = ' + repr(sorted(poisoned)) + '\n'
+            '    output = pathlib.Path(os.environ["TIDEPOOL_TEST_ARTIFACT_ROOT"])\n'
+            '    (output / "compiler-selection.json").write_text(json.dumps({key: os.environ.get(key) for key in keys}))\n'
+            '    print("test result: ok. 1 passed; 0 failed; 0 ignored;")\n'
+        )
+        self.binary.chmod(0o700)
+        outputs = {}
+        original_execute = runner.execute
+
+        def execute(args, timeout, service_slice=None, service_record=None,
+                    environment=None, declared_resources=()):
+            if service_slice is None:
+                return original_execute(args, timeout, environment=environment)
+            command, _ = runner.delegated_command(
+                args, timeout, service_slice, service_record,
+                environment=environment, declared_resources=declared_resources)
+            child_environment = {}
+            for value in command:
+                if value.startswith('--setenv='):
+                    key, selected = value[len('--setenv='):].split('=', 1)
+                    child_environment[key] = selected
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    errors='replace', env=child_environment, check=False)
+            result.cleanup_confirmed = True
+            service_record.update(cleanup_confirmed=True, manager_wait_success=True,
+                                  admission_observer_stopped=True)
+            return result
+
+        for bind_resources in (False, True):
+            for delegated in (False, True):
+                with self.subTest(bind_resources=bind_resources, delegated=delegated), \
+                     tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory) / 'runner-output'
+                    arguments = [str(self.binary), '--exact', 'suite::works',
+                                 '--expected-count', '1', '--output-dir', str(output),
+                                 '--retain-artifacts']
+                    selected_resources = declared if bind_resources else {}
+                    for name in selected_resources:
+                        arguments.extend(['--resource-env', name])
+                    if delegated:
+                        arguments.append('--delegated-service')
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with patch.dict(os.environ, clear=True):
+                        os.environ.update({'PATH': os.environ.get('PATH', ''),
+                                           **poisoned, **selected_resources})
+                        with patch.object(runner, 'execute', side_effect=execute), \
+                             contextlib.redirect_stdout(stdout), \
+                             contextlib.redirect_stderr(stderr):
+                            result = runner.main(arguments)
+                    self.assertEqual(result, 0, stderr.getvalue() + stdout.getvalue())
+                    key = hashlib.sha256(b'suite::works').hexdigest()
+                    captured = output / key / 'artifacts/compiler-selection.json'
+                    outputs[(bind_resources, delegated)] = json.loads(captured.read_text())
+
+        self.assertEqual(outputs[(False, False)], outputs[(False, True)])
+        self.assertEqual(outputs[(False, False)], {name: None for name in poisoned})
+        self.assertEqual(outputs[(True, False)], outputs[(True, True)])
+        self.assertEqual(outputs[(True, False)], declared | {
+            'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT': None,
+            'TIDEPOOL_EXTRACT_NO_DAEMON': None,
+        })
+
     def test_delegated_command_forwards_bounded_startup_and_existing_compiler_diagnostics(self):
         environment = {
             'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600',
@@ -1161,7 +1379,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertFalse(record['cleanup_confirmed'])
 
     def test_delegated_cleanup_failure_refuses_pass_without_erasing_actual_count(self):
-        def result(args, timeout, service_slice, service_record):
+        def result(args, timeout, service_slice, service_record, environment=None):
             self.assertEqual(service_slice, 'app.slice')
             service_record.update(cleanup_confirmed=False, cleanup_error='service still active')
             return completed_process(args, 0,
@@ -1223,7 +1441,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                 spawn.assert_not_called()
 
     def test_delegated_launch_failure_keeps_test_execution_unknown(self):
-        def refused(args, timeout, service_slice, service_record):
+        def refused(args, timeout, service_slice, service_record, environment=None):
             service_record.update(cleanup_confirmed=True)
             return completed_process(args, 1, '', 'service admission refused')
         record = {}
@@ -1894,26 +2112,108 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('FAIL suite::works', output)
         self.assertIn('0 passed; 1 failed', output)
 
-        def child_then_empty_parent(argv, timeout):
+        reached = []
+        def child_then_empty_parent(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
+            reached.append(argv[2])
             return completed_process(
                 argv,
                 0,
-                'child output: test result: ok. 1 passed; 0 failed; 0 ignored;\n'
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n'
                 'test result: ok. 0 passed; 0 failed; 0 ignored; 1 measured; 1 filtered out;\n',
                 '',
             )
 
+        retained = Path(self.tmp.name) / 'parent-summary'
         result, output, _ = self.invoke(
-            ['--exact', 'suite::works', '--expected-count', '1'], child_then_empty_parent
+            ['--exact', 'suite::works', '--expected-count', '1',
+             '--output-dir', str(retained)], child_then_empty_parent
         )
         self.assertEqual(result, 1)
         self.assertIn('FAIL suite::works', output)
+        self.assertEqual(reached, ['suite::works'])
+        records = [json.loads(path.read_text()) for path in retained.glob('*.json')]
+        self.assertEqual(len(records), 1)
+        execution = records[0]['execution']
+        self.assertFalse(records[0]['passed'])
+        self.assertEqual(execution['status'], 'finished')
+        self.assertEqual(execution['exit_code'], 0)
+        self.assertEqual(execution['executed_test_count'], 0)
+        self.assertEqual(execution['passed_test_count'], 0)
+        self.assertEqual(execution['failed_test_count'], 0)
+
+    def test_contradictory_child_and_terminal_summaries_refuse_with_terminal_counts(self):
+        record = {}
+        reached = []
+        def run(args, timeout, environment=None):
+            reached.append(args[2])
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n'
+                'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n', '')
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::contradiction', False,
+                5, record, artifact_root=Path(self.tmp.name) / 'contradictory-summary')
+        self.assertFalse(passed)
+        self.assertEqual(reached, ['suite::contradiction'])
+        self.assertEqual(record['status'], 'finished')
+        self.assertEqual(record['exit_code'], 0)
+        self.assertEqual(record['executed_test_count'], 1)
+        self.assertEqual(record['passed_test_count'], 0)
+        self.assertEqual(record['failed_test_count'], 1)
+
+    def test_generated_terminal_summaries_agree_with_independent_sequence_oracle(self):
+        # Each producer model explicitly says whether it owns the terminal
+        # result. The oracle folds these models, without parsing output text.
+        rows = [
+            ('ok', True, (True, 1, 0, 0), 'test result: ok. 1 passed; 0 failed; 0 ignored;\n'),
+            ('failed', True, (False, 0, 1, 0), 'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n'),
+            ('zero', True, (True, 0, 0, 0), 'test result: ok. 0 passed; 0 failed; 0 ignored;\n'),
+            ('multiple', True, (True, 2, 0, 0), 'test result: ok. 2 passed; 0 failed; 0 ignored;\n'),
+            ('ignored', True, (True, 0, 0, 1), 'test result: ok. 0 passed; 0 failed; 1 ignored;\n'),
+            ('ok-with-failure', True, (True, 1, 1, 0), 'test result: ok. 1 passed; 1 failed; 0 ignored;\n'),
+            ('failed-with-success', True, (False, 1, 0, 0), 'test result: FAILED. 1 passed; 0 failed; 0 ignored;\n'),
+            ('prefixed-child', False, None, 'child output: test result: ok. 1 passed; 0 failed; 0 ignored;\n'),
+            ('prefixed-child-failure', False, None, 'child output: test result: FAILED. 0 passed; 1 failed; 0 ignored;\n'),
+            ('diagnostic', False, None, 'diagnostic after result\n'),
+            ('invalid-tag', True, None, 'test result: UNKNOWN. 1 passed; 0 failed; 0 ignored;\n'),
+            ('invalid-count', True, None, 'test result: ok. missing passed; 0 failed; 0 ignored;\n'),
+        ]
+        histories = itertools.chain.from_iterable(itertools.product(rows, repeat=n) for n in range(3))
+        for index, history in enumerate(histories):
+            expected = None
+            for _, owns_terminal, result, _ in history:
+                if owns_terminal:
+                    expected = result
+            stdout = ''.join(row[3] for row in history)
+            self.assertEqual(runner.terminal_summary(stdout), expected)
+            self.assertEqual(runner.terminal_summary(stdout.encode()), expected)
+            for exit_code, cleanup in itertools.product((0, 101), (False, True)):
+                with self.subTest(history=[row[0] for row in history], exit_code=exit_code, cleanup=cleanup):
+                    record = {}
+                    reached = []
+                    def run(args, timeout, environment=None):
+                        reached.append(args[2])
+                        result = completed_process(args, exit_code, stdout, '')
+                        result.cleanup_confirmed = cleanup
+                        return result
+                    root = Path(self.tmp.name) / f'summary-{index}-{exit_code}-{cleanup}'
+                    with patch.object(runner, 'execute', side_effect=run):
+                        passed, _, _ = runner.run_one(str(self.binary), 'suite::summary', False,
+                            5, record, artifact_root=root)
+                    self.assertEqual(reached, ['suite::summary'])
+                    self.assertEqual(record['status'], 'finished')
+                    self.assertEqual(record['exit_code'], exit_code)
+                    self.assertEqual(passed, exit_code == 0 and cleanup and expected == (True, 1, 0, 0))
+                    self.assertEqual(record['executed_test_count'],
+                                     None if expected is None else expected[1] + expected[2])
+                    self.assertEqual(record['passed_test_count'], None if expected is None else expected[1])
+                    self.assertEqual(record['failed_test_count'], None if expected is None else expected[2])
+                    self.assertEqual(record.get('ignored_test_count'), None if expected is None else expected[3])
 
     def test_test_failure_and_timeout_are_counted(self):
-        def fail(argv, timeout):
+        def fail(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
@@ -1928,7 +2228,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('FAIL suite::works', output)
         self.assertIn('panic', errors)
 
-        def timeout(argv, timeout):
+        def timeout(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered

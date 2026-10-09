@@ -80,12 +80,14 @@ pub(crate) struct ValidationStage {
     proofs: BTreeMap<usize, ValidatedSharedProof>,
     walks: u64,
     hits: u64,
+    work: crate::cache::DependencyEvidenceWork,
 }
 
 #[derive(Debug)]
 enum ValidationStageKind {
     Acquisition,
     Publication,
+    ConfiguredPackage,
 }
 
 struct ValidatedSharedProof {
@@ -101,12 +103,19 @@ impl ValidationStage {
     pub(crate) fn publication() -> Self {
         Self::new(ValidationStageKind::Publication)
     }
+    pub(crate) fn configured_package() -> Self {
+        Self::new(ValidationStageKind::ConfiguredPackage)
+    }
+    pub(crate) fn work(&self) -> crate::cache::DependencyEvidenceWork {
+        self.work
+    }
     fn new(kind: ValidationStageKind) -> Self {
         Self {
             kind,
             proofs: BTreeMap::new(),
             walks: 0,
             hits: 0,
+            work: Default::default(),
         }
     }
 
@@ -115,6 +124,8 @@ impl ValidationStage {
         proof: &SharedEvidence,
         target_source: &str,
     ) -> Result<(), crate::cache::DependencyEvidenceFailure> {
+        crate::host_work::checkpoint()
+            .map_err(|_| crate::cache::DependencyEvidenceFailure::Interrupted)?;
         let key = Arc::as_ptr(&proof.0) as usize;
         let retained = self
             .proofs
@@ -128,7 +139,10 @@ impl ValidationStage {
             return result.clone();
         }
         self.walks += 1;
-        let result = proof.0.evidence.validate(target_source);
+        let result = proof
+            .0
+            .evidence
+            .validate_with_work(target_source, &mut self.work);
         retained
             .sources
             .insert(target_source.to_owned(), result.clone());
@@ -138,9 +152,13 @@ impl ValidationStage {
 
 impl Drop for ValidationStage {
     fn drop(&mut self) {
+        let work = self.work();
         tracing::info!(target: "tidepool_toolchain::module_candidates", phase = "shared_evidence_validation",
             stage = ?self.kind, shared_proofs = self.proofs.len(), proof_walks = self.walks,
-            proof_reuses = self.hits, "source evidence stage completed");
+            proof_reuses = self.hits, source_read_attempts = work.source_read_attempts,
+            source_read_bytes = work.source_read_bytes,
+            negative_metadata_calls = work.negative_metadata_calls,
+            "source evidence stage completed");
     }
 }
 
@@ -239,9 +257,7 @@ impl ReadBudget {
         }
         self.charge(reference.encoded_len)?;
         let mut bytes = Vec::new();
-        (&mut file)
-            .take(reference.encoded_len + 1)
-            .read_to_end(&mut bytes)
+        crate::host_work::read_to_end(&mut (&mut file).take(reference.encoded_len + 1), &mut bytes)
             .ok()?;
         if bytes.len() as u64 != reference.encoded_len || sha(&bytes) != reference.sha256 {
             return None;

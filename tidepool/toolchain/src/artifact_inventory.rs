@@ -1286,7 +1286,8 @@ impl ArtifactInventory {
         let retained_roots = match root_intent {
             ArtifactRootIntent::SuppliedArtifacts => None,
             ArtifactRootIntent::RetainedView(source) => {
-                source.collect_materializations(&mut materialization_parents, &mut BTreeSet::new());
+                source
+                    .collect_materializations(&mut materialization_parents, &mut BTreeSet::new())?;
                 Some(source.roots().to_vec())
             }
         };
@@ -1443,19 +1444,39 @@ struct ViewReadProjection {
     dependencies: OnceLock<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>,
 }
 impl ViewLease {
+    fn lock_materialization(
+        &self,
+    ) -> std::io::Result<
+        std::sync::MutexGuard<
+            '_,
+            BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+        >,
+    > {
+        loop {
+            crate::host_work::checkpoint()?;
+            match self.materialization.try_lock() {
+                Ok(retained) => return Ok(retained),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(2))
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("materialization lock"),
+            }
+        }
+    }
+
     fn collect_materializations(
         self: &Arc<Self>,
         materializations: &mut Vec<
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
         visited: &mut BTreeSet<usize>,
-    ) {
+    ) -> Result<(), CompileError> {
         let mut pending = vec![self];
         while let Some(view) = pending.pop() {
             if !visited.insert(Arc::as_ptr(view) as usize) {
                 continue;
             }
-            let retained = view.materialization.lock().expect("materialization lock");
+            let retained = view.lock_materialization()?;
             if !retained.is_empty() {
                 for materialization in retained.values() {
                     if !materializations
@@ -1477,6 +1498,7 @@ impl ViewLease {
                 pending.extend(view.parents.iter().rev());
             }
         }
+        Ok(())
     }
 }
 impl Drop for ViewLease {
@@ -1710,11 +1732,9 @@ impl ArtifactView {
         >,
     ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
     {
-        let mut retained = self
-            .lease
-            .materialization
-            .lock()
-            .expect("materialization lock");
+        // Waiting for another producer must remain responsive to this scope's
+        // stop edge without interrupting that producer or evicting its result.
+        let mut retained = self.lease.lock_materialization()?;
         let key = metadata.materialization_key();
         if let Some(materialization) = retained.get(&key) {
             return Ok(Arc::clone(materialization));
@@ -1722,7 +1742,7 @@ impl ArtifactView {
         let mut parents = self.lease.materialization_parents.clone();
         let mut visited = BTreeSet::new();
         for parent in &self.lease.parents {
-            parent.collect_materializations(&mut parents, &mut visited);
+            parent.collect_materializations(&mut parents, &mut visited)?;
         }
         let materialization = Arc::new(prepare(parents)?);
         retained.insert(key, Arc::clone(&materialization));
@@ -1735,21 +1755,23 @@ impl ArtifactView {
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
         visited: &mut BTreeSet<usize>,
-    ) {
+    ) -> Result<(), CompileError> {
         self.lease
-            .collect_materializations(materializations, visited);
+            .collect_materializations(materializations, visited)
     }
 
     pub(crate) fn retained_materialization(
         &self,
         metadata: &ArtifactMetadataSnapshot,
-    ) -> Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
-        self.lease
-            .materialization
-            .lock()
-            .expect("materialization lock")
+    ) -> Result<
+        Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+        CompileError,
+    > {
+        Ok(self
+            .lease
+            .lock_materialization()?
             .get(&metadata.materialization_key())
-            .cloned()
+            .cloned())
     }
     pub(crate) fn metadata_snapshot(&self) -> ArtifactMetadataSnapshot {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
@@ -2108,14 +2130,25 @@ impl ArtifactView {
             .collect::<Vec<_>>();
         selected.extend(owned.iter().filter(|key| matches!(key, InventoryNodeKey::Group(group) if ids.contains(&group.artifact))).copied());
         drop(state);
-        let mut materializations = Vec::new();
-        if !selected.is_empty() {
-            self.collect_materializations(&mut materializations, &mut BTreeSet::new());
-        }
-        Ok(self
+        let mut retained = self
             .lease
             .inventory
-            .retain(selected, Vec::new(), materializations))
+            .retain(selected, Vec::new(), Vec::new());
+        let mut materializations = Vec::new();
+        if !retained.is_empty() {
+            self.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
+            if !materializations.is_empty() {
+                let custody =
+                    crate::declaration_context::RetainedArtifactMaterialization::select_custody(
+                        &materializations,
+                        &retained.metadata_snapshot(),
+                    );
+                Arc::get_mut(&mut retained.lease)
+                    .expect("new selection lease")
+                    .materialization_parents = custody.into_iter().collect();
+            }
+        }
+        Ok(retained)
     }
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
         if Arc::ptr_eq(&self.lease, &other.lease) || other.is_empty() {
@@ -2361,6 +2394,51 @@ mod view_read_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_materialization_waiter_exits_without_touching_producer() {
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose,
+        };
+        let view = ArtifactInventory::default().empty_view();
+        let metadata = view.metadata_snapshot();
+        let held = view.lease.materialization.lock().unwrap();
+        let cancellation = CompilerTransactionCancellation::new();
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (finished, received) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker_cancellation = cancellation.clone();
+            let view = &view;
+            let metadata = &metadata;
+            scope.spawn(move || {
+                entered.send(()).unwrap();
+                let result = with_compiler_transaction_cancellable(
+                    worker_cancellation,
+                    |_| {},
+                    || {
+                        view.retain_materialization(metadata, |_| {
+                            panic!("cancelled waiter cannot prepare")
+                        })
+                    },
+                );
+                finished.send(result).unwrap();
+            });
+            observed
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            cancellation.cancel();
+            let result = received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert!(
+                matches!(result.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+            );
+            assert_eq!(result.close, CompilerTransactionClose::NotStarted);
+            assert!(held.is_empty());
+            drop(held);
+        });
+    }
 
     #[test]
     fn native_requirement_index_refuses_interface_edges() {

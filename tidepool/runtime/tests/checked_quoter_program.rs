@@ -1,16 +1,13 @@
 //! The real parser, whole-program worker, and sequential Rust certifier share
 //! fresh originals across slots before any native effect can execute.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::compiler_test_support::OwnedEnvironment;
 
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::SessionId;
-use tidepool_runtime::session::turn::{
-    compile_cell_program_admitted, CellCheckRequest, TemplateSelector,
-};
+use tidepool_runtime::session::turn::{compile_cell_program_admitted, TemplateSelector};
 use tidepool_runtime::session::{
     resident_cell_check_template, resident_workbench_templates, ModuleEnv, PersistentSession,
     SessionLib, SourceImports,
@@ -86,29 +83,9 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
                 None,
             )
             .unwrap();
-        let view = admission.view();
-        let include = admission
-            .include_paths()
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<_>>();
         let started = std::time::Instant::now();
-        let (_, program) = compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &specification.injected_modules,
-                compile_generation: view.next_value_generation().0,
-                compile_view_evidence: "fresh original quoter across checked program slots",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap_or_else(|error| panic!("{phase} checked quoter program failed: {error:?}"));
+        let (_, program) = compile_cell_program_admitted(admission.clone())
+            .unwrap_or_else(|error| panic!("{phase} checked quoter program failed: {error:?}"));
         assert_eq!(program.items().len(), 3);
         for item in program.items() {
             assert!(item.native().is_some());

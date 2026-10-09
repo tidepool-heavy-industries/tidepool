@@ -3403,6 +3403,21 @@ impl PreparedEngine {
             .map(|identity| (identity.clone(), CODE_EXPORT_GENERATION))
     }
 
+    /// Only live exports with an authenticated package interface may cause a
+    /// checked compiler projection to omit their native definitions. Ordinary
+    /// graph installs also retain package tops, but do not issue that proof.
+    pub(crate) fn protected_code_export_retentions(
+        &self,
+    ) -> impl Iterator<Item = (SymbolIdentity, u64)> + '_ {
+        self.code_exports.iter().filter_map(|(identity, export)| {
+            (export
+                .interface_digest
+                .is_some_and(|digest| digest != [0; 32])
+                && self.machine.prepared_handle_of(export.handle.raw()) == Some(export.handle))
+            .then(|| (identity.clone(), CODE_EXPORT_GENERATION))
+        })
+    }
+
     /// Resolve an advertised immutable export through this engine's exact live
     /// ledger. Native `ValueHandle` identities are issued process-wide and
     /// never reused; retaining that identity fences a later install against a
@@ -4193,7 +4208,16 @@ impl PreparedEngine {
                 target_facts.settled = settled;
             }
             let admitted = self.plan_batch_evidence(facts)?;
-            let exports = exportable_code_tops(&target.prepared);
+            // A target can contain incidental package tops absent from its
+            // selected canonical interfaces. Keep those definitions local;
+            // their presence cannot issue a retained package import later.
+            let exports: Vec<_> = exportable_code_tops(&target.prepared)
+                .into_iter()
+                .filter(|(identity, _, _)| {
+                    certified_exports.contains_key(identity)
+                        || target_packages.contains_key(identity)
+                })
+                .collect();
             let mut programs = Vec::with_capacity(demanded.len() + 1);
             let mut package_updates = BTreeMap::<SymbolIdentity, [u8; 32]>::new();
             let mut source_needed = BTreeSet::<ScopedSourceBinder>::new();
@@ -7880,6 +7904,16 @@ pub(super) mod tests {
             .retained_package_code_export_owner(&binder, 0, &[9; 32])
             .is_none());
         assert_eq!(legacy.code_exports[&binder].interface_digest, None);
+        assert!(legacy
+            .code_export_retentions()
+            .any(|row| row == (binder.clone(), 0)));
+        assert!(legacy.protected_code_export_retentions().next().is_none());
+        assert_eq!(
+            engine
+                .protected_code_export_retentions()
+                .collect::<Vec<_>>(),
+            vec![(binder.clone(), 0)]
+        );
         let foreign_owner = foreign
             .retained_package_code_export_owner(&binder, 0, &[9; 32])
             .unwrap();
@@ -7927,6 +7961,56 @@ pub(super) mod tests {
         assert!(matches!(engine.code_export_import(owner_ref, &declaration),
             Err(PreparedRuntimeError::MissingCertifiedOwner(actual)) if actual == owner));
         assert!(engine.release(export.handle));
+    }
+
+    proptest::proptest! {
+        #![proptest_config({
+            let mut config = proptest::test_runner::Config::default();
+            if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+                config.failure_persistence = Some(Box::new(proptest::test_runner::FileFailurePersistence::Direct(path)));
+            }
+            config
+        })]
+
+        #[test]
+        fn protected_export_advertisement_tracks_provenance_and_root_lifetime(
+            history in proptest::collection::vec(0_u8..5, 0..32)
+        ) {
+            let binder = testing::identity("Fixture", "entry");
+            let (mut engine, _) = certified_package_export_fixture([9; 32]);
+            let handle = engine.code_exports[&binder].handle;
+            let mut alive = true;
+            // Always cover missing, zero, restored and released evidence;
+            // generated prefixes exercise repeated transitions and stale roots.
+            for operation in history.into_iter().chain([0, 1, 2, 4, 2]) {
+                let digest = match operation {
+                    0 => None,
+                    1 => Some([0; 32]),
+                    2 => Some([9; 32]),
+                    3 => Some([8; 32]),
+                    _ => {
+                        if alive {
+                            proptest::prop_assert!(engine.release(handle));
+                            alive = false;
+                        }
+                        engine.code_exports[&binder].interface_digest
+                    }
+                };
+                engine.code_exports.get_mut(&binder).unwrap().interface_digest = digest;
+                let expected = if alive && digest.is_some_and(|value| value != [0; 32]) {
+                    vec![(binder.clone(), 0)]
+                } else {
+                    vec![]
+                };
+                proptest::prop_assert_eq!(engine.protected_code_export_retentions().collect::<Vec<_>>(), expected);
+                for requested in [[0; 32], [8; 32], [9; 32]] {
+                    proptest::prop_assert_eq!(
+                        engine.retained_package_code_export_owner(&binder, 0, &requested).is_some(),
+                        alive && requested != [0; 32] && digest == Some(requested)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -8126,6 +8210,10 @@ pub(super) mod tests {
             unit: package.unit.clone(),
             ..testing::identity("FixturePackage", "optionalValue")
         };
+        let incidental = SymbolIdentity {
+            unit: "unselected-package".into(),
+            ..testing::identity("UnselectedPackage", "incidentalValue")
+        };
         let source = testing::identity("Fixture", "cached");
         let package_owner = |digest| ImportOwner::Package {
             unit: package.unit.clone(),
@@ -8221,7 +8309,11 @@ pub(super) mod tests {
                     .nodes
                     .push(wire.expressions.nodes[0].clone());
             }
+            let mut incidental_top = optional_top.clone();
+            incidental_top.identity = incidental.clone();
+            incidental_top.binding.id = ValueId(u32::from(include_package) + 2);
             wire.bindings.push(Group::NonRecursive(optional_top));
+            wire.bindings.push(Group::NonRecursive(incidental_top));
             let Group::NonRecursive(top) = &mut wire.bindings[0] else {
                 unreachable!()
             };
@@ -8380,6 +8472,7 @@ pub(super) mod tests {
         assert_eq!(engine.residency(), before);
         let mut aborted = install(&mut engine, &good).unwrap();
         assert_eq!(aborted.exports.len(), 2);
+        assert!(!aborted.exports.contains_key(&incidental));
         assert_eq!(aborted.exports[&optional].interface_digest, Some([9; 32]));
         assert_eq!(aborted.exports[&package].interface_digest, Some([9; 32]));
         assert_eq!(engine.residency().code_exports, before.code_exports + 2);
@@ -8405,6 +8498,10 @@ pub(super) mod tests {
         let staged_residency = engine.residency();
         let tokens = std::mem::take(&mut staged.leases);
         let program = engine.commit_certified_turn(staged);
+        assert!(!engine.code_exports.contains_key(&incidental));
+        assert!(!engine
+            .protected_code_export_retentions()
+            .any(|(identity, _)| identity == incidental));
         assert_eq!(
             engine.residency().code_exports,
             staged_residency.code_exports

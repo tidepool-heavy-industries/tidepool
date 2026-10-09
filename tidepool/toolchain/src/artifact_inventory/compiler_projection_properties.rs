@@ -687,6 +687,7 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
     let retained_a = a
         .artifact_view()
         .retained_materialization(&metadata_a)
+        .unwrap()
         .unwrap();
     let second = b
         .prepare_compilation(&scratch.path().join("b"), PRODUCER)
@@ -695,6 +696,7 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
     let retained_b = b
         .artifact_view()
         .retained_materialization(&metadata_b)
+        .unwrap()
         .unwrap();
     assert!(!Arc::ptr_eq(&retained_a, &retained_b));
     assert_ne!(
@@ -733,6 +735,7 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
         &retained_a,
         &a.artifact_view()
             .retained_materialization(&metadata_a)
+            .unwrap()
             .unwrap()
     ));
     assert_eq!(
@@ -887,16 +890,40 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
     let mut segments: [Option<ArtifactView>; 4] = std::array::from_fn(|_| None);
     let mut published = [false; 4];
     let mut selected: [BTreeSet<RawGroup>; 4] = std::array::from_fn(|_| BTreeSet::new());
-    let mut coverage = [0usize; 13];
-    let mut refusals = 0;
+    #[derive(Clone, Copy)]
+    enum Outcome {
+        Success,
+        Refusal,
+        Absent,
+    }
+    let mut attempted = [0usize; 13];
+    let mut successes = [0usize; 13];
+    let mut refusals = [0usize; 13];
+    let mut absent = [0usize; 13];
     for operation in operations {
+        let kind = match operation {
+            Op::Offer { .. } => 0,
+            Op::Demote { .. } => 1,
+            Op::Merge { .. } => 2,
+            Op::SourceSurface { .. } => 3,
+            Op::Clone { .. } => 4,
+            Op::Restore { .. } => 5,
+            Op::Target { .. } => 6,
+            Op::IssueSegment { .. } => 7,
+            Op::PublishPrefix { .. } => 8,
+            Op::Demand { .. } => 9,
+            Op::RecoverDemand { .. } => 10,
+            Op::ReleaseSegment { .. } => 11,
+            Op::DeclarationOriginal { .. } => 12,
+        };
+        attempted[kind] += 1;
+        let mut outcome = Outcome::Success;
         match *operation {
             Op::Offer {
                 domain,
                 module,
                 version,
             } => {
-                coverage[0] += 1;
                 let incoming = CompilerInputProjection::from_issued_entries(&[Arc::clone(
                     catalog.original(module, version),
                 )])
@@ -904,24 +931,22 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                 let result = actual[domain].merge(&incoming);
                 if model[domain][module].is_some_and(|old| old != version) {
                     assert!(result.is_err());
-                    refusals += 1;
+                    outcome = Outcome::Refusal;
                 } else {
                     actual[domain] = result.unwrap();
                     model[domain][module] = Some(version);
                 }
             }
             Op::Demote { domain } => {
-                coverage[1] += 1;
                 actual[domain] = actual[domain].interface_only();
                 model[domain] = [None; MODULES];
             }
             Op::Merge { target, source } => {
-                coverage[2] += 1;
                 let conflict = (0..MODULES).any(|module| matches!((model[target][module], model[source][module]), (Some(a), Some(b)) if a != b));
                 let result = actual[target].merge(&actual[source]);
                 if conflict {
                     assert!(result.is_err());
-                    refusals += 1;
+                    outcome = Outcome::Refusal;
                 } else {
                     actual[target] = result.unwrap();
                     for module in 0..MODULES {
@@ -930,7 +955,6 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                 }
             }
             Op::SourceSurface { domain, owners } => {
-                coverage[3] += 1;
                 let selected = (0..MODULES)
                     .filter(|module| owners & (1 << module) != 0)
                     .map(owner)
@@ -943,12 +967,10 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                 }
             }
             Op::Clone { target, source } => {
-                coverage[4] += 1;
                 actual[target] = actual[source].clone();
                 model[target] = model[source];
             }
             Op::Restore { domain } => {
-                coverage[5] += 1;
                 actual[domain] =
                     CompilerInputProjection::restore(&view, &actual[domain].roles()).unwrap();
             }
@@ -958,12 +980,10 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                 version,
                 ordinal,
             } => {
-                coverage[6] += 1;
                 catalog.assert_target(&view, &[(module, version, ordinal)]);
                 catalog.assert_projection(&view, &actual[domain], model[domain]);
             }
             Op::IssueSegment { domain } => {
-                coverage[7] += 1;
                 let inventory = ArtifactInventory::default();
                 segments[domain] = Some(
                     inventory
@@ -978,7 +998,6 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                 selected[domain].clear();
             }
             Op::PublishPrefix { domain } => {
-                coverage[8] += 1;
                 if let Some(previous) = &segments[domain] {
                     let next = previous
                         .inventory()
@@ -995,7 +1014,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                     segments[domain] = Some(next);
                     published[domain] = true;
                 } else {
-                    refusals += 1;
+                    outcome = Outcome::Absent;
                 }
             }
             Op::Demand {
@@ -1005,7 +1024,6 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                 ordinal,
                 whole,
             } => {
-                coverage[9] += 1;
                 if let Some(available) = &segments[domain] {
                     let roots = if whole {
                         ORDINALS
@@ -1045,7 +1063,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                             result.is_err(),
                             "withheld prefix capture must refuse only demanded groups"
                         );
-                        refusals += 1;
+                        outcome = Outcome::Refusal;
                     } else {
                         let next = result.unwrap();
                         selected[domain].extend(wanted);
@@ -1060,11 +1078,10 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                         segments[domain] = Some(next);
                     }
                 } else {
-                    refusals += 1;
+                    outcome = Outcome::Absent;
                 }
             }
             Op::RecoverDemand { domain, mutation } => {
-                coverage[10] += 1;
                 if let Some(previous) = &segments[domain] {
                     let mut offered = selected[domain].clone();
                     if mutation == 1 {
@@ -1089,7 +1106,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                             result.is_err(),
                             "recovery must refuse incomplete exact closure"
                         );
-                        refusals += 1;
+                        outcome = Outcome::Refusal;
                     } else {
                         let recovered = result.unwrap();
                         assert_eq!(recovered.selected_native_groups(), keys);
@@ -1105,7 +1122,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                         segments[domain] = Some(recovered);
                     }
                 } else {
-                    refusals += 1;
+                    outcome = Outcome::Absent;
                 }
             }
             Op::DeclarationOriginal {
@@ -1113,7 +1130,6 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                 module,
                 version,
             } => {
-                coverage[12] += 1;
                 if let Some(available) = &segments[domain] {
                     let projection = CompilerInputProjection::from_issued_entries(&[Arc::clone(
                         catalog.original(module, version),
@@ -1141,14 +1157,13 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                             result.is_err(),
                             "whole-original consumers require unavailable captured groups"
                         );
-                        refusals += 1;
+                        outcome = Outcome::Refusal;
                     }
                 } else {
-                    refusals += 1;
+                    outcome = Outcome::Absent;
                 }
             }
             Op::ReleaseSegment { domain } => {
-                coverage[11] += 1;
                 if let Some(previous) = segments[domain].take() {
                     let inventory = previous.inventory().clone();
                     drop(previous);
@@ -1157,23 +1172,49 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
                         0,
                         "last segment owner must release all retained vertices"
                     );
+                } else {
+                    outcome = Outcome::Absent;
                 }
                 selected[domain].clear();
                 published[domain] = false;
             }
+        }
+        match outcome {
+            Outcome::Success => successes[kind] += 1,
+            Outcome::Refusal => refusals[kind] += 1,
+            Outcome::Absent => absent[kind] += 1,
         }
         for domain in 0..4 {
             catalog.assert_projection(&view, &actual[domain], model[domain]);
         }
         assert_eq!(view.descriptors(), baseline);
     }
-    assert!(coverage.iter().all(|count| *count > 0));
     assert!(
-        refusals > 0,
+        (0..13).all(|kind| successes[kind] + refusals[kind] > 0),
+        "every operation must reach its production boundary"
+    );
+    assert!(
+        refusals.iter().sum::<usize>() > 0,
         "histories must reach a real namespace refusal"
     );
+    assert!(
+        successes[11] > 0,
+        "release must drop an actual segment owner"
+    );
+    for kind in [8, 9, 10, 11, 12] {
+        assert!(
+            absent[kind] > 0,
+            "the guided absent prerequisite cohort is reached"
+        );
+    }
+    for kind in 0..13 {
+        assert_eq!(
+            attempted[kind],
+            successes[kind] + refusals[kind] + absent[kind]
+        );
+    }
     eprintln!(
-        "compiler_projection_history coverage={coverage:?} refusals={refusals} operations={}",
+        "compiler_projection_history attempted={attempted:?} successes={successes:?} refusals={refusals:?} absent={absent:?} operations={}",
         operations.len()
     );
 }
@@ -1188,6 +1229,11 @@ proptest! {
     ) {
         let catalog = Catalog::new(cross_version, generations);
         let mut operations = vec![
+            Op::PublishPrefix { domain: 0 },
+            Op::Demand { domain: 0, module: 0, version: 0, ordinal: 3, whole: false },
+            Op::RecoverDemand { domain: 0, mutation: 1 },
+            Op::ReleaseSegment { domain: 0 },
+            Op::DeclarationOriginal { domain: 0, module: 0, version: 0 },
             Op::Offer { domain: 0, module: 0, version: 0 },
             Op::Offer { domain: 0, module: 0, version: 1 },
             Op::Offer { domain: 1, module: 0, version: 1 },

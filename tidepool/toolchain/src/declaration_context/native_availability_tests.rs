@@ -54,6 +54,41 @@ fn scope(request: &ExactCompilationRequest) -> Vec<Value> {
 }
 
 #[test]
+fn selected_authored_availability_refuses_source_original_spelling_with_full_groups() {
+    let native = product("Tidepool.Session.Lib.G1", 23);
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let mut context = ExactDeclarationContext::new(&[], &[], vec![])
+        .unwrap()
+        .extend_checked_original_products(producer.sha256(), std::slice::from_ref(&native))
+        .unwrap();
+    context.compiler_projection = context.compiler_projection.interface_only();
+    assert!(context
+        .compiler_input_roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    let keys = context.inventory.selected_native_groups();
+    assert_eq!(
+        keys.iter()
+            .map(|key| key.original_ordinal)
+            .collect::<Vec<_>>(),
+        vec![7, 9001]
+    );
+    assert!(
+        OriginalCompilerInputs::from_selected_authored_declarations(&context, producer, &[])
+            .unwrap()
+            .is_none()
+    );
+    // A separately issued configured offer remains legitimate. Full custody
+    // and a session-like module name cannot issue that offer implicitly.
+    assert!(OriginalCompilerInputs::from_native_availability(
+        &context,
+        producer,
+        std::slice::from_ref(&native),
+    )
+    .is_ok());
+}
+
+#[test]
 fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authority() {
     let native = product("HiddenNative", 23);
     let context = type_context(std::slice::from_ref(&native));
@@ -267,4 +302,113 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
         &[wrong, required],
     )
     .is_err());
+}
+
+// Called by the existing genuinely compiled native-origin fixture. The same
+// immutable certificate supplies every narrowed history; none recompiles it.
+pub(crate) fn assert_selected_authored_private_inputs(
+    certificate: &Arc<CertifiedAuthoredDeclaration>,
+    generation: u64,
+    root: &Path,
+    producer_bytes: &[u8],
+) {
+    let native_context =
+        ExactDeclarationContext::new(std::slice::from_ref(certificate), &[], vec![]).unwrap();
+    let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+    let authored_root = native_context.authored_native_root(generation).unwrap();
+    let selected_before = native_context.inventory.selected_native_groups();
+    let authored_groups = selected_before
+        .iter()
+        .filter(|group| group.artifact == authored_root)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        authored_groups.len() >= 2,
+        "the real fixture must issue independent original groups"
+    );
+    assert!(matches!(
+        native_context.compiler_metadata_snapshot().unwrap().entries[&identity(
+            &certificate.product().owner().unit,
+            &certificate.product().owner().module
+        )]
+            .payload,
+        ArtifactPayload::Canonical(_)
+    ));
+    let native =
+        OriginalCompilerInputs::from_selected_authored_declarations(&native_context, producer, &[])
+            .unwrap()
+            .expect("actual authored selection supplies private native availability");
+    let native_request = ExactCompileContext::new(Arc::new(native_context.clone()))
+        .prepare_compilation_with_private_input(
+            &root.join("selected-authored-scope"),
+            producer_bytes,
+            None,
+            Some(native),
+        )
+        .unwrap();
+    assert!(native_request
+        .compiler_original_products()
+        .unwrap()
+        .iter()
+        .any(|product| product.owner() == certificate.product().owner()));
+    assert_eq!(native_request.context().as_ref(), &native_context);
+    assert_eq!(
+        native_request
+            .compiler_inputs()
+            .metadata
+            .selected_native_groups,
+        selected_before
+    );
+    // Reuse the genuine certificate and independently remove execution
+    // roots. Neither type custody nor an incomplete group selection can
+    // supply the complete authored original to another compiler request.
+    let mut valid_sparse_refusals = 0;
+    for omitted in std::iter::once(None).chain(authored_groups.iter().map(Some)) {
+        let selected = match omitted {
+            None => BTreeSet::new(),
+            Some(omitted) => selected_before
+                .iter()
+                .filter(|group| *group != omitted)
+                .copied()
+                .collect(),
+        };
+        let mut partial = native_context.clone();
+        let view = partial.inventory.inventory().admit_recovery_selection(
+            &partial.inventory.inventory().empty_view(),
+            partial.inventory.entries(),
+            &selected,
+        );
+        let Ok(view) = view else {
+            assert!(
+                omitted.is_some(),
+                "removing every native root must retain valid type custody"
+            );
+            // Removing a required dependency is refused by exact closure
+            // admission before private compiler input can be constructed.
+            continue;
+        };
+        partial.inventory = view;
+        assert_eq!(partial.inventory.selected_native_groups(), selected);
+        let private =
+            OriginalCompilerInputs::from_selected_authored_declarations(&partial, producer, &[])
+                .unwrap();
+        assert!(private.as_ref().is_none_or(|private| private
+            .projection
+            .roles()
+            .iter()
+            .all(|role| role.original() != Some(authored_root))));
+        if omitted.is_some()
+            && partial
+                .inventory
+                .selected_native_groups()
+                .iter()
+                .any(|group| group.artifact == authored_root)
+        {
+            valid_sparse_refusals += 1;
+        }
+    }
+    assert!(
+        valid_sparse_refusals > 0,
+        "a valid nonempty sparse selection must reach private offer refusal"
+    );
 }

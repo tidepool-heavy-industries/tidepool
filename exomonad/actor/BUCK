@@ -27,6 +27,7 @@ rust_filegroup(
         "src/fixtures/AwaitRuntime.hs": "exomonad/actor/src/fixtures/AwaitRuntime.hs",
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
+        "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
         "src/forms.rs": "exomonad/actor/src/forms.rs",
@@ -66,6 +67,7 @@ rust_filegroup(
         "src/local_actor/terminal_transfer_tests.rs": "exomonad/actor/src/local_actor/terminal_transfer_tests.rs",
         "src/local_actor/workbench_step.rs": "exomonad/actor/src/local_actor/workbench_step.rs",
         "src/lookup.rs": "exomonad/actor/src/lookup.rs",
+        "src/lookup/inspection_failure_tests.rs": "exomonad/actor/src/lookup/inspection_failure_tests.rs",
         "src/lookup_tool.rs": "exomonad/actor/src/lookup_tool.rs",
         "src/lookup_tool/qualified_name.rs": "exomonad/actor/src/lookup_tool/qualified_name.rs",
         "src/mailbox.rs": "exomonad/actor/src/mailbox.rs",
@@ -185,6 +187,7 @@ tidepool_rust_library(
         "//tidepool/bridge:tidepool_bridge",
         "//tidepool/codegen:tidepool_codegen",
         "//tidepool/effect:tidepool_effect",
+        "//tidepool/extract-cmd:tidepool_extract_cmd",
         "//tidepool/repr:tidepool_repr",
         "//tidepool/runtime:tidepool_runtime",
         "//tidepool/toolchain:tidepool_toolchain",
@@ -214,6 +217,7 @@ rust_filegroup(
         "src/fixtures/AwaitRuntime.hs": "exomonad/actor/src/fixtures/AwaitRuntime.hs",
         "src/fixtures/captured-spec-installer-bind.hs": "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs",
         "src/fixtures/captured-spec-installer.hs": "exomonad/actor/src/fixtures/captured-spec-installer.hs",
+        "src/fixtures/host-json-nested.hs": "exomonad/actor/src/fixtures/host-json-nested.hs",
         "src/fixtures/scope-live-result.hs": "exomonad/actor/src/fixtures/scope-live-result.hs",
         "src/fork_workspace.rs": "exomonad/actor/src/fork_workspace.rs",
         "src/forms.rs": "exomonad/actor/src/forms.rs",
@@ -254,6 +258,7 @@ rust_filegroup(
         "src/local_actor/terminal_transfer_tests.rs": "exomonad/actor/src/local_actor/terminal_transfer_tests.rs",
         "src/local_actor/workbench_step.rs": "exomonad/actor/src/local_actor/workbench_step.rs",
         "src/lookup.rs": "exomonad/actor/src/lookup.rs",
+        "src/lookup/inspection_failure_tests.rs": "exomonad/actor/src/lookup/inspection_failure_tests.rs",
         "src/lookup_tool.rs": "exomonad/actor/src/lookup_tool.rs",
         "src/lookup_tool/qualified_name.rs": "exomonad/actor/src/lookup_tool/qualified_name.rs",
         "src/mailbox.rs": "exomonad/actor/src/mailbox.rs",
@@ -431,6 +436,7 @@ tidepool_rust_binary(
     test_fixtures = [
         "exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs",
         "exomonad/actor/src/fixtures/prepared-instance-provider.hs",
+        "exomonad/actor/src/fixtures/request-alias-borrow.hs",
         "exomonad/actor/src/local_actor/failure_origin.hs",
         "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
         "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
@@ -722,6 +728,7 @@ filegroup(
         "exomonad/actor/src/fixtures/AwaitRuntime.hs": "src/fixtures/AwaitRuntime.hs",
         "exomonad/actor/src/fixtures/captured-spec-installer-bind.hs": "src/fixtures/captured-spec-installer-bind.hs",
         "exomonad/actor/src/fixtures/captured-spec-installer.hs": "src/fixtures/captured-spec-installer.hs",
+        "exomonad/actor/src/fixtures/host-json-nested.hs": "src/fixtures/host-json-nested.hs",
         "exomonad/actor/src/fixtures/scope-live-result.hs": "src/fixtures/scope-live-result.hs",
         "exomonad/actor/src/fork_workspace.rs": "src/fork_workspace.rs",
         "exomonad/actor/src/forms.rs": "src/forms.rs",
@@ -739,6 +746,7 @@ filegroup(
         "exomonad/actor/src/local_actor/terminal_transfer_tests.rs": "src/local_actor/terminal_transfer_tests.rs",
         "exomonad/actor/src/local_actor/workbench_step.rs": "src/local_actor/workbench_step.rs",
         "exomonad/actor/src/lookup.rs": "src/lookup.rs",
+        "exomonad/actor/src/lookup/inspection_failure_tests.rs": "src/lookup/inspection_failure_tests.rs",
         "exomonad/actor/src/lookup_tool.rs": "src/lookup_tool.rs",
         "exomonad/actor/src/lookup_tool/qualified_name.rs": "src/lookup_tool/qualified_name.rs",
         "exomonad/actor/src/mailbox.rs": "src/mailbox.rs",
@@ -945,6 +953,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f686f73742d6a736f6e2d6e65737465642e6873",
+    src = "src/fixtures/host-json-nested.hs",
+    out = "host-json-nested.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f686f73742d6a736f6e2d72657461696e65642e6873",
     src = "src/fixtures/host-json-retained.hs",
     out = "host-json-retained.hs",
@@ -990,6 +1005,13 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f71756f7465642d6167656e742d737065632e6873",
     src = "src/fixtures/quoted-agent-spec.hs",
     out = "quoted-agent-spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f726571756573742d616c6961732d626f72726f772e6873",
+    src = "src/fixtures/request-alias-borrow.hs",
+    out = "request-alias-borrow.hs",
     visibility = ["PUBLIC"],
 )
 

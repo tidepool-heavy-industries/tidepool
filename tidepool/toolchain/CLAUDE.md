@@ -61,6 +61,14 @@ the former eval and invocation cache layouts; neither is read or written.
 identities for workspace capture and reload. Those identities describe a source
 snapshot; they do not determine which files a compiled program consumed.
 
+Host authentication and private materialization use `host_work` checkpoints in
+the owning compiler scope, including between bounded reads and owner-lock polls.
+Interruption remains a refusal through optional cache lookups; it cannot admit
+physical work as a miss. A partial validation stage stays operation-local and
+is discarded on refusal. Once an immutable result is fully validated, a late
+stop cannot revoke its retained owner; cancelled consumers still lack publication
+permission. Checkpoints are cooperative and do not preempt a syscall or decode.
+
 ## Segment original facts
 
 `ExactProgramSegmentAdmission` owns the physical request and consumed-source
@@ -148,8 +156,17 @@ qualification's actual Nix registration, NAR and GC-root checks. Earlier catalog
 are rejected and must be regenerated through the matched producer.
 
 `configured_module_source_selection` shares catalog schema, compiler authority,
-source manifest and alias validation without hydrating native products. Candidate
-admission loads the full package and validates every proof and the complete cohort.
+source manifest and alias validation without hydrating native products. The
+configured package owner retains only its current exact catalog path and complete
+compiler authority selection. Initial loading validates every proof and the
+complete cohort; reuse reauthenticates catalog, native artifacts, canonical
+companions and source observations, sharing the admitted decoded products.
+Deployment records share a dependency proof only after each physical evidence
+file authenticates the exact SHA-256 and length. Each fresh catalog or candidate
+validation stage walks that shared proof and generated input once, including
+negative import witnesses; a later stage observes the filesystem again.
+Candidate acquisition still validates its current source/import witnesses and
+exact context. Read-only bundle permissions do not replace content checks.
 Actual Nix registration, NAR, retention and final bundle qualification remain the
 qualification owner’s independent checks.
 

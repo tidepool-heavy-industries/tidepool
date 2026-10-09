@@ -161,6 +161,134 @@ fn publish(facts: &mut [Option<Result<(), ResponseFailure>>], key: u8, operation
     }
 }
 
+fn delayed_registry_history(
+    order: [usize; 3],
+    failed: [bool; 3],
+    allow_failure: [bool; 3],
+    inspect: [bool; 3],
+) {
+    use crate::request::{
+        ReadinessDependency, RequestRegistry, WatchObservation, WatchRequirement,
+    };
+    use crate::{ActorId, ActorRef};
+
+    let registry = RequestRegistry::default();
+    let owner = ActorRef::first(ActorId(1));
+    let targets = [2, 3, 4].map(|id| ActorRef::first(ActorId(id)));
+    let requests = targets.map(|target| {
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        request
+    });
+    let expression = Expr::All(
+        Box::new(Expr::Either(
+            Box::new(Expr::Leaf(0, allow_failure[0])),
+            Box::new(Expr::Leaf(1, allow_failure[1])),
+        )),
+        Box::new(Expr::Leaf(2, allow_failure[2])),
+    );
+    let mut nodes = Vec::new();
+    let mut reference = construct(&expression, &mut nodes);
+    let nodes = nodes
+        .into_iter()
+        .map(|node| match node {
+            Node::Ready => Node::Ready,
+            Node::Leaf((key, settled)) => Node::Leaf(ReadinessDependency::Request(
+                requests[key as usize],
+                WatchRequirement::Response {
+                    allow_failure: settled,
+                },
+            )),
+            Node::All(left, right) => Node::All(left, right),
+            Node::Either(left, right) => Node::Either(left, right),
+        })
+        .collect();
+    let watch = registry
+        .register_watch_plan(
+            owner,
+            "delayed history".into(),
+            Plan::checked(nodes, reference.index).unwrap(),
+        )
+        .unwrap()
+        .0;
+    let mut facts = vec![None; 3];
+    let _ = reference.observe(&facts);
+    let check = |expected: Option<RefResult>| match (
+        outcome(expected),
+        registry.observe_watch(owner, watch).unwrap(),
+    ) {
+        (None, WatchObservation::Pending(_)) => {}
+        (Some(Outcome::Ready(expected)), WatchObservation::Ready(actual)) => {
+            assert_eq!(actual, expected)
+        }
+        (
+            Some(Outcome::Failed(key, expected)),
+            WatchObservation::Unavailable { request, failure },
+        ) => {
+            assert_eq!(request, requests[key.0 as usize - 1]);
+            assert_eq!(failure, expected);
+        }
+        (expected, actual) => {
+            panic!("delayed watch outcome: expected {expected:?}, actual {actual:?}")
+        }
+    };
+    for (step, key) in order.into_iter().enumerate() {
+        if failed[key] {
+            registry.mark_target_unavailable(owner, requests[key]);
+            facts[key] = Some(Err(ResponseFailure::TargetUnavailable));
+        } else {
+            registry.begin_reply(targets[key], requests[key]).unwrap();
+            registry.finish_reply(requests[key], None);
+            facts[key] = Some(Ok(()));
+        }
+        // The oracle records transitions independently of public reads. The
+        // production registry must advance its own evaluator at settlement.
+        let expected = reference.observe(&facts);
+        if inspect[step] {
+            check(expected);
+        }
+    }
+    let expected = reference.observe(&facts);
+    check(expected.clone());
+    check(expected);
+}
+
+#[test]
+fn unobserved_right_choice_survives_later_left_completion() {
+    // At the first public read both alternatives are ready. Recomputing from
+    // current facts would choose left; the actual transition selected right.
+    delayed_registry_history([1, 0, 2], [false; 3], [false; 3], [false; 3]);
+}
+
+fn delayed_observation_config() -> proptest::test_runner::Config {
+    let mut config = proptest::test_runner::Config::default();
+    if std::env::var_os("PROPTEST_CASES").is_none() {
+        config.cases = 192;
+    }
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(path),
+        ));
+    }
+    config
+}
+
+proptest! {
+    #![proptest_config(delayed_observation_config())]
+    #[test]
+    fn delayed_public_observations_match_transition_latched_history(
+        priorities in any::<[u16; 3]>(),
+        failed in any::<[bool; 3]>(),
+        allow_failure in any::<[bool; 3]>(),
+        inspect in any::<[bool; 3]>(),
+    ) {
+        let mut order = [0, 1, 2];
+        order.sort_by_key(|&key| (priorities[key], key));
+        delayed_registry_history(order, failed, allow_failure, inspect);
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(192))]
     #[test]

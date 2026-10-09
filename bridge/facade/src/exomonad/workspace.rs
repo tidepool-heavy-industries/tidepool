@@ -220,6 +220,65 @@ impl PreparedWorkspacePointer {
     }
 }
 
+/// A completed, sealed deployment issued by workspace preparation. Selecting it
+/// for a run still validates current inputs and retains a run-local pointer.
+pub(crate) struct PreparedWorkspaceSelection {
+    directory: std::sync::Arc<tidepool_atomic_write::DirectoryAnchor>,
+}
+
+impl PreparedWorkspaceSelection {
+    pub(crate) fn pointer(&self) -> Result<PreparedWorkspacePointer> {
+        PreparedWorkspacePointer::for_directory(self.directory.path())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_for_run(
+        &self,
+        workspace: &Path,
+        run_root: &Path,
+    ) -> Result<FrozenWorkspace> {
+        FrozenWorkspace::select_prepared(workspace, run_root, Some(self.directory.path()))
+    }
+}
+
+/// Prepare the original root toolset once, or finish sealing a completed retry.
+/// Directory establishment, process budgeting and default-pointer publication
+/// remain with the caller that owns those operations.
+pub(crate) async fn prepare_workspace(
+    workspace: &Path,
+    directory: std::sync::Arc<tidepool_atomic_write::DirectoryAnchor>,
+) -> Result<PreparedWorkspaceSelection> {
+    let mut frozen = FrozenWorkspace::begin_preparation(workspace, &directory)?;
+    if matches!(
+        frozen.preparation,
+        Some(WorkspacePreparation::Completed { .. })
+    ) {
+        // Completion is published before sealing. Retry confirms the physical
+        // deployment before any caller publishes or selects its pointer.
+        frozen.seal_preparation(&directory)?;
+    } else {
+        let source = std::sync::Arc::new(super::source::ExomonadSourceReload::new_owned(
+            frozen.clone(),
+            workspace.to_owned(),
+            directory.path().to_owned(),
+            frozen.runtime_actors(),
+            super::source::SourceRootOwner::Prepared(std::sync::Arc::clone(&directory)),
+        )?);
+        let entries = crate::actor_host::prepare_workspace_toolsets(
+            workspace,
+            &directory,
+            frozen.clone(),
+            source,
+        )
+        .await?;
+        let revision = super::source::SourceLayer::new(directory.path())
+            .read_active()?
+            .ok_or("workspace preparation did not settle its original source revision")?;
+        frozen.complete_preparation(&directory, revision.identity, entries)?;
+    }
+    Ok(PreparedWorkspaceSelection { directory })
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FrozenWorkspace {
     #[serde(default)]
@@ -276,7 +335,7 @@ impl FrozenWorkspace {
         }
         let deployment = tidepool_toolchain::toolchain::configured_module_package()?
             .as_ref()
-            .map(DeploymentSources::from_package);
+            .map(|package| DeploymentSources::from_package(package));
         Self::load_with_deployment(workspace, run_root, deployment)
     }
 
@@ -591,7 +650,7 @@ impl FrozenWorkspace {
         let selection = pointer.read_selection()?;
         let deployment = tidepool_toolchain::toolchain::configured_module_package()?
             .as_ref()
-            .map(DeploymentSources::from_package);
+            .map(|package| DeploymentSources::from_package(package));
         let frozen = Self::load_with_deployment_selection(
             workspace,
             &pointer.directory,
@@ -638,7 +697,7 @@ impl FrozenWorkspace {
         Ok(frozen)
     }
 
-    pub(crate) fn begin_preparation(
+    fn begin_preparation(
         workspace: &Path,
         directory: &tidepool_atomic_write::DirectoryAnchor,
     ) -> Result<Self> {
@@ -658,7 +717,7 @@ impl FrozenWorkspace {
         Ok(())
     }
 
-    pub(crate) fn complete_preparation(
+    fn complete_preparation(
         &mut self,
         directory: &tidepool_atomic_write::DirectoryAnchor,
         revision: String,
@@ -686,10 +745,7 @@ impl FrozenWorkspace {
         self.seal_preparation(directory)
     }
 
-    pub(crate) fn seal_preparation(
-        &self,
-        directory: &tidepool_atomic_write::DirectoryAnchor,
-    ) -> Result<()> {
+    fn seal_preparation(&self, directory: &tidepool_atomic_write::DirectoryAnchor) -> Result<()> {
         if !matches!(
             self.preparation,
             Some(WorkspacePreparation::Completed { .. })
@@ -1577,22 +1633,29 @@ mod tests {
         frozen.validate_toolset_coverage(&coverage).unwrap();
         assert_eq!(coverage_entries(&coverage).unwrap(), expected);
 
-        for mutation in 0..6 {
+        #[derive(Debug)]
+        enum MalformedCoverage {
+            RequestedEffectOrder,
+            InvalidRecipe,
+            NilOriginal,
+            DuplicateRoot,
+        }
+        for mutation in [
+            MalformedCoverage::RequestedEffectOrder,
+            MalformedCoverage::InvalidRecipe,
+            MalformedCoverage::NilOriginal,
+            MalformedCoverage::DuplicateRoot,
+        ] {
             let mut changed = coverage.clone();
             match mutation {
-                0 => changed[0].requested_effects.reverse(),
-                1 => changed[0].original = uuid::Uuid::new_v4(),
-                2 => changed[0]
-                    .effective_effects
-                    .push(exomonad_actor::ActorEffectKey::Watches),
-                3 => changed[0].recipe = "invalid".into(),
-                4 => changed[0].original = uuid::Uuid::nil(),
-                5 => changed.push(changed[0].clone()),
-                _ => unreachable!(),
+                MalformedCoverage::RequestedEffectOrder => changed[0].requested_effects.reverse(),
+                MalformedCoverage::InvalidRecipe => changed[0].recipe = "invalid".into(),
+                MalformedCoverage::NilOriginal => changed[0].original = uuid::Uuid::nil(),
+                MalformedCoverage::DuplicateRoot => changed.push(changed[0].clone()),
             }
             assert!(
                 frozen.validate_toolset_coverage(&changed).is_err(),
-                "mutation {mutation}"
+                "mutation {mutation:?}"
             );
             // Refusal leaves the primary records available for the next
             // observation; it cannot repair them or infer another original.
@@ -1600,6 +1663,20 @@ mod tests {
             frozen.validate_toolset_coverage(&coverage).unwrap();
             assert_eq!(coverage_entries(&coverage).unwrap(), expected);
         }
+
+        // Original UUIDs are primary selections. This structural validator
+        // cannot infer a prior selection or certify its native container.
+        // The CompletedOriginal acquisition consumer validates that container.
+        let mut alternate = coverage.clone();
+        alternate[0].original = uuid::Uuid::new_v4();
+        frozen.validate_toolset_coverage(&alternate).unwrap();
+        assert_eq!(
+            coverage_entries(&alternate).unwrap(),
+            [(recipe, alternate[0].original)]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>()
+        );
+        assert_eq!(serde_json::to_vec(&coverage).unwrap(), admitted);
     }
 
     #[test]
@@ -1650,21 +1727,46 @@ mod tests {
             .unwrap();
         let mut changed_support = support.clone();
         changed_support.pop();
-        assert!(
-            frozen
-                .validate_prepared_toolset_recipes(&workbench, &source, &changed_support)
-                .is_err()
-        );
+        assert!(frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &changed_support)
+            .is_err());
         // Context support selects a different builtin installer even when its
         // support-filtered actor row remains unchanged.
         let mut changed_installer = support.clone();
         changed_installer.push(ToolEffectKey::ContextReadWrite);
-        assert!(
-            frozen
-                .validate_prepared_toolset_recipes(&workbench, &source, &changed_installer)
-                .is_err()
-        );
+        assert!(frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &changed_installer)
+            .is_err());
         assert_eq!(serde_json::to_vec(&frozen.preparation).unwrap(), admitted);
+        frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &support)
+            .unwrap();
+
+        // Effective effects and recipe bytes are compared with actual host
+        // support by this consumer, after structural coverage validation.
+        for mutate_effects in [false, true] {
+            let mut changed = frozen.clone();
+            let Some(WorkspacePreparation::Completed { coverage, .. }) = &mut changed.preparation
+            else {
+                panic!("completed selection fixture");
+            };
+            if mutate_effects {
+                coverage[0].effective_effects.pop();
+            } else {
+                coverage[0].recipe = if coverage[0].recipe == "a".repeat(64) {
+                    "b".repeat(64)
+                } else {
+                    "a".repeat(64)
+                };
+            }
+            changed.validate_prepared_toolset_promises().unwrap();
+            let mutated = serde_json::to_vec(&changed.preparation).unwrap();
+            assert!(changed
+                .validate_prepared_toolset_recipes(&workbench, &source, &support)
+                .is_err());
+            assert_eq!(serde_json::to_vec(&changed.preparation).unwrap(), mutated);
+            assert_eq!(serde_json::to_vec(&frozen.preparation).unwrap(), admitted);
+        }
         frozen
             .validate_prepared_toolset_recipes(&workbench, &source, &support)
             .unwrap();
@@ -1708,6 +1810,19 @@ mod tests {
         retry.admit_preparation(directory.path()).unwrap();
         assert!(
             matches!(retry.preparation, Some(WorkspacePreparation::Preparing { original: selected }) if selected == original)
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),
+            before
+        );
+        let anchor =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
+        assert!(
+            retry
+                .seal_preparation(&anchor)
+                .unwrap_err()
+                .to_string()
+                .contains("only a completed")
         );
         assert_eq!(
             std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),

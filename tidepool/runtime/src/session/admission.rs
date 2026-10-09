@@ -473,8 +473,7 @@ impl PrivateExecutionAdmission {
 pub struct RuntimeCellAdmission {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
-    private_execution: Option<Arc<PrivateExecutionAdmission>>,
-    native_purpose: Option<NativeCellPurpose>,
+    purpose: RuntimeCellPurpose,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
     declaration_baseline: Option<super::lexical_projection::DeclarationProjectionBaseline>,
@@ -501,20 +500,26 @@ pub struct RuntimeCellAdmission {
     digest: [u8; 32],
 }
 
-/// Runtime-issued purpose for a native setup action or host payload mount.
-/// These purposes never authorize authored private writes or declarations.
-enum NativeCellPurpose {
-    Setup,
+/// One runtime-issued execution purpose. Component controls can capture an
+/// observation without making an executable cell admission.
+enum RuntimeCellPurpose {
+    #[cfg(test)]
+    Observation,
+    PrivateExecution(Arc<PrivateExecutionAdmission>),
+    NativeSetup,
     HostCarrier {
         binding: String,
         expected: super::resident::HostBindingType,
     },
 }
 
-impl NativeCellPurpose {
+impl RuntimeCellPurpose {
     fn frame_authorization(&self, frame: &mut impl FnMut(&[u8])) {
         match self {
-            Self::Setup => frame(b"TidepoolNativeSetupAdmission1"),
+            #[cfg(test)]
+            Self::Observation => {}
+            Self::PrivateExecution(_) => frame(b"TidepoolPrivateExecutionAdmission1"),
+            Self::NativeSetup => frame(b"TidepoolNativeSetupAdmission1"),
             Self::HostCarrier { binding, expected } => {
                 frame(b"TidepoolHostCarrierAdmission1");
                 frame(binding.as_bytes());
@@ -894,7 +899,7 @@ impl<I: Clone + AsRef<ValueInterfaceSnapshot>> CheckedInterfaces<I> {
 pub struct RuntimeCheckedPrefix {
     admission: Arc<RuntimeCellAdmission>,
     first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-    program: Option<Arc<tidepool_toolchain::checked_cell::CellProgram>>,
+    program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     state: parking_lot::Mutex<RuntimeCheckedState>,
 }
 
@@ -1005,8 +1010,8 @@ impl RuntimeCheckedPrefixSnapshot {
 }
 
 impl RuntimeCheckedPrefix {
-    pub fn cell_program(&self) -> Option<&Arc<tidepool_toolchain::checked_cell::CellProgram>> {
-        self.program.as_ref()
+    pub fn cell_program(&self) -> &Arc<tidepool_toolchain::checked_cell::CellProgram> {
+        &self.program
     }
     pub fn admission(&self) -> &Arc<RuntimeCellAdmission> {
         &self.admission
@@ -1030,13 +1035,13 @@ impl RuntimeCheckedPrefix {
                 reservation.item != *execution.item()
                     || reservation.generation.0 != execution.generation()
             })
-            || self.program.as_ref().is_some_and(|program| {
-                program
+            || {
+                self.program
                     .items()
                     .get(execution.item().index())
                     .and_then(|item| item.native())
                     .is_none_or(|native| !Arc::ptr_eq(native, &execution))
-            })
+            }
             || execution.item().admission_digest() != self.admission.digest()
             || session.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
@@ -1074,7 +1079,7 @@ fn validate_private_value_overlay<'a>(
     snapshot: &RuntimeCheckedPrefixSnapshot,
     names: impl Iterator<Item = &'a str>,
 ) -> Result<(), SessionError> {
-    if prefix.admission.private_execution.is_none() {
+    if prefix.admission.private_execution().is_none() {
         return Ok(());
     }
     let names = names.collect::<std::collections::BTreeSet<_>>();
@@ -1109,7 +1114,7 @@ impl CheckedTurnCompletion {
         scope: ScopeId,
         binders: &[&super::BoundBinder],
     ) -> Result<bool, SessionError> {
-        let Some(private) = &self.prefix.admission.private_execution else {
+        let Some(private) = self.prefix.admission.private_execution() else {
             return Ok(false);
         };
         if !self.prefix.admission.belongs_to(session)
@@ -1160,7 +1165,7 @@ impl CheckedTurnCompletion {
             self.execution.target_definition_identities(),
             self.execution.bound_binder_identities(),
         )?;
-        let completed_values = if let Some(private) = &self.prefix.admission.private_execution {
+        let completed_values = if let Some(private) = self.prefix.admission.private_execution() {
             let mut values = Vec::new();
             for name in self.execution.private_value_overlay_binders() {
                 let entry = session
@@ -1469,17 +1474,24 @@ impl RuntimeCellAdmission {
     }
 
     pub fn private_execution(&self) -> Option<&Arc<PrivateExecutionAdmission>> {
-        self.private_execution.as_ref()
+        match &self.purpose {
+            RuntimeCellPurpose::PrivateExecution(execution) => Some(execution),
+            _ => None,
+        }
     }
 
-    pub(super) fn is_native_setup(&self) -> bool {
-        matches!(self.native_purpose, Some(NativeCellPurpose::Setup))
+    pub(super) fn has_execution_purpose(&self) -> bool {
+        match &self.purpose {
+            #[cfg(test)]
+            RuntimeCellPurpose::Observation => false,
+            RuntimeCellPurpose::PrivateExecution(_)
+            | RuntimeCellPurpose::NativeSetup
+            | RuntimeCellPurpose::HostCarrier { .. } => true,
+        }
     }
     pub(super) fn host_carrier(&self) -> Option<(&str, super::resident::HostBindingType)> {
-        match &self.native_purpose {
-            Some(NativeCellPurpose::HostCarrier { binding, expected }) => {
-                Some((binding, *expected))
-            }
+        match &self.purpose {
+            RuntimeCellPurpose::HostCarrier { binding, expected } => Some((binding, *expected)),
             _ => None,
         }
     }
@@ -1565,12 +1577,10 @@ impl PersistentSession {
                     || reservation.generation.0 != execution.generation()
                     || reservation.digest != admission.digest()
             })
-            || prefix.program.as_ref().is_none_or(|program| {
-                program.items().len() != 1
-                    || program.items()[0]
-                        .native()
-                        .is_none_or(|original| !Arc::ptr_eq(original, execution))
-            })
+            || prefix.program.items().len() != 1
+            || prefix.program.items()[0]
+                .native()
+                .is_none_or(|original| !Arc::ptr_eq(original, execution))
             || self.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
             || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
@@ -1614,12 +1624,13 @@ impl PersistentSession {
         let scope = prefix.admission.visibility.scope;
         if !prefix.admission.belongs_to(self)
             || !item.same_cell(&prefix.first_item)
-            || prefix.program.as_ref().is_some_and(|program| {
-                program
+            || {
+                prefix
+                    .program
                     .items()
                     .get(item.index())
                     .is_none_or(|prepared| prepared.checked_item() != &item)
-            })
+            }
             || item.index() != state.snapshot.compiler_prefix.next_item()
             || state.in_flight.is_some()
             || state.reservation.is_some()
@@ -1632,63 +1643,26 @@ impl PersistentSession {
         let snapshot = state.snapshot.clone();
         let planned_row = prefix
             .admission
-            .planned
-            .as_ref()
-            .map(|planned| {
-                planned
-                    .items()
-                    .get(item.index())
-                    .ok_or(SessionError::StaleStagedDeclaration)
-            })
-            .transpose()?;
-        let generation = match planned_row {
-            Some(row) => {
-                use super::RuntimePlannedCellItemKind as Kind;
-                use tidepool_toolchain::checked_cell::CheckedItemKind as CheckedKind;
-                if !matches!(
-                    (row.kind(), item.kind()),
-                    (Kind::Prologue | Kind::Declaration, CheckedKind::Declaration)
-                        | (Kind::Bind, CheckedKind::Bind)
-                        | (Kind::Expression, CheckedKind::Expression)
-                ) {
-                    return Err(SessionError::StaleStagedDeclaration);
-                }
-                row.value_generation()
-                    .or_else(|| row.declaration_generation())
-                    .ok_or(SessionError::StaleStagedDeclaration)?
-            }
-            None if item.index() == 0 => prefix.admission.initial_value_generation,
-            None => {
-                let generation = self.val_gen().next();
-                self.set_val_gen(generation);
-                generation
-            }
-        };
-        let observation_name = if let Some(row) = planned_row {
-            row.observation_name().map(str::to_owned)
-        } else {
-            (item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Expression).then(
-                || {
-                    let mut name = format!("observation{}", generation.0);
-                    let visible = self.bindings().iter_current_in(self.scope_tree(), scope);
-                    let declaration_names = self
-                        .lib()
-                        .log
-                        .current_items_at(snapshot.visibility.declaration_tip)
-                        .into_iter()
-                        .flat_map(|(item, _)| {
-                            item.value_names().map(str::to_owned).collect::<Vec<_>>()
-                        })
-                        .collect::<std::collections::BTreeSet<_>>();
-                    while visible.iter().any(|(existing, _)| existing.0 == name)
-                        || declaration_names.contains(&name)
-                    {
-                        name.push('_');
-                    }
-                    name
-                },
-            )
-        };
+            .plan_reservation()
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .items()
+            .get(item.index())
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        use super::RuntimePlannedCellItemKind as Kind;
+        use tidepool_toolchain::checked_cell::CheckedItemKind as CheckedKind;
+        if !matches!(
+            (planned_row.kind(), item.kind()),
+            (Kind::Prologue | Kind::Declaration, CheckedKind::Declaration)
+                | (Kind::Bind, CheckedKind::Bind)
+                | (Kind::Expression, CheckedKind::Expression)
+        ) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let generation = planned_row
+            .value_generation()
+            .or_else(|| planned_row.declaration_generation())
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let observation_name = planned_row.observation_name().map(str::to_owned);
         let mut digest = blake3::Hasher::new();
         digest.update(b"TidepoolRuntimeCheckedItem1");
         digest.update(&snapshot.digest());
@@ -1751,18 +1725,14 @@ impl PersistentSession {
         let original_source = item
             .planned_declaration_source()
             .ok_or(SessionError::StaleStagedDeclaration)?;
-        let generation = match &prefix.admission.planned {
-            Some(planned) => planned
-                .items()
-                .get(item.index())
-                .and_then(|row| row.declaration_generation())
-                .ok_or(SessionError::StaleStagedDeclaration)?,
-            None => *prefix
-                .admission
-                .reserved_generations
-                .first()
-                .ok_or(SessionError::StaleStagedDeclaration)?,
-        };
+        let generation = prefix
+            .admission
+            .plan_reservation()
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .items()
+            .get(item.index())
+            .and_then(|row| row.declaration_generation())
+            .ok_or(SessionError::StaleStagedDeclaration)?;
         let prepared = prefix.admission.prepared_declaration(item)?;
         let module = tidepool_repr::SessionModule::lib(generation);
         if prepared.generation != generation
@@ -1812,8 +1782,7 @@ impl PersistentSession {
             reserved: true,
             persistence: if prefix
                 .admission
-                .private_execution
-                .as_ref()
+                .private_execution()
                 .is_some_and(|private| private.durable_owner.is_some())
             {
                 super::DeclarationPersistence::Durable
@@ -1942,22 +1911,15 @@ impl PersistentSession {
         }
         Ok(())
     }
-    pub fn begin_checked_prefix(
-        &self,
-        admission: Arc<RuntimeCellAdmission>,
-        first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-    ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
-        if admission.planned.is_some() {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        self.begin_checked_prefix_inner(admission, first_item, None)
-    }
 
     pub fn begin_cell_program(
         &self,
         admission: Arc<RuntimeCellAdmission>,
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     ) -> Result<Option<Arc<RuntimeCheckedPrefix>>, SessionError> {
+        if !admission.has_execution_purpose() {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         let planned = admission
             .plan_reservation()
             .ok_or(SessionError::StaleStagedDeclaration)?;
@@ -1998,15 +1960,15 @@ impl PersistentSession {
                 .map_err(|_| SessionError::StaleStagedDeclaration)?;
             return Ok(None);
         };
-        self.begin_checked_prefix_inner(admission, first.checked_item().clone(), Some(program))
+        self.begin_cell_program_prefix(admission, first.checked_item().clone(), program)
             .map(Some)
     }
 
-    fn begin_checked_prefix_inner(
+    fn begin_cell_program_prefix(
         &self,
         admission: Arc<RuntimeCellAdmission>,
         first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-        program: Option<Arc<tidepool_toolchain::checked_cell::CellProgram>>,
+        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
         if !admission.belongs_to(self)
             || first_item.admission_digest() != admission.digest()
@@ -2264,7 +2226,8 @@ impl PersistentSession {
         self.begin_private_execution(public_scope)
     }
 
-    pub fn admit_cell_in(
+    #[cfg(test)]
+    pub(super) fn admit_cell_in(
         &mut self,
         scope: ScopeId,
         declaration_count: usize,
@@ -2281,8 +2244,7 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             None,
-            None,
-            None,
+            RuntimeCellPurpose::Observation,
             None,
         )
     }
@@ -2321,8 +2283,7 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             Some(plan),
-            None,
-            Some(NativeCellPurpose::Setup),
+            RuntimeCellPurpose::NativeSetup,
             compile_inputs,
         )
     }
@@ -2361,8 +2322,7 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             Some(plan),
-            None,
-            Some(NativeCellPurpose::HostCarrier { binding, expected }),
+            RuntimeCellPurpose::HostCarrier { binding, expected },
             compile_inputs,
         )
     }
@@ -2389,8 +2349,7 @@ impl PersistentSession {
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
         plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
-        private_execution: Option<Arc<PrivateExecutionAdmission>>,
-        native_purpose: Option<NativeCellPurpose>,
+        purpose: RuntimeCellPurpose,
         compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
@@ -2462,13 +2421,11 @@ impl PersistentSession {
                     })
             };
             if let Some(reason) = refusal {
-                return Err(
-                    if matches!(native_purpose, Some(NativeCellPurpose::Setup)) {
-                        self.native_setup_refusal(scope, reason)
-                    } else {
-                        SessionError::StaleStagedDeclaration
-                    },
-                );
+                return Err(if matches!(purpose, RuntimeCellPurpose::NativeSetup) {
+                    self.native_setup_refusal(scope, reason)
+                } else {
+                    SessionError::StaleStagedDeclaration
+                });
             }
         }
         let view_digest = self
@@ -2693,9 +2650,7 @@ impl PersistentSession {
                 frame(parent.as_bytes());
             }
         }
-        if let Some(purpose) = &native_purpose {
-            purpose.frame_authorization(&mut frame);
-        }
+        purpose.frame_authorization(&mut frame);
         compile_inputs.frame_authorization(&mut frame);
         let digest = *digest.finalize().as_bytes();
         let planned = planned.map(|mut planned| {
@@ -2707,8 +2662,7 @@ impl PersistentSession {
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
-            private_execution,
-            native_purpose,
+            purpose,
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
             declaration_baseline,
@@ -2772,7 +2726,7 @@ impl PersistentSession {
             bound.insert(entry.value.identity.clone());
         }
         if let Some(engine) = self.prepared() {
-            for (identity, generation) in engine.code_export_retentions() {
+            for (identity, generation) in engine.protected_code_export_retentions() {
                 if bound.contains(&identity) {
                     continue;
                 }
@@ -2872,10 +2826,10 @@ impl PersistentSession {
         })
     }
 
-    /// Issue executable cell authority inside the exact private execution
-    /// whose token this runtime minted. The token retains its lexical owner
-    /// through off-checkout compilation and parked native execution.
-    pub fn admit_cell_for_execution(
+    /// Capture private admission facts for owner-component controls without
+    /// a parser or compiler. This cannot produce an executable program prefix.
+    #[cfg(test)]
+    pub(super) fn admit_cell_for_execution(
         &mut self,
         execution: Arc<PrivateExecutionAdmission>,
         declaration_count: usize,
@@ -2885,18 +2839,17 @@ impl PersistentSession {
         include_paths: Vec<PathBuf>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.compile_view_for_execution(&execution)?;
-        let mut admission = self.admit_cell_in(
+        self.admit_cell_with_plan(
             execution.private_scope(),
             declaration_count,
             specification,
             specification_digest,
             authority_digest,
             include_paths,
-        )?;
-        Arc::get_mut(&mut admission)
-            .expect("fresh runtime admission has one owner")
-            .private_execution = Some(execution);
-        Ok(admission)
+            None,
+            RuntimeCellPurpose::PrivateExecution(execution),
+            None,
+        )
     }
 
     /// Reserve every ordered source item under the original private admission.
@@ -2928,8 +2881,7 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             Some(plan),
-            Some(execution),
-            None,
+            RuntimeCellPurpose::PrivateExecution(execution),
             compile_inputs,
         )
     }

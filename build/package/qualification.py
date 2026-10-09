@@ -920,8 +920,51 @@ def verify_workspace_bundle(bundle: Path, record: dict, git: Path) -> None:
         subprocess.run([str(git), "-C", str(repository), "fsck", "--no-dangling"], check=True,
                        stdout=subprocess.DEVNULL)
 
-def native_environment(root: Path) -> dict:
-    tools = native_runtime_tools(root / "share/exomonad/runtime-tools")
+_VERIFIED_CATALOG_ISSUER = object()
+
+
+def _canonical_json(value: dict) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+class _VerifiedNativeCatalog:
+    __slots__ = ("bundle_root", "catalog_contract", "root_entry_contract",
+                 "source_selection", "snapshot_root", "_issuer")
+
+    def __init__(self, bundle_root: Path, catalog_contract: bytes, root_entry_contract: bytes,
+                 source_selection: bytes, snapshot_root: str, issuer: object):
+        object.__setattr__(self, "bundle_root", bundle_root)
+        object.__setattr__(self, "catalog_contract", catalog_contract)
+        object.__setattr__(self, "root_entry_contract", root_entry_contract)
+        object.__setattr__(self, "source_selection", source_selection)
+        object.__setattr__(self, "snapshot_root", snapshot_root)
+        object.__setattr__(self, "_issuer", issuer)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("verified native catalog capsules are immutable")
+
+
+def _verify_native_catalog_bundle(root: Path, tools: Path, contract: dict) -> _VerifiedNativeCatalog:
+    root = root.resolve(strict=True)
+    catalog = verify_native_catalog(root, tools)
+    root_entry = verify_native_root_entry(root, contract["native_catalog"])
+    if catalog != contract["native_catalog"]:
+        raise ValueError("native catalog validation differs from the owning build contract")
+    if root_entry != contract["native_root_entry"]:
+        raise ValueError("prepared root entry validation differs from the owning build contract")
+    selection = catalog["source_selection"]
+    return _VerifiedNativeCatalog(
+        root, _canonical_json(contract["native_catalog"]),
+        _canonical_json(contract["native_root_entry"]),
+        _canonical_json(selection), selection["snapshot_root"],
+        _VERIFIED_CATALOG_ISSUER)
+
+
+def _native_environment(root: Path, verified_catalog: _VerifiedNativeCatalog | None = None,
+                        tools: Path | None = None) -> dict:
+    root = root.resolve(strict=True)
+    if tools is None:
+        tools = native_runtime_tools(root / "share/exomonad/runtime-tools")
     ghc = (root / "share/exomonad/ghc-libdir.txt").read_text().strip()
     environment = {
         "TIDEPOOL_EXTRACT": str(root / "bin/tidepool-extract"),
@@ -941,14 +984,33 @@ def native_environment(root: Path) -> dict:
 
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
     if contract["stdlib_mode"] == "catalog-backed":
-        selection = verify_native_catalog(root, tools)["source_selection"]
-        verify_native_root_entry(root, contract["native_catalog"])
+        if (not isinstance(verified_catalog, _VerifiedNativeCatalog)
+                or verified_catalog._issuer is not _VERIFIED_CATALOG_ISSUER
+                or verified_catalog.bundle_root != root
+                or verified_catalog.catalog_contract != _canonical_json(contract["native_catalog"])
+                or verified_catalog.root_entry_contract != _canonical_json(contract["native_root_entry"])):
+            raise ValueError("catalog-backed environment requires this bundle's verified catalog and root entry")
+        selection = json.loads(verified_catalog.source_selection)
+        if selection.get("snapshot_root") != verified_catalog.snapshot_root:
+            raise ValueError("verified native catalog selection was altered")
         environment["TIDEPOOL_COMPILER_MODULES"] = str(root / "share/exomonad/catalog/catalog.json")
         environment["TIDEPOOL_PREPARED_ROOT_ENTRY"] = str(root / "share/exomonad/root-entry")
         environment["TIDEPOOL_PRELUDE_DIR"] = str(Path(selection["snapshot_root"]) / "lib")
     elif contract["stdlib_mode"] != "source-backed":
         raise ValueError("unsupported native stdlib mode")
+    elif verified_catalog is not None:
+        raise ValueError("source-backed environment cannot consume a catalog validation")
     return environment
+
+
+def native_environment(root: Path) -> dict:
+    root = root.resolve(strict=True)
+    tools = native_runtime_tools(root / "share/exomonad/runtime-tools")
+    contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
+    verified_catalog = None
+    if contract["stdlib_mode"] == "catalog-backed":
+        verified_catalog = _verify_native_catalog_bundle(root, tools, contract)
+    return _native_environment(root, verified_catalog, tools)
 
 def execution_environment(descriptor: dict) -> dict:
     environment = dict(os.environ)
@@ -1219,10 +1281,10 @@ def verify(path: Path) -> dict:
             raise ValueError(f"declared Nix selection changed: {path}")
     tools = native_runtime_tools(Path(descriptor["external_inputs"]["runtime_tools"]["path"]))
     expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}
+    verified_catalog = None
     if descriptor["stdlib_mode"] == "catalog-backed":
-        selection = verify_native_catalog(root, tools)["source_selection"]
-        verify_native_root_entry(root, contract["native_catalog"])
-        expected_roots.add(str(Path(selection["snapshot_root"])))
+        verified_catalog = _verify_native_catalog_bundle(root, tools, contract)
+        expected_roots.add(verified_catalog.snapshot_root)
     for item in descriptor["elf_runtime"].values():
         if item["linkage"] == "dynamic":
             expected_roots.add(item["loader_store_path"])
@@ -1239,7 +1301,7 @@ def verify(path: Path) -> dict:
         if Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"]):
             raise ValueError("deployment Nix GC root was removed or changed")
     verify_registered_gc_roots(tools, descriptor["gc_roots"])
-    expected_environment = native_environment(root)
+    expected_environment = _native_environment(root, verified_catalog, tools)
     expected_environment.update(
         TIDEPOOL_BROWSER_NODE=descriptor["external_inputs"]["TIDEPOOL_BROWSER_NODE"]["path"],
         TIDEPOOL_BROWSER_DRIVER=str(root / "share/exomonad/browser-driver/driver.mjs"),

@@ -33,7 +33,6 @@ def cargo_dependency_key(dependency):
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 HASKELL_RUST_INPUTS = set()
 HASKELL_TEST_FIXTURES = {}
-HASKELL_RUNTIME_FIXTURE_READS = set()
 arguments = argparse.ArgumentParser(description=__doc__)
 arguments.add_argument("--package", action="append", required=True, help="Cargo package to generate (repeatable)")
 arguments.add_argument(
@@ -567,15 +566,13 @@ def source_inputs(package, target, features=(), test_target=False):
                         or "\\" in relative or parsed.suffix != ".hs"):
                     raise SystemExit(f"invalid Haskell test fixture path: {relative!r}")
                 register_test_fixture(ROOT / relative, external_labels)
-                HASKELL_RUNTIME_FIXTURE_READS.add(relative)
         relatives = list(includes.findall(contents))
         for relative in relatives:
             included = pathlib.Path(os.path.abspath(source.parent / relative))
             if not included.resolve().is_relative_to(ROOT):
                 raise SystemExit(f"compile-time input outside repository {included} from {source}")
             if test_target and package["name"] in {"tidepool", "exomonad-actor"} and included.suffix == ".hs":
-                # Transitional includes remain compiler inputs until migrated;
-                # their inventory is already retained by the runtime owner.
+                # Compile-time includes and runtime reads share one fixture roster.
                 register_test_fixture(included, external_labels)
             if included.is_relative_to(ROOT) and included.relative_to(ROOT).as_posix() in test_only:
                 continue
@@ -822,6 +819,24 @@ def runtime_arguments(env, resources, worker, resource_env=None):
     return "\n".join(lines)
 
 
+def integration_binary_compile_env(package, source_map):
+    """Project literal Cargo executable inputs from their emitted binary owners."""
+    requested = set()
+    for source in source_map:
+        if source.endswith(".rs") and not source.startswith(("//", ":", "root//", "toolchains//")):
+            contents = (ROOT / package_dir(package) / source).read_text()
+            requested.update(re.findall(
+                r'\b(?:option_)?env!\s*\(\s*"CARGO_BIN_EXE_([^\"]+)"', contents,
+            ))
+    environment = {}
+    binaries = NATIVE_TARGETS[package["name"]]["binaries"]
+    for binary in sorted(requested):
+        if binary not in binaries:
+            raise SystemExit(f"Cargo executable input {binary!r} has no binary owner in {package['name']}")
+        environment["CARGO_BIN_EXE_" + binary] = "$(location " + binaries[binary]["build"] + ")"
+    return environment
+
+
 def render_rule(rule, name, target, package, deps, named, extra="", features=(), test_target=False):
     crate_root = target["src_path"]
     src_root = pathlib.Path(crate_root).relative_to(ROOT).as_posix()
@@ -836,6 +851,10 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
         package, target, features,
         test_target=test_target or rule in ("tidepool_rust_test", "tidepool_rust_isolated_test"),
     )
+    if rule == "tidepool_rust_isolated_test" and "test" in target["kind"]:
+        compile_env = integration_binary_compile_env(package, source_map)
+        if compile_env:
+            extra += "\n    compile_env = " + json.dumps(compile_env, sort_keys=True) + ","
     CURRENT_QUALIFICATION_SOURCES.update(source for source in source_map if not source.startswith(("//", ":", "root//", "toolchains//")))
     lines.extend(
         "        " + json.dumps(source) + ": " + json.dumps(mapped) + ","
@@ -1596,12 +1615,10 @@ if selected == set(SUPPORTED_PACKAGES):
 else:
     manifest_path = ROOT / "build/test-fixtures.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
-    if not HASKELL_RUNTIME_FIXTURE_READS.issubset(set(manifest.get("files", []))):
-        raise SystemExit("new runtime Haskell fixture inputs need complete native graph regeneration")
+    if not set(HASKELL_TEST_FIXTURES).issubset(set(manifest.get("files", []))):
+        raise SystemExit("new Haskell fixture inputs need complete native graph regeneration")
     # Preserve the global roster when regenerating one resource owner. Only the
     # complete source walk may replace the manifest and retire fixture exports.
-    # Transitional includes keep their compiler edge until that complete walk;
-    # they cannot silently enlarge the runtime tree beside a retained manifest.
     HASKELL_TEST_FIXTURES.clear()
     for relative in manifest.get("files", []):
         register_test_fixture(ROOT / relative, EXTERNAL_SOURCE_LABELS)

@@ -30,6 +30,10 @@ and is never replayed.
 Ordinary daemon mode exits when its request or RSS rotation bound is reached.
 `--persistent` keeps the daemon endpoint alive and rotates only the pinned GHC
 worker, for a long-lived owner such as one Exomonad tmux session.
+Scoped daemon binding retains its preflighted socket, boot epoch and producer
+without reserving a worker or CPU grant. The first execution admits the exact
+captured endpoint; stale epochs refuse rather than silently rebinding an already
+prepared offer. Direct identity handshakes retain their existing child owner.
 An explicit compiler transaction pins that worker across its ordered requests;
 rotation and request-local compiler cleanup occur when the transaction closes.
 An ordinary one-shot response is delivered only after the worker acknowledges
@@ -42,6 +46,11 @@ by the configured request deadline (`--request-deadline-secs`,
 default 15 minutes); a worker that never replies is killed at expiry and the
 daemon recovers it through the same worker-replacement path a crash uses,
 which only `--persistent` survives.
+
+Host-side preparation polls `compiler_host_checkpoint` within the same compiler
+scope. It returns `io::ErrorKind::Interrupted` when that scope is cancelled;
+unscoped work is allowed. Polling acquires no endpoint or admission and leaves
+accepted-request and END cleanup custody with the original owner.
 
 Direct identity and transaction-BEGIN handshakes share the same process owner.
 A scoped cancellation token arms the child immediately after spawn, before
@@ -56,8 +65,11 @@ owner checks epoch/deployment fences and routes through bounded per-slot queues.
 The lowest live slot retains foreground context; preparation never occupies it.
 Foreground uses that slot first and may spill to an idle additional slot. At most
 one foreground job waits beyond occupied workers. Every accepted connection holds
-its CPU grant through transaction cleanup; failed acknowledgement, disconnect,
-worker failure and cancellation release the grant through the same owned permit.
+its CPU grant through transaction cleanup and any owned worker rotation;
+`compiler_capacity_release` records the exact admission after its permit is
+released, including failed delivery, cancellation and replacement. Failed
+acknowledgement, disconnect, worker failure and cancellation release the grant
+through the same owned permit.
 STOP and deployment changes drain accepted work before rejecting the backlog.
 
 Requests and transaction acquisition declare `CompileWorkload::Foreground` or
@@ -70,11 +82,17 @@ outer transaction and retain its workload. Workload is urgency, not artifact
 identity. Explicit classification belongs inside the actual blocking compiler
 closure rather than depending on implicit propagation across async tasks.
 
-Defaults allow two foreground jobs and four preparation jobs per request, bounded
-by aggregate effective CPU availability. `--foreground-jobs` and
-`--preparation-jobs` select positive maxima for the qualification matrix. The
-accept owner observes ancestor cgroup quotas/cpusets, ancestor memory remaining
-and host memory headroom before acceptance. Preparation cannot borrow the reserved
+The `--workers` setting controls the number of resident GHC worker processes;
+foreground job width controls module scheduling and the worker executor within
+each process. They are separate limits. Defaults allow two foreground jobs and
+four preparation jobs per request, bounded by aggregate effective CPU
+availability. `--foreground-jobs` and `--preparation-jobs` select positive
+maxima for the qualification matrix. The Exomonad `[compiler]` configuration
+can set `foreground_jobs`; omission preserves the daemon's default of two.
+Changing job width does not add worker processes, but can increase one worker's
+RSS and make its existing rotation ceiling arrive sooner. The accept owner
+observes ancestor cgroup quotas/cpusets, ancestor memory remaining and host
+memory headroom before acceptance. Preparation cannot borrow the reserved
 foreground CPU allowance or warm worker. These defaults require measured latency
 qualification; available CPU count alone does not establish a passing allocation.
 Explicit `max` and a controller file absent from an existing cgroup impose no
@@ -126,6 +144,13 @@ replay a caller's request.
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork
 counter.
+
+The native owned-daemon runner publishes the PID, producer and epoch from its
+preflighted daemon to both the child measurement environment and lifecycle
+report. It refuses inherited compiler ownership coordinates. Test this handoff
+through the actual frontend as well as its projections; shell-owner evidence
+does not qualify the native owner. Artifact retention, diagnostic completeness,
+workload success and acknowledged cleanup remain independent observations.
 
 Every process edge in the extractor chain uses the crate's parent-death
 contract. Killing a caller, frontend, or daemon must reap its frontend or GHC

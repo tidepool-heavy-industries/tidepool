@@ -4339,6 +4339,7 @@ fn unique_key(values: &[Value], key: &str, count: usize) -> Result<Value, Compil
     }
 }
 pub(crate) fn read(path: impl AsRef<Path>, limit: u64) -> Result<Vec<u8>, CompileError> {
+    crate::host_work::checkpoint()?;
     if std::fs::metadata(path.as_ref())
         .map_err(|error| {
             failure(format!(
@@ -4351,7 +4352,10 @@ pub(crate) fn read(path: impl AsRef<Path>, limit: u64) -> Result<Vec<u8>, Compil
     {
         return Err(failure("checked evidence exceeds bound"));
     }
-    let bytes = std::fs::read(path.as_ref()).map_err(|error| {
+    let bytes = crate::host_work::read(path.as_ref()).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return CompileError::Io(error);
+        }
         failure(format!(
             "checked evidence {}: {error}",
             path.as_ref().display()

@@ -10,6 +10,14 @@ use crate::request::{PRINT_WORKER_REQUEST_FLAG, WORKER_REQUEST_FLAG};
 use crate::{daemon, ExtractRequest};
 
 const WORKER_ENV: &str = "TIDEPOOL_EXTRACT_WORKER";
+const OWNED_COMPILER_ENV: [&str; 6] = [
+    crate::DAEMON_SOCKET_ENV,
+    crate::REQUIRED_DAEMON_ENDPOINT_ENV,
+    "TIDEPOOL_EXTRACT_NO_DAEMON",
+    "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID",
+    "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER",
+    "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH",
+];
 const USAGE: &str = "Usage: tidepool-extract [OPTIONS] <file.hs> ...";
 
 pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
@@ -152,6 +160,44 @@ fn owned_timing_command(program: impl AsRef<OsStr>, timing: Option<&OsStr>) -> C
     command
 }
 
+/// One owner's preflight facts feed both the child and retained lifecycle.
+struct OwnedCompilerEvidence<'a> {
+    identity: &'a crate::CompilerIdentity,
+    epoch: &'a [u8; 32],
+    pid: u32,
+    socket: &'a Path,
+}
+
+impl OwnedCompilerEvidence<'_> {
+    fn configure_child(&self, command: &mut Command) {
+        command
+            .env(crate::DAEMON_SOCKET_ENV, self.socket)
+            .env(crate::REQUIRED_DAEMON_ENDPOINT_ENV, self.identity.to_hex())
+            .env(
+                "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID",
+                self.pid.to_string(),
+            )
+            .env(
+                "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER",
+                self.identity.producer_hex(),
+            )
+            .env(
+                "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH",
+                crate::endpoint::hex(self.epoch),
+            );
+    }
+
+    fn write_lifecycle(&self, report: &Path, confirmed: bool, code: Option<u8>) -> io::Result<()> {
+        atomic_write_manifest(report, format!(
+            "{{\"schema\":1,\"producer\":{},\"endpoint\":{},\"daemon_epoch\":{},\"daemon_pid\":{},\"socket_path\":{},\"cleanup_confirmed\":{},\"exit_code\":{}}}\n",
+            json_string(&self.identity.producer_hex()), json_string(&self.identity.to_hex()),
+            json_string(&crate::endpoint::hex(self.epoch)), self.pid,
+            json_string(&self.socket.display().to_string()), confirmed,
+            code.map_or("null".into(), |value| value.to_string())
+        ).as_bytes())
+    }
+}
+
 fn worker_count(count: u64) -> Result<usize, FrontendError> {
     let count = usize::try_from(count)
         .map_err(|_| FrontendError::Usage("--workers is too large".to_owned()))?;
@@ -213,11 +259,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         child_args,
     } = parse_owned_invocation(args)?;
     let timing = std::env::var_os("TIDEPOOL_TIMING");
-    for key in [
-        crate::DAEMON_SOCKET_ENV,
-        crate::REQUIRED_DAEMON_ENDPOINT_ENV,
-        "TIDEPOOL_EXTRACT_NO_DAEMON",
-    ] {
+    for key in OWNED_COMPILER_ENV {
         if std::env::var_os(key).is_some() {
             return Err(FrontendError::Usage(format!(
                 "owned daemon refuses inherited {key}"
@@ -270,6 +312,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         "isolated-qualification",
         workers,
         Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+        None,
     );
     let mut command = owned_timing_command(&frontend, timing.as_deref());
     command
@@ -310,21 +353,25 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
     }
     let report = root.join("lifecycle.json");
     let daemon_pid = daemon.0.id();
-    let write_report = |confirmed: bool, code: Option<u8>| {
-        atomic_write_manifest(&report, format!(
-            "{{\"schema\":1,\"producer\":{},\"endpoint\":{},\"daemon_epoch\":{},\"daemon_pid\":{},\"socket_path\":{},\"cleanup_confirmed\":{},\"exit_code\":{}}}\n",
-            json_string(&identity.producer_hex()), json_string(&identity.to_hex()),
-            json_string(&crate::endpoint::hex(&binding.epoch)), daemon_pid, json_string(&socket.display().to_string()), confirmed,
-            code.map_or("null".into(), |value| value.to_string())
-        ).as_bytes()).map_err(FrontendError::Io)
+    let evidence = OwnedCompilerEvidence {
+        identity: &identity,
+        epoch: &binding.epoch,
+        pid: daemon_pid,
+        socket: &socket,
     };
-    write_report(false, None)?;
+    evidence
+        .write_lifecycle(&report, false, None)
+        .map_err(FrontendError::Io)?;
     let mut descendants =
         crate::process::descendant_snapshot(daemon_pid).map_err(FrontendError::Io)?;
-    let child = owned_timing_command(program, timing.as_deref())
+    let mut child_command = owned_timing_command(program, timing.as_deref());
+    evidence.configure_child(&mut child_command);
+    let child = child_command
         .args(child_args)
-        .env(crate::DAEMON_SOCKET_ENV, &socket)
-        .env(crate::REQUIRED_DAEMON_ENDPOINT_ENV, identity.to_hex())
+        .env(
+            "TIDEPOOL_PERFORMANCE_COMPILER_TRACE",
+            root.join("compiler.jsonl"),
+        )
         .env("XDG_CACHE_HOME", &cache)
         .env("TIDEPOOL_CACHE_DIR", cache.join("tidepool"))
         .env("TIDEPOOL_COMPILE_CACHE_DIR", cache.join("artifacts"))
@@ -362,7 +409,9 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
     if code == 0 {
         std::fs::remove_dir_all(&cache).map_err(FrontendError::Io)?;
     }
-    write_report(true, Some(code))?;
+    evidence
+        .write_lifecycle(&report, true, Some(code))
+        .map_err(FrontendError::Io)?;
     atomic_write_manifest(
         &outcome_path,
         b"{\"schema\":1,\"cleanup\":{\"status\":\"confirmed\"}}\n",
@@ -1156,6 +1205,61 @@ mod tests {
         ));
     }
 
+    fn owned_evidence_property_config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
+    proptest::proptest! {
+        #![proptest_config(owned_evidence_property_config())]
+
+        #[test]
+        fn owned_measurement_handoff_preserves_identity_across_lifecycle_transitions(
+            producer in proptest::prelude::any::<[u8; 32]>(),
+            worker in proptest::prelude::any::<[u8; 32]>(),
+            epoch in proptest::prelude::any::<[u8; 32]>(),
+            pid in 1_u32..u32::MAX,
+            code in proptest::prelude::any::<u8>(),
+            suffix in "[a-z\"\\\\]{0,12}",
+        ) {
+            let directory = tempfile::tempdir().unwrap();
+            let report = directory.path().join("lifecycle.json");
+            let socket = directory.path().join(format!("{suffix}.sock"));
+            let identity = crate::CompilerIdentity::daemon(producer, worker, epoch);
+            let evidence = OwnedCompilerEvidence { identity: &identity, epoch: &epoch, pid, socket: &socket };
+            let mut command = Command::new("unused-child");
+            for key in OWNED_COMPILER_ENV { command.env(key, "foreign-owner"); }
+            evidence.configure_child(&mut command);
+            // Readiness and settled reports must carry the same issued facts;
+            // only terminal cleanup and exit evidence change.
+            for (confirmed, exit) in [(false, None), (true, Some(code))] {
+                evidence.write_lifecycle(&report, confirmed, exit).unwrap();
+                let lifecycle: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+                let environment: std::collections::BTreeMap<_, _> = command.get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())))
+                    .collect();
+                proptest::prop_assert_eq!(lifecycle["daemon_pid"].as_u64(), Some(u64::from(pid)));
+                proptest::prop_assert_eq!(environment["TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID"].as_str(), pid.to_string());
+                for (key, field, expected) in [
+                    ("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER", "producer", producer.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+                    ("TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH", "daemon_epoch", epoch.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+                    (crate::DAEMON_SOCKET_ENV, "socket_path", socket.display().to_string()),
+                ] {
+                    proptest::prop_assert_eq!(&environment[key], &expected);
+                    proptest::prop_assert_eq!(lifecycle[field].as_str(), Some(expected.as_str()));
+                }
+                proptest::prop_assert_eq!(lifecycle["cleanup_confirmed"].as_bool(), Some(confirmed));
+                proptest::prop_assert_eq!(lifecycle["exit_code"].as_u64(), exit.map(u64::from));
+                proptest::prop_assert_eq!(lifecycle["endpoint"].as_str(), Some(environment[crate::REQUIRED_DAEMON_ENDPOINT_ENV].as_str()));
+            }
+        }
+    }
+
     #[test]
     fn owned_compiler_workers_flow_to_existing_admission_command() {
         for (options, expected) in [
@@ -1176,6 +1280,7 @@ mod tests {
                 "isolated-qualification",
                 invocation.workers,
                 Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+                None,
             );
             let config = parse_daemon(&arguments[1..]).unwrap();
             assert_eq!(config.workers, Some(expected));
@@ -1208,6 +1313,7 @@ mod tests {
             "isolated-qualification",
             1,
             Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+            None,
         );
         for (timing, expected) in [
             (None, "1"),
@@ -1256,11 +1362,39 @@ mod tests {
             "case",
             1,
             Some(7168),
+            None,
         );
         let configuration = parse_daemon(&arguments[1..]).unwrap();
         assert!(configuration.persistent);
         assert_eq!(configuration.workers, Some(1));
         assert_eq!(configuration.rss_ceiling_mb, Some(7168));
+    }
+
+    #[test]
+    fn persistent_daemon_command_forwards_only_an_explicit_foreground_job_limit() {
+        for (jobs, expected, expected_width) in [
+            (None, None, 2),
+            (std::num::NonZeroUsize::new(8), Some(8), 8),
+        ] {
+            let arguments = crate::persistent_daemon_arguments(
+                Path::new("/tmp/owned.sock"),
+                Path::new("/tmp/compiler.jsonl"),
+                "case",
+                2,
+                Some(10 * 1024),
+                jobs,
+            );
+            let configuration = parse_daemon(&arguments[1..]).unwrap();
+            assert_eq!(configuration.foreground_jobs, expected);
+            assert_eq!(
+                configuration
+                    .foreground_jobs
+                    .unwrap_or(daemon::DEFAULT_FOREGROUND_JOBS),
+                expected_width
+            );
+            assert_eq!(configuration.workers, Some(2));
+            assert_eq!(configuration.rss_ceiling_mb, Some(10 * 1024));
+        }
     }
 
     #[test]
@@ -1278,6 +1412,13 @@ mod tests {
             assert_eq!(config.foreground_jobs, Some(count));
             assert_eq!(config.preparation_jobs, Some(count));
         }
+        assert!(parse_daemon(&[
+            "--socket".into(),
+            "/tmp/compiler.sock".into(),
+            "--foreground-jobs".into(),
+            "0".into()
+        ])
+        .is_err());
         assert!(parse_daemon(&[
             "--socket".into(),
             "/tmp/compiler.sock".into(),

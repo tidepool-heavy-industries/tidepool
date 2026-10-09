@@ -57,6 +57,7 @@ action_path=$(config_value action_path)
 outputs=()
 buck_output=
 git_output=
+workspace_gitlink_revision=
 while IFS=$'\t' read -r name reference output root; do
   [[ $root == "$generation/roots/$name" && -L $root &&
      $(readlink -f -- "$root") == "$output" && -d $output ]] || refuse "retained output $name"
@@ -66,6 +67,11 @@ while IFS=$'\t' read -r name reference output root; do
   outputs+=("$output")
   [[ $name != buck-buck2 ]] || buck_output=$output
   [[ $name != buck-test-git ]] || git_output=$output
+  if [[ $name == workspace-git-resource ]]; then
+    [[ -z $workspace_gitlink_revision && $reference == gitlink:* ]] || refuse 'workspace Gitlink resource record'
+    workspace_gitlink_revision=${reference#gitlink:}
+    [[ $workspace_gitlink_revision =~ ^[0-9a-f]{40}$ ]] || refuse 'workspace Gitlink resource revision'
+  fi
 done < "$generation/outputs.tsv"
 [[ -n $buck_output && $buck_bin == "$buck_output/bin/buck2" && -x $buck_bin ]] || refuse 'Buck executable does not match its retained output'
 [[ $action_path != :* && $action_path != *: && $action_path != *::* ]] || refuse 'empty action PATH entry'
@@ -91,4 +97,29 @@ case $(owner_value selection_mode) in
   explicit) ;;
   *) refuse 'missing generation selection mode' ;;
 esac
+[[ -n $workspace_gitlink_revision ]] || refuse 'missing retained workspace Gitlink resource'
+workspace_gitlink_line=$("$git_bin" -C "$PWD" ls-tree HEAD -- .exomonad/workspace) || refuse 'cannot read committed workspace Gitlink'
+IFS=$'\t' read -r workspace_gitlink_metadata workspace_gitlink_path <<< "$workspace_gitlink_line"
+read -r workspace_gitlink_mode workspace_gitlink_kind current_workspace_revision <<< "$workspace_gitlink_metadata"
+if [[ $workspace_gitlink_mode != 160000 || $workspace_gitlink_kind != commit ||
+      ! $current_workspace_revision =~ ^[0-9a-f]{40}$ ||
+      $workspace_gitlink_path != .exomonad/workspace ]]; then
+  refuse 'missing committed workspace Gitlink'
+fi
+[[ $workspace_gitlink_revision == "$current_workspace_revision" ]] || refuse 'changed workspace Gitlink'
+# The native graph declares the stage-0 index Gitlink. It must agree with the
+# same retained revision as HEAD before any build can consume that declaration.
+workspace_gitlink_index=$("$git_bin" -C "$PWD" ls-files --stage -- .exomonad/workspace) || refuse 'cannot read workspace Gitlink index'
+[[ $workspace_gitlink_index == "160000 $workspace_gitlink_revision 0"$'\t.exomonad/workspace' ]] || refuse 'workspace Gitlink index differs from retained pin'
+if [[ -n ${TIDEPOOL_BUCK_CONFIG_FILE:-} ]]; then
+  shared_config=$(mktemp)
+  trap 'rm -f -- "$shared_config"' EXIT
+  if ! python3 scripts/buck2-config-args.py "$TIDEPOOL_BUCK_CONFIG_FILE" -- "$@" > "$shared_config"; then
+    refuse 'shared Buck configuration is invalid or conflicts with command-line configuration'
+  fi
+  mapfile -d '' -t configured_args < "$shared_config"
+  rm -f -- "$shared_config"
+  trap - EXIT
+  exec "$buck_bin" "${configured_args[@]}"
+fi
 exec "$buck_bin" "$@"

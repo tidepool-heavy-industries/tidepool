@@ -2675,15 +2675,21 @@ mod tests {
         assert!(!foreign.same_revision(&captured));
         assert!(reload.validate_source_authority(&foreign).is_err());
         assert!(reload.admit_retained_layer(&foreign).is_err());
-        assert!(reload
-            .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run")
-            .is_err());
-        assert!(reload
-            .bind_checkpoint_for(PrincipalId::new(1, 1), "run", &foreign)
-            .is_err());
-        assert!(reload
-            .validate_source_authority(&exomonad_actor::CheckpointSourceLayer::default())
-            .is_err());
+        assert!(
+            reload
+                .admit_checkpoint_layer(&foreign, PrincipalId::SYSTEM, "run")
+                .is_err()
+        );
+        assert!(
+            reload
+                .bind_checkpoint_for(PrincipalId::new(1, 1), "run", &foreign)
+                .is_err()
+        );
+        assert!(
+            reload
+                .validate_source_authority(&exomonad_actor::CheckpointSourceLayer::default())
+                .is_err()
+        );
         reload.validate_source_authority(&captured).unwrap();
     }
 
@@ -2943,17 +2949,27 @@ mod tests {
                 .contains_key(&current_recipe.recipe)
         );
         let before = tidepool_extract_cmd::extract_spawn_count();
+        let mut compiler_owner = exomonad_actor::CompilerPreparationOwner::new();
+        let refusal = compiler_owner
+            .scope(workbench.prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                current.clone(),
+                &requested,
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            ))
+            .await;
         assert!(matches!(
-            workbench
-                .prepare_source_toolset(
-                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                    current.clone(),
-                    &requested,
-                    &[],
-                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-                )
-                .await,
+            refusal.action,
             Err(exomonad_actor::ResidentActorWorkbenchError::PreparedEntryAbsent { .. })
+        ));
+        let cleanup = refusal.cleanup.observation();
+        assert!(cleanup.is_confirmed());
+        assert!(matches!(
+            cleanup.work.as_slice(),
+            [exomonad_actor::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
         ));
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
         let fresh = reload.fresh_toolset_layer_from(&current).unwrap();
@@ -3848,13 +3864,15 @@ mod tests {
         let helper_actor = PrincipalId::new(1, 1);
         exomonad_actor::ActorSourceLayers::bind_for(&reload, helper_actor, "run");
         exomonad_actor::ActorSourceLayers::layer_include_for(&reload, "run").unwrap();
-        assert!(reload
-            .helper_layer("run")
-            .read_active()
-            .unwrap()
-            .unwrap()
-            .modules
-            .is_empty());
+        assert!(
+            reload
+                .helper_layer("run")
+                .read_active()
+                .unwrap()
+                .unwrap()
+                .modules
+                .is_empty()
+        );
         // A helper checks against the published run layer, including source
         // introduced after the frozen workspace was captured.
         std::fs::write(

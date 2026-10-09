@@ -900,11 +900,14 @@ impl InvocationWork {
     }
 
     pub(super) fn close(&self) {
-        let scopes = {
+        let (scopes, compilers) = {
             let mut state = self.state.lock();
             state.phase = InvocationWorkPhase::Closing;
-            state.scopes.clone()
+            (state.scopes.clone(), state.compilers.clone())
         };
+        for compiler in compilers {
+            compiler.request_cancellation();
+        }
         for scope in scopes {
             scope.close();
         }

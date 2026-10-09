@@ -1,4 +1,6 @@
-use super::super::test_campaign::{commit_workspace, dispatch_haskell_script, TestCampaign};
+use super::super::test_campaign::{
+    commit_workspace, committed_display_text, dispatch_haskell_script, TestCampaign,
+};
 use super::*;
 use harness::{
     item::Item,
@@ -144,32 +146,111 @@ async fn campaign() -> (TestCampaign, Arc<Store>, Arc<ScriptState>, HeldBinding)
     .await;
     (campaign, store, script, retained)
 }
+async fn displayed(
+    campaign: &mut TestCampaign,
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    source: &str,
+) -> serde_json::Value {
+    let store = super::super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    campaign
+        .drive_actor_output(&store, dispatch_haskell_script(endpoint, source))
+        .await
+}
+
+fn same_terminal_reply(
+    owner: &exomonad_actor::KernelWorkbenchReply,
+    dispatch: &Result<exomonad_actor::ResidentToolResponse, exomonad_actor::ResidentToolError>,
+) -> bool {
+    use exomonad_actor::{ResidentToolError, ResidentToolResponse};
+    match (owner, dispatch) {
+        (Ok(expected), Ok(ResidentToolResponse::Workbench(actual))) => expected == actual,
+        (Ok(expected), Ok(ResidentToolResponse::Value(actual))) => {
+            serde_json::to_value(expected).unwrap() == *actual
+        }
+        (Err(expected), Err(ResidentToolError::Invocation(actual))) => expected == actual,
+        _ => false,
+    }
+}
+
+#[test]
+fn cancellation_terminal_comparison_refuses_mismatched_owner_results() {
+    use exomonad_actor::{
+        ActorId, ActorRef, KernelInvocationFailure, ResidentToolError, ResidentToolResponse,
+    };
+    use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
+    let response = WorkbenchResponse {
+        status: WorkbenchRunStatus::Committed,
+        summary: None,
+        items: Vec::new(),
+        next_index: 1,
+        total: 1,
+        publication: None,
+    };
+    let failure = KernelInvocationFailure::Cancelled {
+        actor: ActorRef::first(ActorId(42)),
+    };
+    let successful_owner = Ok(response.clone());
+    let failed_owner = Err(failure.clone());
+    let typed = Ok(ResidentToolResponse::Workbench(response.clone()));
+    let projected = Ok(ResidentToolResponse::Value(
+        serde_json::to_value(&response).unwrap(),
+    ));
+    let failed = Err(ResidentToolError::Invocation(failure));
+    assert!(same_terminal_reply(&successful_owner, &typed));
+    assert!(same_terminal_reply(&successful_owner, &projected));
+    assert!(same_terminal_reply(&failed_owner, &failed));
+    assert!(!same_terminal_reply(&successful_owner, &failed));
+    assert!(!same_terminal_reply(&failed_owner, &typed));
+    let mut changed = response;
+    changed.status = WorkbenchRunStatus::Completed;
+    assert!(!same_terminal_reply(
+        &successful_owner,
+        &Ok(ResidentToolResponse::Workbench(changed)),
+    ));
+    assert!(!same_terminal_reply(
+        &failed_owner,
+        &Err(ResidentToolError::Invocation(
+            KernelInvocationFailure::Cancelled {
+                actor: ActorRef::first(ActorId(43)),
+            }
+        )),
+    ));
+}
+
 #[tokio::test]
 async fn resident_model_callback_and_hook_keep_caller_effects_and_retained_result() {
     let (campaign, store, script, _) = campaign().await;
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
-                let capability = dispatch_haskell_script(
-                    campaign.root_installation.policy.as_ref(),
-                    "pure ModelFixture.modelCapabilityKeys",
+                let endpoint = campaign.root_installation.policy.clone();
+                let capability = displayed(
+                    campaign,
+                    endpoint.as_ref(),
+                    "display (case ModelFixture.modelCapabilityKeys of { [Tidepool.Effects.Core.EffectModelCall] -> True; _ -> False })",
                 )
                 .await;
-                assert_eq!(
-                    capability["items"][0]["output"].as_str().unwrap().trim(),
-                    "[EffectModelCall]"
-                );
-                let result = dispatch_haskell_script(
-                    campaign.root_installation.policy.as_ref(),
-                    "ModelFixture.callbackCell",
+                assert_eq!(committed_display_text(&capability), "True");
+                let result = displayed(
+                    campaign,
+                    endpoint.as_ref(),
+                    "modelCallbackResult <- ModelFixture.callbackCell\ndisplay (case fst modelCallbackResult of { Right answer -> answer == \"done\"; _ -> False })",
                 )
                 .await;
-                let output = result["items"][0]["output"].as_str().unwrap();
-                assert!(output.contains("Right \"done\""), "{result}");
-                assert!(
-                    output.contains("model callback") && output.contains("model hook"),
-                    "{result}"
-                );
+                assert_eq!(committed_display_text(&result), "True");
+                let output_lines = result["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|item| item["output"].as_str().unwrap().lines())
+                    .collect::<Vec<_>>();
+                for expected in ["model callback", "model hook"] {
+                    assert_eq!(
+                        output_lines.iter().filter(|line| **line == expected).count(),
+                        1,
+                        "the real caller Console effect must run once: {result}"
+                    );
+                }
                 let requests = script.requests.lock().unwrap();
                 assert_eq!(requests.len(), 2);
                 assert!(requests
@@ -200,39 +281,35 @@ async fn resident_nested_model_and_separate_cell_budget_use_original_execution_o
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
-                let endpoint = campaign.root_installation.policy.as_ref();
-                let nested = dispatch_haskell_script(endpoint, "ModelFixture.nestedCell").await;
-                assert!(
-                    nested["items"][0]["output"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Right \"done\""),
-                    "{nested}"
-                );
+                let endpoint = campaign.root_installation.policy.clone();
+                let nested = displayed(
+                    campaign,
+                    endpoint.as_ref(),
+                    "import qualified Tidepool.Model as ModelApi\nnestedModelOutcome <- ModelFixture.nestedCell\ndisplay (case nestedModelOutcome of { Right answer -> answer == \"done\"; _ -> False })",
+                )
+                .await;
+                assert_eq!(committed_display_text(&nested), "True");
                 assert_eq!(script.requests.lock().unwrap().len(), 3);
-                let limited =
-                    dispatch_haskell_script(endpoint, "ModelFixture.nestedBudgetCell").await;
-                assert!(
-                    limited["items"][0]["output"]
-                        .as_str()
-                        .unwrap()
-                        .contains("ModelBudgetExceeded ProviderRequests"),
-                    "{limited}"
-                );
+                let limited = displayed(
+                    campaign,
+                    endpoint.as_ref(),
+                    "limitedNestedModelOutcome <- ModelFixture.nestedBudgetCell\ndisplay (case limitedNestedModelOutcome of { Left (ModelApi.ModelBudgetExceeded ModelApi.ProviderRequests) -> True; _ -> False })",
+                )
+                .await;
+                assert_eq!(committed_display_text(&limited), "True");
                 assert_eq!(
                     script.requests.lock().unwrap().len(),
                     5,
                     "outer invocation exhaustion latches the shared cell allowance"
                 );
                 for _ in 0..2 {
-                    let receipt =
-                        dispatch_haskell_script(endpoint, "ModelFixture.budgetCell").await;
-                    let output = receipt["items"][0]["output"].as_str().unwrap();
-                    assert!(
-                        output.contains("(16,")
-                            && output.contains("ModelBudgetExceeded ProviderRequests"),
-                        "{receipt}"
-                    );
+                    let receipt = displayed(
+                        campaign,
+                        endpoint.as_ref(),
+                        "modelBudgetResult <- ModelFixture.budgetCell\ndisplay (case modelBudgetResult of { (16, Left (ModelApi.ModelBudgetExceeded ModelApi.ProviderRequests)) -> True; _ -> False })",
+                    )
+                    .await;
+                    assert_eq!(committed_display_text(&receipt), "True");
                 }
                 assert_eq!(
                     script.requests.lock().unwrap().len(),
@@ -256,8 +333,8 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
                     "model-test".into(),
                     "parked-turn".into(),
                     "parked-call".into(),
-                    Some("parked-operation".into()),
-                    Some("haskell".into()),
+                    Some("parked-call".into()),
+                    None,
                 );
                 let task = tokio::spawn(endpoint.dispatch_boxed(ToolInvocation {
                     name: exomonad_actor::HASKELL_TOOL.into(),
@@ -272,11 +349,13 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
                 .unwrap();
                 let receipt = tokio::time::timeout(
                     std::time::Duration::from_secs(180),
-                    dispatch_haskell_script(endpoint.as_ref(), "pure (42 :: Int)"),
+                    displayed(campaign, endpoint.as_ref(), "display (42 :: Int)"),
                 )
                 .await
                 .unwrap();
-                assert_eq!(receipt["items"][0]["output"].as_str().unwrap().trim(), "42");
+                assert_eq!(committed_display_text(&receipt), "42");
+                assert!(!task.is_finished(), "the original dispatch remains pending");
+                assert_eq!(script.dropped.load(Ordering::SeqCst), 0);
                 let cancelled = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     endpoint.cancel_workbench_boxed(context),
@@ -284,13 +363,21 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
                 .await
                 .unwrap()
                 .unwrap();
-                assert!(
-                    matches!(
-                        cancelled,
-                        exomonad_actor::WorkbenchCancellationOutcome::Cancelled { .. }
-                    ),
-                    "{cancelled:?}"
-                );
+                let exomonad_actor::WorkbenchCancellationOutcome::Cancelled {
+                    execution,
+                    reply: owner_reply,
+                } = cancelled
+                else {
+                    panic!("the actual parked model cell must cancel: {cancelled:?}");
+                };
+                let native_items = match &owner_reply {
+                    Ok(response) => response.items.as_slice(),
+                    Err(failure) => failure.receipts(),
+                };
+                assert!(native_items
+                    .iter()
+                    .flat_map(|item| &item.operations)
+                    .all(|operation| operation.id.execution == execution));
                 let held = retained
                     .lock()
                     .unwrap()
@@ -312,10 +399,14 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
                 assert!(receipts
                     .iter()
                     .all(|receipt| receipt["outcome"]["kind"] == "cancelled"));
-                let _actual = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+                let actual = tokio::time::timeout(std::time::Duration::from_secs(30), task)
                     .await
                     .unwrap()
                     .unwrap();
+                assert!(
+                    same_terminal_reply(&owner_reply, &actual),
+                    "dispatch must return the exact cancellation owner's terminal reply: owner={owner_reply:?}, dispatch={actual:?}"
+                );
                 script.release.notify_waiters();
                 assert_eq!(script.requests.lock().unwrap().len(), 2);
                 assert_eq!(script.dropped.load(Ordering::SeqCst), 1);

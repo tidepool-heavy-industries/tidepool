@@ -172,14 +172,40 @@ impl CompilerWorkClose {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CompilerWorkReceipt(Arc<Mutex<CompilerWorkClose>>);
+pub(crate) struct CompilerWorkReceipt {
+    close: Arc<Mutex<CompilerWorkClose>>,
+    cancellation: Option<tidepool_runtime::CompilerTransactionCancellation>,
+}
 
 impl CompilerWorkReceipt {
     pub(crate) fn pending() -> Self {
-        Self(Arc::new(Mutex::new(CompilerWorkClose::Pending)))
+        Self {
+            close: Arc::new(Mutex::new(CompilerWorkClose::Pending)),
+            cancellation: Some(tidepool_runtime::CompilerTransactionCancellation::new()),
+        }
     }
     pub(crate) fn observation(&self) -> CompilerWorkClose {
-        self.0.lock().clone()
+        self.close.lock().clone()
+    }
+
+    /// A dependent waiter observes settlement without owning the shared producer's stop edge.
+    pub(crate) fn observation_only(&self) -> Self {
+        Self {
+            close: Arc::clone(&self.close),
+            cancellation: None,
+        }
+    }
+
+    pub(crate) fn request_cancellation(&self) {
+        let cancellation = {
+            let close = self.close.lock();
+            matches!(*close, CompilerWorkClose::Pending)
+                .then(|| self.cancellation.clone())
+                .flatten()
+        };
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+        }
     }
 }
 
@@ -202,14 +228,17 @@ impl CompilerWorkTicket {
             owner,
         }
     }
-    pub(crate) fn run<T>(
-        self,
-        cancellation: tidepool_runtime::CompilerTransactionCancellation,
-        action: impl FnOnce() -> T,
-    ) -> T {
+    pub(crate) fn cancellation(&self) -> tidepool_runtime::CompilerTransactionCancellation {
+        self.receipt
+            .cancellation
+            .as_ref()
+            .expect("compiler ticket owns cancellation")
+            .clone()
+    }
+
+    pub(crate) fn run<T>(self, action: impl FnOnce() -> T) -> T {
         self.run_for_workload(
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-            cancellation,
             action,
         )
     }
@@ -219,9 +248,9 @@ impl CompilerWorkTicket {
     pub(crate) fn run_for_workload<T>(
         self,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
-        cancellation: tidepool_runtime::CompilerTransactionCancellation,
         action: impl FnOnce() -> T,
     ) -> T {
+        let cancellation = self.cancellation();
         tidepool_toolchain::artifacts::with_compiler_transaction_cancellable_for_workload(
             workload,
             cancellation,
@@ -237,7 +266,7 @@ impl CompilerWorkTicket {
         mut self,
         outcome: tidepool_runtime::CompilerTransactionOutcome<T>,
     ) -> T {
-        *self.receipt.0.lock() = CompilerWorkClose::Settled(outcome.close);
+        *self.receipt.close.lock() = CompilerWorkClose::Settled(outcome.close);
         self.settled = true;
         self.owner.close_settled();
         outcome.action
@@ -247,7 +276,7 @@ impl CompilerWorkTicket {
 impl Drop for CompilerWorkTicket {
     fn drop(&mut self) {
         if !self.settled {
-            *self.receipt.0.lock() = CompilerWorkClose::Abandoned;
+            *self.receipt.close.lock() = CompilerWorkClose::Abandoned;
             self.owner.close_settled();
         }
     }
@@ -277,22 +306,32 @@ impl CompilerPreparationOwner {
         &'a mut self,
         operation: impl std::future::Future<Output = T> + 'a,
     ) -> impl std::future::Future<Output = CompilerPreparationOutcome<T>> + 'a {
-        let admission = PreparationAdmissionGuard(self.retained.clone());
+        let mut admission = PreparationAdmissionGuard {
+            owner: self.retained.clone(),
+            completed: false,
+        };
         let cleanup = self.cleanup();
         let owner =
             crate::resident_workbench::CompilerCloseOwner::Initialization(self.retained.clone());
         async move {
             let action = owner.scope(operation).await;
+            admission.completed = true;
             drop(admission);
             CompilerPreparationOutcome { action, cleanup }
         }
     }
 }
 
-struct PreparationAdmissionGuard(RetainedActorExit);
+struct PreparationAdmissionGuard {
+    owner: RetainedActorExit,
+    completed: bool,
+}
 impl Drop for PreparationAdmissionGuard {
     fn drop(&mut self) {
-        self.0.close_compiler_admission();
+        self.owner.close_compiler_admission();
+        if !self.completed {
+            self.owner.cancel_compiler_work();
+        }
     }
 }
 
@@ -479,8 +518,9 @@ impl RetainedActorExit {
     }
 
     pub(crate) fn register_compiler_work(&self, receipt: CompilerWorkReceipt) -> bool {
+        let shutdown = self.state.requested_shutdown.lock();
         let mut state = self.state.cleanup.lock();
-        if state.compiler_admission_closed {
+        if state.compiler_admission_closed || shutdown.is_some() {
             return false;
         }
         state.compilers.push(receipt);
@@ -494,6 +534,13 @@ impl RetainedActorExit {
         drop(state);
         if changed {
             self.notify_compiler_close();
+        }
+    }
+
+    fn cancel_compiler_work(&self) {
+        let receipts = self.state.cleanup.lock().compilers.clone();
+        for receipt in receipts {
+            receipt.request_cancellation();
         }
     }
 
@@ -521,6 +568,7 @@ impl RetainedActorExit {
             .lock()
             .get_or_insert(terminal)
             .clone();
+        self.cancel_compiler_work();
         self.state.changed.send_modify(|revision| *revision += 1);
         terminal
     }
@@ -551,6 +599,7 @@ impl RetainedActorExit {
         close_admissions();
         drop(guards);
         for (owner, _) in owners {
+            owner.cancel_compiler_work();
             owner.state.changed.send_modify(|revision| *revision += 1);
         }
     }
@@ -777,7 +826,6 @@ mod tests {
                 let _native = tidepool_runtime::spawn_blocking_in_span(move || {
                     ticket.run_for_workload(
                         tidepool_toolchain::artifacts::CompileWorkload::Preparation,
-                        tidepool_runtime::CompilerTransactionCancellation::new(),
                         || {
                             proceed
                                 .recv_timeout(std::time::Duration::from_secs(5))

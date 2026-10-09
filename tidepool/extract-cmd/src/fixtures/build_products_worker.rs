@@ -48,6 +48,24 @@ fn request(payload: &[u8]) -> Vec<u8> {
 }
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--observe-owned-environment") {
+        let names = [
+            "TIDEPOOL_EXTRACT_DAEMON_SOCKET",
+            "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT",
+            "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID",
+            "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER",
+            "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH",
+            "TIDEPOOL_PERFORMANCE_COMPILER_TRACE",
+        ];
+        for name in names {
+            println!(
+                "{name}={}",
+                std::env::var(name).expect("owner-issued input")
+            );
+        }
+        std::fs::copy(&args[2], &args[3]).unwrap();
+        std::process::exit(args[4].parse().unwrap());
+    }
     if args.get(1).map(String::as_str) == Some("--print-worker-request-flag") {
         println!("--worker-request-v18");
         return;

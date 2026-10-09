@@ -1438,6 +1438,7 @@ rust_filegroup(
         "src/actor_host/embedded_checkpoint_release_tests.rs": "bridge/facade/src/actor_host/embedded_checkpoint_release_tests.rs",
         "src/actor_host/embedded_command_tests.rs": "bridge/facade/src/actor_host/embedded_command_tests.rs",
         "src/actor_host/embedded_context.rs": "bridge/facade/src/actor_host/embedded_context.rs",
+        "src/actor_host/embedded_failure_projection_tests.rs": "bridge/facade/src/actor_host/embedded_failure_projection_tests.rs",
         "src/actor_host/embedded_harness.rs": "bridge/facade/src/actor_host/embedded_harness.rs",
         "src/actor_host/embedded_idle_retirement_tests.rs": "bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs",
         "src/actor_host/embedded_notification_tests.rs": "bridge/facade/src/actor_host/embedded_notification_tests.rs",
@@ -1547,6 +1548,7 @@ rust_filegroup(
         "src/model_turn.rs": "bridge/facade/src/model_turn.rs",
         "src/operator.rs": "bridge/facade/src/operator.rs",
         "src/operator/proxy.rs": "bridge/facade/src/operator/proxy.rs",
+        "src/operator/proxy/recovery_tests.rs": "bridge/facade/src/operator/proxy/recovery_tests.rs",
         "src/operator/wire.rs": "bridge/facade/src/operator/wire.rs",
         "src/run_map/fixtures/review-trace.jsonl": "bridge/facade/src/run_map/fixtures/review-trace.jsonl",
         "src/run_map/metadata.rs": "bridge/facade/src/run_map/metadata.rs",
@@ -1619,6 +1621,7 @@ tidepool_rust_binary(
     },
     required_test_modules = [
         "bridge/facade/src/actor_host/embedded_agent_spec_tests.rs",
+        "bridge/facade/src/actor_host/embedded_failure_projection_tests.rs",
         "bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs",
         "bridge/facade/src/actor_host/embedded_operation_settlement_tests.rs",
         "bridge/facade/src/actor_host/m1_cancel_performance.rs",
@@ -2364,6 +2367,7 @@ tidepool_rust_isolated_test(
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
         "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
     },
+    compile_env = {"CARGO_BIN_EXE_exomonad": "$(location //bridge/facade:exomonad)"},
     visibility = ["PUBLIC"],
 )
 
@@ -2452,6 +2456,7 @@ tidepool_rust_isolated_test(
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
         "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
     },
+    compile_env = {"CARGO_BIN_EXE_exomonad": "$(location //bridge/facade:exomonad)"},
     visibility = ["PUBLIC"],
 )
 
@@ -2505,6 +2510,7 @@ filegroup(
         "bridge/facade/src/actor_host/embedded_checkpoint_release_tests.rs": "src/actor_host/embedded_checkpoint_release_tests.rs",
         "bridge/facade/src/actor_host/embedded_command_tests.rs": "src/actor_host/embedded_command_tests.rs",
         "bridge/facade/src/actor_host/embedded_context.rs": "src/actor_host/embedded_context.rs",
+        "bridge/facade/src/actor_host/embedded_failure_projection_tests.rs": "src/actor_host/embedded_failure_projection_tests.rs",
         "bridge/facade/src/actor_host/embedded_harness.rs": "src/actor_host/embedded_harness.rs",
         "bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs": "src/actor_host/embedded_idle_retirement_tests.rs",
         "bridge/facade/src/actor_host/embedded_notification_tests.rs": "src/actor_host/embedded_notification_tests.rs",
@@ -2616,6 +2622,7 @@ filegroup(
         "bridge/facade/src/model_turn.rs": "src/model_turn.rs",
         "bridge/facade/src/operator.rs": "src/operator.rs",
         "bridge/facade/src/operator/proxy.rs": "src/operator/proxy.rs",
+        "bridge/facade/src/operator/proxy/recovery_tests.rs": "src/operator/proxy/recovery_tests.rs",
         "bridge/facade/src/operator/wire.rs": "src/operator/wire.rs",
         "bridge/facade/src/run_map/fixtures/review-trace.jsonl": "src/run_map/fixtures/review-trace.jsonl",
         "bridge/facade/src/run_map/metadata.rs": "src/run_map/metadata.rs",

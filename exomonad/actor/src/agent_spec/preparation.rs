@@ -162,8 +162,11 @@ impl PreparationTask {
 #[derive(Default)]
 pub(crate) struct ToolsetPreparation {
     state: Mutex<PreparationState>,
+    compiler_owner: crate::RetainedActorExit,
     #[cfg(test)]
     fresh_launch_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    completed_load_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Default)]
@@ -203,6 +206,13 @@ impl ToolsetPreparation {
     pub(crate) fn observe_fresh_launch(&self, observer: Arc<dyn Fn() + Send + Sync>) {
         let mut slot = self.fresh_launch_observer.lock();
         assert!(slot.is_none(), "fresh launch observer already installed");
+        *slot = Some(observer);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_completed_load(&self, observer: Arc<dyn Fn() + Send + Sync>) {
+        let mut slot = self.completed_load_observer.lock();
+        assert!(slot.is_none(), "completed load observer already installed");
         *slot = Some(observer);
     }
 
@@ -251,44 +261,25 @@ impl ToolsetPreparation {
             "toolset preparation lookup"
         );
         if disposition == PreparationLookupDisposition::New {
-            let completed_original = match selected_original_present(&recipe, &source) {
-                Ok(present) => present,
+            let admitted =
+                crate::resident_workbench::CompilerCloseOwner::current().and_then(|owner| {
+                    owner
+                        .shared_preparation(self.compiler_owner.clone())
+                        .register_work()
+                });
+            let compiler_work = match admitted {
+                Ok(ticket) => ticket,
                 Err(error) => {
-                    self.settle(recipe, &task, Err(error));
+                    self.settle(
+                        recipe,
+                        &task,
+                        Err(PreparationFailure::Admission(Arc::new(error))),
+                    );
                     return task.wait().await;
                 }
             };
-            let compiler_work = if completed_original {
-                None
-            } else {
-                let admitted = crate::resident_workbench::CompilerCloseOwner::current()
-                    .and_then(|owner| owner.register_work());
-                match admitted {
-                    Ok(ticket) => Some((
-                        ticket,
-                        tidepool_runtime::CompilerTransactionCancellation::new(),
-                    )),
-                    Err(error) => {
-                        self.settle(
-                            recipe,
-                            &task,
-                            Err(PreparationFailure::Admission(Arc::new(error))),
-                        );
-                        return task.wait().await;
-                    }
-                }
-            };
-            let acquisition = if completed_original {
-                OriginalAcquisition::LoadCompleted
-            } else {
-                OriginalAcquisition::CompileIfAbsent
-            };
             #[cfg(test)]
-            let fresh_launch_observer = if compiler_work.is_some() {
-                self.fresh_launch_observer.lock().take()
-            } else {
-                None
-            };
+            let observer_owner = Arc::clone(self);
             let task = Arc::clone(&task);
             let owner = Arc::clone(self);
             let key = recipe.clone();
@@ -297,17 +288,29 @@ impl ToolsetPreparation {
             tokio::spawn(
                 async move {
                     let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
-                        if let Some((ticket, cancellation)) = compiler_work {
-                            ticket.run_for_workload(workload, cancellation, || {
-                                #[cfg(test)]
-                                if let Some(observer) = fresh_launch_observer {
+                        compiler_work.run_for_workload(workload, || {
+                            tidepool_extract_cmd::compiler_host_checkpoint()
+                                .map_err(preparation_io_failure)?;
+                            let completed_original = selected_original_present(&recipe, &source)?;
+                            let acquisition = if completed_original {
+                                OriginalAcquisition::LoadCompleted
+                            } else {
+                                OriginalAcquisition::CompileIfAbsent
+                            };
+                            #[cfg(test)]
+                            {
+                                let observer = if completed_original {
+                                    &observer_owner.completed_load_observer
+                                } else {
+                                    &observer_owner.fresh_launch_observer
+                                };
+                                let observer = observer.lock().take();
+                                if let Some(observer) = observer {
                                     observer();
                                 }
-                                compile_installer(recipe, resolved, source, registry, acquisition)
-                            })
-                        } else {
+                            }
                             compile_installer(recipe, resolved, source, registry, acquisition)
-                        }
+                        })
                     })
                     .await
                     .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
@@ -439,6 +442,7 @@ pub(crate) mod tests {
         model: CacheModel,
         handles: HashMap<usize, (InstallerRecipe, Arc<PreparationTask>)>,
         ready: Arc<PreparedToolset>,
+        payloads: HashMap<usize, Arc<PreparedToolset>>,
     }
 
     impl CacheHistory {
@@ -448,6 +452,7 @@ pub(crate) mod tests {
                 model: CacheModel::default(),
                 handles: HashMap::new(),
                 ready,
+                payloads: HashMap::new(),
             }
         }
 
@@ -488,11 +493,30 @@ pub(crate) mod tests {
             if let Some((_, expected_handle)) = self.handles.get(&expected_task) {
                 assert!(Arc::ptr_eq(&actual, expected_handle));
             } else {
+                assert!(self
+                    .handles
+                    .values()
+                    .all(|(_, issued)| !Arc::ptr_eq(&actual, issued)));
                 self.handles
                     .insert(expected_task, (key.clone(), Arc::clone(&actual)));
             }
             self.assert_matches_model();
             expected_task
+        }
+
+        fn lookup_with_payload(
+            &mut self,
+            key: InstallerRecipe,
+            payload: &Arc<PreparedToolset>,
+        ) -> usize {
+            let task = self.lookup(key);
+            if let Some(expected) = self.payloads.get(&task) {
+                assert!(Arc::ptr_eq(expected, payload));
+            } else {
+                self.payloads.insert(task, Arc::clone(payload));
+            }
+            self.assert_matches_model();
+            task
         }
 
         fn settle_success(&mut self, task: usize) {
@@ -511,7 +535,7 @@ pub(crate) mod tests {
             let is_current_pending = current
                 .is_some_and(|entry| entry.task == task && entry.phase == ModelPhase::Pending);
             let outcome = if success {
-                Ok(Arc::clone(&self.ready))
+                Ok(Arc::clone(self.payloads.get(&task).unwrap_or(&self.ready)))
             } else {
                 Err(PreparationFailure::Source(format!(
                     "history failure {task}"
@@ -561,13 +585,110 @@ pub(crate) mod tests {
                 match (expected.phase, outcome.as_ref()) {
                     (ModelPhase::Pending, None) => {}
                     (ModelPhase::Ready, Some(Ok(prepared))) => {
-                        assert!(Arc::ptr_eq(prepared, &self.ready));
-                        assert_eq!(prepared.acquisition, self.ready.acquisition);
+                        assert!(self.payload_matches(expected.task, prepared));
                     }
                     _ => panic!("retained preparation outcome differs from modeled readiness"),
                 }
             }
         }
+
+        fn payload_matches(&self, task: usize, prepared: &Arc<PreparedToolset>) -> bool {
+            let expected = self.payloads.get(&task).unwrap_or(&self.ready);
+            Arc::ptr_eq(prepared, expected)
+                && prepared.acquisition == expected.acquisition
+                && prepared.source_revision == expected.source_revision
+        }
+    }
+
+    /// Both products are issued by the real source installer fixture once;
+    /// generated histories create fresh cache/task state without compilation.
+    pub(crate) fn distinct_ready_payload_histories(payloads: [Arc<PreparedToolset>; 2]) {
+        use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+        use std::cell::Cell;
+
+        assert!(!Arc::ptr_eq(&payloads[0], &payloads[1]));
+        assert_ne!(payloads[0].acquisition, payloads[1].acquisition);
+        assert_ne!(payloads[0].source_revision, payloads[1].source_revision);
+        // Mutate only a settled payload, preserving key, task, disposition and
+        // retention state. The old shared-payload fixture could not expose this.
+        let mut sensitivity = CacheHistory::new(Arc::clone(&payloads[0]));
+        let task = sensitivity.lookup_with_payload(recipe("payload-swap"), &payloads[0]);
+        sensitivity.settle_success(task);
+        let handle = &sensitivity.handles[&task].1;
+        *handle.outcome.lock() = Some(Ok(Arc::clone(&payloads[1])));
+        let outcome = handle.outcome.lock();
+        let Some(Ok(swapped)) = outcome.as_ref() else {
+            unreachable!()
+        };
+        assert!(!sensitivity.payload_matches(task, swapped));
+        drop(outcome);
+        drop(sensitivity);
+        let mut config = Config::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 192;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::distinct_ready_payload_histories"
+        ));
+        let configured = config.cases;
+        let completed = Cell::new(0usize);
+        let result = TestRunner::new(config).run(
+            &proptest::collection::vec((0usize..23, 0u8..3), 0..64),
+            |operations| {
+                let mut history = CacheHistory::new(Arc::clone(&payloads[0]));
+                let key = |index| recipe(&format!("distinct-history-{index}"));
+                let mut issued = Vec::new();
+                // Both payloads cross the actual retention bound in every case.
+                for index in 0..RETAINED_TOOLSETS + 4 {
+                    let task = history.lookup_with_payload(key(index), &payloads[index % 2]);
+                    history.settle_success(task);
+                    issued.push(task);
+                }
+                for (index, task) in issued.iter().enumerate() {
+                    let outcome = history.handles[task].1.outcome.lock();
+                    let Some(Ok(prepared)) = outcome.as_ref() else {
+                        panic!("retained waiter lost its original result");
+                    };
+                    assert!(Arc::ptr_eq(prepared, &payloads[index % 2]));
+                }
+                // A stale owner cannot replace the new pending task or payload.
+                let retry = key(22);
+                let old = history.lookup_with_payload(retry.clone(), &payloads[0]);
+                history.settle_failure(old);
+                let new = history.lookup_with_payload(retry, &payloads[0]);
+                assert_ne!(old, new);
+                history.settle_failure(old);
+                history.settle_success(new);
+
+                for (index, operation) in operations {
+                    let task = history.lookup_with_payload(key(index), &payloads[index % 2]);
+                    // A producer settles exactly once. Ready hits remain reads.
+                    if history.model.entries[&key(index)].phase == ModelPhase::Pending {
+                        match operation {
+                            0 => { history.lookup_with_payload(key(index), &payloads[index % 2]); }
+                            1 => history.settle_success(task),
+                            2 => history.settle_failure(task),
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                history.assert_matches_model();
+                let count = completed.get() + 1;
+                completed.set(count);
+                if count.is_power_of_two() {
+                    eprintln!("distinct cache payload history: immutable_products=2, completed_cases={count}");
+                }
+                Ok(())
+            },
+        );
+        eprintln!("distinct cache payload history: configured_cases={configured}, completed_cases={}, immutable_products=2", completed.get());
+        result.expect("distinct prepared payload histories match independent cache model");
     }
 
     async fn run_cache_history(ready: Arc<PreparedToolset>) {
@@ -764,6 +885,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn interrupted_original_authentication_preserves_infrastructure_classification() {
+        let failure = preparation_auth_failure(tidepool_toolchain::CompileError::Io(
+            std::io::Error::from(std::io::ErrorKind::Interrupted),
+        ));
+        assert!(matches!(failure, PreparationFailure::Compiler(diagnostic)
+            if diagnostic.class == tidepool_toolchain::failclass::FailureClass::Infra));
+        let ordinary = preparation_auth_failure(tidepool_toolchain::CompileError::ExtractFailed(
+            "changed original".into(),
+        ));
+        assert!(matches!(ordinary, PreparationFailure::Source(_)));
+    }
+
+    #[test]
     fn only_an_absent_original_path_can_select_compilation() {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("entry");
@@ -868,8 +1002,8 @@ pub(crate) fn durable_recipe_key(recipe: &InstallerRecipe) -> Result<String, Pre
     .to_string())
 }
 
-/// Presence only chooses whether a compiler ticket is needed. It never grants
-/// original custody: all present outputs still pass the complete loader.
+/// Presence chooses physical compilation or completed-original authentication.
+/// Both run inside the shared producer's scope; presence grants no custody.
 fn selected_original_present(
     recipe: &InstallerRecipe,
     source: &crate::CheckpointSourceLayer,
@@ -957,6 +1091,23 @@ fn compile_unprepared_installer(
     Ok(compiled)
 }
 
+fn preparation_io_failure(error: std::io::Error) -> PreparationFailure {
+    PreparationFailure::Compiler(tidepool_runtime::classify_compile(
+        &tidepool_toolchain::CompileError::Io(error),
+    ))
+}
+
+fn preparation_auth_failure(error: tidepool_toolchain::CompileError) -> PreparationFailure {
+    if matches!(&error, tidepool_toolchain::CompileError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted)
+    {
+        return PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error));
+    }
+    if let Err(interrupted) = tidepool_extract_cmd::compiler_host_checkpoint() {
+        return preparation_io_failure(interrupted);
+    }
+    PreparationFailure::Source(error.to_string())
+}
+
 fn retained_installer(
     recipe: &InstallerRecipe,
     storage: &crate::SourceEntryStorage,
@@ -969,7 +1120,11 @@ fn retained_installer(
     };
     use tidepool_toolchain::toolchain::CompilerDeploymentConfiguration;
     let source_error =
-        |error: &dyn std::fmt::Display| PreparationFailure::Source(error.to_string());
+        |error: &dyn std::fmt::Display| match tidepool_extract_cmd::compiler_host_checkpoint() {
+            Err(interrupted) => preparation_io_failure(interrupted),
+            Ok(()) => PreparationFailure::Source(error.to_string()),
+        };
+    tidepool_extract_cmd::compiler_host_checkpoint().map_err(preparation_io_failure)?;
     let key = durable_recipe_key(recipe)?;
     let directory = storage.directory().join(&key);
     let (original, selected) = match storage {
@@ -1016,8 +1171,8 @@ fn retained_installer(
     if !completed && matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
         match std::fs::symlink_metadata(&source_path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                if std::fs::read(&source_path).map_err(|error| source_error(&error))?
-                    != wrapper.as_bytes()
+                if !FrozenEntrySources::source_file_matches(&source_path, wrapper.as_bytes())
+                    .map_err(preparation_auth_failure)?
                 {
                     return Err(PreparationFailure::Source(
                         "retained installer wrapper changed before retry".into(),
@@ -1040,8 +1195,8 @@ fn retained_installer(
             std::fs::symlink_metadata(&source_path).map_err(|error| source_error(&error))?;
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
-            || std::fs::read(&source_path).map_err(|error| source_error(&error))?
-                != wrapper.as_bytes()
+            || !FrozenEntrySources::source_file_matches(&source_path, wrapper.as_bytes())
+                .map_err(preparation_auth_failure)?
         {
             return Err(PreparationFailure::Source(
                 "completed installer wrapper differs from selected source and row".into(),
@@ -1049,7 +1204,7 @@ fn retained_installer(
         }
     }
     let sources = FrozenEntrySources::capture(&recipe.roots, &source_path)
-        .map_err(|error| source_error(&error))?;
+        .map_err(preparation_auth_failure)?;
     if sources
         .source_revision(b"exomonad-agent-spec-ordered-source-closure-v1")
         .map_err(|error| source_error(&error))?
@@ -1076,7 +1231,7 @@ fn retained_installer(
         &authority,
         &ProductionEntrySources::FrozenWorkspace(sources),
     )
-    .map_err(|error| source_error(&error))?;
+    .map_err(preparation_auth_failure)?;
     // A previous rename may have succeeded before parent fsync failed. This
     // confirms publication of that exact validated original without source.
     tidepool_atomic_write::sync_parent_directory(&output).map_err(|error| source_error(&error))?;

@@ -13,8 +13,10 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from typing import NamedTuple
 import uuid
 
 
@@ -30,12 +32,17 @@ TRACE_QUEUE_LIMIT = 256
 TRACE_QUEUE_BYTE_LIMIT = 64 << 10
 TRANSACTION_DIRECTORY_LIMIT = 4096
 TRANSACTION_CAPTURE_LIMIT = 256
-RESULT = re.compile(
-    r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
-    re.MULTILINE,
+COMPILER_SELECTION_RESOURCES = (
+    'TIDEPOOL_COMPILER_MODULES',
+    'TIDEPOOL_PREPARED_ROOT_ENTRY',
+    'TIDEPOOL_EXTRACT_DAEMON_SOCKET',
+)
+COMPILER_SELECTION_FLAGS = (
+    'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT',
+    'TIDEPOOL_EXTRACT_NO_DAEMON',
 )
 EXECUTION_RESULT = re.compile(
-    r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
+    r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
     re.MULTILINE,
 )
 ACTIVE_PROCESSES = {}
@@ -128,6 +135,7 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT',
     'TIDEPOOL_EXTRACT_DAEMON_LOG', 'TIDEPOOL_KEEP_TEST_LOGS',
     'TIDEPOOL_TEST_ARTIFACT_ROOT', 'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE',
+    'TIDEPOOL_COMPILE_CACHE_DIR',
     'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', 'TIDEPOOL_TIMING', 'TIDEPOOL_MEMO_TRACE',
     'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS',
     'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
@@ -358,7 +366,7 @@ def names(binary, *args):
 
 
 def resolve_resource_environment(names):
-    """Bind declared single-path resources to this Buck launch directory."""
+    """Bind declared paths after clearing ambient compiler selections."""
     selected = {}
     for name in names:
         value = os.environ.get(name)
@@ -370,6 +378,11 @@ def resolve_resource_environment(names):
         if not path.exists():
             raise RuntimeError(f'declared resource does not exist: {name}={path}')
         selected[name] = str(path)
+    # Source-backed libtests may inherit caller variables even when Buck did
+    # not declare them. Clear these selectors before either direct or delegated
+    # execution, then restore only paths explicitly bound as runner resources.
+    for name in (*COMPILER_SELECTION_RESOURCES, *COMPILER_SELECTION_FLAGS):
+        os.environ.pop(name, None)
     os.environ.update(selected)
 
 
@@ -485,18 +498,36 @@ def select_tests(all_names, ignored_names, options):
     return selected
 
 
-def record_actual_counts(record, stdout, delegated=False):
-    if record is None:
-        return
+class LibtestSummary(NamedTuple):
+    succeeded: bool
+    passed: int
+    failed: int
+    ignored: int
+
+
+def terminal_summary(stdout):
+    """The last unprefixed libtest result owns both outcome and counts."""
     if isinstance(stdout, bytes):
         stdout = stdout.decode(errors='replace')
-    actual = list(EXECUTION_RESULT.finditer(stdout or ''))
-    if actual:
-        passed, failed, ignored = map(int, actual[-1].groups())
-        record.update(executed_test_count=passed + failed,
-                      passed_test_count=passed, failed_test_count=failed,
-                      ignored_test_count=ignored)
-        if delegated and passed + failed > 0:
+    last = None
+    for line in (stdout or '').splitlines():
+        if not line.startswith('test result: '):
+            continue
+        match = EXECUTION_RESULT.fullmatch(line)
+        if match is None:
+            last = None
+            continue
+        outcome, passed, failed, ignored = match.groups()
+        last = LibtestSummary(outcome == 'ok', int(passed), int(failed), int(ignored))
+    return last
+
+
+def record_actual_counts(record, summary, delegated=False):
+    if record is not None and summary is not None:
+        record.update(executed_test_count=summary.passed + summary.failed,
+                      passed_test_count=summary.passed, failed_test_count=summary.failed,
+                      ignored_test_count=summary.ignored)
+        if delegated and summary.passed + summary.failed > 0:
             record['process_execution_count'] = 1
 
 
@@ -1016,6 +1047,9 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             retain_artifacts=False):
     if record is None:
         record = {}
+    for key in ('artifact_disposition', 'artifacts_removed_after_success',
+                'artifacts_retained_after_success', 'artifacts_retained_after_failure'):
+        record.pop(key, None)
     record.update(schema=1, process_cleanup_status='not_started', hosted_cleanup_status='not_observed',
                   compiler_cleanup_status='not_observed', compiler_cleanup_observation_complete=None,
                   diagnostic_evidence_complete=None)
@@ -1043,6 +1077,15 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         if artifact_root is None or not frontend:
             raise RuntimeError('owned-resident requires a declared compiler and per-case artifact root')
         args = [frontend, '--owned-daemon-run', str(artifact_root / 'compiler'), '--', *args]
+    # Candidate evidence may name a case's temporary authored sources. Sharing
+    # that mutable cache lets another case delete an acquired input mid-compile.
+    compile_cache = (artifact_root / 'compile-cache' if artifact_root is not None
+                     else Path(tempfile.mkdtemp(prefix='tidepool-libtest-cache-')))
+    if artifact_root is not None:
+        compile_cache.mkdir(mode=0o700)
+    environment = dict(os.environ) if environment is None else environment
+    environment['TIDEPOOL_COMPILE_CACHE_DIR'] = str(compile_cache)
+    record['compile_cache_root'] = str(compile_cache)
     started = time.monotonic_ns()
     record.update(command=args, started_ns=started, exit_code=None,
                   timeout_seconds=timeout,
@@ -1058,6 +1101,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     if artifact_root is not None:
         (artifact_root / 'launch-inputs.json').write_text(json.dumps(launch_inputs, indent=2) + '\n')
     def finish(passed, stdout, stderr):
+        cache_removed = False
         cleanup_complete, hosted_runtime_not_started, evidence_complete, errors = case_artifact_evidence(
             artifact_root, compiler_mode, record)
         passed = passed and cleanup_complete
@@ -1066,11 +1110,26 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                 and not hosted_runtime_not_started and startup_diagnostic_seconds is None):
             # Successful scenarios have completed their own acknowledged teardown.
             # The runner additionally confirms its enclosing process/service cleanup.
-            if retain_artifacts:
-                record['artifacts_retained_after_success'] = True
-            else:
+            if not retain_artifacts:
                 shutil.rmtree(artifact_root)
                 record['artifacts_removed_after_success'] = True
+        # Retention is an observed disposition, independent of diagnostic
+        # completeness or the reason a passing case must preserve evidence.
+        if artifact_root is not None:
+            retained = artifact_root.is_dir() and not artifact_root.is_symlink()
+            record['artifact_disposition'] = ('retained' if retained else
+                'removed' if record.get('artifacts_removed_after_success') else 'missing')
+            if retained:
+                record['artifacts_retained_after_success' if passed else
+                       'artifacts_retained_after_failure'] = True
+        elif passed and not retain_artifacts:
+            shutil.rmtree(compile_cache)
+            cache_removed = True
+        cache_retained = compile_cache.is_dir() and not compile_cache.is_symlink()
+        record['compile_cache_disposition'] = ('retained' if cache_retained else
+            'removed' if cache_removed or record.get('artifacts_removed_after_success') else 'missing')
+        if artifact_root is None and cache_retained:
+            stderr += f'\ncompile cache retained at {compile_cache}'
         return passed, stdout, stderr
 
     if launch_inputs['status'] == 'UNKNOWN':
@@ -1094,7 +1153,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             stdout = stdout.decode(errors='replace')
         if isinstance(stderr, bytes):
             stderr = stderr.decode(errors='replace')
-        record_actual_counts(record, stdout, service_record is not None)
+        record_actual_counts(record, terminal_summary(stdout), service_record is not None)
         detail = f'timed out after {timeout:g}s'
         if stdout:
             detail += f'\n{stdout}'
@@ -1116,13 +1175,12 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     record.update(status='finished', process_execution_count=(None if service_record is not None else 1),
                   exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started,
                   process_cleanup_status=process_cleanup_status(result, service_record))
-    record_actual_counts(record, result.stdout, service_record is not None)
-    summaries = list(RESULT.finditer(result.stdout))
-    summary = summaries[-1] if summaries else None
+    summary = terminal_summary(result.stdout)
+    record_actual_counts(record, summary, service_record is not None)
     passed = (
         result.returncode == 0
         and summary is not None
-        and summary.groups() == ('1', '0', '0')
+        and summary == LibtestSummary(True, 1, 0, 0)
         and record['process_cleanup_status'] == 'confirmed'
         and (service_record is None or service_record.get('cleanup_confirmed') is True)
     )

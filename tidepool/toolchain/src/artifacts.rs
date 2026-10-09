@@ -1183,7 +1183,11 @@ impl ModuleCandidateOffer {
             scratch,
             checked_candidate_reservations(&specification, Some(&planned)),
         )?;
-        let private = private_native_availability(&context, producer, selected.as_deref())?;
+        let private = crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
+            &context,
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
+            selected.as_ref().map_or(&[], |selected| selected.native_availability.as_slice()),
+        )?;
         Ok(Self {
             selected,
             producer: producer.to_vec(),
@@ -4073,6 +4077,8 @@ fn compile_invocation_inner(
                     let load_start = Instant::now();
                     if let Some((meta_bytes, raw, product_bytes, evidence)) = allow_candidates
                         .then(|| load_memo(key, &name_refs, inv.targets, inv.source))
+                        .transpose()
+                        .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?
                         .flatten()
                     {
                         // Direct invocation memo lacks a worker group/target
@@ -4106,6 +4112,10 @@ fn compile_invocation_inner(
                                 );
                                 return Ok(CompileAttempt::Cached(Box::new(artifacts)));
                             }
+                            // An interrupted memo admission is a refusal, not
+                            // permission to retry with physical compiler work.
+                            crate::host_work::checkpoint()
+                                .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?;
                         }
                     }
                 }
@@ -4130,6 +4140,8 @@ fn compile_invocation_inner(
                 .map_err(CompileAttemptError::Diagnostic)?;
             }
             let diagnostics = CompilerDiagnosticCapture::start(output_owner.path(), &cmd);
+            crate::host_work::checkpoint()
+                .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?;
             let previous_submission = output_owner.begin_execution();
             let execution = endpoint.execute(&cmd).map_err(|error| {
                 output_owner.endpoint_failure(&error, previous_submission);
@@ -4146,6 +4158,9 @@ fn compile_invocation_inner(
         Ok(attempt) => attempt,
         Err(error) => {
             if matches!(&error, CompileAttemptError::Endpoint(error) if error.definitely_unsubmitted())
+                || matches!(&error, CompileAttemptError::Diagnostic(CompileError::Io(error))
+                    | CompileAttemptError::ModulePackage(crate::toolchain::ModulePackageError::Interrupted(error))
+                    if error.kind() == std::io::ErrorKind::Interrupted)
             {
                 if let CompilationOutputOwner::Original(preparation) = output_owner {
                     preparation.release_if_unsubmitted()?;
@@ -5513,28 +5528,34 @@ fn load_memo(
     names: &[&str],
     targets: &[&str],
     source: &str,
-) -> Option<(
-    Vec<u8>,
-    Vec<RawTargetOutput>,
-    Vec<u8>,
-    cache::DependencyEvidence,
-)> {
-    let (loaded, evidence) = cache::artifacts_load(key, names, source)?;
-    let mut it = loaded.into_iter();
-    // Every artifact is required. An extractor represents a target with no
-    // typed suspension sites by writing an `[]` sidecar.
-    let meta_bytes = it.next()??;
-    let mut raw = Vec::with_capacity(targets.len());
-    for target in targets {
-        let prepared_bytes = it.next()??;
-        let asks_bytes = it.next()??;
-        raw.push(RawTargetOutput {
-            target: (*target).to_string(),
-            asks_bytes,
-            prepared_bytes: Arc::new(prepared_bytes),
-        });
-    }
-    Some((meta_bytes, raw, it.next()??, evidence))
+) -> std::io::Result<
+    Option<(
+        Vec<u8>,
+        Vec<RawTargetOutput>,
+        Vec<u8>,
+        cache::DependencyEvidence,
+    )>,
+> {
+    let Some((loaded, evidence)) = cache::artifacts_load(key, names, source)? else {
+        return Ok(None);
+    };
+    Ok((|| {
+        let mut it = loaded.into_iter();
+        // Every artifact is required. An extractor represents a target with no
+        // typed suspension sites by writing an `[]` sidecar.
+        let meta_bytes = it.next()??;
+        let mut raw = Vec::with_capacity(targets.len());
+        for target in targets {
+            let prepared_bytes = it.next()??;
+            let asks_bytes = it.next()??;
+            raw.push(RawTargetOutput {
+                target: (*target).to_string(),
+                asks_bytes,
+                prepared_bytes: Arc::new(prepared_bytes),
+            });
+        }
+        Some((meta_bytes, raw, it.next()??, evidence))
+    })())
 }
 
 /// Store this invocation's full artifact set under `names`, in the order
@@ -6689,6 +6710,21 @@ mod module_product_tests {
         preparation.confirm_unsubmitted_attempt(previous);
         let original = preparation.raw().join("original-partial-output");
         std::fs::write(&original, b"original bytes").unwrap();
+        let cancellation = tidepool_extract_cmd::CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let stopped = tidepool_extract_cmd::with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || crate::host_work::read(&original),
+        );
+        assert_eq!(
+            stopped.action.unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert_eq!(
+            stopped.close,
+            tidepool_extract_cmd::CompilerTransactionClose::NotStarted
+        );
         preparation.release_if_unsubmitted().unwrap();
         assert_eq!(std::fs::read(&original).unwrap(), b"original bytes");
         assert!(matches!(

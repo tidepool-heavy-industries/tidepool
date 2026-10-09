@@ -291,6 +291,7 @@ fn write_fixture_config(authored: &Path, config: &ExomonadConfig) {
 struct CompilerConfig {
     workers: std::num::NonZeroUsize,
     rss_ceiling_mb: std::num::NonZeroU64,
+    foreground_jobs: Option<std::num::NonZeroUsize>,
 }
 
 impl Default for CompilerConfig {
@@ -301,6 +302,7 @@ impl Default for CompilerConfig {
                 tidepool_extract_cmd::SESSION_WORKER_RSS_CEILING_MB,
             )
             .unwrap(),
+            foreground_jobs: None,
         }
     }
 }
@@ -1008,34 +1010,9 @@ pub async fn prepare(options: PrepareOptions) -> Result<(), Box<dyn std::error::
         std::env::current_dir()?.join(options.directory)
     };
     let directory = std::sync::Arc::new(establish_preparation_directory(&requested)?);
-    let mut frozen = workspace::FrozenWorkspace::begin_preparation(&workspace, &directory)?;
-    if !matches!(
-        frozen.preparation,
-        Some(workspace::WorkspacePreparation::Completed { .. })
-    ) {
-        let source = std::sync::Arc::new(source::ExomonadSourceReload::new_owned(
-            frozen.clone(),
-            workspace.clone(),
-            directory.path().to_owned(),
-            frozen.runtime_actors(),
-            source::SourceRootOwner::Prepared(std::sync::Arc::clone(&directory)),
-        )?);
-        let entries = crate::actor_host::prepare_workspace_toolsets(
-            &workspace,
-            &directory,
-            frozen.clone(),
-            source,
-        )
-        .await?;
-        let revision = source::SourceLayer::new(directory.path())
-            .read_active()?
-            .ok_or("workspace preparation did not settle its original source revision")?;
-        frozen.complete_preparation(&directory, revision.identity, entries)?;
-    } else {
-        // A retry finishes partial sealing before publishing a default pointer.
-        frozen.seal_preparation(&directory)?;
-    }
-    let pointer = workspace::PreparedWorkspacePointer::for_directory(directory.path())?;
+    let prepared =
+        workspace::prepare_workspace(&workspace, std::sync::Arc::clone(&directory)).await?;
+    let pointer = prepared.pointer()?;
     exomonad_worktree::GitCli::new().ensure_exomonad_local_exclude(&workspace)?;
     tidepool_atomic_write::write_durable(
         &workspace.join(".exomonad/prepared.json"),
@@ -1449,6 +1426,7 @@ fn compiler_daemon_launch(
             run_id,
             compiler.workers.get(),
             Some(compiler.rss_ceiling_mb.get()),
+            compiler.foreground_jobs,
         )
         .into_iter()
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -3972,7 +3950,7 @@ mod tests {
             ]
         );
         let configured: ExomonadConfig = toml::from_str(
-            "[defaults]\nmodel = \"test\"\n[compiler]\nworkers = 2\nrss_ceiling_mb = 10240\n",
+            "[defaults]\nmodel = \"test\"\n[compiler]\nworkers = 2\nrss_ceiling_mb = 10240\nforeground_jobs = 8\n",
         )
         .unwrap();
         let configured_launch = compiler_daemon_launch(
@@ -3995,7 +3973,18 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
         );
-        for setting in ["workers = 0", "rss_ceiling_mb = 0", "unknown = 2"] {
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--foreground-jobs", "8"])
+        );
+        for setting in [
+            "workers = 0",
+            "rss_ceiling_mb = 0",
+            "foreground_jobs = 0",
+            "unknown = 2",
+        ] {
             assert!(
                 toml::from_str::<ExomonadConfig>(&format!(
                     "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"

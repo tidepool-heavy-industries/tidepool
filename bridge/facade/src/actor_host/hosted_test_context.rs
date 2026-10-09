@@ -922,11 +922,11 @@ impl HostedTestRuntime {
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: impl FnOnce(
-                &Arc<embedded_harness::EmbeddedHarnessRuntime>,
-                &ActorHostConfig,
-            ) -> Arc<dyn harness::engine::ResponsesTransport>
-            + Send
-            + 'static,
+            &Arc<embedded_harness::EmbeddedHarnessRuntime>,
+            &ActorHostConfig,
+        ) -> Arc<dyn harness::engine::ResponsesTransport>
+        + Send
+        + 'static,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
             settings,
@@ -1033,38 +1033,12 @@ impl HostedTestRuntime {
                     .child("prepared-deployment")
                     .map_err(|error| error.to_string())?,
             );
-            let mut frozen = crate::exomonad::workspace::FrozenWorkspace::begin_preparation(
+            let prepared = crate::exomonad::workspace::prepare_workspace(
                 &config.workspace,
-                &directory,
-            )
-            .map_err(|error| error.to_string())?;
-            let source = Arc::new(
-                crate::exomonad::source::ExomonadSourceReload::new_owned(
-                    frozen.clone(),
-                    config.workspace.clone(),
-                    directory.path().to_owned(),
-                    frozen.runtime_actors(),
-                    crate::exomonad::source::SourceRootOwner::Prepared(Arc::clone(&directory)),
-                )
-                .map_err(|error| error.to_string())?,
-            );
-            let entries = super::prepare_workspace_toolsets(
-                &config.workspace,
-                &directory,
-                frozen.clone(),
-                source,
+                Arc::clone(&directory),
             )
             .await
             .map_err(|error| error.to_string())?;
-            let revision = crate::exomonad::source::SourceLayer::new(directory.path())
-                .read_active()
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| {
-                    "production preparation did not settle its source revision".to_owned()
-                })?;
-            frozen
-                .complete_preparation(&directory, revision.identity, entries)
-                .map_err(|error| error.to_string())?;
             eprintln!(
                 "prepared-runtime-first-preparation {}",
                 serde_json::json!({
@@ -1073,12 +1047,9 @@ impl HostedTestRuntime {
                 })
             );
             config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::select_prepared(
-                    &config.workspace,
-                    config.run_directory.path(),
-                    Some(directory.path()),
-                )
-                .map_err(|error| error.to_string())?,
+                prepared
+                    .select_for_run(&config.workspace, config.run_directory.path())
+                    .map_err(|error| error.to_string())?,
             );
         }
         if let Some(diagnostics) = &mut diagnostics {
@@ -1354,6 +1325,136 @@ pub(super) fn cell_output_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires matched compiler deployment; one real workspace toolset preparation"]
+    async fn production_workspace_preparation_retries_sealing_and_refuses_drift() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Sealing deliberately removes directory write permission. Restore it
+        // only when releasing this test's private filesystem, including panic.
+        struct WritableOnDrop(std::path::PathBuf);
+        impl Drop for WritableOnDrop {
+            fn drop(&mut self) {
+                fn restore(path: &std::path::Path) {
+                    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+                        return;
+                    };
+                    if metadata.file_type().is_symlink() {
+                        return;
+                    }
+                    let mut permissions = metadata.permissions();
+                    permissions.set_mode(
+                        permissions.mode() | if metadata.is_dir() { 0o700 } else { 0o600 },
+                    );
+                    let _ = std::fs::set_permissions(path, permissions);
+                    if metadata.is_dir() {
+                        if let Ok(entries) = std::fs::read_dir(path) {
+                            for entry in entries.flatten() {
+                                restore(&entry.path());
+                            }
+                        }
+                    }
+                }
+                restore(&self.0);
+            }
+        }
+
+        tidepool_testing::eval_harness::require_extract();
+        let files = tempfile::tempdir().unwrap();
+        let settings = super::super::test_campaign::hosted_test_settings(&files, 1);
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+        let authored = repository.path().join(".exomonad");
+        crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+            project.launch.embedded = Some(settings);
+            project.prompts.agent = Some("agent.md".into());
+        });
+        let prompt = authored.join("agent.md");
+        std::fs::write(&prompt, "preparation lifecycle fixture").unwrap();
+        super::super::test_campaign::commit_workspace(repository.path());
+        let directory = Arc::new(
+            tidepool_atomic_write::DirectoryAnchor::open_existing(files.path())
+                .unwrap()
+                .child("prepared")
+                .unwrap(),
+        );
+        let _release = WritableOnDrop(directory.path().to_owned());
+        let prepared = crate::exomonad::workspace::prepare_workspace(
+            repository.path(),
+            Arc::clone(&directory),
+        )
+        .await
+        .expect("fresh preparation completes through the production operation");
+        let pointer = prepared.pointer().unwrap();
+        let selection = directory.path().join("workspace/selection.json");
+        let completed = std::fs::read(&selection).unwrap();
+        assert_eq!(
+            std::fs::metadata(&selection).unwrap().permissions().mode() & 0o222,
+            0
+        );
+
+        // Model completion publication followed by interrupted sealing. The
+        // original selection stays valid, but retry must finish the seal.
+        let mut permissions = std::fs::metadata(&selection).unwrap().permissions();
+        permissions.set_mode(permissions.mode() | 0o200);
+        std::fs::set_permissions(&selection, permissions).unwrap();
+        let requests = tidepool_extract_cmd::extract_spawn_count();
+        let retried = crate::exomonad::workspace::prepare_workspace(
+            repository.path(),
+            Arc::clone(&directory),
+        )
+        .await
+        .expect("completed retry only finishes sealing");
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+        assert_eq!(std::fs::read(&selection).unwrap(), completed);
+        assert_eq!(
+            retried.pointer().unwrap().selection_digest,
+            pointer.selection_digest
+        );
+        assert_eq!(
+            std::fs::metadata(&selection).unwrap().permissions().mode() & 0o222,
+            0
+        );
+
+        let root = tidepool_atomic_write::DirectoryAnchor::open_existing(files.path()).unwrap();
+        let first = root.child("first-run").unwrap();
+        let second = root.child("second-run").unwrap();
+        let first_inputs = prepared
+            .select_for_run(repository.path(), first.path())
+            .unwrap();
+        let second_inputs = retried
+            .select_for_run(repository.path(), second.path())
+            .unwrap();
+        assert_eq!(first_inputs.identity(), second_inputs.identity());
+        assert_eq!(
+            first_inputs.completed_entry_selections().unwrap(),
+            second_inputs.completed_entry_selections().unwrap(),
+        );
+        assert_eq!(
+            std::fs::read(first.path().join("workspace-prepared.json")).unwrap(),
+            std::fs::read(second.path().join("workspace-prepared.json")).unwrap(),
+        );
+        assert!(!first.path().join("workspace").exists());
+        assert!(!second.path().join("workspace").exists());
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+
+        std::fs::write(&prompt, "changed after preparation").unwrap();
+        let refused = crate::exomonad::workspace::prepare_workspace(
+            repository.path(),
+            Arc::clone(&directory),
+        )
+        .await;
+        assert!(matches!(refused, Err(error) if error.to_string().contains("prompt changed")));
+        let refused_run = root.child("refused-run").unwrap();
+        assert!(
+            prepared
+                .select_for_run(repository.path(), refused_run.path())
+                .is_err()
+        );
+        assert!(!refused_run.path().join("workspace-prepared.json").exists());
+        assert_eq!(std::fs::read(selection).unwrap(), completed);
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+    }
 
     #[tokio::test]
     async fn host_barrier_prioritizes_successful_and_failed_host_exit_over_deadline() {

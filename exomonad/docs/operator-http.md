@@ -4,12 +4,12 @@ A running Exomonad host prints its protected Unix socket path at startup. The ho
 owns one resident forest and heap. Workbenches are optional, independently scoped
 roots; no provider process or provider-turn identity is created for them.
 
-Provision and attach:
+Provision and attach (`SESSION` is the opaque ID returned by `new`):
 
 ```sh
 exomonad operator --socket /path/to/run/operator/operator.sock new
 exomonad operator --socket /path/to/run/operator/operator.sock list
-exomonad operator --socket /path/to/run/operator/operator.sock stop operator-42-1
+exomonad operator --socket /path/to/run/operator/operator.sock stop "$SESSION"
 ```
 
 `exomonad proxy` is the command-line client for this protocol: it resolves a
@@ -25,13 +25,26 @@ exomonad proxy run7 cell.hs --json
 exomonad proxy run7 cell.hs --fresh
 ```
 
+The proxy saves a versioned Pending provisioning operation durably before its
+POST and saves Ready only after receiving the selected session. A lost reply or
+failed Ready write retains that operation for reconciliation on the next call;
+it does not allocate a replacement. `--fresh` first reconciles Pending, confirms
+retirement of the selected session, then issues a new operation. A changed service
+incarnation or malformed/unreadable saved record refuses before provisioning.
+A live legacy `{ "session": "..." }` record migrates by observing that exact
+session in the current service; this is not proof of its historical service.
+A dead legacy record requires explicit reconciliation: use `exomonad operator
+--socket PATH list` to inspect current attachments and preserve the saved record
+until selecting or retiring the intended session. Cell submission remains separate:
+an uncertain submit is reported as indeterminate and is never automatically replayed.
+
 `new` prints JSON containing `session` and `socket`. Use the returned ID verbatim.
 Multiple consoles attached to that ID share bindings. Another `new` creates an
 isolated scope. Console disconnects do not retire workbenches. Explicit stop
 retires the workbench and its descendants. Model-root replacement preserves
 operator bindings. Model-root completion or unavailable recovery leaves operators
-attached; host shutdown retires the entire forest. IDs are not restored
-across host restart.
+attached; host shutdown retires the entire forest. IDs include the service incarnation and are opaque; do not parse them. They are
+not restored across host restart.
 
 The socket directory is mode 0700 and the socket is mode 0600. Access is local to
 the host owner. Operator roots receive forest inspection/control authority;
@@ -49,7 +62,7 @@ Haskell. For example:
 
 ```sh
 curl --unix-socket /path/to/run/operator/operator.sock \
-  http://localhost/v1/sessions/operator-42-1/actors
+  "http://localhost/v1/sessions/$SESSION/actors"
 ```
 
 The response has `protocol_version: 1`, the exact `session`, and an `actors`
@@ -115,7 +128,12 @@ cancellation endpoint, or execution-status lookup is provided.
 
 Host control is separate from the console contract:
 
-- `POST /host/operators` provisions a workbench.
+- `GET /host/operators/service` returns `{ "incarnation": "UUID" }` for this
+  service lifetime.
+- `POST /host/operators` takes `{ "service": { "incarnation": "UUID" },
+  "operation": "UUID" }`. Repeating the same operation in that service observes
+  the same admission and result, including a failed or stopped result. A changed
+  service incarnation refuses the request before provisioning.
 - `GET /host/operators` lists live attachment IDs and socket paths.
 - `POST /host/operators/{session}/stop` explicitly retires an attachment.
 

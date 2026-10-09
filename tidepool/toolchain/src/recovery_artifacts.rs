@@ -585,6 +585,7 @@ fn recovery_validation_error(
     use crate::certified_products::CertificationError;
     use tidepool_repr::execution_schema::ParseError;
     match error {
+        CertificationError::Interrupted(error) => RecoveryArtifactError::Io(error),
         CertificationError::CompletedSourceEvidence { input, failure } => {
             RecoveryArtifactError::CompletedSourceEvidence { input, failure }
         }
@@ -653,10 +654,10 @@ fn hex(digest: &[u8; 32]) -> String {
     })
 }
 
-const PACKAGE_IMPORTS_LIMIT: u64 = 4 * 1024 * 1024;
+pub(crate) const PACKAGE_IMPORTS_LIMIT: u64 = 4 * 1024 * 1024;
 const PACKAGE_IMPORT_ROOT_LIMIT: usize = 16_384;
-const PACKAGE_INTERFACE_LIMIT: u64 = 32 * 1024 * 1024;
-const CERTIFICATION_LIMIT: u64 = 32 * 1024 * 1024;
+pub(crate) const PACKAGE_INTERFACE_LIMIT: u64 = 32 * 1024 * 1024;
+pub(crate) const CERTIFICATION_LIMIT: u64 = 32 * 1024 * 1024;
 
 // Captures belong to one validation stage, never to a later filesystem check.
 // Limit retained bytes without rejecting an otherwise valid large closure:
@@ -825,6 +826,7 @@ impl PackageInterfaceValidation {
                 Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()))
             };
         }
+        crate::host_work::checkpoint()?;
         let file = File::open(path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 RecoveryArtifactError::Unavailable(path.to_path_buf())
@@ -855,12 +857,12 @@ impl PackageInterfaceValidation {
             .charge(metadata.len() as usize + 1)
             .map_err(accounting_charge_error)?;
         let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
-        file.take(metadata.len() + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| RecoveryArtifactError::Unreadable {
+        crate::host_work::read_to_end(&mut file.take(metadata.len() + 1), &mut bytes).map_err(
+            |error| RecoveryArtifactError::Unreadable {
                 path: path.to_path_buf(),
                 error,
-            })?;
+            },
+        )?;
         #[cfg(test)]
         PACKAGE_INTERFACE_IO.with(|work| {
             let (opens, read_bytes) = work.get();
@@ -934,8 +936,10 @@ fn verify_execution_source(
             return Err(RecoveryArtifactError::InvalidReference);
         }
         let mut bytes = Vec::new();
-        file.take(crate::execution_source::GRAPH_BYTES_LIMIT as u64 + 1)
-            .read_to_end(&mut bytes)?;
+        crate::host_work::read_to_end(
+            &mut file.take(crate::execution_source::GRAPH_BYTES_LIMIT as u64 + 1),
+            &mut bytes,
+        )?;
         validation.read_bytes += bytes.len() as u64;
         if bytes.len() > crate::execution_source::GRAPH_BYTES_LIMIT {
             return Err(RecoveryArtifactError::InvalidReference);
@@ -1360,6 +1364,7 @@ fn read_admission_bytes(
     limit: u64,
     validation: &PackageInterfaceValidation,
 ) -> Result<Vec<u8>, RecoveryArtifactError> {
+    crate::host_work::checkpoint()?;
     let file = File::open(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             RecoveryArtifactError::Unavailable(path.to_path_buf())
@@ -1381,7 +1386,7 @@ fn read_admission_bytes(
         .charge(metadata.len() as usize + 1)
         .map_err(accounting_charge_error)?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
-    file.take(metadata.len() + 1).read_to_end(&mut bytes)?;
+    crate::host_work::read_to_end(&mut file.take(metadata.len() + 1), &mut bytes)?;
     if bytes.len() as u64 != metadata.len() {
         return Err(RecoveryArtifactError::InvalidCapturedPayload(
             path.to_path_buf(),
@@ -1411,10 +1416,12 @@ fn materialize_copy_with_validation(
     mode: MaterializationMode,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<(), RecoveryArtifactError> {
+    crate::host_work::checkpoint()?;
     reject_symlink(path)?;
     if verify_existing_materialization(path, bytes.len(), digest, mode, validation)? {
         return Ok(());
     }
+    crate::host_work::checkpoint()?;
     match mode {
         MaterializationMode::Durable => {
             tidepool_atomic_write::write_durable_new(path, bytes).map_err(io::Error::from)?;
@@ -1425,7 +1432,11 @@ fn materialize_copy_with_validation(
                 path.parent()
                     .ok_or(RecoveryArtifactError::InvalidReference)?,
             )?;
-            temporary.write_all(bytes)?;
+            for chunk in bytes.chunks(64 * 1024) {
+                crate::host_work::checkpoint()?;
+                temporary.write_all(chunk)?;
+            }
+            crate::host_work::checkpoint()?;
             validation.written_bytes += bytes.len() as u64;
             match temporary.persist_noclobber(path) {
                 Ok(_) => {}
@@ -1777,12 +1788,12 @@ pub(crate) fn capture_module_payload(
         .charge(metadata.len() as usize + 1)
         .map_err(accounting_charge_error)?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
-    file.take(metadata.len() + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| RecoveryArtifactError::Unreadable {
+    crate::host_work::read_to_end(&mut file.take(metadata.len() + 1), &mut bytes).map_err(
+        |error| RecoveryArtifactError::Unreadable {
             path: path.clone(),
             error,
-        })?;
+        },
+    )?;
     validation.read_bytes += bytes.len() as u64;
     if bytes.len() as u64 != metadata.len()
         || size.is_some_and(|size| size != bytes.len() as u64)

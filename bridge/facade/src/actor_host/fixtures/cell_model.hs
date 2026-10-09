@@ -39,13 +39,13 @@ callbackTurn = textTurn (AgentSpec
       pure (Annotated "checked"))
   }) "callback"
 
-callbackCell :: (Member ModelCall effects, Member Sleep effects, Member Console effects)
+callbackCell :: (Member ModelCall effects, AsyncEffects effects, Member Sleep effects, Member Console effects)
              => Eff effects (Either ModelFailure Text, Maybe ModelUsage)
 callbackCell = do
   result <- invokeModel callbackTurn "hello"
   pure (modelOutcome result, fmap invocationUsage (modelReceipt result))
 
-nestedTurn :: Member ModelCall effects => ModelTurn EchoTools effects Text
+nestedTurn :: (Member ModelCall effects, AsyncEffects effects) => ModelTurn EchoTools effects Text
 nestedTurn = textTurn (AgentSpec
   { specTools = EchoTools (presentWith id $ tool "Invoke a nested model in this cell" (\_ -> do
       result <- invokeModel (textTurn defaultSpec "nested") "inner"
@@ -53,10 +53,10 @@ nestedTurn = textTurn (AgentSpec
   , afterTool = Nothing
   }) "nested-outer"
 
-nestedCell :: Member ModelCall effects => Eff effects (Either ModelFailure Text)
+nestedCell :: (Member ModelCall effects, AsyncEffects effects) => Eff effects (Either ModelFailure Text)
 nestedCell = modelOutcome <$> invokeModel nestedTurn "outer"
 
-nestedBudgetCell :: Member ModelCall effects => Eff effects (Either ModelFailure Text)
+nestedBudgetCell :: (Member ModelCall effects, AsyncEffects effects) => Eff effects (Either ModelFailure Text)
 nestedBudgetCell = modelOutcome <$> invokeModel
   (withLimits (defaultLimits { requestLimit = Just 1 }) nestedTurn) "outer"
 
@@ -64,14 +64,14 @@ budgetTurn :: ModelTurn NoTools effects Text
 budgetTurn = withLimits (defaultLimits { requestLimit = Just 1 })
   (textTurn defaultSpec "budget")
 
-budgetCell :: Member ModelCall effects
+budgetCell :: (Member ModelCall effects, AsyncEffects effects)
            => Eff effects (Int, Either ModelFailure Text)
 budgetCell = do
   results <- replicateM 17 (invokeModel budgetTurn "one")
   let successes = length [() | result <- results, Right _ <- [modelOutcome result]]
   pure (successes, modelOutcome (last results))
 
-parkedCell :: Member ModelCall effects => Eff effects (Either ModelFailure Text)
+parkedCell :: (Member ModelCall effects, AsyncEffects effects) => Eff effects (Either ModelFailure Text)
 parkedCell = modelOutcome <$> invokeModel (textTurn defaultSpec "parked") "park"
 
 modelCapabilityKeys :: [ActorEffectKey]

@@ -2099,7 +2099,7 @@ pub(crate) enum SettlePlan {
 }
 
 /// How deep [`render_retained_layer`] recurses into nested constructors
-/// before cutting with `…`, independent of the character budget -- bounds
+/// before cutting with `…`, independent of the byte budget -- bounds
 /// the walk against a deeply nested value even when each layer prints short.
 const RETAINED_PREVIEW_MAX_DEPTH: usize = 8;
 
@@ -2113,7 +2113,7 @@ fn preview_truncated_note(budget: usize) -> String {
         format!("{budget}-byte")
     };
     format!(
-        "\n[reply exceeds the {budget} notice budget; shown to the last whole line. \
+        "\n[reply exceeds the {budget} notice budget; preview truncated. \
          `pollResponse` on the retained `Response` has the complete value.]"
     )
 }
@@ -2142,11 +2142,10 @@ fn push_bounded(out: &mut String, text: &str, budget: &mut usize) {
     }
 }
 
-/// Enforce `budget` characters (bytes) on a finished preview, cutting at the
-/// last line boundary at or before the limit rather than mid-line, and
-/// appending [`preview_truncated_note`] when anything was cut. A value with
-/// no newline before `budget` cuts at the nearest earlier char boundary
-/// instead -- still bounded, just without a line to cut at.
+/// Enforce a byte budget including the omission notice. Reserve the notice
+/// first, then prefer a whole-line prefix and otherwise a UTF-8 boundary.
+/// Small budgets use a compact notice, or `~` when even that does not fit;
+/// a zero-byte budget cannot carry either content or an omission notice.
 ///
 /// The one truncation implementation for a settlement notice's reply
 /// preview, whichever side rendered the untruncated text: this session's own
@@ -2157,12 +2156,25 @@ pub fn truncate_preview_at_line(text: String, budget: usize) -> String {
     if text.len() <= budget {
         return text;
     }
-    let mut cut = text[..budget].rfind('\n').unwrap_or(budget);
+    let note = preview_truncated_note(budget);
+    let note = if note.len() <= budget {
+        note.as_str()
+    } else if budget >= "[reply omitted; pollResponse]".len() {
+        "[reply omitted; pollResponse]"
+    } else if budget >= "[omitted]".len() {
+        "[omitted]"
+    } else if budget > 0 {
+        "~"
+    } else {
+        ""
+    };
+    let mut cut = budget - note.len();
     while cut > 0 && !text.is_char_boundary(cut) {
         cut -= 1;
     }
+    cut = text[..cut].rfind('\n').unwrap_or(cut);
     let mut truncated = text[..cut].to_string();
-    truncated.push_str(&preview_truncated_note(budget));
+    truncated.push_str(note);
     truncated
 }
 
@@ -2931,26 +2943,6 @@ where
         self.state.confirm_durable_public_scope(owner, scope)
     }
 
-    pub fn admit_cell_in(
-        &mut self,
-        scope: ScopeId,
-        declarations: usize,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_cell_in(
-            scope,
-            declarations,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-        )
-    }
-
     /// Reserve a fresh interface for one original input. No authored cell or
     /// prepared program is needed to bind the already rooted heap value.
     pub fn admit_activation_input_in(
@@ -3033,14 +3025,6 @@ where
             .begin_durable_private_execution(owner, public_scope)
     }
 
-    pub fn begin_checked_prefix(
-        &self,
-        admission: Arc<super::RuntimeCellAdmission>,
-        first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-    ) -> Result<Arc<super::RuntimeCheckedPrefix>, SessionError> {
-        self.state.begin_checked_prefix(admission, first_item)
-    }
-
     pub fn begin_cell_program(
         &self,
         admission: Arc<super::RuntimeCellAdmission>,
@@ -3090,26 +3074,6 @@ where
             authority_digest,
             include_paths,
             compile_inputs,
-        )
-    }
-
-    pub fn admit_cell_for_execution(
-        &mut self,
-        execution: Arc<super::PrivateExecutionAdmission>,
-        declarations: usize,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_cell_for_execution(
-            execution,
-            declarations,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
         )
     }
 
@@ -6905,7 +6869,7 @@ where
     pub fn render_retained_preview(
         &mut self,
         custody: &RootCustody,
-        char_budget: usize,
+        byte_budget: usize,
     ) -> Option<String> {
         if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
             return None;
@@ -6914,13 +6878,13 @@ where
         let table = self.state.session_table().clone();
         let engine = self.state.prepared_mut()?;
         // The walk itself runs against a generous internal cap (bounded work
-        // regardless of `char_budget`), then the caller's exact budget is
+        // regardless of `byte_budget`), then the caller's exact budget is
         // enforced once, at a line boundary, below -- cutting mid-walk would
         // land wherever a field happened to end, not at a readable line.
-        let mut walk_budget = char_budget.saturating_mul(4).max(4096);
+        let mut walk_budget = byte_budget.saturating_mul(4).max(4096);
         let mut out = String::new();
         render_retained_layer(engine, &table, handle, 0, &mut walk_budget, &mut out);
-        Some(truncate_preview_at_line(out, char_budget))
+        Some(truncate_preview_at_line(out, byte_budget))
     }
 
     /// The prepared-route arm of [`Self::run_rooted_entry_borrowed`]: apply
@@ -8023,10 +7987,9 @@ mod authored_publication_tests {
     }
 
     fn checked_interface_publication_failure(write_failure: bool) {
-        use crate::session::turn::{check_cell_admitted, run_checked_item};
+        use crate::session::turn::{compile_cell_program_admitted, consume_cell_program_item};
         use crate::session::{
-            resident_cell_check_template, resident_workbench_templates, CellCheckRequest,
-            SourceImports, TurnRequest, TurnResult,
+            resident_cell_check_template, resident_workbench_templates, SourceImports, TurnResult,
         };
         use std::os::unix::fs::PermissionsExt;
         use tidepool_testing::effect_surface::TestEffectSurface;
@@ -8066,38 +8029,25 @@ mod authored_publication_tests {
             reserved_declaration_modules: vec![],
         };
         let admission = state
-            .admit_cell_for_execution(
+            .admit_planned_cell_for_execution(
                 execution.clone(),
-                0,
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(specification.clone()),
+                    &(view.include_paths(effects.include_paths())),
+                )
+                .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
                 [1; 32],
                 view.include_paths(effects.include_paths()),
+                None,
             )
             .unwrap();
-        let view = admission.view();
-        let include = view.include_paths(effects.include_paths());
-        let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let injected = view.injected_module_names();
-        let checked = check_cell_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
+        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
         let first = checked.checked_item(0).unwrap();
         let prefix = state
-            .begin_checked_prefix(admission, first.clone())
+            .begin_cell_program(admission, program)
+            .unwrap()
             .unwrap();
         let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
         resident
@@ -8109,28 +8059,9 @@ mod authored_publication_tests {
         let reservation = resident
             .admit_checked_item(prefix.clone(), first.clone())
             .unwrap();
-        let snapshot = reservation.snapshot();
-        let view = snapshot.view();
-        let injected = snapshot.compiler_prefix().injected_modules();
         let TurnResult::Bind {
             bound, compiled, ..
-        } = run_checked_item(
-            TurnRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                turn_text: first.source(),
-                templates: &templates,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                gen: reservation.generation().0,
-                verdict: Some(checked.items[0].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            reservation.clone(),
-        )
-        .unwrap()
+        } = consume_cell_program_item(reservation.clone()).unwrap()
         else {
             panic!("expected checked binding");
         };
@@ -9572,10 +9503,11 @@ mod authored_publication_tests {
 
     #[test]
     fn unsupported_checked_routes_refuse_before_native_install_and_prefix_settlement() {
-        use crate::session::turn::{check_cell_admitted, run_checked_item, TemplateSelector};
+        use crate::session::turn::{
+            compile_cell_program_admitted, consume_cell_program_item, TemplateSelector,
+        };
         use crate::session::{
-            resident_cell_check_template, resident_workbench_templates, CellCheckRequest,
-            TurnRequest, TurnResult,
+            resident_cell_check_template, resident_workbench_templates, TurnResult,
         };
         use tidepool_testing::effect_surface::TestEffectSurface;
         use tidepool_toolchain::checked_cell::CheckedCellSpecification;
@@ -9627,57 +9559,31 @@ mod authored_publication_tests {
         };
         let includes = view.include_paths(effects.include_paths());
         let admission = session
-            .admit_cell_for_execution(
+            .admit_planned_cell_for_execution(
                 private,
-                0,
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(specification.clone()),
+                    &(includes.clone()),
+                )
+                .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
                 [0; 32],
                 includes.clone(),
+                None,
             )
             .unwrap();
-        let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let checked = check_cell_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &includes,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: view.next_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
+        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
         let item = checked.checked_item(0).unwrap();
         let prefix = session
-            .begin_checked_prefix(admission, item.clone())
+            .begin_cell_program(admission, program)
+            .unwrap()
             .unwrap();
         let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();
         let generation = item_admission.generation();
         let TurnResult::Bind {
             bound, compiled, ..
-        } = run_checked_item(
-            TurnRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                turn_text: &checked.items[0].source,
-                templates: &templates,
-                include: &includes,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                gen: generation.0,
-                verdict: Some(checked.items[0].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            item_admission.clone(),
-        )
-        .unwrap()
+        } = consume_cell_program_item(item_admission.clone()).unwrap()
         else {
             panic!("expected compiler-owned binders");
         };
@@ -10450,6 +10356,48 @@ mod activation_input_tests;
 #[cfg(test)]
 mod preview_budget_tests {
     use super::truncate_preview_at_line;
+    use proptest::prelude::*;
+
+    fn config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        fn arbitrary_unicode_previews_obey_the_whole_byte_budget(
+            characters in prop::collection::vec(any::<char>(), 0..2048),
+            budget in 0usize..8193,
+        ) {
+            let text: String = characters.into_iter().collect();
+            let preview = truncate_preview_at_line(text.clone(), budget);
+            prop_assert!(preview.len() <= budget);
+            if text.len() <= budget {
+                prop_assert_eq!(preview, text);
+            } else if budget == 0 {
+                prop_assert!(preview.is_empty());
+            } else {
+                // The content is an exact prefix; notices carry no invented
+                // output and are included in the measured transport bytes.
+                let body = if let Some((body, _)) = preview.split_once("\n[reply exceeds ") {
+                    body
+                } else {
+                    preview.strip_suffix("[reply omitted; pollResponse]")
+                        .or_else(|| preview.strip_suffix("[omitted]"))
+                        .or_else(|| preview.strip_suffix('~'))
+                        .expect("an explicit omission marker")
+                };
+                prop_assert!(text.starts_with(body));
+                prop_assert_eq!(truncate_preview_at_line(preview.clone(), budget), preview);
+            }
+        }
+    }
 
     #[test]
     fn reply_within_budget_renders_whole_without_a_note() {
@@ -10463,11 +10411,24 @@ mod preview_budget_tests {
         let reply = vec![line.as_str(); 100].join("\n");
         let rendered = truncate_preview_at_line(reply, 8192);
         let (body, note) = rendered.split_once("\n[").expect("a truncation note");
-        assert!(body.len() <= 8192 && body.ends_with(&line), "{body}");
+        assert!(rendered.len() <= 8192 && body.ends_with(&line), "{body}");
         assert_eq!(
             note,
-            "reply exceeds the 8 KiB notice budget; shown to the last whole line. \
+            "reply exceeds the 8 KiB notice budget; preview truncated. \
              `pollResponse` on the retained `Response` has the complete value.]"
         );
+    }
+
+    #[test]
+    fn unicode_at_the_production_limit_and_tiny_budgets_never_split_codepoints() {
+        let text = format!("x{}", "λ".repeat(8192));
+        for budget in [0, 1, 2, 3, 8, 9, 27, 28, 8191, 8192, usize::MAX] {
+            let preview = truncate_preview_at_line(text.clone(), budget);
+            assert!(preview.len() <= budget);
+            if text.len() > budget && budget > 0 {
+                assert!(!preview.is_empty());
+            }
+        }
+        assert_eq!(truncate_preview_at_line("λ".into(), 1), "~");
     }
 }

@@ -1060,6 +1060,8 @@ pub enum OriginalMembershipFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
+    #[error("compiler host work interrupted: {0}")]
+    Interrupted(#[source] std::io::Error),
     #[error("unsupported {format:?} version {found}; expected {expected}")]
     UnsupportedVersion {
         format: CertificationFormat,
@@ -1651,9 +1653,17 @@ fn decode_receipt_value_in(
             let file = std::fs::File::open(directory.join("execution-source.cbor"))
                 .map_err(|_| CertificationError::Receipt("source recipe unavailable"))?;
             let mut bytes = Vec::new();
-            file.take((crate::execution_source::GRAPH_BYTES_LIMIT + 1) as u64)
-                .read_to_end(&mut bytes)
-                .map_err(|_| CertificationError::Receipt("source recipe read"))?;
+            crate::host_work::read_to_end(
+                &mut file.take((crate::execution_source::GRAPH_BYTES_LIMIT + 1) as u64),
+                &mut bytes,
+            )
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    CertificationError::Interrupted(error)
+                } else {
+                    CertificationError::Receipt("source recipe read")
+                }
+            })?;
             if bytes.len() > crate::execution_source::GRAPH_BYTES_LIMIT || sha(&bytes) != expected {
                 return Err(CertificationError::Receipt("source recipe digest or bound"));
             }
@@ -2130,6 +2140,7 @@ pub(crate) fn read_bounded_with_operation(
     operation: &InventoryOperation,
 ) -> CertResult<Vec<u8>> {
     use std::io::Read;
+    crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
     let failure = |failure| CertificationError::EvidenceRead {
         path: path.to_path_buf(),
         failure,
@@ -2160,14 +2171,17 @@ pub(crate) fn read_bounded_with_operation(
         })
     })?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
-    file.take(metadata.len() + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
+    crate::host_work::read_to_end(&mut file.take(metadata.len() + 1), &mut bytes).map_err(
+        |error| {
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                return CertificationError::Interrupted(error);
+            }
             failure(EvidenceReadFailure::Io {
                 operation: EvidenceReadOperation::Read,
                 error,
             })
-        })?;
+        },
+    )?;
     if bytes.len() as u64 != metadata.len() {
         return Err(failure(EvidenceReadFailure::LengthChanged {
             expected: metadata.len(),
@@ -2202,6 +2216,16 @@ fn package_validation_error(
     error: crate::recovery_artifacts::RecoveryArtifactError,
 ) -> CertificationError {
     match error {
+        crate::recovery_artifacts::RecoveryArtifactError::Io(error)
+            if error.kind() == std::io::ErrorKind::Interrupted =>
+        {
+            CertificationError::Interrupted(error)
+        }
+        crate::recovery_artifacts::RecoveryArtifactError::Unreadable { error, .. }
+            if error.kind() == std::io::ErrorKind::Interrupted =>
+        {
+            CertificationError::Interrupted(error)
+        }
         error @ (crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_)
         | crate::recovery_artifacts::RecoveryArtifactError::CompletedSourceEvidence {
             ..
@@ -5828,7 +5852,8 @@ pub(crate) fn certify_candidate_original_with_validation(
     let imports = authenticate_original_imports(&raw, &witness, validation)?;
     let groups = raw
         .groups
-        .into_iter()
+        .iter()
+        .cloned()
         .zip(imports)
         .map(|(group, imports)| AuthenticatedOriginalGroup {
             owner: owner.clone(),
@@ -9347,6 +9372,20 @@ pub(crate) mod tests {
         interface: Vec<u8>,
         sites: &BTreeMap<u32, Vec<tidepool_repr::execution_schema::SiteRow>>,
     ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+        original_groups_fixture_in_unit_with_sites(
+            "fixture", module, groups, version, packages, interface, sites,
+        )
+    }
+
+    pub(crate) fn original_groups_fixture_in_unit_with_sites(
+        unit: &str,
+        module: &str,
+        groups: Vec<(u32, Vec<PendingImportOwner>)>,
+        version: u8,
+        packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+        interface: Vec<u8>,
+        sites: &BTreeMap<u32, Vec<tidepool_repr::execution_schema::SiteRow>>,
+    ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         let projected = groups
             .iter()
             .map(|(ordinal, imports)| {
@@ -9361,6 +9400,7 @@ pub(crate) mod tests {
                 if groups.len() == 1 && *ordinal == 7 {
                     top.identity = testing::identity(module, "entry");
                 }
+                top.identity.unit = unit.into();
                 top.binding.rhs = tidepool_repr::execution_schema::HeapRhs::Bytes(Vec::new());
                 let top = top.clone();
                 wire.bindings = vec![tidepool_repr::execution_schema::Group::Recursive(vec![top])];
@@ -9400,13 +9440,13 @@ pub(crate) mod tests {
             .collect();
         let product_bytes =
             tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
-                unit: "fixture".into(),
+                unit: unit.into(),
                 module: module.into(),
                 interface: interface.clone(),
                 groups: projected,
             }]);
         let owner = CachedHomeOwner {
-            unit: "fixture".into(),
+            unit: unit.into(),
             module: module.into(),
             module_version: ModuleVersion([version; 32]),
             skinny_iface_sha256: sha(&interface),

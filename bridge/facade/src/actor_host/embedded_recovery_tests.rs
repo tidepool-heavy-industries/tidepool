@@ -146,11 +146,12 @@ fn configuration(root: &Path) -> ActorHostConfig {
 #[test]
 #[ignore = "private subprocess entry for the owning production recovery test"]
 fn production_recovery_process() {
-    let Some(root) = std::env::var_os("TIDEPOOL_RECOVERY_TEST_ROOT") else {
-        return;
-    };
-    let root = PathBuf::from(root);
-    let phase = std::env::var("TIDEPOOL_RECOVERY_TEST_PHASE").unwrap();
+    let root = PathBuf::from(
+        std::env::var_os("TIDEPOOL_RECOVERY_TEST_ROOT")
+            .expect("production recovery parent must supply TIDEPOOL_RECOVERY_TEST_ROOT"),
+    );
+    let phase = std::env::var("TIDEPOOL_RECOVERY_TEST_PHASE")
+        .expect("production recovery parent must supply TIDEPOOL_RECOVERY_TEST_PHASE");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -180,6 +181,37 @@ fn production_recovery_process() {
             _ = observed => unreachable!(),
         }
     });
+}
+
+#[test]
+fn production_recovery_helper_refuses_missing_required_settings() {
+    for missing in [
+        "TIDEPOOL_RECOVERY_TEST_ROOT",
+        "TIDEPOOL_RECOVERY_TEST_PHASE",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", PROCESS_TEST, "--ignored", "--nocapture"])
+            .env("TIDEPOOL_RECOVERY_TEST_ROOT", root.path())
+            .env("TIDEPOOL_RECOVERY_TEST_PHASE", "missing-settings-control")
+            .env_remove(missing)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "helper accepted missing {missing}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("production recovery parent must supply {missing}")),
+            "helper did not reach the missing-setting refusal: {output:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "missing settings must refuse before host startup"
+        );
+    }
 }
 
 struct Process(Child);

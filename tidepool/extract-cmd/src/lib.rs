@@ -30,7 +30,7 @@ mod process;
 mod request;
 mod resources;
 pub use endpoint::{
-    with_compiler_transaction, with_compiler_transaction_cancellable,
+    compiler_host_checkpoint, with_compiler_transaction, with_compiler_transaction_cancellable,
     with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
     CompilerEndpoint, CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause,
     CompilerScratchFailure, CompilerScratchRetirement, CompilerTermination, CompilerTransaction,
@@ -77,12 +77,15 @@ pub const REQUIRED_DAEMON_ENDPOINT_ENV: &str = "TIDEPOOL_EXTRACT_REQUIRED_DAEMON
 pub const SESSION_WORKER_RSS_CEILING_MB: u64 = 7 * 1024;
 
 /// Shared persistent daemon command for production and isolated qualification.
+/// The optional foreground allowance selects per-request scheduling width;
+/// omission leaves the daemon's default in force without changing worker count.
 pub fn persistent_daemon_arguments(
     socket: &Path,
     log: &Path,
     run_id: &str,
     workers: usize,
     rss_ceiling_mb: Option<u64>,
+    foreground_jobs: Option<std::num::NonZeroUsize>,
 ) -> Vec<OsString> {
     let mut args = vec![
         "--daemon".into(),
@@ -97,6 +100,9 @@ pub fn persistent_daemon_arguments(
             OsString::from("--rss-ceiling-mb"),
             ceiling.to_string().into(),
         ]);
+    }
+    if let Some(jobs) = foreground_jobs {
+        args.extend([OsString::from("--foreground-jobs"), jobs.to_string().into()]);
     }
     args.extend([
         OsString::from("--run-id"),
