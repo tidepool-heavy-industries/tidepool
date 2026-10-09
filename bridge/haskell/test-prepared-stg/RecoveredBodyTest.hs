@@ -54,7 +54,7 @@ import Tidepool.ExecutionSchema
 import Tidepool.FatIface
   ( FatIfaceLookup(..), newFatIfaceCache, lookupFatIfaceExact
   , readExactInterface
-  , OwnerInterfaceContext(..), newOwnerInterfaceCache, lookupOwnerInterface, evictOwnerInterfaceMatching )
+  , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, lookupOwnerInterface, evictOwnerInterfaceMatching )
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
   , PipelineResult(prHscEnv), runPipelineSelected )

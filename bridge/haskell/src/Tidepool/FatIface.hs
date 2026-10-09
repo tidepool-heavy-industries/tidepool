@@ -16,7 +16,8 @@ module Tidepool.FatIface
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , FatIfaceComponentLookup(..), lookupFatIfaceComponents, privateOriginalDependencies
   , ExactInterfaceFailure(..), readExactInterface
-  , OwnerInterfaceContext(..), OwnerInterfaceCache, newOwnerInterfaceCache
+  , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries
+  , sameOwnerInterfaceContext, ownerInterfaceMatchesOriginal, OwnerInterfaceCache, newOwnerInterfaceCache
   , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching
   ) where
@@ -52,6 +53,7 @@ import Control.Concurrent.MVar
   (MVar, modifyMVar_, newMVar, readMVar)
 import Control.Exception
   ( displayException, evaluate )
+import Tidepool.FatIface.Internal (OwnerInterfaceContext(..))
 import Tidepool.FatIface.Internal qualified as Shared
 import Tidepool.ExtractUtil (trySynchronous)
 import Control.Monad.IO.Class (liftIO)
@@ -422,11 +424,14 @@ renderReadInterfaceError failure = case failure of
 -- | The defining context needed after an owner's interface has been read and
 -- typechecked. Entry metadata comes from its declarations, independently of
 -- the Ids reconstructed by the optional fat Core decoder.
-data OwnerInterfaceContext = OwnerInterfaceContext
-  { ownerInterfaceLocation :: ModLocation
-  , ownerInterfaceTyCons :: [TyCon]
-  , ownerInterfaceEntries :: Map.Map Name Id
-  }
+sameOwnerInterfaceContext :: OwnerInterfaceContext -> OwnerInterfaceContext -> Bool
+sameOwnerInterfaceContext first second =
+  ownerInterfaceIdentity first == ownerInterfaceIdentity second
+    && ownerInterfaceVersion first == ownerInterfaceVersion second
+
+ownerInterfaceMatchesOriginal :: OwnerInterfaceContext -> FatOriginalVersion -> Bool
+ownerInterfaceMatchesOriginal context (FatOriginalVersion owner interface _) =
+  ownerInterfaceVersion context == (owner,interface)
 
 -- | Daemon-lifetime cache of an owner module's already-read-and-typechecked
 -- defining context: the 'ModLocation' 'readExactInterface' resolved it at,

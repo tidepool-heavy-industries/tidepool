@@ -34,6 +34,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32, Word64)
+import Data.Unique (Unique)
 import System.Environment (lookupEnv)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
@@ -73,7 +74,7 @@ import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Env (plusNameEnv, emptyNameEnv, disjointNameEnv)
 import GHC.Unit.Types (Module)
 import GHC.Unit.Module.Location (ModLocation)
-import GHC.Unit.Module.ModIface (ModIface)
+import GHC.Unit.Module.ModIface (ModIface, mi_iface_hash, mi_final_exts)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
 import GHC.Types.TypeEnv (typeEnvTyCons, typeEnvIds)
@@ -100,7 +101,8 @@ import Tidepool.FatIface
   , fatComponentOrdinals, fatComponentOrdinal, fatComponentBindings, fatComponentAllBinders
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
-  , OwnerInterfaceContext(..), OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
+  , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries
+  , sameOwnerInterfaceContext, ownerInterfaceMatchesOriginal, OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
 import Tidepool.FatIface.Internal qualified as Shared
 
 -- | Observe prepared output without replacing its compiler-owned evidence.
@@ -163,7 +165,9 @@ preparedRejectsIntrinsic prepared identifier =
 -- admits missing siblings; only final selected emission checks this contract.
 preparedExpectedEntry :: PreparedModule -> Id -> Maybe Id
 preparedExpectedEntry prepared identifier =
-  Map.lookup (varName identifier) (preparedExpectedEntries prepared)
+  Map.lookup (varName identifier) $ case preparedExpectedEntries prepared of
+    ProvisionalEntries entries -> entries
+    DeclaringEntries context -> ownerInterfaceEntries context
 
 -- | The typed census, not an empty site list, determines authority dependence.
 preparedUsesSiteAuthority :: PreparedModule -> Bool
@@ -271,7 +275,7 @@ acquireRecoveredModuleWithWorkers workers environment hscEnv input = do
     (recoveredTyCons input) Map.empty bindings
   pure $ PreparedModuleTask $ do
     prepared <- runPreparedModuleTask task
-    pure prepared { preparedExpectedEntries = entries }
+    pure prepared { preparedExpectedEntries = ProvisionalEntries entries }
 
 -- Fat Core's local IdInfo is not the executable interface contract. Restore
 -- only entry-relevant fields; occurrence analyses and unfoldings still belong
@@ -358,7 +362,7 @@ recoveredSubsetScope owner bindings =
 data PreparedBodyCache = PreparedBodyCache
   { cachedExactBodies :: MVar (Map Module (Map PreparedBodyKey [PreparedModule]))
   , cachedOriginalModules :: MVar (Map Module (Map OriginalVersion [PreparedOriginalAlternative]))
-  , cachedFatComponents :: MVar (Map Module (Shared.LoadCache (FatOriginalVersion, FatPreparationUnit) PreparedModule))
+  , cachedFatComponents :: MVar (Map Module (Shared.LoadCache (FatOriginalVersion, Unique, FatPreparationUnit) PreparedModule))
   }
 
 -- Defining-context wrappers retain their exact binder census. Canonical fat
@@ -408,8 +412,8 @@ selectPreparedBodyCaches sources = do
     <*> newMVar (Map.unionsWith (Map.unionWith mergeOriginalAlternatives) (map snd selected))
     <*> newMVar components
 
-mergeComponentBuckets :: [Map Module (Shared.LoadCache (FatOriginalVersion, FatPreparationUnit) PreparedModule)]
-  -> IO (Map Module (Shared.LoadCache (FatOriginalVersion, FatPreparationUnit) PreparedModule))
+mergeComponentBuckets :: [Map Module (Shared.LoadCache (FatOriginalVersion, Unique, FatPreparationUnit) PreparedModule)]
+  -> IO (Map Module (Shared.LoadCache (FatOriginalVersion, Unique, FatPreparationUnit) PreparedModule))
 mergeComponentBuckets sources = mapM
   (Shared.mergeLoadCaches . map (\cache -> (cache,const True)))
   (Map.unionsWith (++) (map (Map.map pure) sources))
@@ -551,6 +555,8 @@ newPreparedComponentTaskPreparer env owners stable = do
     resolved <- acquireRecoveredContext env owners owner
     case resolved of
       Left failure -> pure (Left failure)
+      Right context | not (ownerInterfaceMatchesOriginal context version) ->
+        pure (Left (RecoveredModuleInterfaceFailure owner "declaring context differs from exact original interface"))
       Right context -> do
         bucket <- modifyMVar (cachedFatComponents stable) $ \buckets ->
           case Map.lookup owner buckets of
@@ -562,7 +568,7 @@ newPreparedComponentTaskPreparer env owners stable = do
               (ownerInterfaceTyCons context) (IntMap.elems (fatComponentBindings component)))
             (plain, siteBearing) = partition pureUnit components
         acquired <- forM plain $ \component -> do
-          let key = (version,OriginalComponent (fatComponentOrdinal component))
+          let key = (version,Shared.ownerInterfaceIdentity context,OriginalComponent (fatComponentOrdinal component))
           completed <- Shared.lookupCompletedLoadCache bucket key
           task <- case completed of
             Just prepared | not disabled -> pure (Right (PreparedModuleTask (pure prepared)))
@@ -579,7 +585,7 @@ newPreparedComponentTaskPreparer env owners stable = do
         -- the original body subset. Give that implicit arena one version-bound
         -- cache key and one place in assembly, including for site-bearing units.
         workerTask <- case disabled of
-          False -> Shared.lookupCompletedLoadCache bucket (version,ConstructorWorkers) >>= \case
+          False -> Shared.lookupCompletedLoadCache bucket (version,Shared.ownerInterfaceIdentity context,ConstructorWorkers) >>= \case
             Just completed -> pure (Right (PreparedModuleTask (pure completed)))
             Nothing -> acquireRecoveredWithSiteContext (Just environment) env owner context []
           True -> acquireRecoveredWithSiteContext (Just environment) env owner context []
@@ -607,7 +613,7 @@ newPreparedComponentTaskPreparer env owners stable = do
                   result <- runPreparedBodyTask task >>= either (ioError . userError . show) pure
                   pure [(concatMap fatComponentOrdinals siteBearing,result)]
               workerResult <- if disabled then runPreparedModuleTask workers else
-                Shared.lookupLoadCache bucket (version,ConstructorWorkers) (runPreparedModuleTask workers)
+                Shared.lookupLoadCache bucket (version,Shared.ownerInterfaceIdentity context,ConstructorWorkers) (runPreparedModuleTask workers)
               assembled <- assembleComponentSelection selection workerResult (pureResults ++ siteResult)
               emitCount timing "prepared_recover_component_demanded_groups"
                 (fromIntegral (fatSelectionDemandedGroupCount selection))
@@ -645,6 +651,9 @@ preparedTopBinders (StgTopLifted (StgRec pairs)) = map fst pairs
 -- constructor workers; the single site batch supplies the owner-local type graph.
 assembleComponentSelection :: FatIfaceSelection -> PreparedModule -> [([Int],PreparedModule)] -> IO PreparedModule
 assembleComponentSelection selection workers units = do
+  timing <- readTimingEnabled
+  emitCount timing "prepared_recover_assemblies" 1
+  emitCount timing "prepared_recover_declaring_context_checks" (fromIntegral (1 + length units))
   let version = fatSelectionVersion selection
       owner = fatOriginalOwner version
       rosters = map fst units
@@ -658,7 +667,13 @@ assembleComponentSelection selection workers units = do
         (plusNameEnv known (pmTagSigs item), valid && disjointNameEnv known (pmTagSigs item)))
         (emptyNameEnv,True) prepared)
       siblings = mergeConsistentIds (map pmSitedSiblings prepared)
-      entries = mergeConsistentIds (map preparedExpectedEntries prepared)
+      context = case preparedExpectedEntries workers of
+        DeclaringEntries declared -> Just declared
+        ProvisionalEntries _ -> Nothing
+      consistentContext item = case (context, preparedExpectedEntries item) of
+        (Just declared, DeclaringEntries other) -> sameOwnerInterfaceContext declared other
+          && ownerInterfaceMatchesOriginal other version
+        _ -> False
   unless (not (null units)
       && all (isJust . isDataConWorkId_maybe)
         (concatMap (preparedTopBinders . fst) (pmBindings workers))
@@ -671,7 +686,7 @@ assembleComponentSelection selection workers units = do
       && length names == Set.size (Set.fromList names)
       && length spellings == Set.size (Set.fromList spellings)
       && tagsDisjoint && length siteUnits <= 1
-      && maybe False (const True) siblings && maybe False (const True) entries)
+      && maybe False (const True) siblings && all consistentContext prepared)
     (ioError (userError "canonical fat component assembly has inconsistent or overlapping evidence"))
   let base = case siteUnits of site:_ -> site; [] -> head prepared
   pure base
@@ -680,7 +695,7 @@ assembleComponentSelection selection workers units = do
     , preparedTagSigs = foldl plusNameEnv emptyNameEnv (map pmTagSigs prepared)
     , preparedStableTopSpellings = Map.unions (map pmStableTopSpellings prepared)
     , preparedSitedSiblings = fromMaybe Map.empty siblings
-    , preparedExpectedEntries = fromMaybe Map.empty entries
+    , preparedExpectedEntries = preparedExpectedEntries workers
     }
 
 -- Shared owner facts may occur in several units, but conflicting typed
@@ -767,9 +782,13 @@ acquireRecoveredWithSiteContext = acquireRecoveredWithWorkers IncludeConstructor
 acquireRecoveredWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment -> HscEnv -> Module
   -> OwnerInterfaceContext -> [CoreBind] -> IO (Either RecoveredModuleFailure PreparedModuleTask)
 acquireRecoveredWithWorkers workers environment hscEnv owner context bindings = do
-  prepared <- trySynchronous (acquireRecoveredModuleWithWorkers workers environment hscEnv
-    (RecoveredModuleInput owner (ownerInterfaceLocation context)
-      (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context)))
+  prepared <- trySynchronous $ do
+    task <- acquireRecoveredModuleWithWorkers workers environment hscEnv
+      (RecoveredModuleInput owner (ownerInterfaceLocation context)
+        (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context))
+    pure (PreparedModuleTask $ do
+      output <- runPreparedModuleTask task
+      pure output { preparedExpectedEntries = DeclaringEntries context })
   pure $ case prepared of
     Left reason -> Left (RecoveredModulePreparationFailure owner reason)
     Right value -> Right value
@@ -792,8 +811,8 @@ acquireRecoveredContext hscEnv ownerCache owner = do
           case details of
             Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
             Right (tycons, entries) -> do
-              let hit = OwnerInterfaceContext location tycons
-                    (Map.fromList [(varName identifier,identifier) | identifier <- entries])
+              hit <- Shared.issueOwnerInterfaceContext owner (mi_iface_hash (mi_final_exts iface))
+                location tycons (Map.fromList [(varName identifier,identifier) | identifier <- entries])
               cacheOwnerInterface ownerCache owner hit
               pure (Right hit)
   where
@@ -876,7 +895,7 @@ acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule lo
           , preparedAuthorityDependent = not (intrinsicFree census)
           , preparedSiteDependencies = dependencies
           , preparedIntrinsicNames = Set.fromList (intrinsicNames census)
-          , preparedExpectedEntries = Map.empty
+          , preparedExpectedEntries = ProvisionalEntries Map.empty
           }
       -- Wired-in declarations are deliberately absent from interface files.
       -- Their exact Names carry GHC's canonical TyThing, including implicit

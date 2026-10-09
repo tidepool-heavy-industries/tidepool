@@ -64,8 +64,10 @@ import Tidepool.PreparedStg
   , resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent )
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.ExactHydration (forkExactContext)
+import Tidepool.FatIface.Internal (issueOwnerInterfaceContext)
+import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts)
 import Tidepool.FatIface
-  ( OwnerInterfaceContext(..), newOwnerInterfaceCache, cacheOwnerInterface )
+  ( OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, cacheOwnerInterface )
 import qualified Data.Map.Strict as Map
 import qualified Tidepool.ExecutionProjection as Projection
 import qualified Tidepool.ExecutionSchema as Schema
@@ -982,9 +984,12 @@ verifyTypedPreparationCacheLifetime dir = do
     bodies <- newPreparedBodyCache
     let env = prHscEnv (pprPipelineResult cold)
         input name = recoveredFixtureInput name cold
-    mapM_ (\name -> let recovered = input name in cacheOwnerInterface owners
-        (recoveredModule recovered) (OwnerInterfaceContext (recoveredLocation recovered) (recoveredTyCons recovered)
-          (recoveredEntries recovered)))
+    mapM_ (\name -> do
+        let recovered = input name
+            iface = hm_iface (finalizedHomeModInfo (finalizedFixtureOwner name cold))
+        context <- issueOwnerInterfaceContext (recoveredModule recovered) (mi_iface_hash (mi_final_exts iface))
+          (recoveredLocation recovered) (recoveredTyCons recovered) (recoveredEntries recovered)
+        cacheOwnerInterface owners (recoveredModule recovered) context)
       ["TypedPreparationPlain", "TypedPreparationOwner"]
     request <- newPreparedBodyPreparer env owners bodies
     nextRequest <- newPreparedBodyPreparer env owners bodies

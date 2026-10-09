@@ -49,7 +49,7 @@ import Tidepool.FatIface
   , lookupFatIfaceExact, lookupFatIfaceBodies
   , lookupFatIfaceComponents, privateOriginalDependencies
   , newFatIfaceCache
-  , OwnerInterfaceContext(..), newOwnerInterfaceCache, copyOwnerInterfaceCache
+  , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, copyOwnerInterfaceCache
   , lookupOwnerInterface, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
   )
 import Tidepool.FatIface.Internal
