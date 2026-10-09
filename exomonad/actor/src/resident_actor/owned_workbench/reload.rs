@@ -303,7 +303,7 @@ where
                         return Ok(None);
                     }
                     workbench
-                        .prepare_tools(context, install, granted_effects)
+                        .prepare_candidate_tools(context, install, granted_effects)
                         .await
                         .map(Some)
                 })
