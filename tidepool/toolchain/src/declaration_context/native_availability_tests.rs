@@ -561,10 +561,11 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
     .is_err());
 }
 
-// Called by the existing genuinely compiled native-origin fixture. The same
-// immutable certificate supplies every narrowed history; none recompiles it.
+// The existing native-origin fixture supplies genuine certificates for narrowed
+// selections and an old dependency island beside a newer same-module issuer.
 pub(crate) fn assert_selected_authored_private_inputs(
     certificate: &Arc<CertifiedAuthoredDeclaration>,
+    dependent: &CertifiedAuthoredDeclaration,
     generation: u64,
     root: &Path,
     producer_bytes: &[u8],
@@ -721,4 +722,141 @@ pub(crate) fn assert_selected_authored_private_inputs(
         valid_sparse_refusals > 0,
         "a valid nonempty sparse selection must reach private offer refusal"
     );
+
+    let current_root = tempfile::tempdir().unwrap();
+    let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation));
+    let source = "module Tidepool.Session.Lib.G1 where\nbaseline = (80 :: Int)\n{-# NOINLINE baseline #-}\ncurrentOnly = (81 :: Int)\n{-# NOINLINE currentOnly #-}\n";
+    let path = current_root.path().join(module.relative_hs_path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, source).unwrap();
+    let current = Arc::new(
+        crate::declaration_join::certify_authored_declaration(
+            module,
+            &path,
+            source,
+            &[current_root.path().to_path_buf()],
+            current_root.path(),
+        )
+        .expect("the replacement interface and native body need the real issuing compiler"),
+    );
+    let mut history =
+        ExactDeclarationContext::new(std::slice::from_ref(&current), &[], vec![]).unwrap();
+    let current_native = history.authored_native_root(generation).unwrap();
+    let current_interface =
+        ArtifactEntry::canonical(current.product().module_interface().unwrap().clone())
+            .descriptor
+            .id;
+    let old_interface =
+        ArtifactEntry::canonical(certificate.product().module_interface().unwrap().clone())
+            .descriptor
+            .id;
+    assert_ne!(current_interface, old_interface);
+    assert_ne!(current_native, authored_root);
+    let dependent_native = ArtifactEntry::original(producer.sha256(), dependent.product().clone())
+        .unwrap()
+        .descriptor
+        .id;
+    assert!(
+        dependent
+            .artifact_view()
+            .dependencies()
+            .iter()
+            .any(|(from, to, edge)| {
+                *from == dependent_native
+                    && *to == authored_root
+                    && matches!(
+                        edge,
+                        crate::artifact_inventory::ArtifactDependency::NativeGroup { .. }
+                    )
+            }),
+        "the historical child must be a compiler-authenticated exact dependency"
+    );
+    let before_merge = history.inventory.selected_native_groups();
+    history.inventory = history
+        .inventory
+        .merge(certificate.artifact_view())
+        .unwrap()
+        .merge(dependent.artifact_view())
+        .unwrap();
+    let selected_history = history.inventory.selected_native_groups();
+    assert!(before_merge.is_subset(&selected_history));
+    assert!(selected_before.is_subset(&selected_history));
+    assert!(selected_history
+        .iter()
+        .any(|group| group.artifact == dependent_native));
+    let metadata = history.compiler_metadata_snapshot().unwrap();
+    assert_eq!(
+        metadata.entries[&identity(
+            &current.product().owner().unit,
+            &current.product().owner().module
+        )]
+            .descriptor
+            .id,
+        current_interface
+    );
+    assert!(history
+        .compiler_projection
+        .roles()
+        .iter()
+        .all(|role| role.interface() != old_interface));
+    let private =
+        OriginalCompilerInputs::from_selected_authored_declarations(&history, producer, &[])
+            .unwrap()
+            .expect("current issued authored body remains privately available");
+    assert_eq!(
+        private
+            .projection
+            .roles()
+            .iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([current_native])
+    );
+    let request = ExactCompileContext::new(Arc::new(history.clone()))
+        .prepare_compilation_with_private_input(
+            &root.join("historical-authored-scope"),
+            producer_bytes,
+            None,
+            Some(private),
+        )
+        .unwrap();
+    assert_eq!(
+        request
+            .compiler_original_products()
+            .unwrap()
+            .iter()
+            .map(|product| product.owner().clone())
+            .collect::<Vec<_>>(),
+        vec![current.product().owner().clone()]
+    );
+    assert_eq!(
+        request.compiler_inputs().metadata.selected_native_groups,
+        selected_history
+    );
+    let offer = crate::artifacts::ModuleCandidateOffer::select_in_context(
+        producer_bytes,
+        &[root.to_path_buf()],
+        &root.join("historical-authored-exact-offer"),
+        Arc::new(ExactCompileContext::new(Arc::new(history.clone()))),
+    )
+    .expect("public exact preparation must keep historical children out of its namespace");
+    let wire: Value = ciborium::de::from_reader(
+        std::fs::read(offer.exact_scope_path().unwrap())
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    let originals = wire.as_array().unwrap()[6].as_array().unwrap();
+    assert_eq!(originals.len(), 1);
+    assert_eq!(
+        &originals[0].as_array().unwrap()[..5],
+        &[
+            text(&current.product().owner().unit),
+            text(&current.product().owner().module),
+            text(hex(&current.product().owner().module_version.0)),
+            text(hex(&current.product().owner().skinny_iface_sha256)),
+            text(hex(&current.product().owner().product_sha256)),
+        ]
+    );
+    assert_eq!(history.inventory.selected_native_groups(), selected_history);
 }

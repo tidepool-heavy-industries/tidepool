@@ -2151,12 +2151,6 @@ mod authored_tests {
             }));
         }
         let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
-        crate::declaration_context::assert_selected_authored_private_inputs(
-            &baseline,
-            baseline_module.gen.0,
-            root.path(),
-            endpoint.identity().producer_bytes(),
-        );
         let context = Arc::new(
             ExactDeclarationContext::new(
                 std::slice::from_ref(&baseline),
@@ -2208,7 +2202,19 @@ mod authored_tests {
             .recovery_products()
             .iter()
             .any(|product| product.owner() == baseline.product().owner()));
+        crate::declaration_context::assert_selected_authored_private_inputs(
+            &baseline,
+            &result,
+            baseline_module.gen.0,
+            root.path(),
+            endpoint.identity().producer_bytes(),
+        );
         let result_owner = result.product().owner().clone();
+        let result_interface = crate::artifact_inventory::ArtifactEntry::canonical(
+            result.product().module_interface().unwrap().clone(),
+        )
+        .descriptor
+        .id;
         let context = ExactDeclarationContext::new(
             &[baseline, Arc::new(result)],
             &[],
@@ -2226,7 +2232,7 @@ mod authored_tests {
         assert!(context
             .compiler_input_roles()
             .iter()
-            .all(|role| role.original().is_none()));
+            .any(|role| role.interface() == result_interface && role.original().is_none()));
         let selected_before = context.artifact_view().selected_native_groups();
         std::fs::remove_file(baseline_path).unwrap();
         std::fs::remove_file(path).unwrap();

@@ -135,15 +135,22 @@ pub(crate) struct OriginalCompilerInputs {
 }
 
 impl OriginalCompilerInputs {
-    /// A resident cell may privately reuse a complete authored original whose
-    /// executable groups are already selected. A lexical join can hide its
-    /// source owner without withdrawing that issued native selection.
+    /// Privately reuse a complete selected authored original matching the
+    /// issuing compiler interface and, when present, its exact native role.
+    /// Historical native children remain dependencies without receiving names
+    /// in the current compiler namespace.
     pub(crate) fn from_selected_authored_declarations(
         context: &ExactDeclarationContext,
         producer: CanonicalProducerIdentity,
         configured: &[CertifiedRecoveryProduct],
     ) -> Result<Option<Self>, CompileError> {
         let metadata = context.inventory.metadata_snapshot();
+        let issued = context
+            .compiler_projection
+            .roles()
+            .into_iter()
+            .map(|role| (role.interface(), role.original()))
+            .collect::<BTreeMap<_, _>>();
         let selected = metadata
             .selected_native_groups
             .iter()
@@ -158,12 +165,21 @@ impl OriginalCompilerInputs {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 return Err(failure("selected native group has no original product"));
             };
-            if !product.module_interface().is_some_and(|interface| {
+            let Some(interface) = product.module_interface().filter(|interface| {
                 matches!(
                     interface.origin(),
                     crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
                 )
-            }) {
+            }) else {
+                continue;
+            };
+            let canonical = ArtifactEntry::canonical(interface.clone()).descriptor.id;
+            let Some(original) = issued.get(&canonical) else {
+                // Exact historical children stay selected dependencies, not
+                // independent names in the current compiler namespace.
+                continue;
+            };
+            if original.is_some_and(|original| original != id) {
                 continue;
             }
             // A selected dependency group alone grants no availability for
