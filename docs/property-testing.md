@@ -204,7 +204,7 @@ regression and verify that it fails before the repair and passes afterward.
 
 Calibrate important suites with a plausible temporary defect, such as omitted
 invalidation or premature shared-owner release. Coordinate a separate worktree
-or an exclusive, recorded source interval with the build owner. Verify generated
+or an exclusive, recorded source interval with the checkout owner. Verify generated
 cases detect the mutation, that a seed is actually saved outside build outputs,
 and that replay detects it. Restore the exact owned patch and rerun against the
 repair. Never include deliberate mutants in release artifacts or publish them

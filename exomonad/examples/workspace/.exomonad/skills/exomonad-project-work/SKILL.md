@@ -26,6 +26,12 @@ permitted holes explicit and distinguish compiled code from implemented
 behavior. Assign ready work with the contract and evidence its owner needs, then
 continue independent work while requests run.
 
+For code changes, each implementation owner compiles affected targets and runs
+its focused acceptance through the repository's supported commands. Independent
+review can proceed alongside those checks. Coordinate concrete resource or shared
+output conflicts; report a blocked check explicitly rather than routing routine
+validation through a central build owner.
+
 A request should carry its objective, source identity, owned paths, dependencies,
 acceptance, relevant evidence, and escalation conditions. Include the failure
 mechanism and useful method cues; leave routine implementation choices to its

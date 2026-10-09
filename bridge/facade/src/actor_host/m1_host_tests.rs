@@ -35,6 +35,9 @@ mod real_host_late_output_tests;
 #[path = "m1_request_reload_tests.rs"]
 mod request_reload_tests;
 
+#[path = "m1_chat_projection_tests.rs"]
+mod chat_projection_tests;
+
 #[tokio::test]
 #[ignore = "requires declared matched web, Node, Playwright and resident compiler inputs"]
 async fn production_browser_executes_resident_haskell_retries_and_controls_root() {

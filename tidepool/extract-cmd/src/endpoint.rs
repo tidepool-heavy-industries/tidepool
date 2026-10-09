@@ -2646,6 +2646,7 @@ mod tests {
         begins: usize,
         admissions: usize,
         requests: usize,
+        ends: usize,
         active: usize,
     }
 
@@ -2742,6 +2743,7 @@ mod tests {
                             }
                             match command[0] {
                                 daemon::TRANSACTION_END => {
+                                    counts.lock().unwrap().ends += 1;
                                     connection.write_all(&[1]).unwrap();
                                     break;
                                 }
@@ -2957,6 +2959,10 @@ mod tests {
         fixture.settle();
         let counts = fixture.counts.lock().unwrap();
         assert_eq!(
+            counts.ends, 1,
+            "clean close follows the peer's END acknowledgement"
+        );
+        assert_eq!(
             (
                 counts.preflights,
                 counts.begins,
@@ -3083,12 +3089,23 @@ mod tests {
             },
         );
         assert_eq!(outcome.action, [1]);
-        assert!(matches!(
-            outcome.close,
-            CompilerTransactionClose::Unconfirmed(_)
-        ));
+        let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+            panic!("disconnect cannot acknowledge daemon cleanup");
+        };
+        assert_eq!(
+            evidence.reason,
+            CompilerTransactionCloseReason::FailedRequest
+        );
+        assert_eq!(
+            evidence.retirement,
+            CompilerTransactionRetirement::DaemonUnobserved {
+                disconnect: Some(Ok(())),
+            }
+        );
+        assert!(evidence.earlier.is_empty());
         fixture.settle();
         let counts = fixture.counts.lock().unwrap();
+        assert_eq!(counts.ends, 0, "no END acknowledgement was requested");
         assert_eq!(
             (
                 counts.preflights,
@@ -3099,6 +3116,72 @@ mod tests {
             ),
             (1, 1, 1, 1, 0)
         );
+    }
+
+    #[test]
+    fn scoped_daemon_cancel_and_unwind_after_response_preserve_body_without_cleanup_proof() {
+        for unwind in [false, true] {
+            let cancellation = CompilerTransactionCancellation::new();
+            let mut fixture =
+                DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, cancellation.clone());
+            let command = fixture.command();
+            let retained = RefCell::new(None);
+            let body = RefCell::new(None);
+            let action = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_compiler_transaction_cancellable(
+                    cancellation.clone(),
+                    |close| *retained.borrow_mut() = Some(close),
+                    || {
+                        *body.borrow_mut() = Some(
+                            fixture
+                                .bind(&command)
+                                .unwrap()
+                                .execute(&command)
+                                .unwrap()
+                                .output
+                                .stdout,
+                        );
+                        if unwind {
+                            panic!("original action unwind");
+                        }
+                        cancellation.cancel();
+                    },
+                )
+            }));
+            if unwind {
+                assert_eq!(
+                    action.unwrap_err().downcast_ref::<&str>(),
+                    Some(&"original action unwind")
+                );
+            } else {
+                assert_eq!(action.unwrap().close, retained.borrow().clone().unwrap());
+            }
+            assert_eq!(body.into_inner(), Some(vec![1]));
+            let Some(CompilerTransactionClose::Unconfirmed(evidence)) = retained.into_inner()
+            else {
+                panic!("completed response and disconnected peer cannot prove daemon cleanup");
+            };
+            assert_eq!(
+                evidence.reason,
+                if unwind {
+                    CompilerTransactionCloseReason::Abandoned
+                } else {
+                    CompilerTransactionCloseReason::Cancelled
+                }
+            );
+            assert_eq!(
+                evidence.retirement,
+                CompilerTransactionRetirement::DaemonUnobserved {
+                    disconnect: Some(Ok(())),
+                }
+            );
+            assert!(evidence.earlier.is_empty());
+            fixture.settle();
+            let counts = fixture.counts.lock().unwrap();
+            assert_eq!(counts.requests, 1, "completed body is never replayed");
+            assert_eq!(counts.ends, 0, "no END acknowledgement was requested");
+            assert_eq!(counts.active, 0, "peer releases its own independent permit");
+        }
     }
 
     #[test]
@@ -3168,12 +3251,43 @@ mod tests {
                     }
                 },
             );
-            assert!(matches!(
-                outcome.close,
-                CompilerTransactionClose::Unconfirmed(_)
-            ));
+            let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+                panic!("cancelled admission/request cannot acknowledge daemon cleanup");
+            };
+            match behavior {
+                DaemonFixtureBehavior::CancelBegin => {
+                    assert!(matches!(
+                        evidence.reason,
+                        CompilerTransactionCloseReason::AdmissionFailed(
+                            CompilerTransactionCloseFailure {
+                                phase: CompilerTransactionClosePhase::BeginHandshake,
+                                ..
+                            }
+                        )
+                    ));
+                    assert_eq!(
+                        evidence.retirement,
+                        CompilerTransactionRetirement::DaemonUnobserved { disconnect: None }
+                    );
+                }
+                DaemonFixtureBehavior::CancelRequest => {
+                    assert_eq!(
+                        evidence.reason,
+                        CompilerTransactionCloseReason::FailedRequest
+                    );
+                    assert_eq!(
+                        evidence.retirement,
+                        CompilerTransactionRetirement::DaemonUnobserved {
+                            disconnect: Some(Ok(())),
+                        }
+                    );
+                }
+                DaemonFixtureBehavior::Normal => unreachable!(),
+            }
+            assert!(evidence.earlier.is_empty());
             fixture.settle();
             let counts = fixture.counts.lock().unwrap();
+            assert_eq!(counts.ends, 0, "no END acknowledgement was requested");
             assert_eq!(
                 (
                     counts.preflights,
