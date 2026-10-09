@@ -770,6 +770,12 @@ impl DeploymentModulePackage {
             .map_err(|_| ModulePackageError::Bounds)?;
         let mut records = Vec::with_capacity(self.catalog.modules.len());
         let mut owners = BTreeSet::new();
+        // Every physical evidence file is authenticated even when its exact
+        // immutable proof is already owned by another module in this package.
+        let mut evidence_proofs = std::collections::BTreeMap::<
+            (String, u64),
+            super::shared_evidence::SharedEvidence,
+        >::new();
         let mut evidence_validation = super::shared_evidence::ValidationStage::configured_package();
         let mut graphs = std::collections::BTreeMap::new();
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
@@ -817,11 +823,21 @@ impl DeploymentModulePackage {
             if !owners.insert((owner.unit.clone(), owner.module.clone())) {
                 return Err(ModulePackageError::Format("duplicate module owner"));
             }
-            let evidence: super::shared_evidence::SharedEvidence = decode_json(
-                &self.read_ref(&files.evidence, RECORD_LIMIT, &inventory)?,
-                &inventory,
-                "dependency evidence JSON",
-            )?;
+            let evidence_bytes = self.read_ref(&files.evidence, RECORD_LIMIT, &inventory)?;
+            let evidence_key = (files.evidence.sha256.clone(), files.evidence.length);
+            let evidence = if let Some(proof) = evidence_proofs.get(&evidence_key) {
+                proof.clone()
+            } else {
+                inventory
+                    .reserve::<((String, u64), super::shared_evidence::SharedEvidence)>(1)
+                    .and_then(|_| inventory.charge(evidence_key.0.len()))
+                    .map_err(|_| ModulePackageError::Bounds)?;
+                let proof: super::shared_evidence::SharedEvidence =
+                    decode_json(&evidence_bytes, &inventory, "dependency evidence JSON")?;
+                evidence_proofs.insert(evidence_key, proof.clone());
+                proof
+            };
+            drop(evidence_bytes);
             let mut record = Record {
                 evidence: evidence.clone(),
                 module_interface_proof: None,
@@ -995,6 +1011,10 @@ impl DeploymentModulePackage {
             records.iter().map(|record| record.record()),
             &self.catalog.source_selection,
         )?;
+        tracing::info!(target: "tidepool_toolchain::module_candidates",
+            phase = "configured_package_evidence", evidence_files = self.catalog.modules.len(),
+            decoded_proofs = evidence_proofs.len(),
+            shared_proof_reuses = self.catalog.modules.len() - evidence_proofs.len());
         Ok(records)
     }
 }
@@ -1117,6 +1137,23 @@ mod tests {
                 crate::certified_products::PackageInterfaceWitness,
             >,
         ) -> Self {
+            Self::with_modules_execution_packages_and_shadow(
+                names,
+                with_execution,
+                package_witnesses,
+                None,
+            )
+        }
+
+        fn with_modules_execution_packages_and_shadow(
+            names: &[&str],
+            with_execution: bool,
+            package_witnesses: &std::collections::BTreeMap<
+                (String, String),
+                crate::certified_products::PackageInterfaceWitness,
+            >,
+            shadow: Option<&Path>,
+        ) -> Self {
             let root = tempfile::tempdir().unwrap();
             let source = root.path().join("sources");
             let output = root.path().join("products");
@@ -1183,7 +1220,19 @@ mod tests {
                     })
                     .collect(),
                 packages: vec![],
-                resolutions: vec![],
+                resolutions: shadow
+                    .into_iter()
+                    .map(|shadow| {
+                        let selected = module_source(names[0]);
+                        crate::cache::ResolutionEvidence {
+                            qualifier: crate::cache::ImportQualifier::Unqualified,
+                            module: names[0].to_owned(),
+                            boot: false,
+                            selected: Some(selected.clone()),
+                            candidates: vec![shadow.to_owned(), selected],
+                        }
+                    })
+                    .collect(),
             };
             let bytes = combine_rows(
                 names

@@ -56,6 +56,129 @@ fn configured_package_validation_timing_workload() {
 }
 
 #[test]
+fn deployment_evidence_sharing_reauthenticates_every_file_before_reusing_a_proof() {
+    let fixture = Fixture::with_modules(&["A", "B"]);
+    let catalog = fixture.catalog();
+    assert_eq!(
+        catalog.modules[0].evidence.sha256,
+        catalog.modules[1].evidence.sha256
+    );
+    assert_ne!(
+        catalog.modules[0].evidence.path,
+        catalog.modules[1].evidence.path
+    );
+    let changed = fixture.output.join(&catalog.modules[1].evidence.path);
+    let original = fs::read(&changed).unwrap();
+    let counter = DecodeCounter::new();
+    fs::write(&changed, b"changed duplicate physical evidence file").unwrap();
+    assert!(
+        matches!(fixture.load(), Err(ModulePackageError::ArtifactChanged(path)) if path == changed)
+    );
+    assert_eq!(
+        counter.count(),
+        1,
+        "first record admitted before second physical file refuses"
+    );
+    fs::write(changed, original).unwrap();
+    let package = fixture.load().unwrap();
+    assert!(std::ptr::eq(
+        &*package.records[0].evidence,
+        &*package.records[1].evidence
+    ));
+    let work = package
+        .revalidate(&fixture.output.join("catalog.json"), RootPolicy::Fixture)
+        .unwrap();
+    assert_eq!(work.evidence.source_read_attempts, 2);
+    assert_eq!(
+        work.evidence.source_read_bytes,
+        package.records[0]
+            .evidence
+            .sources
+            .iter()
+            .filter(|source| source.path != Path::new("@generated-source"))
+            .map(|source| fs::metadata(&source.path).unwrap().len())
+            .sum::<u64>()
+    );
+    assert_eq!(counter.count(), 3);
+}
+
+#[test]
+fn deployment_evidence_sharing_keeps_distinct_authenticated_wire_proofs_separate() {
+    let fixture = Fixture::with_modules(&["A", "B"]);
+    let mut catalog = fixture.catalog();
+    let evidence = &mut catalog.modules[1].evidence;
+    let path = fixture.output.join(&evidence.path);
+    let original = fs::read(&path).unwrap();
+    let altered = [original.as_slice(), b"\n"].concat();
+    let decoded_original: crate::cache::DependencyEvidence =
+        serde_json::from_slice(&original).unwrap();
+    let decoded_altered: crate::cache::DependencyEvidence =
+        serde_json::from_slice(&altered).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded_original).unwrap(),
+        serde_json::to_value(decoded_altered).unwrap()
+    );
+    fs::write(path, &altered).unwrap();
+    evidence.length = altered.len() as u64;
+    evidence.sha256 = sha(&altered);
+    assert_ne!(
+        catalog.modules[0].evidence.sha256,
+        catalog.modules[1].evidence.sha256
+    );
+    fs::write(
+        fixture.output.join("catalog.json"),
+        serde_json::to_vec(&catalog).unwrap(),
+    )
+    .unwrap();
+    let package = fixture.load().unwrap();
+    assert!(!std::ptr::eq(
+        &*package.records[0].evidence,
+        &*package.records[1].evidence
+    ));
+    let work = package
+        .revalidate(&fixture.output.join("catalog.json"), RootPolicy::Fixture)
+        .unwrap();
+    assert_eq!(work.evidence.source_read_attempts, 4);
+}
+
+#[test]
+fn warm_shared_deployment_evidence_rechecks_negative_witnesses_outside_the_source_manifest() {
+    let external = tempfile::tempdir().unwrap();
+    let shadow = fs::canonicalize(external.path()).unwrap().join("A.hs");
+    let fixture = Fixture::with_modules_execution_packages_and_shadow(
+        &["A", "B"],
+        false,
+        &Default::default(),
+        Some(&shadow),
+    );
+    let counter = DecodeCounter::new();
+    let mut owner = ConfiguredModulePackageOwner::new();
+    let path = fixture.output.join("catalog.json");
+    let package = owner
+        .load_under(&path, &fixture.authority, RootPolicy::Fixture)
+        .unwrap();
+    assert!(!package.source_selection().contains_source(&shadow));
+    assert!(std::ptr::eq(
+        &*package.records[0].evidence,
+        &*package.records[1].evidence
+    ));
+    let work = package.revalidate(&path, RootPolicy::Fixture).unwrap();
+    assert_eq!(work.evidence.source_read_attempts, 2);
+    assert_eq!(work.evidence.negative_metadata_calls, 1);
+    fs::write(&shadow, b"module A where\nvalue = 8\n").unwrap();
+    assert!(matches!(
+        owner.load_under(&path, &fixture.authority, RootPolicy::Fixture),
+        Err(ModulePackageError::OpenCohort)
+    ));
+    fs::remove_file(shadow).unwrap();
+    let restored = owner
+        .load_under(&path, &fixture.authority, RootPolicy::Fixture)
+        .unwrap();
+    assert!(Arc::ptr_eq(&package, &restored));
+    assert_eq!(counter.count(), 2);
+}
+
+#[test]
 fn deployment_hydration_decodes_once_and_selection_carries_exact_products() {
     let names = ["A", "B"];
     let fixture = Fixture::with_modules(&names);

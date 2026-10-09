@@ -153,6 +153,10 @@ configured package owner retains only its current exact catalog path and complet
 compiler authority selection. Initial loading validates every proof and the
 complete cohort; reuse reauthenticates catalog, native artifacts, canonical
 companions and source observations, sharing the admitted decoded products.
+Deployment records share a dependency proof only after each physical evidence
+file authenticates the exact SHA-256 and length. Each fresh catalog or candidate
+validation stage walks that shared proof and generated input once, including
+negative import witnesses; a later stage observes the filesystem again.
 Candidate acquisition still validates its current source/import witnesses and
 exact context. Read-only bundle permissions do not replace content checks.
 Actual Nix registration, NAR, retention and final bundle qualification remain the
