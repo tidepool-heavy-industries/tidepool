@@ -3,7 +3,9 @@
 module Tidepool.DeclarationJoin
   ( ModuleSnapshot(..), ExportNamespace(..), DeclarationKind(..), ExportIdentity(..), DeclarationExport(..)
   , ClassInstanceEvidence(..), InstanceInventory(..), JoinDecision(..), JoinRejection(..)
-  , buildJoinedInterface, validateRetainedFamilyInstances
+  , buildJoinedInterface, validateRetainedFamilyInstances, validateInstances
+  , DeclarationInventoryIndex, declarationInventoryIndex, interfaceInventoryIndexed
+  , declarationClassPairCount
   , exportIdentity, interfaceExports, interfaceInventory
   , ReservedJoin(..), DeclarationArtifact(..), DeclarationWrite(..)
   , DeclarationJoinInput(..), DeclarationJoinOutcome(..)
@@ -25,8 +27,10 @@ import Control.Monad (forM, replicateM, unless, when)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
-import Data.List (elemIndex, intercalate, nubBy, sort, sortBy, tails)
+import Data.List (elemIndex, intercalate, nubBy, sort, sortBy)
 import Data.Maybe (catMaybes, isJust)
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word64)
 import GHC.Core.FamInstEnv
@@ -68,7 +72,7 @@ import System.Posix.Files (createLink)
 import Tidepool.ExactHydration
 import Tidepool.CheckedCell (CheckedSignature, decodeCheckedSignature, encodeCheckedSignature, validateCheckedTypeWitnessBytes)
 import Tidepool.Json (jsonString)
-import Tidepool.Timing (readTimingEnabled, timeDetailPhase)
+import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), emptyPackageImports, readPackageImports, sealPackageImports, validatePackageImportRoot )
 
@@ -162,11 +166,13 @@ buildJoinedInterface hsc joined path originals exports selected familyClosure = 
   exportChoices <- measureJoin timing "exports"
     (forceEither (foldr (\avail rest -> forceIdentities (map exportIdentity (availNames avail)) `seq` rest) ()) . sequence)
     (mapM selectExport exports)
+  let inventoryIndex = declarationInventoryIndex hsc
+  emitCount timing "declaration_inventory_contexts" 1
   inventories <- measureJoin timing "inventories"
     (\rows -> case sequence exportChoices of
       Left _ -> ()
       Right _ -> forceEither (foldr (\inventory rest -> forceInventory inventory `seq` rest) ()) (sequence rows))
-    (mapM (interfaceInventory hsc) originals)
+    (mapM (interfaceInventoryIndexed inventoryIndex) originals)
   case (sequence exportChoices, sequence inventories) of
     (Left diagnostic, _) -> pure (Left (ExportMismatch, diagnostic))
     (_, Left diagnostic) -> pure (Left (Unprovable, diagnostic))
@@ -178,10 +184,9 @@ buildJoinedInterface hsc joined path originals exports selected familyClosure = 
       | sort (nubBy (==) familyClosure) /= actualFamilies ->
           pure (Left (InstanceMismatch, "retained family inventory differs from the exact implementation closure"))
       | otherwise -> do
-          let hmis = [hmi | hpt <- unitEnv_hpts (hsc_HUG hsc), hmi <- eltsHpt hpt]
-              allFamilies = concatMap (md_fam_insts . hm_details) hmis
+          let allFamilies = indexedOriginalFamilies inventoryIndex
               selectedClassNames = map instanceDfun (inventoryClasses selected)
-              selectedClasses = [i | hmi <- hmis, i <- instEnvElts (md_insts (hm_details hmi))
+              selectedClasses = [i | i <- indexedOriginalClasses inventoryIndex
                   , exportIdentity (is_dfun_name i) `elem` selectedClassNames]
               selectedFamilyNames = inventoryFamilies selected
               selectedFamilies = [i | i <- allFamilies
@@ -203,8 +208,11 @@ buildJoinedInterface hsc joined path originals exports selected familyClosure = 
                   (mkInstEnv (nubBy (\a b -> is_dfun_name a == is_dfun_name b) selectedClasses))
                   (mkModuleSet orphanOwners)
               selectedEnv = (emptyFamInstEnv, extendFamInstEnvList emptyFamInstEnv selectedFamilies)
+          let classIndex = classInstanceIndex classes
+          emitCount timing "declaration_class_pairs" (fromIntegral (length (classIndexPairs classIndex)))
+          emitCount timing "declaration_class_visible" (fromIntegral (length (classIndexVisible classIndex)))
           consistency <- measureJoin timing "selected_consistency" forceDecision
-            (pure (validateInstances classes selectedEnv))
+            (pure (validateInstancesIndexed classes classIndex selectedEnv))
           familyConsistency <- case consistency of
             JoinRejected {} -> pure JoinAccepted
             JoinAccepted -> measureJoin timing "retained_family_consistency" forceDecision
@@ -299,8 +307,37 @@ normalizeExport e = e { exportChildren = sort (exportChildren e) }
 
 -- | Local additions only. A persisted Join reports its selected inventory;
 -- authored interfaces report their original local dfuns and family axioms.
+-- The exact hydrated context owns one original-Name census. Projection selects
+-- the interface's issued dfuns and axioms without rescanning all home modules.
+data DeclarationInventoryIndex = DeclarationInventoryIndex
+  { indexedOriginalClasses :: [ClsInst]
+  , indexedOriginalFamilies :: [FamInst]
+  , indexedClasses :: Map.Map Name ClsInst
+  , indexedFamilies :: Map.Map Name FamInst
+  , indexedAssociatedOwners :: Map.Map (Name, Module) [ClsInst]
+  }
+
+declarationInventoryIndex :: HscEnv -> DeclarationInventoryIndex
+declarationInventoryIndex hsc = DeclarationInventoryIndex originals originalFamilies classes families associated
+  where
+    hmis = [hmi | hpt <- unitEnv_hpts (hsc_HUG hsc), hmi <- eltsHpt hpt]
+    -- Preserve the first original for each Name, including duplicated lexical
+    -- reexports of the same dfun or axiom.
+    originals = concatMap (instEnvElts . md_insts . hm_details) hmis
+    originalFamilies = concatMap (md_fam_insts . hm_details) hmis
+    classes = Map.fromListWith (\_ original -> original)
+      [(is_dfun_name instance_, instance_) | instance_ <- originals]
+    families = Map.fromListWith (\_ original -> original)
+      [(coAxiomName (fi_axiom family), family) | family <- originalFamilies]
+    associated = Map.fromListWith (++)
+      [((is_cls_nm instance_, nameModule (is_dfun_name instance_)), [instance_])
+      | instance_ <- Map.elems classes]
+
 interfaceInventory :: HscEnv -> ModIface -> IO (Either String InstanceInventory)
-interfaceInventory hsc iface = pure $ do
+interfaceInventory hsc = interfaceInventoryIndexed (declarationInventoryIndex hsc)
+
+interfaceInventoryIndexed :: DeclarationInventoryIndex -> ModIface -> IO (Either String InstanceInventory)
+interfaceInventoryIndexed inventoryIndex iface = pure $ do
   unless (sort (map (exportIdentity . coAxiomName . fi_axiom) localFamilies)
       == sort (map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface)))
     (Left "original family inventory is incomplete after hydration")
@@ -315,24 +352,19 @@ interfaceInventory hsc iface = pure $ do
       | instance_ <- mi_insts iface]
     (map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface))
   where
-    hmis = [hmi | hpt <- unitEnv_hpts (hsc_HUG hsc), hmi <- eltsHpt hpt]
-    implementationClasses = nubBy (\a b -> is_dfun_name a == is_dfun_name b)
-      [instance_ | hmi <- hmis, instance_ <- instEnvElts (md_insts (hm_details hmi))]
-    localClasses = [instance_ | instance_ <- implementationClasses,
-      exportIdentity (is_dfun_name instance_) `elem` map (exportIdentity . ifDFun) (mi_insts iface)]
-    localFamilies = uniqueFamilyInstances
-      [family | hmi <- hmis, family <- md_fam_insts (hm_details hmi),
-      exportIdentity (coAxiomName (fi_axiom family)) `elem`
-        map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface)]
+    localClasses = Map.elems $ Map.restrictKeys (indexedClasses inventoryIndex)
+      (Set.fromList (map ifDFun (mi_insts iface)))
+    localFamilies = Map.elems $ Map.restrictKeys (indexedFamilies inventoryIndex)
+      (Set.fromList (map ifFamInstAxiom (mi_fam_insts iface)))
     -- GHC's consistency check projects the family parameters shared with its
     -- enclosing class. Interfaces retain that structural relation, but do not
     -- retain a pointer from an associated axiom to its particular dfun.
     associatedOwner family = case tyConAssoc_maybe (coAxiomTyCon (fi_axiom family)) of
       Nothing -> Right (axiom, Nothing)
       Just parent -> case [exportIdentity (is_dfun_name instance_)
-        | instance_ <- implementationClasses, is_cls_nm instance_ == tyConName parent,
-          nameModule (is_dfun_name instance_) == nameModule (coAxiomName (fi_axiom family)),
-          sameInstantiation instance_ family] of
+        | instance_ <- Map.findWithDefault []
+            (tyConName parent, nameModule (coAxiomName (fi_axiom family)))
+            (indexedAssociatedOwners inventoryIndex), sameInstantiation instance_ family] of
         [dfun] -> Right (axiom, Just dfun)
         [] -> Left "associated axiom has no provable original class-instance owner"
         _ -> Left "associated axiom has ambiguous original class-instance owners"
@@ -380,16 +412,52 @@ normalizeInventory (InstanceInventory classes families) = InstanceInventory
     | record <- nubBy sameOwner classes]) (sort (nubBy (==) families))
   where sameOwner a b = instanceDfun a == instanceDfun b && instanceClass a == instanceClass b
 
+visibleClassInstances :: InstEnvs -> [ClsInst]
+visibleClassInstances classes = unique Set.empty $
+  filter (instIsVisible (ie_visible classes))
+    (instEnvElts (ie_global classes) ++ instEnvElts (ie_local classes))
+  where
+    unique _ [] = []
+    unique seen (instance_ : rest)
+      | is_dfun_name instance_ `Set.member` seen = unique seen rest
+      | otherwise = instance_ : unique (Set.insert (is_dfun_name instance_) seen) rest
+
+classInstanceBuckets :: [ClsInst] -> Map.Map Name [(Int, ClsInst)]
+classInstanceBuckets = foldr
+  (\entry@(_,instance_) -> Map.insertWith (++) (is_cls_nm instance_) [entry]) Map.empty
+  . zip [0 ..]
+
+data ClassInstanceIndex = ClassInstanceIndex
+  { classIndexVisible :: [ClsInst]
+  , classIndexPairs :: [(ClsInst, ClsInst)]
+  }
+
+classInstanceIndex :: InstEnvs -> ClassInstanceIndex
+classInstanceIndex classes = ClassInstanceIndex visible pairs
+  where
+    visible = visibleClassInstances classes
+    buckets = classInstanceBuckets visible
+    -- Keep the original exhaustive traversal order within every class. No
+    -- pair from different classes is constructed or compared.
+    pairs = [(a,b) | (ordinal,a) <- zip [0 :: Int ..] visible
+      , (later,b) <- Map.findWithDefault [] (is_cls_nm a) buckets, later > ordinal]
+
+-- Counts the actual pair list admitted to the production overlap checker.
+declarationClassPairCount :: InstEnvs -> Int
+declarationClassPairCount = length . classIndexPairs . classInstanceIndex
+
 validateInstances :: InstEnvs -> FamInstEnvs -> JoinDecision
-validateInstances classes families
+validateInstances classes = validateInstancesIndexed classes (classInstanceIndex classes)
+
+validateInstancesIndexed :: InstEnvs -> ClassInstanceIndex -> FamInstEnvs -> JoinDecision
+validateInstancesIndexed classes index families
   | not (null classConflicts) = JoinRejected ClassInstanceConflict (showSDocUnsafe (ppr classConflicts))
   | not (null familyConflicts) = JoinRejected FamilyInstanceConflict (showSDocUnsafe (ppr familyConflicts))
   | not (null injectivityConflicts) = JoinRejected FamilyInstanceConflict (showSDocUnsafe (ppr injectivityConflicts))
   | otherwise = JoinAccepted
   where
-    visible = nubBy (\a b -> is_dfun_name a == is_dfun_name b) $
-      filter (instIsVisible (ie_visible classes)) (instEnvElts (ie_global classes) ++ instEnvElts (ie_local classes))
-    pairs = [(a,b) | a : rest <- tails visible, b <- rest, is_cls_nm a == is_cls_nm b]
+    visible = classIndexVisible index
+    pairs = classIndexPairs index
     classConflicts = [(a,b) | (a,b) <- pairs, incompatible a b]
       ++ [(a,b) | a <- visible, b <- checkFunDeps classes a, is_dfun_name a /= is_dfun_name b]
     incompatible a b
@@ -794,13 +862,15 @@ inspectDeclarationArtifacts operations artifacts = runExactInterfaceOperation op
       Left diagnostic -> rejected diagnostic
       Right verified -> do
         hydrated <- hydrateExactScope initial verified
+        let inventoryIndex = declarationInventoryIndex hydrated
+        emitCount timing "declaration_inventory_contexts" 1
         inventories <- measureJoin timing "inspection_inventories"
           (forceEither (foldr (\row rest ->
             foldr (\exported next -> forceExport exported `seq` next)
               (forceInventory (inventoryInstances row) `seq` rest) (inventoryExports row)) ()) . sequence) $
           forM (zip artifacts verified) $ \(artifact, (_, iface)) -> do
             exports <- interfaceExports hydrated iface
-            fmap (DeclarationInventory artifact exports) <$> interfaceInventory hydrated iface
+            fmap (DeclarationInventory artifact exports) <$> interfaceInventoryIndexed inventoryIndex iface
         unchangedAfter <- measureJoin timing "revalidate_after" rnf (artifactsUnchanged artifacts)
         if not unchangedAfter then rejected "implementation artifacts changed during inspection"
           else pure (DeclarationInventoryOutcome artifacts

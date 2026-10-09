@@ -226,6 +226,7 @@ test-suite declaration-join-test
     filepath,
     ghc >= 9.12 && < 9.13,
     process,
+    QuickCheck >= 2.14 && < 2.16,
     tidepool-extract-internal
   default-language: GHC2024
   ghc-options:      -Wall

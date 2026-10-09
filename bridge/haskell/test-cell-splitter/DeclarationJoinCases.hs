@@ -10,7 +10,8 @@ import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
-import Data.List (isInfixOf, sort)
+import Data.List (elemIndex, isInfixOf, nubBy, sort, tails)
+import Data.Maybe (isJust)
 import Data.String (fromString)
 import Tidepool.OriginalProductRoots
   ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
@@ -22,11 +23,20 @@ import Tidepool.ExactScope
   ( ExactOriginalGroup(..), originalGroupFromProjected, originalGroupFromCandidate )
 import GHC
 import GHC.Builtin.Types (doubleTy)
-import GHC.Core.InstEnv (instEnvElts, is_dfun_name, is_tys)
-import GHC.Core.FamInstEnv (fi_axiom)
+import GHC.Core.InstEnv
+import GHC.Core.Class (classTyVars)
+import GHC.Core.TyCon (tyConInjectivityInfo, Injectivity(..), tyConAssoc_maybe, tyConName, tyConTyVars)
+import GHC.Core.Coercion (etaExpandCoAxBranch)
+import GHC.Core.Coercion.Axiom (coAxiomTyCon, coAxiomSingleBranch)
+import GHC.Core.Unify (tcMatchTys, tcUnifyTys)
+import GHC.Tc.Instance.FunDeps (checkFunDeps)
+import GHC.Utils.Outputable (ppr, showSDocUnsafe)
+import GHC.Unit.Env (unitEnv_hpts)
+import GHC.Unit.Module.Env (mkModuleSet, emptyModuleSet)
+import GHC.Core.FamInstEnv
 import GHC.Core.Coercion.Axiom (coAxiomName)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Driver.Env (hsc_HPT, hscUpdateHPT, hscEPS, hptInstancesBelow)
+import GHC.Driver.Env (hsc_HPT, hsc_HUG, hscUpdateHPT, hscEPS, hptInstancesBelow)
 import GHC.Driver.Env.Types (hsc_mod_graph)
 import GHC.Driver.Pipeline (compileOne)
 import GHC.Iface.Syntax (IfaceClsInst(..), IfaceFamInst(..))
@@ -571,3 +581,187 @@ wireRoundTripChecks = bracket temporary removeDirectoryRecursive $ \root -> do
   BS.writeFile (root </> "inventory.cbor") (encodeDeclarationInventory [])
   inventory <- readDeclarationOperation (root </> "inventory.cbor")
   unless (inventory == InspectInventory []) (fail "typed empty inventory did not roundtrip")
+
+-- This oracle retains the old exhaustive census and all-class pair traversal.
+-- Its decisions and inventory construction do not consume the production index.
+interfaceInventoryExhaustive :: HscEnv -> ModIface -> IO (Either String InstanceInventory)
+interfaceInventoryExhaustive hsc iface = pure $ do
+  unless (sort (map (exportIdentity . coAxiomName . fi_axiom) localFamilies)
+      == sort (map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface)))
+    (Left "original family inventory is incomplete after hydration")
+  unless (sort (map (exportIdentity . is_dfun_name) localClasses)
+      == sort (map (exportIdentity . ifDFun) (mi_insts iface)))
+    (Left "original class inventory is incomplete after hydration")
+  associations <- mapM associatedOwner localFamilies
+  pure $ normalizeInventoryExhaustive $ InstanceInventory
+    [ClassInstanceEvidence (exportIdentity (ifDFun instance_))
+      (exportIdentity (ifInstCls instance_))
+      [axiom | (axiom, Just dfun) <- associations, dfun == exportIdentity (ifDFun instance_)]
+      | instance_ <- mi_insts iface]
+    (map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface))
+  where
+    hmis = [hmi | hpt <- unitEnv_hpts (hsc_HUG hsc), hmi <- eltsHpt hpt]
+    implementationClasses = nubBy (\a b -> is_dfun_name a == is_dfun_name b)
+      [instance_ | hmi <- hmis, instance_ <- instEnvElts (md_insts (hm_details hmi))]
+    localClasses = [instance_ | instance_ <- implementationClasses,
+      exportIdentity (is_dfun_name instance_) `elem` map (exportIdentity . ifDFun) (mi_insts iface)]
+    localFamilies = uniqueFamilyInstances
+      [family | hmi <- hmis, family <- md_fam_insts (hm_details hmi),
+      exportIdentity (coAxiomName (fi_axiom family)) `elem`
+        map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface)]
+    -- GHC's consistency check projects the family parameters shared with its
+    -- enclosing class. Interfaces retain that structural relation, but do not
+    -- retain a pointer from an associated axiom to its particular dfun.
+    associatedOwner family = case tyConAssoc_maybe (coAxiomTyCon (fi_axiom family)) of
+      Nothing -> Right (axiom, Nothing)
+      Just parent -> case [exportIdentity (is_dfun_name instance_)
+        | instance_ <- implementationClasses, is_cls_nm instance_ == tyConName parent,
+          nameModule (is_dfun_name instance_) == nameModule (coAxiomName (fi_axiom family)),
+          sameInstantiation instance_ family] of
+        [dfun] -> Right (axiom, Just dfun)
+        [] -> Left "associated axiom has no provable original class-instance owner"
+        _ -> Left "associated axiom has ambiguous original class-instance owners"
+      where axiom = exportIdentity (coAxiomName (fi_axiom family))
+    sameInstantiation instance_ family =
+      let (_, arguments, _) = etaExpandCoAxBranch (coAxiomSingleBranch (fi_axiom family))
+          shared = [(is_tys instance_ !! index, argument)
+            | (variable, argument) <- zip (tyConTyVars (coAxiomTyCon (fi_axiom family))) arguments,
+              Just index <- [elemIndex variable (classTyVars (is_cls instance_))]]
+          (classArguments, familyArguments) = unzip shared
+      in isJust (tcMatchTys classArguments familyArguments)
+        && isJust (tcMatchTys familyArguments classArguments)
+
+normalizeInventoryExhaustive :: InstanceInventory -> InstanceInventory
+normalizeInventoryExhaustive (InstanceInventory classes families) = InstanceInventory
+  (sort [record { instanceSelectedAxioms = sort (nubBy (==)
+      (concatMap instanceSelectedAxioms (filter (sameOwner record) classes))) }
+    | record <- nubBy sameOwner classes]) (sort (nubBy (==) families))
+  where sameOwner a b = instanceDfun a == instanceDfun b && instanceClass a == instanceClass b
+
+validateInstancesExhaustive :: InstEnvs -> FamInstEnvs -> JoinDecision
+validateInstancesExhaustive classes families
+  | not (null classConflicts) = JoinRejected ClassInstanceConflict (showSDocUnsafe (ppr classConflicts))
+  | not (null familyConflicts) = JoinRejected FamilyInstanceConflict (showSDocUnsafe (ppr familyConflicts))
+  | not (null injectivityConflicts) = JoinRejected FamilyInstanceConflict (showSDocUnsafe (ppr injectivityConflicts))
+  | otherwise = JoinAccepted
+  where
+    visible = nubBy (\a b -> is_dfun_name a == is_dfun_name b) $
+      filter (instIsVisible (ie_visible classes)) (instEnvElts (ie_global classes) ++ instEnvElts (ie_local classes))
+    pairs = [(a,b) | a : rest <- tails visible, b <- rest, is_cls_nm a == is_cls_nm b]
+    classConflicts = [(a,b) | (a,b) <- pairs, incompatible a b]
+      ++ [(a,b) | a <- visible, b <- checkFunDeps classes a, is_dfun_name a /= is_dfun_name b]
+    incompatible a b
+      | identicalClsInstHead a b = True
+      | not (isJust (tcUnifyTys instanceBindFun (is_tys a) (is_tys b))) = False
+      | isIncoherent a || isIncoherent b = False
+      | isJust (tcMatchTys (is_tys a) (is_tys b)) && (isOverlappable a || isOverlapping b) = False
+      | isJust (tcMatchTys (is_tys b) (is_tys a)) && (isOverlappable b || isOverlapping a) = False
+      | otherwise = True
+    allFamilies = famInstEnvElts (fst families) ++ famInstEnvElts (snd families)
+    familyConflicts = [(a,b) | a <- allFamilies
+      , b <- lookupFamInstEnvConflicts families a, fi_axiom a /= fi_axiom b]
+    -- GHC's injectiveBranches accepts a branch compared with itself, including
+    -- polymorphic branches. Keeping self changes no conflict result; GHC's
+    -- per-family lookup can reuse the complete package/home indices directly.
+    injectivityConflicts = [branch | a <- allFamilies
+      , Injective flags <- [tyConInjectivityInfo (famInstTyCon a)]
+      , branch <- lookupFamInstEnvInjectivityConflicts flags families a]
+
+
+withDeclarationIndexOracle :: (Int -> Int -> ([Int] -> [Int] -> Bool -> Either String [String]) -> IO ()) -> IO ()
+withDeclarationIndexOracle check = bracket temporary removeDirectoryRecursive $ \root -> do
+  let fixture = "test-cell-splitter/fixtures/declaration-join/exact-isolation"
+      targets = ["Old", "Public", "RichInventory", "AmbiguousInventory", "Conflict", "InjectiveConflict"]
+      owners = "Common" : targets
+  forM_ owners $ \name -> copyFile (fixture </> name ++ ".hs") (root </> name ++ ".hs")
+  libdir <- ghcLibdir
+  forM_ targets $ \name -> runGhc (Just libdir) $ do
+    configure root
+    target <- guessTarget (root </> name ++ ".hs") Nothing Nothing
+    setTargets [target]
+    success <- load LoadAllTargets
+    liftIO $ unless (succeeded success) (fail (name ++ " index fixture compile failed"))
+  runGhc (Just libdir) $ do
+    configure root
+    initial <- getSession
+    fresh <- liftIO (freshExactState initial)
+    artifacts <- liftIO (mapM (artifact root) owners)
+    loaded <- liftIO (readExactIfaceArtifacts fresh artifacts >>= either fail pure)
+    hydrated <- liftIO (hydrateExactScope fresh loaded)
+    let inventoryIndex = declarationInventoryIndex hydrated
+        hmis = [hmi | hpt <- unitEnv_hpts (hsc_HUG hydrated), hmi <- eltsHpt hpt]
+        originals = nubBy (\a b -> is_dfun_name a == is_dfun_name b)
+          [instance_ | hmi <- hmis, instance_ <- instEnvElts (md_insts (hm_details hmi))]
+        families = nubBy (\a b -> fi_axiom a == fi_axiom b)
+          [family | hmi <- hmis, family <- md_fam_insts (hm_details hmi)]
+        toggle values index = let instance_ = originals !! (index `mod` length originals)
+          in if any ((== is_dfun_name instance_) . is_dfun_name) values
+            then filter ((/= is_dfun_name instance_) . is_dfun_name) values
+            else values ++ [instance_]
+        variants entries = [entries, reverse entries, entries ++ take 2 entries]
+        decisionCategory JoinAccepted = "accepted"
+        decisionCategory (JoinRejected reason _) = show reason
+        compareHistory operations familyIndices visible = sequence
+          [compareState step entries selectedFamilies visible
+          | (step,selected) <- zip [0 :: Int ..] (scanl toggle [] operations)
+          , entries <- variants selected
+          , selectedFamilies <- [[], [families !! (index `mod` length families) | index <- familyIndices]]]
+        compareState step entries selectedFamilies visible = do
+          let orphanModules = if visible then mkModuleSet ownersOfEntries else emptyModuleSet
+              ownersOfEntries = map (nameModule . is_dfun_name) originals
+              (package,home) = splitAt (length entries `div` 2) entries
+              classEnv = InstEnvs (mkInstEnv package) (mkInstEnv home) orphanModules
+              familyEnv = (emptyFamInstEnv, extendFamInstEnvList emptyFamInstEnv selectedFamilies)
+              expected = validateInstancesExhaustive classEnv familyEnv
+              actual = validateInstances classEnv familyEnv
+              census = nubBy (\a b -> is_dfun_name a == is_dfun_name b) $
+                filter (instIsVisible orphanModules) (instEnvElts (ie_global classEnv) ++ instEnvElts (ie_local classEnv))
+              expectedPairs = length [(a,b) | a : rest <- tails census, b <- rest, is_cls_nm a == is_cls_nm b]
+          unless (actual == expected) (Left ("index history differs at prefix " ++ show (step,visible) ++ ": " ++ show (actual,expected)))
+          unless (declarationClassPairCount classEnv == expectedPairs)
+            (Left "class index compared a cross-class pair or omitted a same-class pair")
+          pure (decisionCategory actual)
+    liftIO $ do
+      unless (length originals >= 10 && length families >= 8)
+        (fail "index histories lack class, functional-dependency and family coverage")
+      forM_ loaded $ \(_,iface) ->
+        forM_ [iface, set_mi_insts [] iface, set_mi_fam_insts [] iface,
+          set_mi_insts (take 1 (mi_insts iface)) iface,
+          set_mi_fam_insts (take 1 (mi_fam_insts iface)) iface,
+          set_mi_insts (mi_insts iface ++ take 1 (mi_insts iface)) iface] $ \selection -> do
+          expected <- interfaceInventoryExhaustive hydrated selection
+          actual <- interfaceInventoryIndexed inventoryIndex selection
+          unless (actual == expected) (fail ("indexed inventory differs: " ++ show (actual,expected)))
+      let distinctClasses = nubBy (\a b -> is_cls_nm a == is_cls_nm b) originals
+          distinctEnv = InstEnvs emptyInstEnv (mkInstEnv distinctClasses)
+            (mkModuleSet (map (nameModule . is_dfun_name) originals))
+          fullEnv = InstEnvs emptyInstEnv (mkInstEnv originals)
+            (mkModuleSet (map (nameModule . is_dfun_name) originals))
+          count = length originals
+      unless (length distinctClasses >= 4 && declarationClassPairCount distinctEnv == 0)
+        (fail "distinct classes admitted a cross-class comparison")
+      putStrLn ("declaration class census: " ++ show count ++ " visible identities, "
+        ++ show (count * (count - 1) `div` 2) ++ " exhaustive pairs, "
+        ++ show (declarationClassPairCount fullEnv) ++ " indexed pairs; "
+        ++ show (length distinctClasses) ++ " distinct classes admit zero pairs")
+      check (length originals) (length families) compareHistory
+
+-- Bounded deterministic cases complement shrinking generated histories. The
+-- reference traverses the original whole HPT and all visible instance pairs.
+declarationIndexHistories :: IO ()
+declarationIndexHistories = withDeclarationIndexOracle $ \classCount familyCount compareHistory -> do
+  let histories = [] : [[a] | a <- [0 .. classCount - 1]]
+        ++ [[a,b] | a <- [0 .. classCount - 1], b <- [0 .. classCount - 1]]
+      familyChoices = [] : [[a] | a <- [0 .. familyCount - 1]]
+        ++ [[a,b] | a <- [0 .. familyCount - 1], b <- [0 .. familyCount - 1]]
+  let selections = [(history,[]) | history <- histories]
+        ++ [([],familyChoice) | familyChoice <- familyChoices]
+        ++ [([a],[b]) | a <- [0 .. classCount - 1], b <- [0 .. familyCount - 1]]
+  outcomes <- sequence
+    [either fail pure (compareHistory history familyChoice visible)
+    | (history,familyChoice) <- selections, visible <- [False,True]]
+  let categories = Set.fromList (concat outcomes)
+  unless (all (`Set.member` categories) ["accepted", "ClassInstanceConflict", "FamilyInstanceConflict"])
+    (fail ("index histories missed decision categories: " ++ show categories))
+  putStrLn ("declaration index: " ++ show (sum (map length outcomes))
+    ++ " bounded history states agree with exhaustive checking; all original inventories agree")
