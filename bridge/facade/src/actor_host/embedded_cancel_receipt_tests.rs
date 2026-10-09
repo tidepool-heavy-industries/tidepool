@@ -193,18 +193,22 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 else {
                     panic!("full cancelled native receipt required: {native_terminal:?}");
                 };
-                assert!(native_failure
-                    .receipts()
-                    .iter()
-                    .any(|receipt| !receipt.output.is_empty()));
-                assert!(native_failure
-                    .receipts()
-                    .iter()
-                    .flat_map(|receipt| &receipt.operations)
-                    .any(|operation| {
-                        operation.disposition
+                assert!(
+                    native_failure
+                        .receipts()
+                        .iter()
+                        .any(|receipt| !receipt.output.is_empty())
+                );
+                assert!(
+                    native_failure
+                        .receipts()
+                        .iter()
+                        .flat_map(|receipt| &receipt.operations)
+                        .any(|operation| {
+                            operation.disposition
                             == tidepool_runtime::session::WorkbenchOperationDisposition::Committed
-                    }));
+                        })
+                );
                 assert!(
                     !failure.message().contains("unreachable suffix"),
                     "the suffix must not execute: {failure}"

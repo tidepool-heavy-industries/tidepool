@@ -3,12 +3,12 @@ pub mod proxy;
 pub mod wire;
 
 use axum::{
-    body::{to_bytes, Body},
+    Json, Router,
+    body::{Body, to_bytes},
     extract::{Path as RoutePath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use exomonad_actor::{
     ActorExitKind, ActorTerminal, KernelInvocationFailure, KernelMessage, LocalActorRef,
@@ -23,7 +23,7 @@ use std::{
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus};
 use tokio::{
     net::UnixListener,
-    sync::{watch, Mutex},
+    sync::{Mutex, watch},
 };
 use uuid::Uuid;
 use wire::*;
@@ -234,7 +234,7 @@ async fn artifact(State(state): State<AttachmentState>, body: Body) -> Response 
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_too_large",
                 "Artifact query exceeds 8 KiB",
-            )
+            );
         }
     };
     let request: ArtifactRequest = match serde_json::from_slice(&bytes) {
@@ -306,7 +306,11 @@ async fn new(
     Json(request): Json<ProvisionRequest>,
 ) -> Response {
     if request.service != state.service {
-        return error(StatusCode::CONFLICT, "service_changed", "Operator service incarnation changed; reconcile the saved operation before provisioning");
+        return error(
+            StatusCode::CONFLICT,
+            "service_changed",
+            "Operator service incarnation changed; reconcile the saved operation before provisioning",
+        );
     }
     if !state.open.load(std::sync::atomic::Ordering::SeqCst) {
         return error(
@@ -510,7 +514,7 @@ async fn graph(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 error_value.to_string(),
-            )
+            );
         }
     };
     if bytes.len() > MAX_RESPONSE_BYTES {
@@ -539,7 +543,7 @@ async fn expand_display(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_too_large",
                 "Display expansion request exceeds the request budget",
-            )
+            );
         }
     };
     let input: DisplayExpansionRequest = match serde_json::from_slice(&bytes) {
@@ -549,7 +553,7 @@ async fn expand_display(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 error_value.to_string(),
-            )
+            );
         }
     };
     submit_invocation(
@@ -572,7 +576,7 @@ async fn submit(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_too_large",
                 "Request body exceeds 1 MiB or could not be read",
-            )
+            );
         }
     };
     let input: SubmitRequest = match serde_json::from_slice(&bytes) {
@@ -657,8 +661,20 @@ fn invocation_error(failure: KernelInvocationFailure) -> Response {
     };
     let bytes = match serde_json::to_vec(&response) {
         Ok(bytes) if bytes.len() <= MAX_RESPONSE_BYTES => bytes,
-        Ok(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Execution ended but its required receipt exceeds the response budget; execution is unknown to this connection"),
-        Err(error_value) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", error_value.to_string()),
+        Ok(_) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Execution ended but its required receipt exceeds the response budget; execution is unknown to this connection",
+            );
+        }
+        Err(error_value) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                error_value.to_string(),
+            );
+        }
     };
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -689,7 +705,9 @@ fn map_failure(failure: exomonad_actor::KernelWorkbenchFailure) -> SubmitRespons
             tidepool_runtime::session::WorkbenchFailurePoint::Publication {
                 completed_input_units,
             } if durability_unconfirmed => {
-                format!("Publication durability remains unconfirmed after {completed_input_units} completed input units")
+                format!(
+                    "Publication durability remains unconfirmed after {completed_input_units} completed input units"
+                )
             }
             tidepool_runtime::session::WorkbenchFailurePoint::Publication {
                 completed_input_units,
@@ -770,12 +788,16 @@ fn bounded_response(mut result: SubmitResponse) -> Response {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
                     error_value.to_string(),
-                )
+                );
             }
         };
     }
     if bytes.len() > MAX_RESPONSE_BYTES {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Execution ended but its required receipt exceeds the response budget; execution is unknown to this connection");
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Execution ended but its required receipt exceeds the response budget; execution is unknown to this connection",
+        );
     }
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -976,15 +998,19 @@ mod artifact_tests {
             detail: "journal outcome unknown".into(),
             diagnostic: None,
         };
-        assert!(uncertain_failure
-            .to_string()
-            .contains("publication durability remains unconfirmed"));
+        assert!(
+            uncertain_failure
+                .to_string()
+                .contains("publication durability remains unconfirmed")
+        );
         let uncertain_response = map_failure(uncertain_failure);
-        assert!(uncertain_response
-            .receipt
-            .unwrap()
-            .display
-            .contains("Publication durability remains unconfirmed"));
+        assert!(
+            uncertain_response
+                .receipt
+                .unwrap()
+                .display
+                .contains("Publication durability remains unconfirmed")
+        );
         assert_eq!(structured["items"][2]["output"], "private result 2");
         assert_eq!(
             structured["items"][2]["operations"][0]["effect"],

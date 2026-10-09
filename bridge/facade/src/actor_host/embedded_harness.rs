@@ -1,8 +1,8 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -28,7 +28,7 @@ use harness::{
     store::Store,
     turn::{JobOutput, JobScheduler},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
 use super::cell_context::{EmbeddedContextBinding, ModelResolver};
@@ -2515,9 +2515,11 @@ mod tests {
                             ..identity.clone()
                         },
                     ] {
-                        assert!(scratch_runtime
-                            .attach(foreign, campaign.actor.clone(), installation.clone(), None)
-                            .is_err());
+                        assert!(
+                            scratch_runtime
+                                .attach(foreign, campaign.actor.clone(), installation.clone(), None)
+                                .is_err()
+                        );
                     }
                     let (wakes, _incoming) = mpsc::unbounded_channel();
                     let scratch = tempfile::tempdir().unwrap();

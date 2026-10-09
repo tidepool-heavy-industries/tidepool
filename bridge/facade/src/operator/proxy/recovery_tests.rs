@@ -1,8 +1,8 @@
 use super::*;
 use crate::operator::{self, OperatorService};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -293,13 +293,14 @@ async fn pending_publication_failure_never_submits_and_retry_keeps_visible_ident
             .unwrap();
         assert_eq!(host.count(), 1);
         if let Some(request) = request {
-            assert!(host
-                .service
-                .state
-                .provisions
-                .lock()
-                .await
-                .contains_key(&request.operation));
+            assert!(
+                host.service
+                    .state
+                    .provisions
+                    .lock()
+                    .await
+                    .contains_key(&request.operation)
+            );
         }
         host.finish().await;
     }

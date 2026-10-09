@@ -682,9 +682,11 @@ mod tests {
         );
         let error = run_root_for_session(runs.path(), "missing").unwrap_err();
         assert!(error.to_string().contains("missing"));
-        assert!(error
-            .to_string()
-            .contains(&runs.path().display().to_string()));
+        assert!(
+            error
+                .to_string()
+                .contains(&runs.path().display().to_string())
+        );
     }
 
     #[test]
