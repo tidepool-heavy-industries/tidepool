@@ -72,8 +72,14 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
                 .await
                 .call(
                     "checkpoint-issuer-setup",
-                    &tidepool_testing::fixture_source(
-                        "bridge/facade/src/actor_host/checkpoint_issuer_setup.hs",
+                    &format!(
+                        "{}\n{}",
+                        tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/embedded_checkpoint_scope_setup.hs",
+                        ),
+                        tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/checkpoint_issuer_setup.hs",
+                        ),
                     ),
                 );
             let next_root = next_hosted_script_round(&mut requests, &mut pending, &root).await;
