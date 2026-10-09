@@ -40,7 +40,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (readProcess)
 import Tidepool.FatIface
-  (FatIfaceLookup(..), OwnerInterfaceContext(..), lookupFatIfaceExact,
+  (FatIfaceLookup(..), OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, lookupFatIfaceExact,
    lookupOwnerInterface, newFatIfaceCache, newOwnerInterfaceCache, readExactInterface)
 import Tidepool.PreparedStg
   (PreparedModule, RecoveredModuleInput(..), newPreparedBodyCache,
