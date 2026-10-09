@@ -2203,10 +2203,13 @@ impl PersistentSession {
             .map(|context| context.published_source_original_selections())
             .transpose()?
             .unwrap_or_default();
-        if generation != Generation(0) && lib.log.recovered_at(generation).is_none() {
+        if generation != Generation(0)
+            && (recovered_context.is_none() || lib.log.recovered_at(generation).is_none())
+        {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
-                detail: "persisted declaration root has not been hydrated".into(),
+                detail: "persisted declaration root lacks its exact public compiler selection"
+                    .into(),
             });
         }
         let scope = self.mint_isolated_scope();
@@ -2646,9 +2649,11 @@ impl PersistentSession {
             .map(|context| context.published_source_original_selections())
             .transpose()?
             .unwrap_or_default();
-        if generation != Generation(0) && lib.log.recovered_at(generation).is_none() {
+        if generation != Generation(0)
+            && (recovered_context.is_none() || lib.log.recovered_at(generation).is_none())
+        {
             return Err(invalid(
-                "successor declaration root has not been hydrated".into(),
+                "successor declaration root lacks its exact public compiler selection".into(),
             ));
         }
         let root = state

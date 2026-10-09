@@ -164,9 +164,9 @@ impl SessionLib {
             .surface(owner)
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         if surface.compiler_context.artifact_refs.is_empty() {
-            return Ok(surface
-                .declaration_root
-                .and_then(|generation| self.log.joined_context_at(generation)));
+            // An explicit v9 empty selection grants no compiler context. A
+            // historical declaration node cannot widen this public surface.
+            return Ok(None);
         }
         let root = state
             .path
