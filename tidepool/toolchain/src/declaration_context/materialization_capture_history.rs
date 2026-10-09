@@ -83,6 +83,10 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         .iter()
         .map(|root| private_directory_census(root))
         .fold((0, 0), |left, right| (left.0 + right.0, left.1 + right.1));
+    let history_rows = owners
+        .iter()
+        .map(|owner| owner.upgrade().unwrap().rows.len())
+        .sum::<usize>();
     let captured = captured_materialization_context(&context, vec![ids[first], ids[second]]);
     let expected = context
         .prepare_compilation(&scratch.path().join("expected"), &producer)
@@ -108,18 +112,7 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
     }
     let fork = captured_materialization_context(&captured, vec![ids[second]]);
     drop(context);
-    assert!(
-        owners.iter().all(|owner| owner.upgrade().is_none()),
-        "a capture must not retain historical materialization metadata"
-    );
     let selected_directories = BTreeSet::from([first + 1, second + 1]);
-    for (index, root) in directories.iter().enumerate() {
-        assert_eq!(
-            root.is_dir(),
-            selected_directories.contains(&index),
-            "directory {index} retained beyond its selected facts"
-        );
-    }
     let selected_census = directories
         .iter()
         .filter(|root| root.is_dir())
@@ -130,11 +123,26 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         serde_json::json!({
             "kind": "retained_materialization_capture_census", "history_length": length,
             "capture_roots": [first, second], "materialized_before_reselection": warm,
-            "before": { "directories": directories.len(), "files": before.0, "bytes": before.1 },
-            "captured": { "directories": selected_directories.len(), "files": selected_census.0, "bytes": selected_census.1 },
+            "before": { "directories": directories.len(), "files": before.0, "bytes": before.1, "retained_rows": history_rows },
+            "captured": { "directories": directories.iter().filter(|root| root.is_dir()).count(), "files": selected_census.0, "bytes": selected_census.1 },
+            "required_directories": selected_directories.len(),
             "historical_materialization_owners_alive": owners.iter().filter(|owner| owner.upgrade().is_some()).count(),
+            "row_struct_bytes_excludes_shared_payload_and_map_nodes": std::mem::size_of::<RetainedArtifactRow>(),
+            "materialization_struct_bytes_excludes_collections_and_shared_payload": std::mem::size_of::<RetainedArtifactMaterialization>(),
+            "graph_file_struct_bytes_excludes_path_buffer_and_directory": std::mem::size_of::<OwnedExecutionGraphFile>(),
         })
     );
+    assert!(
+        owners.iter().all(|owner| owner.upgrade().is_none()),
+        "a capture must not retain historical materialization metadata"
+    );
+    for (index, root) in directories.iter().enumerate() {
+        assert_eq!(
+            root.is_dir(),
+            selected_directories.contains(&index),
+            "directory {index} retained beyond its selected facts"
+        );
+    }
     drop(captured);
     for (index, root) in directories.iter().enumerate() {
         assert_eq!(
