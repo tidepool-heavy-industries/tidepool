@@ -761,8 +761,15 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     -- and both operations must retain the same original type-only closure.
     forM_ [[emptyRoot,work],[work,emptyRoot],[work,work]] $ \search -> do
       let currentScope = admitted {scopePurpose=ExactCellPurpose admission search}
-          checkCurrent = void (compile CheckedEnvironment Set.empty (ExactScopeCompile purpose currentScope)
-            (Just session) consumer search Nothing)
+          checkCurrent = do
+            previousReceipts <- listDirectory (work </> ".exact-compilations")
+            _ <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose currentScope)
+              (Just session) consumer search Nothing
+            currentReceipts <- listDirectory (work </> ".exact-compilations")
+            currentReceipt <- case filter (`notElem` previousReceipts) currentReceipts of
+              [entry] -> pure (work </> ".exact-compilations" </> entry </> "receipt.cbor")
+              _ -> fail "checking transition did not issue one exact source receipt"
+            codecReceiptSourceSelected <$> readReceiptCodecFacts work currentReceipt
           prepareCurrent = do
             selected <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose currentScope)
               (Just session) consumer search Nothing
@@ -771,16 +778,13 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
             unless (null (scopeProducts (compilationScope currentCompilation))
                 && null (scopeExecutionGraphs (compilationScope currentCompilation))) $
               fail "source selection granted execution custody to canonical type-only originals"
+            currentSelection <- maybe (fail "preparation transition omitted current source proof") pure
+              (compilationSourceSelection currentCompilation)
+            pure [key | (key,_,_,_) <- selectedOriginalRows currentSelection]
       forM_ [checkCurrent,prepareCurrent] $ \selectCurrent -> do
         _ <- compile CheckedEnvironment Set.empty GeneralCompile Nothing consumer search Nothing
-        previousReceipts <- listDirectory (work </> ".exact-compilations")
-        selectCurrent
-        currentReceipts <- listDirectory (work </> ".exact-compilations")
-        currentReceipt <- case filter (`notElem` previousReceipts) currentReceipts of
-          [entry] -> pure (work </> ".exact-compilations" </> entry </> "receipt.cbor")
-          _ -> fail "search/product-role transition did not issue one exact source receipt"
-        currentFacts <- readReceiptCodecFacts work currentReceipt
-        unless (Set.fromList (codecReceiptSourceSelected currentFacts)
+        currentOwners <- selectCurrent
+        unless (Set.fromList currentOwners
             == Set.fromList [("main","CanonicalSource"),("main","CanonicalDependency")]) $
           fail "search/product-role transition changed the canonical source closure"
     _ <- check compile purpose
