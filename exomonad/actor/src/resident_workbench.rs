@@ -20846,7 +20846,10 @@ pub(crate) mod request_tests {
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
-                    source: "sleep (minutes 0) >> error \"failure after answer\"".into(),
+                    source: format!(
+                        "(sleep (minutes 0) >> error \"failure after answer\") :: Eff {} ()",
+                        context.haskell_effects_alias,
+                    ),
                 },
             )
             .await
@@ -20980,7 +20983,10 @@ pub(crate) mod request_tests {
                 .admit_private_cell_for_test(context.clone())
                 .await
                 .expect("failing parent checked-cell admission");
-            let failing_source = "sleep (minutes 0) >> error \"parent failed\"";
+            let failing_source = format!(
+                "(sleep (minutes 0) >> error \"parent failed\") :: Eff {} ()",
+                failing_context.haskell_effects_alias,
+            );
             let (checked, prepared) = failing_workbench
                 .prepare_cell(failing_context.clone(), failing_source.into())
                 .await
