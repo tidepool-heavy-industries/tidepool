@@ -2776,7 +2776,17 @@ fn seal_turn_outputs_with_validation(
             .as_slice(),
     };
     let ordinary_evidence = if exact_source.is_none() {
-        cache::CompletedSourceEvidence::from_worker(evidence_bytes, source_path, source)
+        Some(
+            cache::CompletedSourceEvidence::from_worker(evidence_bytes, source_path, source)
+                .map_err(|failure| {
+                    CompileError::CompilerEvidence(Box::new(
+                        crate::certified_products::CertificationError::CompletedSourceEvidence {
+                            input: source_path.to_path_buf(),
+                            failure: Box::new(failure),
+                        },
+                    ))
+                })?,
+        )
     } else {
         None
     };
@@ -3806,8 +3816,13 @@ pub fn validate_completed_corpus_sources(
         source,
         &std::fs::read_to_string(source)?,
     )
-    .ok_or_else(|| {
-        CompileError::ExtractFailed("corpus consumed bytes or import witnesses changed".into())
+    .map_err(|failure| {
+        CompileError::CompilerEvidence(Box::new(
+            crate::certified_products::CertificationError::CompletedSourceEvidence {
+                input: source.to_path_buf(),
+                failure: Box::new(failure),
+            },
+        ))
     })?;
     Ok(())
 }
@@ -4271,10 +4286,20 @@ fn compile_invocation_inner(
             );
         let evidence = match exact_source.as_ref() {
             Some(source) => Some((*source.evidence).clone()),
-            None => cache::CompletedSourceEvidence::from_worker(
-                &evidence_bytes,
-                &input_path,
-                inv.source,
+            None => Some(
+                cache::CompletedSourceEvidence::from_worker(
+                    &evidence_bytes,
+                    &input_path,
+                    inv.source,
+                )
+                .map_err(|failure| {
+                    CompileError::CompilerEvidence(Box::new(
+                        crate::certified_products::CertificationError::CompletedSourceEvidence {
+                            input: input_path.clone(),
+                            failure: Box::new(failure),
+                        },
+                    ))
+                })?,
             ),
         };
         if let Some((output, _)) = inventory_export {

@@ -264,16 +264,25 @@ pub struct DependencyEvidence {
 pub(crate) struct CompletedSourceEvidence(DependencyEvidence);
 
 impl CompletedSourceEvidence {
-    pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
-        Self::from_worker_evidence(serde_json::from_slice(bytes).ok()?, input, source)
+    pub(crate) fn from_worker(
+        bytes: &[u8],
+        input: &Path,
+        source: &str,
+    ) -> Result<Self, DependencyEvidenceFailure> {
+        let evidence = serde_json::from_slice(bytes).map_err(|error| {
+            DependencyEvidenceFailure::WorkerDecode {
+                message: error.to_string(),
+            }
+        })?;
+        Self::from_worker_evidence(evidence, input, source)
     }
 
     pub(crate) fn from_worker_evidence(
         evidence: DependencyEvidence,
         input: &Path,
         source: &str,
-    ) -> Option<Self> {
-        Self::from_normalized(evidence.normalize_worker_paths(input)?, source).ok()
+    ) -> Result<Self, DependencyEvidenceFailure> {
+        Self::from_normalized(evidence.normalize_worker_paths(input)?, source)
     }
 
     pub(crate) fn from_normalized(
@@ -432,8 +441,15 @@ impl ModuleEvidence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DependencyEvidenceFailure {
+    WorkerDecode {
+        message: String,
+    },
+    WorkerInput {
+        path: PathBuf,
+        message: String,
+    },
     Header,
     Source {
         index: usize,
@@ -457,14 +473,14 @@ pub enum DependencyEvidenceFailure {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceWitnessFailure {
     Malformed,
     Unavailable,
     Changed { expected: String, actual: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolutionWitnessFailure {
     Malformed,
     Duplicate,
@@ -477,13 +493,17 @@ impl DependencyEvidence {
     /// Admit replay-eligible worker evidence after validating consumed bytes.
     /// Authored dependencies retain their path identity.
     pub(crate) fn from_worker(bytes: &[u8], input: &Path, source: &str) -> Option<Self> {
-        let completed = CompletedSourceEvidence::from_worker(bytes, input, source)?;
+        let completed = CompletedSourceEvidence::from_worker(bytes, input, source).ok()?;
         completed.cache_safe.then(|| completed.into_evidence())
     }
 
-    fn normalize_worker_paths(mut self, input: &Path) -> Option<Self> {
+    fn normalize_worker_paths(mut self, input: &Path) -> Result<Self, DependencyEvidenceFailure> {
         let evidence = &mut self;
-        let input = fs::canonicalize(input).ok()?;
+        let input =
+            fs::canonicalize(input).map_err(|error| DependencyEvidenceFailure::WorkerInput {
+                path: input.to_path_buf(),
+                message: error.to_string(),
+            })?;
         for item in &mut evidence.sources {
             if fs::canonicalize(&item.path).ok().as_ref() == Some(&input) {
                 item.path = GENERATED_SOURCE.into();
@@ -505,7 +525,7 @@ impl DependencyEvidence {
                 }
             }
         }
-        Some(self)
+        Ok(self)
     }
 
     /// Validate replay eligibility, consumed bytes and negative witnesses. IO
@@ -1045,7 +1065,69 @@ mod tests {
         assert!(completed.revalidate("target").is_ok());
         fs::write(root.path().join("later/Library.hs"), "library = 2").unwrap();
         assert!(completed.revalidate("target").is_err());
-        assert!(CompletedSourceEvidence::from_worker(&worker_bytes, &input, "target").is_none());
+        assert!(CompletedSourceEvidence::from_worker(&worker_bytes, &input, "target").is_err());
+    }
+
+    #[test]
+    fn completed_worker_evidence_retains_decode_input_and_resolution_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("Target.hs");
+        fs::write(&input, "target").unwrap();
+        let mut worker = evidence(root.path());
+        worker.sources[0].path = input.clone();
+        worker.modules[0].source = input.clone();
+        let bytes = serde_json::to_vec(&worker).unwrap();
+        assert!(matches!(
+            CompletedSourceEvidence::from_worker(b"{", &input, "target"),
+            Err(DependencyEvidenceFailure::WorkerDecode { .. })
+        ));
+        let missing = root.path().join("Missing.hs");
+        assert!(
+            matches!(CompletedSourceEvidence::from_worker(&bytes, &missing, "target"),
+            Err(DependencyEvidenceFailure::WorkerInput { path, .. }) if path == missing)
+        );
+        fs::write(root.path().join("first/Library.hs"), "library = 1").unwrap();
+        let expected = DependencyEvidenceFailure::Resolution {
+            index: 0,
+            reason: ResolutionWitnessFailure::NegativeCandidateUnavailable { index: 0 },
+        };
+        assert_eq!(
+            CompletedSourceEvidence::from_worker(&bytes, &input, "target"),
+            Err(expected)
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn completed_source_history_refuses_changed_bytes_and_real_shadow_candidates(
+            history in proptest::collection::vec((proptest::bool::ANY, proptest::bool::ANY), 1..32)
+        ) {
+            let root = tempfile::tempdir().unwrap();
+            let completed = CompletedSourceEvidence::from_normalized(evidence(root.path()), "target").unwrap();
+            let shadow = root.path().join("first/Library.hs");
+            let selected = root.path().join("later/Library.hs");
+            for (shadow_present, source_changed) in history {
+                if shadow_present {
+                    // Identical bytes do not authorize an existing earlier source.
+                    fs::write(&shadow, "library = 1").unwrap();
+                } else if shadow.exists() {
+                    fs::remove_file(&shadow).unwrap();
+                }
+                fs::write(&selected, if source_changed { "library = 2" } else { "library = 1" }).unwrap();
+                let actual = completed.revalidate("target");
+                if source_changed {
+                    proptest::prop_assert!(matches!(actual, Err(DependencyEvidenceFailure::Source {
+                        index: 1, reason: SourceWitnessFailure::Changed { .. },
+                    })), "changed consumed source must retain its typed refusal");
+                } else if shadow_present {
+                    proptest::prop_assert_eq!(actual, Err(DependencyEvidenceFailure::Resolution {
+                        index: 0, reason: ResolutionWitnessFailure::NegativeCandidateUnavailable { index: 0 },
+                    }));
+                } else {
+                    proptest::prop_assert_eq!(actual, Ok(()));
+                }
+            }
+        }
     }
 
     #[test]
