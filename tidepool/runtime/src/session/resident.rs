@@ -2907,26 +2907,6 @@ where
         self.state.confirm_durable_public_scope(owner, scope)
     }
 
-    pub fn admit_cell_in(
-        &mut self,
-        scope: ScopeId,
-        declarations: usize,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_cell_in(
-            scope,
-            declarations,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-        )
-    }
-
     /// Reserve a fresh interface for one original input. No authored cell or
     /// prepared program is needed to bind the already rooted heap value.
     pub fn admit_activation_input_in(
@@ -3058,26 +3038,6 @@ where
             authority_digest,
             include_paths,
             compile_inputs,
-        )
-    }
-
-    pub fn admit_cell_for_execution(
-        &mut self,
-        execution: Arc<super::PrivateExecutionAdmission>,
-        declarations: usize,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_cell_for_execution(
-            execution,
-            declarations,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
         )
     }
 
@@ -7972,8 +7932,7 @@ mod authored_publication_tests {
     fn checked_interface_publication_failure(write_failure: bool) {
         use crate::session::turn::{compile_cell_program_admitted, consume_cell_program_item};
         use crate::session::{
-            resident_cell_check_template, resident_workbench_templates, CellCheckRequest,
-            SourceImports, TurnResult,
+            resident_cell_check_template, resident_workbench_templates, SourceImports, TurnResult,
         };
         use std::os::unix::fs::PermissionsExt;
         use tidepool_testing::effect_surface::TestEffectSurface;
@@ -8027,26 +7986,7 @@ mod authored_publication_tests {
                 None,
             )
             .unwrap();
-        let view = admission.view();
-        let include = view.include_paths(effects.include_paths());
-        let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let injected = view.injected_module_names();
-        let (checked, program) = compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
+        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
         let first = checked.checked_item(0).unwrap();
         let prefix = state
             .begin_cell_program(admission, program)
@@ -9510,8 +9450,7 @@ mod authored_publication_tests {
             compile_cell_program_admitted, consume_cell_program_item, TemplateSelector,
         };
         use crate::session::{
-            resident_cell_check_template, resident_workbench_templates, CellCheckRequest,
-            TurnResult,
+            resident_cell_check_template, resident_workbench_templates, TurnResult,
         };
         use tidepool_testing::effect_surface::TestEffectSurface;
         use tidepool_toolchain::checked_cell::CheckedCellSpecification;
@@ -9577,23 +9516,7 @@ mod authored_publication_tests {
                 None,
             )
             .unwrap();
-        let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let (checked, program) = compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &includes,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: view.next_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
+        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
         let item = checked.checked_item(0).unwrap();
         let prefix = session
             .begin_cell_program(admission, program)

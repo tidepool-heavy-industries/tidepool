@@ -655,17 +655,7 @@ fn try_check_fixture_cell(
     execution: Arc<crate::session::PrivateExecutionAdmission>,
     declaration_count: usize,
 ) -> Result<CheckedFixtureCell, turn::CellCheckFailure> {
-    try_issue_fixture_cell(resident, recipe, source, execution, declaration_count)
-}
-
-fn try_issue_fixture_cell(
-    resident: &mut TestSession,
-    recipe: &InputRecipe,
-    source: &str,
-    execution: Arc<crate::session::PrivateExecutionAdmission>,
-    declaration_count: usize,
-) -> Result<CheckedFixtureCell, turn::CellCheckFailure> {
-    use crate::session::{CellCheckRequest, TemplateSelector};
+    use crate::session::TemplateSelector;
     use tidepool_toolchain::checked_cell::CheckedCellSpecification;
 
     let scope = resident.run_context().lexical_scope;
@@ -719,23 +709,7 @@ fn try_issue_fixture_cell(
             None,
         )
         .expect("admit checked fixture bindings with their selected interfaces");
-    let view = admission.view();
-    let includes = admission.include_paths().to_vec();
-    let include = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    let injected = view.injected_module_names();
-    let request = CellCheckRequest {
-        exact_context: view.exact_compile_context(),
-        session_id: Some(view.session()),
-        cell_text: source,
-        template: &template,
-        include: &include,
-        session_root: view.session_root(),
-        inject_modules: &injected,
-        compile_generation: admission.initial_value_generation().0,
-        compile_view_evidence: "",
-    };
-    let (checked, program) =
-        turn::compile_cell_program_admitted(request, admission.clone(), &templates)?;
+    let (checked, program) = turn::compile_cell_program_admitted(admission.clone())?;
     let prefix = resident
         .begin_cell_program(admission, program)
         .unwrap()
@@ -929,7 +903,7 @@ fn original_value_probe(
 }
 
 fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixture) {
-    use crate::session::{CellCheckRequest, TemplateSelector};
+    use crate::session::TemplateSelector;
     use tidepool_toolchain::checked_cell::CheckedCellSpecification;
 
     let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
@@ -981,29 +955,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
             None,
         )
         .unwrap();
-    let view = admission.view();
-    let include_paths = admission.include_paths().to_vec();
-    let include = include_paths
-        .iter()
-        .map(PathBuf::as_path)
-        .collect::<Vec<_>>();
-    let injected = view.injected_module_names();
-    let (checked, program) = turn::compile_cell_program_admitted(
-        CellCheckRequest {
-            exact_context: view.exact_compile_context(),
-            session_id: Some(view.session()),
-            cell_text: source,
-            template: &template,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &injected,
-            compile_generation: admission.initial_value_generation().0,
-            compile_view_evidence: "",
-        },
-        admission.clone(),
-        &templates,
-    )
-    .unwrap();
+    let (checked, program) = turn::compile_cell_program_admitted(admission.clone()).unwrap();
     let item = checked.checked_item(0).unwrap();
     let prefix = resident
         .begin_cell_program(admission, program)

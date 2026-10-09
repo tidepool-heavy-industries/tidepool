@@ -22,9 +22,9 @@ use tidepool_toolchain::artifacts::{
     ModuleCandidateOffer,
 };
 use tidepool_toolchain::certified_products::{PendingCertifiedGroup, PendingImportOwner};
-use tidepool_toolchain::checked_cell::{
-    CheckedCellSpecification, ExactCheckedCell, ExactCheckedItem, ExactCompiledItem,
-};
+#[cfg(test)]
+use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+use tidepool_toolchain::checked_cell::{ExactCheckedCell, ExactCheckedItem, ExactCompiledItem};
 use tidepool_toolchain::extract_module_name;
 use tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct;
 
@@ -2521,56 +2521,11 @@ pub fn compile_activation_preview(
     ))
 }
 
-fn validate_cell_admitted_request(
-    req: &CellCheckRequest<'_>,
-    admission: &super::RuntimeCellAdmission,
-) -> Result<(), CellCheckFailure> {
-    let view = admission.view();
-    if admission.private_execution().is_none()
-        && !admission.is_native_setup()
-        && admission.host_carrier().is_none()
-    {
-        return Err(CompileError::ExtractFailed(
-            "checked execution requires its owning private or native setup admission".into(),
-        )
-        .into());
-    }
-    if req.include.len() != admission.include_paths().len()
-        || req
-            .include
-            .iter()
-            .zip(admission.include_paths())
-            .any(|(requested, admitted)| requested.as_os_str() != admitted.as_os_str())
-    {
-        return Err(CompileError::InputRejected(vec![crate::diag::ExtractDiag {
-            span: None,
-            severity: crate::diag::DiagnosticSeverity::Error,
-            message: "checked request source search inputs differ from its runtime admission"
-                .into(),
-        }])
-        .into());
-    }
-    if req.session_id != Some(view.session())
-        || req.session_root != view.session_root()
-        || req.compile_generation != view.next_value_generation().0
-        || req.inject_modules != view.injected_module_names()
-        || req.exact_context != view.exact_compile_context()
-    {
-        return Err(CompileError::ExtractFailed(
-            "checked-cell request differs from the protected runtime admission".into(),
-        )
-        .into());
-    }
-    Ok(())
-}
-
 /// Prepare every authored item before the caller can execute the
 /// first native effect. The compiler owns and seals the complete immutable
 /// program, including original declaration and Val interface identities.
 pub fn compile_cell_program_admitted(
-    req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
-    templates: &[TurnTemplate],
 ) -> Result<
     (
         CellCheck,
@@ -2579,9 +2534,7 @@ pub fn compile_cell_program_admitted(
     CellCheckFailure,
 > {
     compile_cell_program_admitted_inner(
-        req,
         admission,
-        templates,
         #[cfg(test)]
         CellProgramAudit::None,
     )
@@ -2589,9 +2542,7 @@ pub fn compile_cell_program_admitted(
 
 #[cfg(test)]
 fn compile_cell_program_admitted_receipt_controls(
-    req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
-    templates: &[TurnTemplate],
 ) -> Result<
     (
         CellCheck,
@@ -2599,7 +2550,7 @@ fn compile_cell_program_admitted_receipt_controls(
     ),
     CellCheckFailure,
 > {
-    compile_cell_program_admitted_inner(req, admission, templates, CellProgramAudit::Receipts)
+    compile_cell_program_admitted_inner(admission, CellProgramAudit::Receipts)
 }
 
 #[cfg(test)]
@@ -2614,9 +2565,7 @@ enum CellProgramAudit<'a> {
 
 #[cfg(test)]
 fn compile_cell_program_admitted_native_emission_controls(
-    req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
-    templates: &[TurnTemplate],
     old_owners: &std::collections::BTreeSet<(String, String)>,
 ) -> Result<
     (
@@ -2626,9 +2575,7 @@ fn compile_cell_program_admitted_native_emission_controls(
     CellCheckFailure,
 > {
     compile_cell_program_admitted_inner(
-        req,
         admission,
-        templates,
         CellProgramAudit::NativeEmissionOwnersAbsent(old_owners),
     )
 }
@@ -2731,9 +2678,7 @@ fn audit_current_native_emission(
 
 #[cfg(test)]
 fn compile_cell_program_admitted_work_controls(
-    req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
-    templates: &[TurnTemplate],
     expected_shape: Option<scaling_tests::SegmentWorkShape>,
 ) -> Result<
     (
@@ -2742,19 +2687,12 @@ fn compile_cell_program_admitted_work_controls(
     ),
     CellCheckFailure,
 > {
-    compile_cell_program_admitted_inner(
-        req,
-        admission,
-        templates,
-        CellProgramAudit::WorkCounts(expected_shape),
-    )
+    compile_cell_program_admitted_inner(admission, CellProgramAudit::WorkCounts(expected_shape))
 }
 
-#[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = req.cell_text.len()))]
+#[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = tracing::field::Empty))]
 fn compile_cell_program_admitted_inner(
-    req: CellCheckRequest<'_>,
     admission: Arc<super::RuntimeCellAdmission>,
-    templates: &[TurnTemplate],
     #[cfg(test)] audit: CellProgramAudit<'_>,
 ) -> Result<
     (
@@ -2765,18 +2703,33 @@ fn compile_cell_program_admitted_inner(
 > {
     let setup_span =
         tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.setup").entered();
-    validate_cell_admitted_request(&req, &admission)?;
+    if !admission.has_execution_purpose() {
+        return Err(CompileError::ExtractFailed(
+            "checked execution requires its owning private or native setup admission".into(),
+        )
+        .into());
+    }
     let planned = admission.plan_reservation().ok_or_else(|| {
         CompileError::ExtractFailed(
             "complete cell compilation requires its parser reservation".into(),
         )
     })?;
+    let view = admission.view();
+    let recipe = planned.plan().specification();
+    tracing::Span::current().record("cell_bytes", recipe.cell_source.len());
+    let mut specification = recipe.as_ref().clone();
+    specification.admission_digest = admission.digest();
+    specification.reserved_declaration_modules = admission
+        .reserved_generations()
+        .iter()
+        .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
+        .collect();
     let scratch = compiler_scratch_directory()?;
     let cell_path = scratch.path().join("cell.txt");
     let template_path = scratch.path().join("CellCheckTemplate.hs");
     let output_path = scratch.path().join("cell.cbor");
-    std::fs::write(&cell_path, req.cell_text)?;
-    std::fs::write(&template_path, req.template)?;
+    std::fs::write(&cell_path, &recipe.cell_source)?;
+    std::fs::write(&template_path, &recipe.template_source)?;
     let mut command = extract_cmd()?;
     command
         .input(&cell_path)
@@ -2784,16 +2737,15 @@ fn compile_cell_program_admitted_inner(
         .cell_template(&template_path)
         .cell_out(&output_path)
         .output_dir(scratch.path())
-        .includes(req.include)
-        .session_root(req.session_root)
-        .inject_vals(req.inject_modules);
-    if let Some(session) = req.session_id {
-        command.session_incarnation(session.0.to_string());
-    }
-    for (index, template) in templates.iter().enumerate() {
+        .includes(admission.include_paths())
+        .session_root(view.session_root())
+        .inject_vals(view.injected_module_names());
+    command.session_incarnation(view.session().0.to_string());
+
+    for (index, (kind, source)) in recipe.turn_templates.iter().enumerate() {
         let path = scratch.path().join(format!("checked-template-{index}.hs"));
-        std::fs::write(&path, &template.source)?;
-        command.turn_template(template.kind.wire_name(), &path);
+        std::fs::write(&path, source)?;
+        command.turn_template(kind, &path);
     }
     for (identity, generation) in admission.admitted_retained_imports() {
         command.retained_generation(extract_identity(identity), *generation);
@@ -2802,37 +2754,11 @@ fn compile_cell_program_admitted_inner(
     let endpoint = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.bind")
         .in_scope(|| bind_extract_cmd(&command))?;
     let offer_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.offer", inclusive = true).entered();
-    let specification = CheckedCellSpecification {
-        admission_digest: admission.digest(),
-        cell_source: req.cell_text.to_owned(),
-        template_source: req.template.to_owned(),
-        turn_templates: templates
-            .iter()
-            .map(|template| (template.kind.wire_name().into(), template.source.clone()))
-            .collect(),
-        injected_modules: req.inject_modules.to_vec(),
-        reserved_declaration_modules: admission
-            .reserved_generations()
-            .iter()
-            .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
-            .collect(),
-    };
-    if specification.specification_digest() != admission.specification_digest() {
-        return Err(CompileError::ExtractFailed(
-            "cell compiler recipe differs from its runtime reservation".into(),
-        )
-        .into());
-    }
-    let include = req
-        .include
-        .iter()
-        .map(|path| path.to_path_buf())
-        .collect::<Vec<_>>();
     let offer = ModuleCandidateOffer::select_cell_program(
         &endpoint,
-        &include,
+        admission.include_paths(),
         scratch.path(),
-        req.exact_context.clone(),
+        view.exact_compile_context(),
         specification,
         admission
             .interfaces()
@@ -2893,9 +2819,9 @@ fn compile_cell_program_admitted_inner(
     }
     let mut checked = decode_cell_out(
         program.checked_cell().observations(),
-        req.cell_text,
-        req.compile_generation,
-        req.compile_view_evidence,
+        &recipe.cell_source,
+        admission.initial_value_generation().0,
+        "",
     )?;
     checked.warnings = report.diagnostics;
     drop(admission_span);
@@ -5746,28 +5672,8 @@ mod tests {
                     None,
                 )
                 .unwrap();
-            let view = admission.view();
-            let include = admission
-                .include_paths()
-                .iter()
-                .map(PathBuf::as_path)
-                .collect::<Vec<_>>();
-            let (checked, program) = compile_cell_program_admitted(
-                CellCheckRequest {
-                    exact_context: view.exact_compile_context(),
-                    session_id: Some(view.session()),
-                    cell_text: source,
-                    template: &template,
-                    include: &include,
-                    session_root: view.session_root(),
-                    inject_modules: &specification.injected_modules,
-                    compile_generation: admission.initial_value_generation().0,
-                    compile_view_evidence: "",
-                },
-                admission.clone(),
-                &templates,
-            )
-            .map_err(|failure| failure.error)?;
+            let (checked, program) = compile_cell_program_admitted(admission.clone())
+                .map_err(|failure| failure.error)?;
             Ok(CheckedHomeCell {
                 admission,
                 checked,
@@ -6337,41 +6243,6 @@ mod tests {
         );
     }
 
-    fn compile_fixture_program(
-        admission: Arc<crate::session::RuntimeCellAdmission>,
-        specification: &CheckedCellSpecification,
-        templates: &[TurnTemplate],
-    ) -> Result<
-        (
-            CellCheck,
-            Arc<tidepool_toolchain::checked_cell::CellProgram>,
-        ),
-        CellCheckFailure,
-    > {
-        let view = admission.view();
-        let include = admission
-            .include_paths()
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<_>>();
-        let injected = view.injected_module_names();
-        compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: &specification.cell_source,
-                template: &specification.template_source,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            templates,
-        )
-    }
-
     #[test]
     fn dependency_load_errors_keep_source_spans_and_allow_a_valid_retry() {
         use crate::session::{ModuleEnv, PersistentSession, SessionLib};
@@ -6441,7 +6312,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let failure = compile_fixture_program(admission.clone(), &specification, &templates)
+        let failure = compile_cell_program_admitted(admission.clone())
             .unwrap_err()
             .error;
         assert_eq!(
@@ -6467,8 +6338,7 @@ mod tests {
             include_str!("fixtures/checked-search-original.hs"),
         )
         .unwrap();
-        let (_, program) =
-            compile_fixture_program(admission.clone(), &specification, &templates).unwrap();
+        let (_, program) = compile_cell_program_admitted(admission.clone()).unwrap();
         state
             .begin_cell_program(admission, program)
             .unwrap()
@@ -6594,8 +6464,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (_, alternate_program) =
-            compile_fixture_program(alternate.clone(), &specification, &templates).unwrap();
+        let (_, alternate_program) = compile_cell_program_admitted(alternate.clone()).unwrap();
         assert_eq!(
             alternate_program.items()[0].checked_item().include_paths(),
             alternate.include_paths()
@@ -6603,8 +6472,7 @@ mod tests {
         assert!(state
             .begin_cell_program(admission.clone(), alternate_program)
             .is_err());
-        let (_, program) =
-            compile_fixture_program(admission.clone(), &specification, &templates).unwrap();
+        let (_, program) = compile_cell_program_admitted(admission.clone()).unwrap();
         state
             .begin_cell_program(admission, program)
             .expect("refusal must leave original admission unclaimed")
@@ -6727,27 +6595,8 @@ mod tests {
                 None,
             )
             .unwrap();
-        let view = admission.view();
-        let include = admission
-            .include_paths()
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<_>>();
-        let injected = view.injected_module_names();
         let (_, program) = compile_cell_program_admitted_inner(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
             admission.clone(),
-            &templates,
             CellProgramAudit::PublicationRefusal(cache.path()),
         )
         .unwrap();
@@ -6829,27 +6678,8 @@ mod tests {
                     None,
                 )
                 .unwrap();
-            let view = admission.view();
-            let include = admission.include_paths();
-            let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-            let injected = view.injected_module_names();
             let started = std::time::Instant::now();
-            let (checked, program) = compile_cell_program_admitted(
-                CellCheckRequest {
-                    exact_context: view.exact_compile_context(),
-                    session_id: Some(view.session()),
-                    cell_text: source,
-                    template: &template,
-                    include: &include,
-                    session_root: view.session_root(),
-                    inject_modules: &injected,
-                    compile_generation: admission.initial_value_generation().0,
-                    compile_view_evidence: "",
-                },
-                admission.clone(),
-                &templates,
-            )
-            .unwrap();
+            let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
             let item = checked.checked_item(0).unwrap();
             let prefix = session
                 .begin_cell_program(admission.clone(), program)
@@ -6994,28 +6824,7 @@ mod tests {
                 ),
             }
             .unwrap();
-            let view = admission.view();
-            let include = admission
-                .include_paths()
-                .iter()
-                .map(PathBuf::as_path)
-                .collect::<Vec<_>>();
-            let injected = view.injected_module_names();
-            let checked = compile_cell_program_admitted(
-                CellCheckRequest {
-                    exact_context: view.exact_compile_context(),
-                    session_id: Some(view.session()),
-                    cell_text: source,
-                    template: &template,
-                    include: &include,
-                    session_root: view.session_root(),
-                    inject_modules: &injected,
-                    compile_generation: admission.initial_value_generation().0,
-                    compile_view_evidence: "",
-                },
-                admission.clone(),
-                &[],
-            );
+            let checked = compile_cell_program_admitted(admission.clone());
             let original = session.public_visibility_snapshot_in(scope).unwrap();
             assert_eq!(original.declaration_tip, Generation(0));
             assert_eq!(original.epoch, 0);
@@ -7161,26 +6970,7 @@ mod tests {
             admission.reserved_generations(),
             &[expected_declaration.gen()]
         );
-        let view = admission.view();
-        let include = view.include_paths(effects.include_paths());
-        let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let injected = view.injected_module_names();
-        let (checked, program) = compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
+        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
         assert_eq!(checked.items.len(), 4);
         let declaration = checked.checked_item(0).unwrap();
         let certificate = declaration
@@ -7711,7 +7501,10 @@ mod tests {
                 binding_execution.clone(),
                 tidepool_toolchain::artifacts::parse_cell_plan(
                     Arc::new(admission_specification.clone()),
-                    &(include.iter().map(|path| path.to_path_buf()).collect()),
+                    &include
+                        .iter()
+                        .map(|path| path.to_path_buf())
+                        .collect::<Vec<_>>(),
                 )
                 .unwrap(),
                 Arc::new(admission_specification.clone()),
@@ -7721,24 +7514,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (checked, program) = compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: Some(Arc::new(
-                    tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
-                )),
-                session_id: Some(view.session()),
-                cell_text: "let result = makeResult (41 :: Int)",
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: view.next_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
+        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
         assert_eq!(checked.items.len(), 1);
         let item = checked.checked_item(0).unwrap();
         assert_eq!(item.admission_digest(), admission.digest());
@@ -7797,12 +7573,19 @@ mod tests {
             "consumer must retain the original owned group identity"
         );
         let mut edited_check = checked.clone();
-        edited_check.pins[0].ty = "Int".into();
+        assert!(
+            edited_check.pins.is_empty(),
+            "typed programs issue capture signatures instead of checking pins"
+        );
+        edited_check.pins.push(CheckedBinderPin {
+            key: "unissued".into(),
+            ty: "Int".into(),
+            heads: vec![],
+        });
         assert!(edited_check.checked_item(0).is_err());
         let mut edited_check = checked.clone();
         edited_check.items[0].source = "let result = makeResult (0 :: Int)".into();
         assert!(edited_check.checked_item(0).is_err());
-        let expression_view = session.compile_view_in(public).unwrap();
         let expression_source = "makeResult (42 :: Int)";
         let expression_specification = CheckedCellSpecification {
             admission_digest: [0; 32],
@@ -7822,7 +7605,10 @@ mod tests {
                 expression_execution.clone(),
                 tidepool_toolchain::artifacts::parse_cell_plan(
                     Arc::new(expression_specification.clone()),
-                    &(include.iter().map(|path| path.to_path_buf()).collect()),
+                    &include
+                        .iter()
+                        .map(|path| path.to_path_buf())
+                        .collect::<Vec<_>>(),
                 )
                 .unwrap(),
                 Arc::new(expression_specification.clone()),
@@ -7832,24 +7618,8 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (expression_check, expression_program) = compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: Some(Arc::new(
-                    tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
-                )),
-                session_id: Some(view.session()),
-                cell_text: expression_source,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: expression_view.next_value_generation().0,
-                compile_view_evidence: "",
-            },
-            expression_admission.clone(),
-            &templates,
-        )
-        .unwrap();
+        let (expression_check, expression_program) =
+            compile_cell_program_admitted(expression_admission.clone()).unwrap();
         let expression_item = expression_check.checked_item(0).unwrap();
         assert!(expression_item.signatures()[0]
             .names()
@@ -9339,7 +9109,7 @@ mod compiler_packet_replay {
     use tidepool_codegen::scope::ScopeId;
     use tidepool_toolchain::checked_cell::CheckedCellSpecification;
 
-    use super::{compile_cell_program_admitted, CellCheckRequest, TemplateSelector, TurnTemplate};
+    use super::{compile_cell_program_admitted, TemplateSelector, TurnTemplate};
     use crate::session::{
         HostBindingType, ModuleEnv, PersistentSession, ResidentSession, RuntimeCompileInputs,
         SessionLib,
@@ -9500,27 +9270,7 @@ mod compiler_packet_replay {
             Some(("job1", HostBindingType::COMMAND_JOB))
         );
         let view = admission.view();
-        let include = inputs
-            .include
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<&Path>>();
-        let (checked, program) = compile_cell_program_admitted(
-            CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: &specification.cell_source,
-                template: &specification.template_source,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &[],
-                compile_generation: view.next_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
+        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
         assert_eq!(checked.items.len(), 1);
         assert_eq!(program.items().len(), 1);
         let item = &program.items()[0];

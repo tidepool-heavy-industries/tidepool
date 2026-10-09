@@ -121,6 +121,12 @@ pub struct ParsedCellPlan {
 }
 
 impl ParsedCellPlan {
+    /// Immutable source recipe bound by the parser receipt and retained by
+    /// runtime admission. Consumers derive compiler requests from this owner.
+    pub fn specification(&self) -> &Arc<CheckedCellSpecification> {
+        &self.specification
+    }
+
     pub fn specification_digest(&self) -> [u8; 32] {
         self.specification.specification_digest()
     }

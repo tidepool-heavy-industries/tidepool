@@ -473,8 +473,7 @@ impl PrivateExecutionAdmission {
 pub struct RuntimeCellAdmission {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
-    private_execution: Option<Arc<PrivateExecutionAdmission>>,
-    native_purpose: Option<NativeCellPurpose>,
+    purpose: RuntimeCellPurpose,
     _retained_scope: Arc<RuntimeLexicalScopeLease>,
     prefix_started: std::sync::atomic::AtomicBool,
     declaration_baseline: Option<super::lexical_projection::DeclarationProjectionBaseline>,
@@ -501,20 +500,26 @@ pub struct RuntimeCellAdmission {
     digest: [u8; 32],
 }
 
-/// Runtime-issued purpose for a native setup action or host payload mount.
-/// These purposes never authorize authored private writes or declarations.
-enum NativeCellPurpose {
-    Setup,
+/// One runtime-issued execution purpose. Component controls can capture an
+/// observation without making an executable cell admission.
+enum RuntimeCellPurpose {
+    #[cfg(test)]
+    Observation,
+    PrivateExecution(Arc<PrivateExecutionAdmission>),
+    NativeSetup,
     HostCarrier {
         binding: String,
         expected: super::resident::HostBindingType,
     },
 }
 
-impl NativeCellPurpose {
+impl RuntimeCellPurpose {
     fn frame_authorization(&self, frame: &mut impl FnMut(&[u8])) {
         match self {
-            Self::Setup => frame(b"TidepoolNativeSetupAdmission1"),
+            #[cfg(test)]
+            Self::Observation => {}
+            Self::PrivateExecution(_) => frame(b"TidepoolPrivateExecutionAdmission1"),
+            Self::NativeSetup => frame(b"TidepoolNativeSetupAdmission1"),
             Self::HostCarrier { binding, expected } => {
                 frame(b"TidepoolHostCarrierAdmission1");
                 frame(binding.as_bytes());
@@ -1074,7 +1079,7 @@ fn validate_private_value_overlay<'a>(
     snapshot: &RuntimeCheckedPrefixSnapshot,
     names: impl Iterator<Item = &'a str>,
 ) -> Result<(), SessionError> {
-    if prefix.admission.private_execution.is_none() {
+    if prefix.admission.private_execution().is_none() {
         return Ok(());
     }
     let names = names.collect::<std::collections::BTreeSet<_>>();
@@ -1109,7 +1114,7 @@ impl CheckedTurnCompletion {
         scope: ScopeId,
         binders: &[&super::BoundBinder],
     ) -> Result<bool, SessionError> {
-        let Some(private) = &self.prefix.admission.private_execution else {
+        let Some(private) = self.prefix.admission.private_execution() else {
             return Ok(false);
         };
         if !self.prefix.admission.belongs_to(session)
@@ -1160,7 +1165,7 @@ impl CheckedTurnCompletion {
             self.execution.target_definition_identities(),
             self.execution.bound_binder_identities(),
         )?;
-        let completed_values = if let Some(private) = &self.prefix.admission.private_execution {
+        let completed_values = if let Some(private) = self.prefix.admission.private_execution() {
             let mut values = Vec::new();
             for name in self.execution.private_value_overlay_binders() {
                 let entry = session
@@ -1469,17 +1474,24 @@ impl RuntimeCellAdmission {
     }
 
     pub fn private_execution(&self) -> Option<&Arc<PrivateExecutionAdmission>> {
-        self.private_execution.as_ref()
+        match &self.purpose {
+            RuntimeCellPurpose::PrivateExecution(execution) => Some(execution),
+            _ => None,
+        }
     }
 
-    pub(super) fn is_native_setup(&self) -> bool {
-        matches!(self.native_purpose, Some(NativeCellPurpose::Setup))
+    pub(super) fn has_execution_purpose(&self) -> bool {
+        match &self.purpose {
+            #[cfg(test)]
+            RuntimeCellPurpose::Observation => false,
+            RuntimeCellPurpose::PrivateExecution(_)
+            | RuntimeCellPurpose::NativeSetup
+            | RuntimeCellPurpose::HostCarrier { .. } => true,
+        }
     }
     pub(super) fn host_carrier(&self) -> Option<(&str, super::resident::HostBindingType)> {
-        match &self.native_purpose {
-            Some(NativeCellPurpose::HostCarrier { binding, expected }) => {
-                Some((binding, *expected))
-            }
+        match &self.purpose {
+            RuntimeCellPurpose::HostCarrier { binding, expected } => Some((binding, *expected)),
             _ => None,
         }
     }
@@ -1772,8 +1784,7 @@ impl PersistentSession {
             reserved: true,
             persistence: if prefix
                 .admission
-                .private_execution
-                .as_ref()
+                .private_execution()
                 .is_some_and(|private| private.durable_owner.is_some())
             {
                 super::DeclarationPersistence::Durable
@@ -1908,6 +1919,9 @@ impl PersistentSession {
         admission: Arc<RuntimeCellAdmission>,
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     ) -> Result<Option<Arc<RuntimeCheckedPrefix>>, SessionError> {
+        if !admission.has_execution_purpose() {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         let planned = admission
             .plan_reservation()
             .ok_or(SessionError::StaleStagedDeclaration)?;
@@ -2214,7 +2228,8 @@ impl PersistentSession {
         self.begin_private_execution(public_scope)
     }
 
-    pub fn admit_cell_in(
+    #[cfg(test)]
+    pub(super) fn admit_cell_in(
         &mut self,
         scope: ScopeId,
         declaration_count: usize,
@@ -2231,8 +2246,7 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             None,
-            None,
-            None,
+            RuntimeCellPurpose::Observation,
             None,
         )
     }
@@ -2271,8 +2285,7 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             Some(plan),
-            None,
-            Some(NativeCellPurpose::Setup),
+            RuntimeCellPurpose::NativeSetup,
             compile_inputs,
         )
     }
@@ -2311,8 +2324,7 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             Some(plan),
-            None,
-            Some(NativeCellPurpose::HostCarrier { binding, expected }),
+            RuntimeCellPurpose::HostCarrier { binding, expected },
             compile_inputs,
         )
     }
@@ -2339,8 +2351,7 @@ impl PersistentSession {
         authority_digest: [u8; 32],
         include_paths: Vec<PathBuf>,
         plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
-        private_execution: Option<Arc<PrivateExecutionAdmission>>,
-        native_purpose: Option<NativeCellPurpose>,
+        purpose: RuntimeCellPurpose,
         compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.reap_admission_leases();
@@ -2412,13 +2423,11 @@ impl PersistentSession {
                     })
             };
             if let Some(reason) = refusal {
-                return Err(
-                    if matches!(native_purpose, Some(NativeCellPurpose::Setup)) {
-                        self.native_setup_refusal(scope, reason)
-                    } else {
-                        SessionError::StaleStagedDeclaration
-                    },
-                );
+                return Err(if matches!(purpose, RuntimeCellPurpose::NativeSetup) {
+                    self.native_setup_refusal(scope, reason)
+                } else {
+                    SessionError::StaleStagedDeclaration
+                });
             }
         }
         let view_digest = self
@@ -2643,9 +2652,7 @@ impl PersistentSession {
                 frame(parent.as_bytes());
             }
         }
-        if let Some(purpose) = &native_purpose {
-            purpose.frame_authorization(&mut frame);
-        }
+        purpose.frame_authorization(&mut frame);
         compile_inputs.frame_authorization(&mut frame);
         let digest = *digest.finalize().as_bytes();
         let planned = planned.map(|mut planned| {
@@ -2657,8 +2664,7 @@ impl PersistentSession {
         Ok(Arc::new(RuntimeCellAdmission {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
-            private_execution,
-            native_purpose,
+            purpose,
             _retained_scope: retained_scope,
             prefix_started: std::sync::atomic::AtomicBool::new(false),
             declaration_baseline,
@@ -2822,10 +2828,10 @@ impl PersistentSession {
         })
     }
 
-    /// Issue executable cell authority inside the exact private execution
-    /// whose token this runtime minted. The token retains its lexical owner
-    /// through off-checkout compilation and parked native execution.
-    pub fn admit_cell_for_execution(
+    /// Capture private admission facts for owner-component controls without
+    /// a parser or compiler. This cannot produce an executable program prefix.
+    #[cfg(test)]
+    pub(super) fn admit_cell_for_execution(
         &mut self,
         execution: Arc<PrivateExecutionAdmission>,
         declaration_count: usize,
@@ -2835,18 +2841,17 @@ impl PersistentSession {
         include_paths: Vec<PathBuf>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         self.compile_view_for_execution(&execution)?;
-        let mut admission = self.admit_cell_in(
+        self.admit_cell_with_plan(
             execution.private_scope(),
             declaration_count,
             specification,
             specification_digest,
             authority_digest,
             include_paths,
-        )?;
-        Arc::get_mut(&mut admission)
-            .expect("fresh runtime admission has one owner")
-            .private_execution = Some(execution);
-        Ok(admission)
+            None,
+            RuntimeCellPurpose::PrivateExecution(execution),
+            None,
+        )
     }
 
     /// Reserve every ordered source item under the original private admission.
@@ -2878,8 +2883,7 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             Some(plan),
-            Some(execution),
-            None,
+            RuntimeCellPurpose::PrivateExecution(execution),
             compile_inputs,
         )
     }
