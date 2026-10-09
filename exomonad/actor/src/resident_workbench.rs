@@ -4840,21 +4840,7 @@ where
             .transpose()
             .map_err(ResidentActorWorkbenchError::Compile)?
             .flatten();
-        let pending_originals = self
-            .access
-            .with_machine(context.clone(), move |session, context, _| {
-                public_original
-                    .map(|selection| {
-                        session
-                            .stage_published_source_originals_in(
-                                context.placement.lexical_scope,
-                                selection,
-                            )
-                            .map_err(ResidentActorWorkbenchError::Resident)
-                    })
-                    .transpose()
-            })
-            .await?;
+        let public_scope = context.placement.lexical_scope;
         let mut compile_context = context.clone();
         compile_context.haskell_effects_alias = dispatcher_effects.clone();
         let installation_scope = self
@@ -4879,7 +4865,7 @@ where
         let registration = abort_guard.registration();
         let installed_effect_support = self.access.source.installed_effect_support().to_vec();
         let handler_effect_support = self.access.handler_effect_support.clone();
-        let step = registration
+        let (step, pending_originals) = registration
             .scope(self.access.with_machine(compile_context.clone(), {
                 let prepared = code.prepared().cloned();
                 let installer = match &code {
@@ -4887,14 +4873,23 @@ where
                     InstalledToolCode::SourcePrepared(_) => None,
                 };
                 move |session, context, _| {
-                    let (outcome, warnings) = match (prepared, installer) {
+                    let (outcome, warnings, pending_originals) = match (prepared, installer) {
                         (Some(prepared), None) => {
                             session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
                             let entry =
                                 session.prepare_startup_entry(prepared.entry.compiled().code())?;
+                            let pending = public_original
+                                .map(|selection| {
+                                    session.stage_published_source_originals_in(
+                                        public_scope,
+                                        selection,
+                                    )
+                                })
+                                .transpose()?;
                             (
                                 session.run_startup_entry(entry),
                                 prepared.entry.compiled().warnings.warnings.clone(),
+                                pending,
                             )
                         }
                         (None, Some(installer)) => (
@@ -4906,10 +4901,11 @@ where
                                 None,
                             ),
                             Vec::new(),
+                            None,
                         ),
                         _ => unreachable!("one installation producer"),
                     };
-                    start_fragment_settlement(
+                    let step = start_fragment_settlement(
                         session,
                         context,
                         1,
@@ -4917,7 +4913,8 @@ where
                         WorkbenchDisplay::Discard,
                         warnings,
                         outcome,
-                    )
+                    )?;
+                    Ok((step, pending_originals))
                 }
             }))
             .await?;
