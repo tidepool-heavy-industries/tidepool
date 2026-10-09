@@ -227,12 +227,14 @@ async fn parked(
         .while_root_live(
             "recursive typed settlement is parked",
             tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                let mut poll = tokio::time::interval(Duration::from_millis(10));
+                poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
+                    poll.tick().await;
                     pending_claim(host, operation);
                     if actor.hosted_workbench_waiting(&context).is_some() {
                         break;
                     }
-                    tokio::task::yield_now().await;
                 }
             }),
         )
@@ -253,7 +255,10 @@ async fn yield_pending(
         .while_root_live(
             "recursive Engine yield is persisted",
             tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                let mut poll = tokio::time::interval(Duration::from_millis(10));
+                poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
+                    poll.tick().await;
                     pending_claim(host, operation);
                     if host
                         .runtime
@@ -272,7 +277,6 @@ async fn yield_pending(
                     {
                         break;
                     }
-                    tokio::task::yield_now().await;
                 }
             }),
         )
@@ -294,6 +298,37 @@ fn issuing_request(host: &HostedTestRuntime, round: &HostedScriptRound) -> Reque
         .unwrap()
         .pending_head
         .expect("provider request has its issuing frontier")
+}
+
+fn workspace_provenance(host: &HostedTestRuntime, child: &str, grandchild: &str) {
+    let root = actor_worktree_storage_root(
+        &host.context.config.workspace,
+        host.context.config.run_directory.path(),
+    )
+    .unwrap();
+    let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(root).unwrap();
+    let registry = exomonad_worktree::WorktreeRegistry::open(&anchor, "registry").unwrap();
+    let child_id = exomonad_worktree::WorktreeId::from_raw(child.to_owned());
+    let child = registry.get(&child_id).unwrap().unwrap();
+    let grandchild = registry
+        .get(&exomonad_worktree::WorktreeId::from_raw(
+            grandchild.to_owned(),
+        ))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        child.origin,
+        exomonad_worktree::WorktreeOrigin::CurrentRepository
+    );
+    assert_eq!(
+        child.source_repository,
+        std::fs::canonicalize(&host.context.config.workspace).unwrap()
+    );
+    assert_eq!(
+        grandchild.origin,
+        exomonad_worktree::WorktreeOrigin::Worktree(child_id)
+    );
+    assert_eq!(grandchild.source_repository, child.cwd);
 }
 
 fn replied(round: &HostedScriptRound, call: &str) {
@@ -411,6 +446,11 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             assert_ne!(
                 child_worktree, grandchild_worktree,
                 "distinct actual fork worktrees"
+            );
+            workspace_provenance(
+                host,
+                child_worktree.as_deref().unwrap(),
+                grandchild_worktree.as_deref().unwrap(),
             );
             let child_installation = host.context.observer.installation(child_actor).await;
             parked(host, &host.context.actor, &root_operation).await;
