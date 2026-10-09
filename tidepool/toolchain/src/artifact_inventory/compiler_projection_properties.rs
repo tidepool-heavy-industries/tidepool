@@ -424,6 +424,63 @@ fn exact_original_variants_are_custody_not_compiler_namespace_conflicts() {
 }
 
 #[test]
+fn compiler_projection_dependency_refusals_preserve_exact_owners() {
+    let catalog = Catalog::new(false, [1, 2, 3, 4, 5, 6]);
+    let view = catalog.full_view();
+    let descriptors = view.descriptors();
+    let complete = catalog.projection(&view, [None; MODULES]);
+    complete
+        .entries_from_metadata(&view.metadata_snapshot())
+        .unwrap();
+    let incomplete =
+        CompilerInputProjection::from_issued_entries(std::slice::from_ref(&catalog.interfaces[0]))
+            .unwrap();
+    let missing = incomplete
+        .entries_from_metadata(&view.metadata_snapshot())
+        .unwrap_err();
+    let mut changed_seal = view.metadata_snapshot();
+    let required = Arc::make_mut(
+        changed_seal
+            .artifacts
+            .get_mut(&catalog.interfaces[1].descriptor.id)
+            .unwrap(),
+    );
+    required.descriptor.interface_sha256 = [99; 32];
+    let mismatch = complete.entries_from_metadata(&changed_seal).unwrap_err();
+    for (error, expected) in [
+        (
+            missing,
+            ArtifactInventoryFailure::MissingDependency {
+                artifact: catalog.interfaces[0].descriptor.id,
+                dependent: owner(0),
+                required: owner(1),
+                dependency: ArtifactDependency::Interface,
+            },
+        ),
+        (
+            mismatch,
+            ArtifactInventoryFailure::InterfaceSealMismatch {
+                dependent: owner(0),
+                required: owner(1),
+            },
+        ),
+    ] {
+        let CompileError::ArtifactInventory(error) = error else {
+            panic!("projection refusals must retain exact structured dependency facts");
+        };
+        assert_eq!(error.failure, expected);
+        let encoded = serde_json::to_vec(&error.failure).unwrap();
+        let decoded: ArtifactInventoryFailure = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, expected);
+    }
+    assert_eq!(
+        view.descriptors(),
+        descriptors,
+        "refusal leaves retained custody unchanged"
+    );
+}
+
+#[test]
 fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
     let catalog = Catalog::new(false, [1, 2, 3, 4, 5, 6]);
     let view = catalog.full_view();
