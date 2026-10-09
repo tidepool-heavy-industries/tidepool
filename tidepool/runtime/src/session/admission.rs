@@ -1577,12 +1577,10 @@ impl PersistentSession {
                     || reservation.generation.0 != execution.generation()
                     || reservation.digest != admission.digest()
             })
-            || prefix.program.as_ref().is_none_or(|program| {
-                program.items().len() != 1
-                    || program.items()[0]
-                        .native()
-                        .is_none_or(|original| !Arc::ptr_eq(original, execution))
-            })
+            || prefix.program.items().len() != 1
+            || prefix.program.items()[0]
+                .native()
+                .is_none_or(|original| !Arc::ptr_eq(original, execution))
             || self.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
             || self.compile_view_digest_in(scope) != Some(state.snapshot.view_digest)
