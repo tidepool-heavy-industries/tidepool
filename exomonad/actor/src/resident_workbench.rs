@@ -37,12 +37,11 @@ use tidepool_runtime::session::HostCarrier;
 use tidepool_runtime::session::{
     hide_preamble_exports, insert_preamble_imports, render_turn_compile_rejection,
     resident_cell_check_template, resident_workbench_templates, run_admitted_inspections,
-    run_inspections, run_turn, BoundBinder, CellCheck, CellCheckRequest, CompiledTurn,
-    HostBindingAuthority, HostBindingType, HostPayload, InspectionQuery, InspectionRequest,
-    OutputSink, ParsedBlock, PendingPreparedInstall, PendingPreparedMode,
-    ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentResumeError,
-    ResidentSession, RootCustody, SourceImports, TurnClassification, TurnCode, TurnKind,
-    TurnRequest, TurnResult,
+    run_inspections, run_turn, BoundBinder, CellCheck, CompiledTurn, HostBindingAuthority,
+    HostBindingType, HostPayload, InspectionQuery, InspectionRequest, OutputSink, ParsedBlock,
+    PendingPreparedInstall, PendingPreparedMode, ResidentContinuationEvent, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
+    SourceImports, TurnClassification, TurnCode, TurnKind, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
@@ -5407,14 +5406,8 @@ where
             )),
         };
         let leased_input = self.lease_cell_input(&context).await?;
-        self.prepare_checked_cell(
-            context,
-            cell_source,
-            authority,
-            Some(execution),
-            leased_input,
-        )
-        .await
+        self.prepare_checked_cell(context, cell_source, authority, execution, leased_input)
+            .await
     }
 
     async fn lease_cell_input(
@@ -5598,9 +5591,11 @@ where
             context.clone(),
             cell,
             authority,
+            CellPreparationPurpose::HostCarrier {
+                binding: binding.clone(),
+                expected: kind.host_binding_type(),
+            },
             None,
-            None,
-            Some((binding.clone(), kind.host_binding_type())),
         ))
         .await?;
         let PreparedCell {
@@ -5670,16 +5665,15 @@ where
         context: crate::ActorSessionContext,
         cell_source: String,
         authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
-        execution: Option<Arc<ExecutionPrivateScope>>,
+        execution: Arc<ExecutionPrivateScope>,
         leased_input: Option<HostInputRetirement>,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
         self.prepare_checked_host_cell(
             context,
             cell_source,
             authority,
-            execution,
+            CellPreparationPurpose::PrivateExecution(execution),
             leased_input,
-            None,
         )
         .await
     }
@@ -5690,12 +5684,11 @@ where
         context: crate::ActorSessionContext,
         cell_source: String,
         authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
-        execution: Option<Arc<ExecutionPrivateScope>>,
+        purpose: CellPreparationPurpose,
         leased_input: Option<HostInputRetirement>,
-        host: Option<(String, HostBindingType)>,
     ) -> Result<(CellCheck, PreparedCell), ResidentActorWorkbenchError> {
-        if execution
-            .as_ref()
+        if purpose
+            .execution()
             .is_some_and(|execution| context.placement.lexical_scope != execution.private_scope)
             || context.source_layer.as_ref() != authority.source().include_paths()
         {
@@ -5703,8 +5696,8 @@ where
                 "checked cell preparation requires its admitted context and source revision".into(),
             ));
         }
-        let admission_execution = execution.clone();
-        let pure_host_carrier = host.is_some();
+        let snapshot_execution = purpose.execution().cloned();
+        let pure_host_carrier = matches!(purpose, CellPreparationPurpose::HostCarrier { .. });
         let snapshot_source = self.access.source.clone();
 
         let request_scope = self.request_scope.clone();
@@ -5721,11 +5714,12 @@ where
                     snapshot_source,
                     request_scope.as_ref(),
                     mounted_input.as_ref(),
-                    execution
-                        .as_ref()
-                        .map_or(CellSnapshotAdmission::ProtectedSetup, |execution| {
+                    snapshot_execution.as_ref().map_or(
+                        CellSnapshotAdmission::ProtectedSetup,
+                        |execution| {
                             CellSnapshotAdmission::PrivateExecution(execution.admission.as_ref())
-                        }),
+                        },
+                    ),
                 )?;
                 // Fixed host carriers describe native payloads without invoking
                 // actor effects, independently of the selected tool's dispatcher.
@@ -5749,7 +5743,6 @@ where
                     &snapshot.candidate_module.module_name(),
                 )?;
                 let template = resident_cell_check_template(&preamble, effects, &prepared.imports);
-                let evidence = cell_check_evidence(&snapshot.view, &template, &prepared);
                 let templates =
                     resident_workbench_templates(&prepared.preamble, effects, &prepared.imports);
                 let cell = tidepool_toolchain::checked_cell::CheckedCellSpecification {
@@ -5776,9 +5769,7 @@ where
                 let specification = Arc::new(WorkbenchCompilationSpec {
                     _authority: authority.clone(),
                     cell,
-                    templates,
                     include: prepared.include,
-                    evidence,
                     declaration_imports: snapshot.view.workbench_imports(),
                     compile_inputs: snapshot.view.compile_inputs().clone(),
                 });
@@ -5805,41 +5796,29 @@ where
         let admission = self
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let admitted = match (admission_execution, host) {
-                    (None, Some((binding, expected))) => session.admit_host_carrier_cell_in(
-                        context.placement.lexical_scope,
-                        plan,
-                        reservation_specification.clone(),
-                        reservation_specification.cell.specification_digest(),
-                        reservation_specification._authority.authority_digest(),
-                        reservation_specification.include.clone(),
-                        binding,
-                        expected,
-                        Some(reservation_specification.compile_inputs.clone()),
-                    ),
-                    (Some(execution), None) => session.admit_planned_cell_for_execution(
-                        execution.admission.clone(),
-                        plan,
-                        reservation_specification.clone(),
-                        reservation_specification.cell.specification_digest(),
-                        reservation_specification._authority.authority_digest(),
-                        reservation_specification.include.clone(),
-                        Some(reservation_specification.compile_inputs.clone()),
-                    ),
-                    (None, None) => session.admit_native_setup_cell_in(
-                        context.placement.lexical_scope,
-                        plan,
-                        reservation_specification.clone(),
-                        reservation_specification.cell.specification_digest(),
-                        reservation_specification._authority.authority_digest(),
-                        reservation_specification.include.clone(),
-                        Some(reservation_specification.compile_inputs.clone()),
-                    ),
-                    (Some(_), Some(_)) => {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "host input cannot share authored private execution authority".into(),
-                        ))
-                    }
+                let admitted = match purpose {
+                    CellPreparationPurpose::HostCarrier { binding, expected } => session
+                        .admit_host_carrier_cell_in(
+                            context.placement.lexical_scope,
+                            plan,
+                            reservation_specification.clone(),
+                            reservation_specification.cell.specification_digest(),
+                            reservation_specification._authority.authority_digest(),
+                            reservation_specification.include.clone(),
+                            binding,
+                            expected,
+                            Some(reservation_specification.compile_inputs.clone()),
+                        ),
+                    CellPreparationPurpose::PrivateExecution(execution) => session
+                        .admit_planned_cell_for_execution(
+                            execution.admission.clone(),
+                            plan,
+                            reservation_specification.clone(),
+                            reservation_specification.cell.specification_digest(),
+                            reservation_specification._authority.authority_digest(),
+                            reservation_specification.include.clone(),
+                            Some(reservation_specification.compile_inputs.clone()),
+                        ),
                 };
                 admitted.map_err(|error| {
                     ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
@@ -5852,30 +5831,10 @@ where
         let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 compiler_work.run(cancellation, || {
-                    let include = check_specification
-                        .include
-                        .iter()
-                        .map(PathBuf::as_path)
-                        .collect::<Vec<_>>();
-                    let view = check_admission.view();
-                    tidepool_runtime::session::turn::compile_cell_program_admitted(
-                        CellCheckRequest {
-                            exact_context: view.exact_compile_context(),
-                            session_id: Some(view.session()),
-                            cell_text: &check_specification.cell.cell_source,
-                            template: &check_specification.cell.template_source,
-                            include: &include,
-                            session_root: view.session_root(),
-                            inject_modules: &check_specification.cell.injected_modules,
-                            compile_generation: view.next_value_generation().0,
-                            compile_view_evidence: &check_specification.evidence,
-                        },
-                        check_admission.clone(),
-                        &check_specification.templates,
-                    )
-                    .map_err(|failure| {
-                        cell_check_error(failure, &check_specification.cell.cell_source)
-                    })
+                    tidepool_runtime::session::turn::compile_cell_program_admitted(check_admission)
+                        .map_err(|failure| {
+                            cell_check_error(failure, &check_specification.cell.cell_source)
+                        })
                 })
             }))
             .await
@@ -10791,12 +10750,27 @@ impl From<tidepool_runtime::session::resident::BindingLease> for CellPreparation
     }
 }
 
+enum CellPreparationPurpose {
+    PrivateExecution(Arc<ExecutionPrivateScope>),
+    HostCarrier {
+        binding: String,
+        expected: HostBindingType,
+    },
+}
+
+impl CellPreparationPurpose {
+    fn execution(&self) -> Option<&Arc<ExecutionPrivateScope>> {
+        match self {
+            Self::PrivateExecution(execution) => Some(execution),
+            Self::HostCarrier { .. } => None,
+        }
+    }
+}
+
 struct WorkbenchCompilationSpec {
     _authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
     cell: tidepool_toolchain::checked_cell::CheckedCellSpecification,
-    templates: Vec<tidepool_runtime::session::TurnTemplate>,
     include: Vec<PathBuf>,
-    evidence: String,
     declaration_imports: SourceImports,
     compile_inputs: tidepool_runtime::session::RuntimeCompileInputs,
 }
@@ -11383,30 +11357,6 @@ fn text_binding_carrier_imports() -> SourceImports {
 
 const TEXT_BINDING_TYPE_NAME: &str = "TidepoolHostText.Text";
 const TEXT_BINDING_ANCHOR: &str = "case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length";
-
-fn cell_check_evidence(
-    view: &crate::ActorCompileView,
-    template: &str,
-    prepared: &WorkbenchCompilation,
-) -> String {
-    fn field(hasher: &mut blake3::Hasher, value: &[u8]) {
-        hasher.update(&(value.len() as u64).to_le_bytes());
-        hasher.update(value);
-    }
-    let mut evidence = blake3::Hasher::new();
-    field(&mut evidence, view.evidence_key().as_bytes());
-    field(&mut evidence, template.as_bytes());
-    for path in prepared.include.iter() {
-        field(&mut evidence, path.as_os_str().as_encoded_bytes());
-    }
-    // Only the injected modules this scope can reach: the rest are injected
-    // for findability, and another actor's binds must not invalidate the
-    // evidence (`SessionCompileView::is_current_for`).
-    for module in view.reachable_module_names() {
-        field(&mut evidence, module.as_bytes());
-    }
-    evidence.finalize().to_hex().to_string()
-}
 
 /// The verdict for a block this runtime wrote itself: `<binder> <- pure …`,
 /// one bound name, no declaration exports. Classification is its own compiler
@@ -14309,7 +14259,7 @@ pub(crate) mod request_tests {
             assert!(!items.is_empty(), "fixture must execute a checked item");
             assert_eq!(checked.items.len(), items.len());
             for (index, (observed, item)) in checked.items.iter().zip(items).enumerate() {
-                assert!(item.ready.prefix.cell_program().is_some());
+                assert!(!item.ready.prefix.cell_program().items().is_empty());
                 let step = self
                     .begin_prepared_cell_item(
                         context.clone(),
@@ -19636,7 +19586,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 context.clone(),
                 cell,
                 workbench.compilation_authority.clone().unwrap(),
-                workbench.private_execution.clone(),
+                workbench.private_execution.clone().unwrap(),
                 Some(host_owner),
             )
             .await
@@ -19802,7 +19752,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 context.clone(),
                 source,
                 workbench.compilation_authority.clone().unwrap(),
-                workbench.private_execution.clone(),
+                workbench.private_execution.clone().unwrap(),
                 Some(input),
             )
             .await
@@ -20333,29 +20283,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 None,
             )
             .unwrap();
-        let view = admission.view();
-        let include = admission
-            .include_paths()
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<_>>();
-        let injected = view.injected_module_names();
-        let (checked, program) = tidepool_runtime::session::turn::compile_cell_program_admitted(
-            tidepool_runtime::session::CellCheckRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                cell_text: &receiver_text,
-                template: &template,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                compile_generation: admission.initial_value_generation().0,
-                compile_view_evidence: "",
-            },
-            admission.clone(),
-            &templates,
-        )
-        .unwrap();
+        let (checked, program) =
+            tidepool_runtime::session::turn::compile_cell_program_admitted(admission.clone())
+                .unwrap();
         assert_eq!(
             checked.items.len(),
             1,
@@ -23166,28 +23096,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                 prepared.include.clone(),
             )
             .unwrap();
-        let raw_view = raw.view().clone();
-        let include = prepared
-            .include
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<_>>();
-        let request = CellCheckRequest {
-            exact_context: raw_view.exact_compile_context(),
-            session_id: Some(raw_view.session()),
-            cell_text: &specification.cell_source,
-            template: &specification.template_source,
-            include: &include,
-            session_root: raw_view.session_root(),
-            inject_modules: &specification.injected_modules,
-            compile_generation: raw_view.next_value_generation().0,
-            compile_view_evidence: "raw no-private refusal control",
-        };
         assert!(
-            tidepool_runtime::session::turn::compile_cell_program_admitted(
-                request, raw, &templates
-            )
-            .is_err(),
+            tidepool_runtime::session::turn::compile_cell_program_admitted(raw).is_err(),
             "bare public cell admission must not acquire native setup authority"
         );
         let mut leaked = specification.as_ref().clone();
