@@ -5201,7 +5201,7 @@ where
     /// it is shown whole, so the owner reads the child's result in the notice
     /// rather than asking for it again; only a larger reply is cut, and the
     /// cut names this budget.
-    const SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET: usize = 8192;
+    const SETTLEMENT_REPLY_PREVIEW_BYTE_BUDGET: usize = 8192;
 
     /// Both authored tool replies and route callbacks resume the one active
     /// request continuation, then hand it back to the ordinary actor scheduler.
@@ -5255,7 +5255,7 @@ where
                     result,
                     Some(truncate_preview_at_line(
                         carried,
-                        Self::SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET,
+                        Self::SETTLEMENT_REPLY_PREVIEW_BYTE_BUDGET,
                     )),
                 ),
                 _ => match self
@@ -5264,7 +5264,7 @@ where
                     .preview_retained(
                         context.clone(),
                         result,
-                        Self::SETTLEMENT_REPLY_PREVIEW_CHAR_BUDGET,
+                        Self::SETTLEMENT_REPLY_PREVIEW_BYTE_BUDGET,
                     )
                     .await
                 {
