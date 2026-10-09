@@ -102,7 +102,7 @@ BUILTIN_ENTRY_SOURCES = {
 CATALOG_TEST = "actor_host::packaged_catalog_tests::packaged_cohort_executes_and_displays_without_build_inputs"
 REQUIRED_RUNTIME_EXECUTABLES = (
     "bash", "python3", "dirname", "git", "bwrap", "tmux", "systemd-run", "systemctl", "nix", "nix-store",
-    "rg", "find",
+    "rg", "find", "sed",
 )
 
 def programs(root: Path) -> dict:

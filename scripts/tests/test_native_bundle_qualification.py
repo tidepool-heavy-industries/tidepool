@@ -1020,7 +1020,7 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertTrue(report['tests'][0]['passed'])
 
     def test_runtime_tool_owner_checks_declared_executable_files(self):
-        for name in ('nix-store', 'rg', 'find'):
+        for name in ('nix-store', 'rg', 'find', 'sed'):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tools = runtime_tools_fixture(root)
@@ -1033,36 +1033,42 @@ class NativeQualificationTests(unittest.TestCase):
                     required.mkdir()
                     with self.assertRaisesRegex(ValueError, f'lack executable {name}'):
                         qualification.native_runtime_tools(tools)
+                    required.rmdir()
+                    required.write_text('nonexecutable tool fixture\n')
+                    required.chmod(0o644)
+                    with self.assertRaisesRegex(ValueError, f'lack executable {name}'):
+                        qualification.native_runtime_tools(tools)
 
-    def test_missing_or_nonexecutable_python_refuses_assembly_freeze_and_environment_before_work(self):
-        for stage in ('assemble', 'freeze', 'environment'):
-            for condition in ('missing', 'nonexecutable'):
-                with self.subTest(stage=stage, condition=condition), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    tools = runtime_tools_fixture(root)
-                    python = tools / 'bin/python3'
-                    if condition == 'missing':
-                        python.unlink()
-                    else:
-                        python.chmod(0o644)
-                    bundle = root / 'bundle'
-                    (bundle / 'share/exomonad').mkdir(parents=True)
-                    (bundle / 'share/exomonad/runtime-tools').symlink_to(tools)
-                    output = root / 'assembled'
-                    args = SimpleNamespace(runtime_tools=tools, ghc_libdir=tools, output=output, bundle=bundle)
-                    with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
-                         patch.object(qualification.subprocess, 'run') as execute, \
-                         patch.object(qualification.subprocess, 'check_output') as query:
-                        with self.assertRaisesRegex(ValueError, 'lack executable python3'):
-                            if stage == 'assemble':
-                                qualification.assemble(args)
-                            elif stage == 'freeze':
-                                qualification.freeze(args)
-                            else:
-                                qualification.native_environment(bundle)
-                    self.assertFalse(output.exists())
-                    execute.assert_not_called()
-                    query.assert_not_called()
+    def test_missing_or_nonexecutable_interpreter_and_preview_tool_refuse_before_work(self):
+        for name in ('python3', 'sed'):
+            for stage in ('assemble', 'freeze', 'environment'):
+                for condition in ('missing', 'nonexecutable'):
+                    with self.subTest(name=name, stage=stage, condition=condition), tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        tools = runtime_tools_fixture(root)
+                        required = tools / 'bin' / name
+                        if condition == 'missing':
+                            required.unlink()
+                        else:
+                            required.chmod(0o644)
+                        bundle = root / 'bundle'
+                        (bundle / 'share/exomonad').mkdir(parents=True)
+                        (bundle / 'share/exomonad/runtime-tools').symlink_to(tools)
+                        output = root / 'assembled'
+                        args = SimpleNamespace(runtime_tools=tools, ghc_libdir=tools, output=output, bundle=bundle)
+                        with patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
+                             patch.object(qualification.subprocess, 'run') as execute, \
+                             patch.object(qualification.subprocess, 'check_output') as query:
+                            with self.assertRaisesRegex(ValueError, f'lack executable {name}'):
+                                if stage == 'assemble':
+                                    qualification.assemble(args)
+                                elif stage == 'freeze':
+                                    qualification.freeze(args)
+                                else:
+                                    qualification.native_environment(bundle)
+                        self.assertFalse(output.exists())
+                        execute.assert_not_called()
+                        query.assert_not_called()
 
     def test_run_forwards_scheduling_and_sealed_watchdogs_and_records_them(self):
         for compiler_mode in (None, 'owned-resident'):

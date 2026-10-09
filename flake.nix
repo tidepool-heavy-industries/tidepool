@@ -406,6 +406,7 @@
             pkgs.git
             pkgs.ripgrep
             pkgs.findutils
+            pkgs.gnused
             pkgs.bubblewrap
             pkgs.tmux
             pkgs.nix
@@ -433,10 +434,11 @@
           exomonad-runtime-search-tools = pkgs.runCommand "exomonad-runtime-search-tools-check" { } ''
             export PATH=${self.packages.${system}.buck-exomonad-runtime-tools}/bin
             mkdir -p fixture/nested
-            printf 'packaged-search-witness\n' > fixture/nested/input.txt
+            printf 'packaged-search-witness\nsecond-line\nthird-line\n' > fixture/nested/input.txt
             test "$(rg --files fixture)" = fixture/nested/input.txt
             test "$(rg --fixed-strings --line-number packaged-search-witness fixture)" = fixture/nested/input.txt:1:packaged-search-witness
             test "$(find fixture -type f -name input.txt)" = fixture/nested/input.txt
+            test "$(sed -n '2,3{=;p;}' fixture/nested/input.txt)" = "$(printf '2\nsecond-line\n3\nthird-line')"
             touch "$out"
           '';
 
