@@ -98,6 +98,56 @@ class IsolatedLibtestTests(unittest.TestCase):
                         self.assertFalse(record['diagnostic_evidence_complete'])
                         self.assertTrue(record['diagnostic_summaries']['issues'])
                         self.assertNotIn('artifacts_removed_after_success', record)
+                        self.assertTrue(record['artifacts_retained_after_success'])
+                        self.assertEqual(record['artifact_disposition'], 'retained')
+
+    def test_artifact_disposition_matches_observed_outcomes_across_operation_combinations(self):
+        # Independently classify filesystem disposition after each run. Reusing
+        # the outcome record must not carry a previous case's retention claim.
+        record = {}
+        for index, (libtest_passes, cleanup, complete, diagnostic, retain) in enumerate(
+                itertools.product((False, True), repeat=5)):
+            with self.subTest(libtest_passes=libtest_passes, cleanup=cleanup,
+                              complete=complete, diagnostic=diagnostic, retain=retain):
+                root = Path(self.tmp.name) / f'disposition-{index}'
+                result = completed_process([], 0 if libtest_passes else 101,
+                    'test result: ok. 1 passed; 0 failed; 0 ignored;\n' if libtest_passes else
+                    'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n', '')
+                result.cleanup_confirmed = cleanup
+                with patch.object(runner, 'execute', return_value=result), \
+                     patch.object(runner, 'case_artifact_evidence',
+                                  return_value=(cleanup, False, complete, '')), \
+                     patch.dict(os.environ):
+                    if diagnostic:
+                        os.environ['TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS'] = '1'
+                    else:
+                        os.environ.pop('TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', None)
+                    passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                        10, record, artifact_root=root, retain_artifacts=retain)
+                expected_pass = libtest_passes and cleanup
+                expected_retained = not (expected_pass and complete and not diagnostic and not retain)
+                self.assertEqual(passed, expected_pass)
+                self.assertEqual(root.is_dir(), expected_retained)
+                self.assertEqual(record['artifact_disposition'], 'retained' if expected_retained else 'removed')
+                self.assertEqual(record.get('artifacts_retained_after_success', False),
+                                 expected_retained and expected_pass)
+                self.assertEqual(record.get('artifacts_retained_after_failure', False),
+                                 expected_retained and not expected_pass)
+                self.assertEqual(record.get('artifacts_removed_after_success', False), not expected_retained)
+
+    def test_missing_artifact_root_never_claims_retention(self):
+        root = Path(self.tmp.name) / 'missing-artifacts'
+        def run(args, timeout, environment=None):
+            import shutil
+            shutil.rmtree(root)
+            return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        record = {}
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False,
+                10, record, artifact_root=root, retain_artifacts=True)
+        self.assertTrue(passed)
+        self.assertEqual(record['artifact_disposition'], 'missing')
+        self.assertNotIn('artifacts_retained_after_success', record)
 
     def test_scratch_without_capture_markers_has_no_transaction_report_obligation(self):
         root = Path(self.tmp.name) / 'unstarted-scratch'

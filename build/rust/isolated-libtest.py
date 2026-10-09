@@ -1016,6 +1016,9 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             retain_artifacts=False):
     if record is None:
         record = {}
+    for key in ('artifact_disposition', 'artifacts_removed_after_success',
+                'artifacts_retained_after_success', 'artifacts_retained_after_failure'):
+        record.pop(key, None)
     record.update(schema=1, process_cleanup_status='not_started', hosted_cleanup_status='not_observed',
                   compiler_cleanup_status='not_observed', compiler_cleanup_observation_complete=None,
                   diagnostic_evidence_complete=None)
@@ -1066,11 +1069,18 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                 and not hosted_runtime_not_started and startup_diagnostic_seconds is None):
             # Successful scenarios have completed their own acknowledged teardown.
             # The runner additionally confirms its enclosing process/service cleanup.
-            if retain_artifacts:
-                record['artifacts_retained_after_success'] = True
-            else:
+            if not retain_artifacts:
                 shutil.rmtree(artifact_root)
                 record['artifacts_removed_after_success'] = True
+        # Retention is an observed disposition, independent of diagnostic
+        # completeness or the reason a passing case must preserve evidence.
+        if artifact_root is not None:
+            retained = artifact_root.is_dir() and not artifact_root.is_symlink()
+            record['artifact_disposition'] = ('retained' if retained else
+                'removed' if record.get('artifacts_removed_after_success') else 'missing')
+            if retained:
+                record['artifacts_retained_after_success' if passed else
+                       'artifacts_retained_after_failure'] = True
         return passed, stdout, stderr
 
     if launch_inputs['status'] == 'UNKNOWN':
