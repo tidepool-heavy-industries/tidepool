@@ -1930,11 +1930,11 @@ impl ArtifactView {
     /// Seal one typed entry's executable sites independently of native custody
     /// already retained by the parent view. Target imports select the wrapper's
     /// own original dependencies in addition to its checked authored entry.
-    pub(crate) fn native_site_ids_for_target(
+    pub(crate) fn native_sites_for_target(
         &self,
         entry: &crate::checked_cell::CheckedTypedEntry,
         imports: &[crate::certified_products::PendingImportOwner],
-    ) -> Result<BTreeSet<u64>, CompileError> {
+    ) -> Result<crate::checked_cell::SelectedNativeSites, CompileError> {
         let mut roots = certified_target_source_groups(&self.entries(), imports)?;
         roots.insert(entry.native_group_key());
         let roots = roots
@@ -1946,17 +1946,19 @@ impl ArtifactView {
             .collect::<Vec<_>>();
         let (_, groups) = self.native_requirements_with_groups_from_roots(&roots)?;
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let mut sites = BTreeSet::new();
+        let mut sites = crate::checked_cell::SelectedNativeSites::default();
         for key in groups {
             let ArtifactPayload::Original(product) = &state.payloads[&key.artifact].payload else {
                 return Err(failure("selected native group lacks original payload"));
             };
-            let original = crate::certified_products::original_native_group_sites(
+            let original = crate::certified_products::original_native_group_definitions(
                 product,
                 key.original_ordinal,
             )
             .ok_or_else(|| failure("selected native group lacks authenticated sites"))?;
-            sites.extend(original.iter().map(|site| site.site));
+            for site in original.sites() {
+                sites.insert_issued(site.clone(), Arc::clone(original.types()))?;
+            }
         }
         Ok(sites)
     }

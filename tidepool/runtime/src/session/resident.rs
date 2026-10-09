@@ -62,6 +62,8 @@ enum ResidentResumeInput {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProgramProvenance {
     sites: BTreeMap<u64, YieldSite>,
+    fresh_completion_sites: std::collections::BTreeSet<u64>,
+    native_sites: tidepool_toolchain::checked_cell::SelectedNativeSites,
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
     authenticated_inputs: BTreeMap<u64, AuthenticatedInputContext>,
@@ -189,6 +191,8 @@ impl ResidentParcel {
 pub enum ProgramProvenanceError {
     #[error(transparent)]
     SiteMetadata(#[from] YieldSiteCollision),
+    #[error("native site authority conflict: {0}")]
+    NativeSiteAuthority(String),
     #[error("typed input authority conflict at site {site}: {existing:?} != {incoming:?}")]
     AuthenticatedInputTypeContext {
         site: u64,
@@ -225,6 +229,16 @@ impl ProgramProvenance {
     fn merge(&mut self, other: &Self) -> Result<(), ProgramProvenanceError> {
         // A failed composition leaves the original value's evidence unchanged.
         // Site/type compatibility is independent of original execution scope.
+        let mut native_sites = self.native_sites.clone();
+        native_sites
+            .merge(&other.native_sites)
+            .map_err(|error| ProgramProvenanceError::NativeSiteAuthority(error.to_string()))?;
+        native_sites
+            .validate_observations(self.sites.values())
+            .map_err(|error| ProgramProvenanceError::NativeSiteAuthority(error.to_string()))?;
+        native_sites
+            .validate_observations(other.sites.values())
+            .map_err(|error| ProgramProvenanceError::NativeSiteAuthority(error.to_string()))?;
         for site in other.sites.values() {
             if let Some(previous) = self.sites.get(&site.site) {
                 if !previous.same_metadata(site) {
@@ -259,7 +273,17 @@ impl ProgramProvenance {
                 .and_modify(|previous| previous.execution.merge(&interfaces.execution))
                 .or_insert_with(|| interfaces.clone());
         }
+        self.native_sites = native_sites;
+        self.fresh_completion_sites
+            .extend(other.fresh_completion_sites.iter().copied());
         Ok(())
+    }
+
+    /// Completion authority follows the requesting code's issued sites,
+    /// including its selected retained native dependencies.
+    #[must_use]
+    pub fn has_completion_site(&self, site: u64) -> bool {
+        self.native_sites.has_completion_site(site) || self.fresh_completion_sites.contains(&site)
     }
 
     #[must_use]
@@ -5580,6 +5604,20 @@ where
             None
         };
         if let Some(original_interfaces) = original_interfaces {
+            provenance.fresh_completion_sites.extend(
+                code.prepared
+                    .sites()
+                    .iter()
+                    .filter(|site| {
+                        site.inputs.is_empty()
+                            && provenance.sites.get(&site.site).is_some_and(|observed| {
+                                observed.inputs.is_empty()
+                                    && observed.origin == site.origin
+                                    && observed.ordinal == site.ordinal
+                            })
+                    })
+                    .map(|site| site.site),
+            );
             let original_execution =
                 original_execution.ok_or(ResidentError::UnsupportedCheckedTurn)?;
             let original_execution = OriginalExecutionContext::capture(original_execution);
@@ -5598,7 +5636,14 @@ where
                 .map(|site| site.site)
                 .collect::<std::collections::BTreeSet<_>>();
             if let Some(issued_sites) = issued_sites {
-                selected_sites.extend(issued_sites.iter().copied());
+                issued_sites
+                    .validate_observations(code.sites.iter())
+                    .map_err(SessionError::Compile)?;
+                provenance
+                    .native_sites
+                    .merge(issued_sites)
+                    .map_err(SessionError::Compile)?;
+                selected_sites.extend(issued_sites.ids());
             } else {
                 selected_sites.extend(
                     certification

@@ -868,22 +868,16 @@ pub(crate) fn authenticates_original_native_entry(
     })
 }
 
-/// Read sites from the immutable original at its authenticated group ordinal.
-pub(crate) fn original_native_group_sites(
+/// Read definitions from the immutable original at its authenticated group ordinal.
+pub(crate) fn original_native_group_definitions(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
     original_ordinal: u32,
-) -> Option<&[tidepool_repr::execution_schema::SiteRow]> {
+) -> Option<tidepool_repr::execution_schema::DefinitionsView<'_>> {
     let witness = product.original_native()?;
     if !witness.matches_original(product) {
         return None;
     }
-    Some(
-        witness
-            .group(original_ordinal)?
-            .group()
-            .definitions()
-            .sites(),
-    )
+    Some(witness.group(original_ordinal)?.group().definitions())
 }
 
 fn retain_original_native(
@@ -9326,6 +9320,24 @@ pub(crate) mod tests {
         packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
         interface: Vec<u8>,
     ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+        original_groups_fixture_with_sites(
+            module,
+            groups,
+            version,
+            packages,
+            interface,
+            &BTreeMap::new(),
+        )
+    }
+
+    pub(crate) fn original_groups_fixture_with_sites(
+        module: &str,
+        groups: Vec<(u32, Vec<PendingImportOwner>)>,
+        version: u8,
+        packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+        interface: Vec<u8>,
+        sites: &BTreeMap<u32, Vec<tidepool_repr::execution_schema::SiteRow>>,
+    ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         let projected = groups
             .iter()
             .map(|(ordinal, imports)| {
@@ -9344,6 +9356,13 @@ pub(crate) mod tests {
                 let top = top.clone();
                 wire.bindings = vec![tidepool_repr::execution_schema::Group::Recursive(vec![top])];
                 wire.expressions.nodes.clear();
+                wire.sites = sites.get(ordinal).cloned().unwrap_or_default();
+                if !wire.sites.is_empty() {
+                    wire.types = testing::closed_type_graph(
+                        testing::identity("Fixture", "Completion"),
+                        tidepool_repr::type_graph::DeclarationForm::Data,
+                    );
+                }
                 wire.globals = imports
                     .iter()
                     .map(|import| {

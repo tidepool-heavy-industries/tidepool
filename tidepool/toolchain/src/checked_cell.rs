@@ -2468,7 +2468,128 @@ pub struct ExactCompiledItem {
 #[derive(Debug)]
 struct SealedTypedEntry {
     entry: CheckedTypedEntry,
-    native_sites: BTreeSet<u64>,
+    native_sites: SelectedNativeSites,
+}
+
+/// Sites from the checked target's exact original native dependency closure.
+/// Construction stays with the original-group issuer; composition cannot add
+/// observations or promote unselected available native groups.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SelectedNativeSites {
+    sites: BTreeMap<u64, IssuedNativeSite>,
+}
+
+#[derive(Clone, Debug)]
+struct IssuedNativeSite {
+    row: tidepool_repr::execution_schema::SiteRow,
+    types: Arc<tidepool_repr::type_graph::TypeGraph>,
+}
+
+impl PartialEq for IssuedNativeSite {
+    fn eq(&self, other: &Self) -> bool {
+        // Equality preserves issuer custody identity. Cross-original semantic
+        // compatibility is fallible and belongs to composition below.
+        self.row == other.row && Arc::ptr_eq(&self.types, &other.types)
+    }
+}
+impl Eq for IssuedNativeSite {}
+
+impl IssuedNativeSite {
+    fn matches(&self, other: &Self) -> Result<bool, CompileError> {
+        if Arc::ptr_eq(&self.types, &other.types) && self.row == other.row {
+            return Ok(true);
+        }
+        if self.row.origin != other.row.origin
+            || self.row.ordinal != other.row.ordinal
+            || self.row.delivery != other.row.delivery
+            || self.row.inputs.len() != other.row.inputs.len()
+        {
+            return Ok(false);
+        }
+        let mut budget = tidepool_repr::type_graph::TypeWorkBudget::new(
+            tidepool_repr::type_graph::GraphLimits::default().max_work,
+        );
+        for (left, right) in std::iter::once((&self.row.wire, &other.row.wire))
+            .chain(self.row.inputs.iter().zip(&other.row.inputs))
+        {
+            if !self
+                .types
+                .rooted_identity_eq(*left, &other.types, *right, &mut budget)
+                .map_err(failure)?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+impl SelectedNativeSites {
+    pub(crate) fn insert_issued(
+        &mut self,
+        row: tidepool_repr::execution_schema::SiteRow,
+        types: Arc<tidepool_repr::type_graph::TypeGraph>,
+    ) -> Result<(), CompileError> {
+        let incoming = IssuedNativeSite { row, types };
+        if let Some(previous) = self.sites.get(&incoming.row.site) {
+            if !previous.matches(&incoming)? {
+                return Err(failure(format!(
+                    "selected native site metadata conflict at {}",
+                    incoming.row.site
+                )));
+            }
+        } else {
+            self.sites.insert(incoming.row.site, incoming);
+        }
+        Ok(())
+    }
+
+    /// Retain issued authority atomically when live programs are composed.
+    pub fn merge(&mut self, other: &Self) -> Result<(), CompileError> {
+        for (id, incoming) in &other.sites {
+            if let Some(previous) = self.sites.get(id) {
+                if !previous.matches(incoming)? {
+                    return Err(failure(format!(
+                        "selected native site metadata conflict at {id}"
+                    )));
+                }
+            }
+        }
+        for (id, incoming) in &other.sites {
+            self.sites.entry(*id).or_insert_with(|| incoming.clone());
+        }
+        Ok(())
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.sites.keys().copied()
+    }
+
+    pub fn has_completion_site(&self, site: u64) -> bool {
+        self.sites
+            .get(&site)
+            .is_some_and(|issued| issued.row.inputs.is_empty())
+    }
+
+    pub fn validate_observations<'a>(
+        &self,
+        sites: impl IntoIterator<Item = &'a crate::YieldSite>,
+    ) -> Result<(), CompileError> {
+        for observed in sites {
+            if let Some(issued) = self.sites.get(&observed.site) {
+                if issued.row.origin != observed.origin
+                    || issued.row.ordinal != observed.ordinal
+                    || issued.row.inputs.len() != observed.inputs.len()
+                {
+                    return Err(failure(format!(
+                        "selected native site differs from observation at {}",
+                        observed.site
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Read-only identity of a native entry sealed against its canonical original.
@@ -2661,7 +2782,7 @@ impl ExactCompiledItem {
 
     /// Exact native-site selection sealed with this typed target. The original
     /// execution inventory may also retain earlier entries' installed groups.
-    pub fn selected_native_sites(&self) -> Option<&BTreeSet<u64>> {
+    pub fn selected_native_sites(&self) -> Option<&SelectedNativeSites> {
         self.typed_entry.as_ref().map(|issued| &issued.native_sites)
     }
 
@@ -3649,7 +3770,7 @@ impl CheckedItemOffer {
             .map(|entry| {
                 let native_sites = original_execution
                     .artifact_view()
-                    .native_site_ids_for_target(&entry, target_imports)?;
+                    .native_sites_for_target(&entry, target_imports)?;
                 Ok::<_, CompileError>(SealedTypedEntry {
                     entry,
                     native_sites,
@@ -4309,6 +4430,135 @@ fn failure(error: impl std::fmt::Display) -> CompileError {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn selected_native_sites_compose_semantically_and_refuse_conflicts_atomically() {
+        use super::*;
+        use proptest::prelude::*;
+        use tidepool_repr::execution_schema::{testing, SiteDelivery, SiteRow};
+        use tidepool_repr::type_graph::{DeclarationForm, TypeNodeId};
+        let shape = (
+            testing::identity("Fixture", "Completion"),
+            DeclarationForm::Data,
+        );
+        let first_graph = testing::closed_type_roots(&[shape.clone()]);
+        let relocated_graph = testing::closed_type_roots(&[
+            (testing::identity("Fixture", "Other"), DeclarationForm::Data),
+            shape,
+        ]);
+        let row = |site, wire| SiteRow {
+            site,
+            origin: format!("Fixture.completion_{site}"),
+            ordinal: 0,
+            delivery: SiteDelivery::HostAnswer,
+            wire: TypeNodeId::new(wire),
+            inputs: vec![],
+        };
+        let mut pool = Vec::new();
+        for (site, wire, graph) in [
+            (7, 0, &first_graph),
+            (7, 1, &relocated_graph),
+            (9, 0, &first_graph),
+        ] {
+            let mut issued = SelectedNativeSites::default();
+            issued
+                .insert_issued(row(site, wire), Arc::clone(graph))
+                .unwrap();
+            pool.push(issued);
+        }
+        let mut relocated = pool[0].clone();
+        relocated
+            .merge(&pool[1])
+            .expect("graph-local roots do not define site identity");
+        let mut config = proptest::test_runner::Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::selected_native_sites_compose_semantically_and_refuse_conflicts_atomically"
+        ));
+        proptest::test_runner::TestRunner::new(config)
+            .run(&prop::collection::vec(0_usize..3, 0..48), |history| {
+                let mut issued = SelectedNativeSites::default();
+                let mut expected = BTreeSet::new();
+                for index in &history {
+                    issued.merge(&pool[*index]).unwrap();
+                    expected.insert(if *index == 2 { 9 } else { 7 });
+                    prop_assert_eq!(issued.ids().collect::<BTreeSet<_>>(), expected.clone());
+                    prop_assert!(!issued.has_completion_site(11));
+                }
+                let mut reversed = SelectedNativeSites::default();
+                for index in history.iter().rev() {
+                    reversed.merge(&pool[*index]).unwrap();
+                }
+                prop_assert_eq!(
+                    issued.ids().collect::<Vec<_>>(),
+                    reversed.ids().collect::<Vec<_>>()
+                );
+                issued
+                    .merge(&reversed)
+                    .expect("merge order preserves semantic site metadata");
+                let before = issued.clone();
+                issued.merge(&before).unwrap();
+                prop_assert_eq!(issued, before);
+                Ok(())
+            })
+            .unwrap();
+        for mutation in 0..5 {
+            let mut incoming = row(7, 0);
+            match mutation {
+                0 => incoming.origin = "another owner".into(),
+                1 => incoming.ordinal = 1,
+                2 => incoming.delivery = SiteDelivery::LiveReentry,
+                3 => incoming.inputs.push(TypeNodeId::new(0)),
+                4 => incoming.wire = TypeNodeId::new(0),
+                _ => unreachable!(),
+            }
+            let mut other = pool[2].clone();
+            other
+                .insert_issued(
+                    incoming,
+                    if mutation == 4 {
+                        Arc::clone(&relocated_graph)
+                    } else {
+                        Arc::clone(&first_graph)
+                    },
+                )
+                .unwrap();
+            let mut issued = pool[0].clone();
+            let before = issued.clone();
+            assert!(issued.merge(&other).is_err());
+            assert_eq!(
+                issued, before,
+                "failed merge must not add the unrelated site either"
+            );
+        }
+        let observed = crate::YieldSite {
+            site: 7,
+            origin: "Fixture.completion_7".into(),
+            ordinal: 0,
+            ty: "Int".into(),
+            modules: vec![],
+            heads: vec![],
+            inputs: vec![crate::SiteType {
+                ty: "Int".into(),
+                modules: vec![],
+                heads: vec![],
+            }],
+            input_type_witnesses: vec![None],
+            reply_declaration: None,
+            request_type_signatures: None,
+        };
+        assert!(
+            pool[0].validate_observations(&[observed]).is_err(),
+            "an observed input cannot reuse an issued completion id"
+        );
+    }
+
+    #[test]
     fn checked_target_demands_wrapper_dependency_separately_from_authored_entry() {
         use super::*;
         use crate::artifact_inventory::{
@@ -4322,12 +4572,22 @@ mod tests {
         let products = ["Authored", "Wrapper"]
             .iter()
             .map(|module| {
+                let completion = |ordinal: u32| tidepool_repr::execution_schema::SiteRow {
+                    site: u64::from(ordinal) * 10 + u64::from(*module == "Wrapper"),
+                    origin: format!("{module}.entry_{ordinal}"),
+                    ordinal: 0,
+                    delivery: tidepool_repr::execution_schema::SiteDelivery::HostAnswer,
+                    wire: tidepool_repr::type_graph::TypeNodeId::new(0),
+                    inputs: vec![],
+                };
                 let native = certified_products::fixture_finalized_product(
-                    certified_products::tests::original_groups_fixture(
+                    certified_products::tests::original_groups_fixture_with_sites(
                         module,
                         vec![(8, vec![]), (12, vec![])],
                         7,
                         &BTreeMap::new(),
+                        vec![0x42],
+                        &BTreeMap::from([(8, vec![completion(8)]), (12, vec![completion(12)])]),
                     ),
                     [1; 32],
                 );
@@ -4492,6 +4752,16 @@ mod tests {
             ])
         );
         assert_eq!(complete.artifact_ids(), baseline.artifact_ids());
+        let authored_sites = authored_only.native_sites_for_target(&entry, &[]).unwrap();
+        assert_eq!(authored_sites.ids().collect::<Vec<_>>(), vec![80]);
+        let complete_sites = complete.native_sites_for_target(&entry, &imports).unwrap();
+        assert_eq!(complete_sites.ids().collect::<Vec<_>>(), vec![80, 81]);
+        for unselected in [120, 121] {
+            assert!(
+                !complete_sites.has_completion_site(unselected),
+                "available sibling groups cannot issue completion authority"
+            );
+        }
         let groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
             &complete,
             &[],
