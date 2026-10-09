@@ -13427,223 +13427,160 @@ pub(crate) mod request_tests {
             .unwrap();
     }
 
-    /// For an ordinary workbench fragment (`begin_fragment`/`begin_ready_block`),
-    /// snapshotting via `snapshot_fragment_compile`, compiling off-checkout via
-    /// `compile_fragment_off_checkout`, revalidating, then installing and
-    /// running via `begin_ready_block` must commit the exact same output and
-    /// bindings as calling the original single-checkout `begin_fragment`
-    /// directly against an identically-constructed session.
-    #[test]
-    fn ordinary_fragment_split_compile_then_install_matches_single_checkout_begin_fragment() {
-        let (mut split_session, split_context, split_source, _split_root) = host_mount_fixture();
-        let (mut direct_session, direct_context, direct_source, _direct_root) =
-            host_mount_fixture();
-
-        let block = ParsedBlock {
-            ordinal: 1,
-            total: 1,
-            source: "x <- pure (1 :: Int)".into(),
-        };
-        let verdict = TurnClassification {
-            kind: TurnKind::Bind,
-            binders: vec!["x".into()],
-            items: Vec::new(),
-        };
-
-        let snapshot = snapshot_fragment_compile(
-            &mut split_session,
-            &split_context,
-            &split_source,
-            &block,
-            Some(&verdict),
-        )
-        .expect("fragment compile snapshot");
-        let compiled = compile_fragment_off_checkout(
-            &snapshot,
-            &split_source,
-            &split_context.haskell_effects_alias,
-            &block,
-        )
-        .expect("fragment compiles off-checkout");
-        let ready = match compiled {
-            CompiledBlock::Ready(ready) => *ready,
-            CompiledBlock::Rejected(diagnostic) => {
-                panic!("fragment unexpectedly rejected: {diagnostic:?}")
+    #[tokio::test]
+    async fn whole_cell_bind_and_discard_preserve_settlement() {
+        with_test_compiler_owner(async {
+            let (machines, context, source, _root) = actor_registry_fixture();
+            let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
+                .admit_private_cell_for_test(context)
+                .await
+                .unwrap();
+            let (checked, prepared) = workbench
+                .prepare_cell(
+                    context.clone(),
+                    "x <- pure (1 :: Int)\n_ <- pure (2 :: Int)".into(),
+                )
+                .await
+                .unwrap();
+            let PreparedCell {
+                items,
+                dependencies,
+            } = prepared;
+            assert_eq!(checked.items.len(), 2);
+            for (index, item) in items.into_iter().enumerate() {
+                let step = workbench
+                    .begin_prepared_cell_item(
+                        context.clone(),
+                        ParsedBlock {
+                            ordinal: index + 1,
+                            total: 2,
+                            source: checked.items[index].source.clone(),
+                        },
+                        item,
+                    )
+                    .await
+                    .unwrap();
+                let ResidentWorkbenchStep::Committed {
+                    output,
+                    installed_bindings,
+                    ..
+                } = step
+                else {
+                    panic!("pure whole-cell item must commit");
+                };
+                if index == 0 {
+                    assert_eq!(installed_bindings, vec!["x".to_owned()]);
+                    assert!(output.contains('x'), "{output}");
+                } else {
+                    assert!(output.is_empty(), "discarded item created output: {output}");
+                    assert!(installed_bindings.is_empty());
+                }
             }
-        };
-
-        let discard_code = match &ready.result {
-            TurnResult::Bind { compiled, .. } => cloned_turn_code(compiled),
-            _ => panic!("fixture must be a compiled binding"),
-        };
-
-        let fresh_view =
-            actor_compile_view(&split_session, &split_context, &split_source).expect("fresh view");
-        assert!(
-            fresh_view.is_current_for(&snapshot.view),
-            "no mutation happened between snapshot and install: views must still match"
-        );
-
-        let split_step =
-            begin_ready_block(&mut split_session, &split_context, block.clone(), ready)
-                .expect("split compile installs and runs");
-
-        let direct_step = begin_fragment(
-            &mut direct_session,
-            &direct_context,
-            &direct_source,
-            None,
-            block,
-            Some(&verdict),
-        )
-        .expect("single-checkout begin_fragment installs and runs");
-
-        let ResidentWorkbenchStep::Committed {
-            output: split_output,
-            installed_bindings: split_bindings,
-            ..
-        } = split_step
-        else {
-            panic!("split compile-then-install did not commit");
-        };
-        let ResidentWorkbenchStep::Committed {
-            output: direct_output,
-            installed_bindings: direct_bindings,
-            ..
-        } = direct_step
-        else {
-            panic!("single-checkout begin_fragment did not commit");
-        };
-        assert_eq!(split_output, direct_output);
-        assert_eq!(split_bindings, direct_bindings);
-
-        // Reuse the same compiled fixture in the real transient/discard route.
-        let outcome = split_session
-            .run_with_sites("discarded_workbench_value", discard_code)
-            .expect("discard route runs without another compiler request");
-        let discarded = start_fragment_settlement(
-            &mut split_session,
-            &split_context,
-            1,
-            "discarded value".into(),
-            WorkbenchDisplay::Discard,
-            Vec::new(),
-            Ok(outcome),
-        )
-        .expect("discard route settles");
-        let ResidentWorkbenchStep::Committed {
-            output,
-            installed_bindings,
-            ..
-        } = discarded
-        else {
-            panic!("discarded value did not commit");
-        };
-        assert!(
-            output.is_empty(),
-            "discarded values must not create display output: {output}"
-        );
-        assert!(installed_bindings.is_empty());
+            drop(dependencies);
+            workbench
+                .access
+                .with_machine(context, |session, context, _| {
+                    assert_eq!(
+                        session.binding_names_in(context.placement.lexical_scope),
+                        vec!["x".to_owned()]
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        })
+        .await;
     }
 
-    /// A write to the same scope between an ordinary fragment's split-compile
-    /// snapshot and its re-checkout (here, another mount standing in for a
-    /// concurrent actor's install) must be detected by `is_current_for`
-    /// before installing the stale compile, and a fresh snapshot must still
-    /// recompile and install cleanly — the same invariant
-    /// `a_mutation_between_split_checkouts_invalidates_the_snapshot_and_
-    /// blocks_install` proves for the Text carrier path.
-    #[test]
-    fn a_mutation_between_split_fragment_checkouts_invalidates_the_snapshot_and_forces_a_recompile()
-    {
-        let (mut session, context, source, _session_root) = host_mount_fixture();
-        let scope = context.placement.lexical_scope;
-
-        let block = ParsedBlock {
-            ordinal: 1,
-            total: 1,
-            source: "x <- pure (1 :: Int)".into(),
-        };
-        let verdict = TurnClassification {
-            kind: TurnKind::Bind,
-            binders: vec!["x".into()],
-            items: Vec::new(),
-        };
-
-        let snapshot =
-            snapshot_fragment_compile(&mut session, &context, &source, &block, Some(&verdict))
-                .expect("fragment compile snapshot");
-        let compiled = compile_fragment_off_checkout(
-            &snapshot,
-            &source,
-            &context.haskell_effects_alias,
-            &block,
-        )
-        .expect("fragment compiles off-checkout");
-        let ready = match compiled {
-            CompiledBlock::Ready(ready) => *ready,
-            CompiledBlock::Rejected(diagnostic) => {
-                panic!("fragment unexpectedly rejected: {diagnostic:?}")
-            }
-        };
-
-        // Stand in for another actor writing to this exact scope while this
-        // compile ran off-checkout: mount an unrelated Text carrier, which
-        // changes `visible_values`/`shadowing`.
-        mount_text_binding(
-            &mut session,
-            &context,
-            &source,
-            "interloper",
-            "interloper text",
-            None,
-        )
-        .expect("interloping carrier mounts");
-
-        let fresh_view = actor_compile_view(&session, &context, &source).expect("fresh view");
-        assert!(
-            !fresh_view.is_current_for(&snapshot.view),
-            "an interleaved mutation to the same scope must invalidate the snapshot"
-        );
-
-        // The split path must refuse to install against a stale view — no
-        // binding named by the compiled fragment ever reaches the workbench.
-        assert!(session
-            .workbench_bindings_in(scope)
-            .into_iter()
-            .all(|binding| binding.name != "x"));
-        drop(ready);
-
-        // A fresh snapshot recompiles and installs cleanly.
-        let retry_snapshot =
-            snapshot_fragment_compile(&mut session, &context, &source, &block, Some(&verdict))
-                .expect("retry snapshot");
-        let retry_compiled = compile_fragment_off_checkout(
-            &retry_snapshot,
-            &source,
-            &context.haskell_effects_alias,
-            &block,
-        )
-        .expect("retry compiles off-checkout");
-        let retry_ready = match retry_compiled {
-            CompiledBlock::Ready(ready) => *ready,
-            CompiledBlock::Rejected(diagnostic) => {
-                panic!("retry compile unexpectedly rejected: {diagnostic:?}")
-            }
-        };
-        let retry_fresh_view =
-            actor_compile_view(&session, &context, &source).expect("retry fresh view");
-        assert!(retry_fresh_view.is_current_for(&retry_snapshot.view));
-
-        let step = begin_ready_block(&mut session, &context, block, retry_ready)
-            .expect("retry installs and runs");
-        let ResidentWorkbenchStep::Committed {
-            installed_bindings, ..
-        } = step
-        else {
-            panic!("retry did not commit");
-        };
-        assert_eq!(installed_bindings, vec!["x".to_string()]);
+    #[tokio::test]
+    async fn mutation_after_whole_cell_preparation_refuses_stale_item_and_fresh_preparation_succeeds(
+    ) {
+        with_test_compiler_owner(async {
+            let (machines, context, source, _root) = actor_registry_fixture();
+            let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
+                .admit_private_cell_for_test(context)
+                .await
+                .unwrap();
+            let text = "x <- pure (1 :: Int)";
+            let (checked, prepared) = workbench
+                .prepare_cell(context.clone(), text.into())
+                .await
+                .unwrap();
+            let PreparedCell {
+                mut items,
+                dependencies,
+            } = prepared;
+            assert_eq!(
+                items.len(),
+                1,
+                "stale control starts with genuine native preparation"
+            );
+            workbench
+                .bind_tool_result(
+                    context.clone(),
+                    "interloper".into(),
+                    "interloper text".into(),
+                )
+                .await
+                .unwrap()
+                .accept()
+                .unwrap();
+            let refused = workbench
+                .begin_prepared_cell_item(
+                    context.clone(),
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: checked.items[0].source.clone(),
+                    },
+                    items.pop().unwrap(),
+                )
+                .await;
+            assert!(
+                matches!(
+                    refused,
+                    Err(ResidentActorWorkbenchError::Resident(
+                        ResidentError::Session(
+                            tidepool_runtime::session::SessionError::StaleStagedDeclaration
+                        )
+                    ))
+                ),
+                "stale prepared item must be refused before native install"
+            );
+            drop(dependencies);
+            workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    assert!(session
+                        .current_binding_in(context.placement.lexical_scope, "x")
+                        .is_none());
+                    assert!(session
+                        .current_binding_in(context.placement.lexical_scope, "interloper")
+                        .is_some());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let step = workbench
+                .begin_cell_for_test(
+                    context,
+                    ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: text.into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let ResidentWorkbenchStep::Committed {
+                installed_bindings, ..
+            } = step
+            else {
+                panic!("fresh whole-cell preparation must commit");
+            };
+            assert_eq!(installed_bindings, vec!["x".to_owned()]);
+        })
+        .await;
     }
 
     fn introspection_error_table() -> DataConTable {
@@ -21388,117 +21325,69 @@ pub(crate) mod request_tests {
         );
     }
 
-    /// `begin_fragment_split`'s install step must hand off to
-    /// `begin_ready_block_split` for a STEADY-STATE fragment (one compiled
-    /// after the resident machine is already bootstrapped) — the same
-    /// off-checkout JIT install `begin_prepared_cell_item` already uses for
-    /// a planned cell's item, instead of running the Cranelift compile under
-    /// the checkout the way `begin_ready_block` does. `prepare_tools` (the
-    /// child spec installer wave 4 measured holding the machine for 272s of
-    /// JIT across 22 installs) is built on `begin_fragment_split`. This
-    /// must still commit the exact same output and bindings as the
-    /// original single-checkout `begin_fragment`, against an identically
-    /// warmed-up session — `begin_ready_block_split`'s own tests (e.g.
-    /// `stale_import_between_snapshot_and_revalidation_falls_back` in
-    /// tidepool-runtime) already cover that its JIT compile itself runs
-    /// off-checkout; this proves the swap did not change what
-    /// `begin_fragment_split` commits.
     #[tokio::test]
-    async fn begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment() {
-        with_test_compiler_owner(begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment_with_compiler_owner()).await;
+    async fn whole_cell_installs_bindings_before_and_after_native_bootstrap() {
+        with_test_compiler_owner(async {
+            let (machines, context, source, _root) = actor_registry_fixture();
+            let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
+                .admit_private_cell_for_test(context)
+                .await
+                .unwrap();
+            let (checked, prepared) = workbench
+                .prepare_cell(
+                    context.clone(),
+                    "installWarmup <- pure (0 :: Int)\ninstalledAfterBootstrap <- pure (1 :: Int)"
+                        .into(),
+                )
+                .await
+                .unwrap();
+            let PreparedCell {
+                items,
+                dependencies,
+            } = prepared;
+            assert_eq!(items.len(), 2);
+            for (index, item) in items.into_iter().enumerate() {
+                workbench
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        assert_eq!(session.prepared_machine_ready(), index != 0);
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                let step = workbench
+                    .begin_prepared_cell_item(
+                        context.clone(),
+                        ParsedBlock {
+                            ordinal: index + 1,
+                            total: 2,
+                            source: checked.items[index].source.clone(),
+                        },
+                        item,
+                    )
+                    .await
+                    .unwrap();
+                let ResidentWorkbenchStep::Committed {
+                    installed_bindings, ..
+                } = step
+                else {
+                    panic!("native whole-cell bind must commit");
+                };
+                assert_eq!(
+                    installed_bindings,
+                    vec![if index == 0 {
+                        "installWarmup".to_owned()
+                    } else {
+                        "installedAfterBootstrap".to_owned()
+                    }]
+                );
+            }
+            drop(dependencies);
+        })
+        .await;
     }
 
-    async fn begin_fragment_split_after_bootstrap_matches_single_checkout_begin_fragment_with_compiler_owner(
-    ) {
-        let (split_machines, split_context, split_source, _split_root) = actor_registry_fixture();
-        let split_workbench =
-            ResidentActorWorkbench::new(split_machines, split_source.clone(), None);
-        let (mut direct_session, direct_context, direct_source, _direct_root) =
-            host_mount_fixture();
-
-        // A brand-new session's very first turn bootstraps the resident
-        // machine and has no split path at all (`ResidentSession::
-        // prepared_machine_ready`'s doc comment): warm the split side up
-        // with one throwaway fragment first, so the fragment under test
-        // exercises the split's STEADY-STATE install
-        // (`begin_ready_block_split`), not the one-time bootstrap install
-        // this change does not touch. The receipt text and installed
-        // binder names carry no generation number, so this warmup does not
-        // need a matching one on the direct (single-checkout) side.
-        let warmup_block = ParsedBlock {
-            ordinal: 1,
-            total: 1,
-            source: "fragInstallWarmup <- pure (0 :: Int)".into(),
-        };
-        let warmup_verdict = TurnClassification {
-            kind: TurnKind::Bind,
-            binders: vec!["fragInstallWarmup".into()],
-            items: Vec::new(),
-        };
-        split_workbench
-            .begin_fragment_split(
-                split_context.clone(),
-                split_source.clone(),
-                warmup_block,
-                Some(warmup_verdict),
-            )
-            .await
-            .expect("warmup fragment installs");
-
-        let block = ParsedBlock {
-            ordinal: 1,
-            total: 1,
-            source: "fragInstallOffCheckout <- pure (1 :: Int)".into(),
-        };
-        let verdict = TurnClassification {
-            kind: TurnKind::Bind,
-            binders: vec!["fragInstallOffCheckout".into()],
-            items: Vec::new(),
-        };
-        let split_step = split_workbench
-            .begin_fragment_split(
-                split_context,
-                split_source,
-                block.clone(),
-                Some(verdict.clone()),
-            )
-            .await
-            .expect("fragment installs through the post-bootstrap split");
-        let direct_step = begin_fragment(
-            &mut direct_session,
-            &direct_context,
-            &direct_source,
-            None,
-            block,
-            Some(&verdict),
-        )
-        .expect("single-checkout begin_fragment installs and runs");
-
-        let ResidentWorkbenchStep::Committed {
-            output: split_output,
-            installed_bindings: split_bindings,
-            ..
-        } = split_step
-        else {
-            panic!("post-bootstrap split fragment did not commit");
-        };
-        let ResidentWorkbenchStep::Committed {
-            output: direct_output,
-            installed_bindings: direct_bindings,
-            ..
-        } = direct_step
-        else {
-            panic!("single-checkout begin_fragment did not commit");
-        };
-        assert_eq!(split_output, direct_output);
-        assert_eq!(split_bindings, direct_bindings);
-    }
-
-    /// A fragment fixture whose evaluation genuinely suspends waiting on a
-    /// host answer (`ActorContext`'s query, since this bare test session has
-    /// no local actor context handler) — the same shape `prepare_tools` gets
-    /// back from `begin_fragment_split` before its second checkout decodes
-    /// and resumes it.
+    /// The fixture parks at an actor-context effect before any binder commits.
     fn suspending_fragment() -> (ParsedBlock, TurnClassification) {
         (
             ParsedBlock {
@@ -23112,20 +23001,6 @@ pub(crate) mod request_tests {
             injected_modules: prepared.injected,
             reserved_declaration_modules: Vec::new(),
         });
-        let raw = session
-            .admit_cell_in(
-                context.placement.lexical_scope,
-                0,
-                specification.clone(),
-                specification.specification_digest(),
-                [9; 32],
-                prepared.include.clone(),
-            )
-            .unwrap();
-        assert!(
-            tidepool_runtime::session::turn::compile_cell_program_admitted(raw).is_err(),
-            "bare public cell admission must not acquire native setup authority"
-        );
         let mut leaked = specification.as_ref().clone();
         leaked.injected_modules = raw_injection;
         let leaked = Arc::new(leaked);
