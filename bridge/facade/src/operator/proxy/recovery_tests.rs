@@ -1,8 +1,8 @@
 use super::*;
 use crate::operator::{self, OperatorService};
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -293,14 +293,13 @@ async fn pending_publication_failure_never_submits_and_retry_keeps_visible_ident
             .unwrap();
         assert_eq!(host.count(), 1);
         if let Some(request) = request {
-            assert!(
-                host.service
-                    .state
-                    .provisions
-                    .lock()
-                    .await
-                    .contains_key(&request.operation)
-            );
+            assert!(host
+                .service
+                .state
+                .provisions
+                .lock()
+                .await
+                .contains_key(&request.operation));
         }
         host.finish().await;
     }
@@ -475,7 +474,7 @@ async fn retained_provision_failure_is_not_retried() {
     .await
     .unwrap();
     let client = reqwest::Client::builder()
-        .unix_socket(&service.state.socket)
+        .unix_socket(service.state.socket.clone())
         .build()
         .unwrap();
     let request = ProvisionRequest::new(service.state.service);
@@ -578,7 +577,7 @@ async fn changed_service_with_same_actor_identity_cannot_address_old_session() {
     .await
     .unwrap();
     let client = reqwest::Client::builder()
-        .unix_socket(&service.state.socket)
+        .unix_socket(service.state.socket.clone())
         .retry(reqwest::retry::never())
         .build()
         .unwrap();
@@ -673,7 +672,7 @@ async fn lost_or_malformed_provision_reply_retains_pending_for_reconciliation() 
             axum::serve(listener, app).await.unwrap();
         });
         let client = reqwest::Client::builder()
-            .unix_socket(&socket)
+            .unix_socket(socket.clone())
             .retry(reqwest::retry::never())
             .build()
             .unwrap();
