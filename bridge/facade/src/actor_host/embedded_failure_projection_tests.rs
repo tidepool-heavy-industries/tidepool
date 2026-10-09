@@ -270,3 +270,31 @@ fn oversized_original_identity_is_explicitly_omitted_with_the_native_inspection_
     );
     assert_eq!(metadata["publication"]["reason"], "rejected");
 }
+
+#[test]
+fn unconfirmed_cancellation_keeps_its_kind_and_bounds_retained_error_output() {
+    let operation = origin();
+    let output = native_terminal_output(
+        Ok(json!({"application": "already returned"})),
+        Err(error(
+            vec![receipt(
+                0,
+                "retained prefix payload".repeat(2048),
+                &[Disposition::Committed],
+            )],
+            "native cleanup remains unconfirmed".into(),
+            Publication::Published {
+                bindings: vec!["completedBinding".into()],
+            },
+        )),
+        Some(&operation),
+    );
+    let JobOutput::CancellationUnconfirmed(message) = output else {
+        panic!("projection must preserve unconfirmed cancellation");
+    };
+    assert!(message.len() <= TOOL_ERROR_MESSAGE_BYTE_BUDGET);
+    assert!(message.contains("native cleanup remains unconfirmed"));
+    assert!(message.contains("original-call"));
+    assert!(message.contains("bindings were published"));
+    assert!(!message.contains("retained prefix payload"));
+}

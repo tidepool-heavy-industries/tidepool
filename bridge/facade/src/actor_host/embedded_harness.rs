@@ -1071,7 +1071,7 @@ fn bounded_tool_error_message(
             "Original operation: {}{}",
             identity.text,
             if identity.omitted {
-                " [identity abbreviated; metadata records any further omission]"
+                " [identity abbreviated]"
             } else {
                 ""
             }
@@ -1446,7 +1446,7 @@ impl Provider for EmbeddedDispatcher {
                 };
                 if let Err(error) = finalized {
                     return unavailable_context_completion(JobOutput::CancellationUnconfirmed(
-                        error.to_string(),
+                        bounded_tool_error_message(&error, operation.as_ref()),
                     ));
                 }
             }
@@ -1540,7 +1540,9 @@ impl CancellationOwner for EmbeddedDispatcher {
                     Ok(()) => CancellationAcknowledgment::StoppedWithReceipt(
                         workbench_reply_receipt(reply, Some(operation)),
                     ),
-                    Err(error) => CancellationAcknowledgment::Unconfirmed(error.to_string()),
+                    Err(error) => CancellationAcknowledgment::Unconfirmed(
+                        bounded_tool_error_message(&error, Some(operation)),
+                    ),
                 }
             }
             Ok(
@@ -1551,7 +1553,10 @@ impl CancellationOwner for EmbeddedDispatcher {
                 Some(operation),
             )),
             Ok(outcome) => CancellationAcknowledgment::Unconfirmed(format!("{outcome:?}")),
-            Err(error) => CancellationAcknowledgment::Unconfirmed(error.to_string()),
+            Err(error) => CancellationAcknowledgment::Unconfirmed(bounded_tool_error_message(
+                &error,
+                Some(operation),
+            )),
         }
     }
 }
@@ -1590,7 +1595,9 @@ fn native_terminal_output(
             | WorkbenchCancellationOutcome::NotSleeping { .. },
         ) => JobOutput::Completed(result),
         Ok(outcome) => JobOutput::CancellationUnconfirmed(format!("{outcome:?}")),
-        Err(error) => JobOutput::CancellationUnconfirmed(error.to_string()),
+        Err(error) => {
+            JobOutput::CancellationUnconfirmed(bounded_tool_error_message(&error, operation))
+        }
     }
 }
 
