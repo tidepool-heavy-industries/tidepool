@@ -1,5 +1,8 @@
 module CandidateExecutionSourcesTest (candidateExecutionSourcesTest, executionScopeDescriptorChecks) where
 
+import CodecFixtureSupport
+  ( ScopeCodecFixture, ScopeCodecField(..), readScopeCodecFixture
+  , scopeCodecField, replaceScopeCodecField, scopeCodecTerm )
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
@@ -50,7 +53,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   originalFixture <- capturePreparedFixture work original
   sourceScopePath <- writeExecutionScope work originalFixture ["ExecutionReexportFacade"]
   originalScope <- readExactScope sourceScopePath >>= either fail pure
-  emptyExecution <- scopeVariant originalScope (\fields -> take 7 fields ++ [TNull] ++ drop 8 fields)
+  emptyExecution <- scopeVariant originalScope (replaceScopeCodecField ScopeCodecExecution TNull)
     >>= either fail pure
   -- Budget policies consume genuinely admitted original owners. Alter only
   -- the graph envelope; no synthetic interface/Core authority is constructed.
@@ -404,11 +407,8 @@ originalClosureFacts graphs reference = do
 executionScopeDescriptorChecks :: FilePath -> IO ()
 executionScopeDescriptorChecks path = do
   bytes <- BS.readFile path
-  original <- readExactScope path >>= either fail pure
-  fields <- decode bytes >>= \case
-    TList values -> pure values
-    _ -> fail "genuine exact scope has another current envelope"
-  parcel <- case fields !! 7 of
+  (original,fixture) <- readScopeCodecFixture path
+  parcel <- case scopeCodecField ScopeCodecExecution fixture of
     TList [TList descriptors,refs] -> pure (descriptors,refs)
     _ -> fail "genuine exact scope has no execution descriptors"
   (sha,graphPath) <- case fst parcel of
@@ -425,7 +425,8 @@ executionScopeDescriptorChecks path = do
       withGraph label change = (change >> refuse path label)
         `finally` BS.writeFile graphPath graphBytes
       withParcelAt selectedPath label value = (BS.writeFile selectedPath
-          (toStrictByteString (encodeTerm (TList (take 7 fields ++ [value] ++ drop 8 fields))))
+          (toStrictByteString (encodeTerm (scopeCodecTerm
+            (replaceScopeCodecField ScopeCodecExecution value fixture))))
           >> refuse selectedPath label) `finally` BS.writeFile selectedPath bytes
       withParcel = withParcelAt path
       descriptor value = TList [TString sha,value]
@@ -486,25 +487,19 @@ executionScopeDescriptorChecks path = do
     fail "restored exact scope lost original execution custody"
   unchanged <- BS.readFile path
   unless (unchanged == bytes) $ fail "exact execution descriptor checks changed producer scope"
-  where
-    decode bytes = either (fail . show) (pure . snd)
-      (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes))
 
 -- Variants retain the exact issuer-owned original rows; only admission metadata
 -- changes. Invalid wire metadata must be refused before a scope is returned.
-scopeVariant :: ExactScope -> ([Term] -> [Term]) -> IO (Either String ExactScope)
+scopeVariant :: ExactScope -> (ScopeCodecFixture -> ScopeCodecFixture) -> IO (Either String ExactScope)
 scopeVariant original change = do
-  bytes <- BS.readFile (scopeManifestPath original)
-  fields <- either (fail . show) (pure . snd)
-    (deserialiseFromBytes decodeTerm (BSL.fromStrict bytes)) >>= \case
-      TList values -> pure values
-      _ -> fail "genuine scope variant has another envelope layout"
+  (_,fixture) <- readScopeCodecFixture (scopeManifestPath original)
   (path,handle) <- openBinaryTempFile (takeDirectory (scopeManifestPath original)) "execution-variant.cbor"
-  BS.hPut handle (toStrictByteString (encodeTerm (TList (change fields))))
+  BS.hPut handle (toStrictByteString (encodeTerm (scopeCodecTerm (change fixture))))
   hClose handle
   readExactScope path
 
-mapNativeRows :: ([Term] -> [Term]) -> [Term] -> [Term]
-mapNativeRows change fields = take 6 fields ++ [case fields !! 6 of
-  TList rows -> TList (change rows)
-  field -> field] ++ drop 7 fields
+mapNativeRows :: ([Term] -> [Term]) -> ScopeCodecFixture -> ScopeCodecFixture
+mapNativeRows change fixture = replaceScopeCodecField ScopeCodecNativeProducts
+  (case scopeCodecField ScopeCodecNativeProducts fixture of
+    TList rows -> TList (change rows)
+    field -> field) fixture

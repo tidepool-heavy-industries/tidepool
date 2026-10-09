@@ -2,13 +2,16 @@
 
 -- Schema regressions start from a genuine producer-emitted exact context.
 -- They mutate retained evidence; this module never issues module certificates.
-module ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanonicalChecks) where
+module ExactScopeV9Test (exactScopeChecks, nativeOriginChecks, candidateCanonicalChecks) where
 
-import CodecFixtureSupport (PurposeCodecCase(..), readPurposeCodecFixture, readExpressionItemCodecFixture)
+import CodecFixtureSupport
+  ( PurposeCodecCase(..), readPurposeCodecFixture, readExpressionItemCodecFixture
+  , ScopeCodecFixture, ScopeCodecField(..), readScopeCodecFixture
+  , scopeCodecField, replaceScopeCodecField, scopeCodecTerm )
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (bracket)
+import Control.Exception (IOException, bracket, finally, try)
 import Control.Monad (forM_, unless, when)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
@@ -21,6 +24,7 @@ import Numeric (showHex)
 import System.Directory (doesFileExist, removeFile)
 import System.FilePath (takeDirectory)
 import System.IO (hClose, openBinaryTempFile)
+import System.IO.Error (isDoesNotExistError, ioeGetFileName, ioeGetErrorString)
 import Tidepool.CheckedCell
   ( CellExpressionPlan(..), ExpressionLiftPlan(..), encodeCellExpressionPlan )
 import Tidepool.EffectSchema (NominalHead(..))
@@ -29,40 +33,51 @@ import Tidepool.ExactScope
 import Tidepool.ModuleCandidates
 import Tidepool.Session (Generation(..))
 
-exactScopeV9Checks :: FilePath -> IO ()
-exactScopeV9Checks manifest = do
+data ScopeFixtureKind = ExecutableOriginalFixture | NativeDeclarationFixture
+
+exactScopeChecks :: FilePath -> IO ()
+exactScopeChecks = exactScopeChecksFor ExecutableOriginalFixture
+
+exactScopeChecksFor :: ScopeFixtureKind -> FilePath -> IO ()
+exactScopeChecksFor kind manifest = do
   originalBytes <- BS.readFile manifest
-  originalTerm <- decode originalBytes
-  fields <- row 9 originalTerm
-  scope <- readExactScope manifest >>= either fail pure
+  (scope,fixture) <- readScopeCodecFixture manifest
+  fields <- values (scopeCodecTerm fixture)
+  unless (encode (scopeCodecTerm fixture) == originalBytes)
+    (fail "current mutation adapter changed the genuine exact-scope envelope")
   unless (Map.keysSet (scopeInterfaceEvidence scope) == Set.fromList
       [(exactUnit iface,exactModule iface) | (iface,_,_) <- scopeInterfaces scope])
-    (fail "genuine v9 context lost its typed interface evidence")
+    (fail "genuine exact-scope context lost its typed interface evidence")
   let sourceOriginals = scopeSourceOriginalInterfaces scope
       expectedSourceOwners = Map.keysSet (Map.filter
         (isSourceOriginal . canonicalOrigin) (scopeModuleInterfaceProofs scope))
   unless (Map.keysSet sourceOriginals == expectedSourceOwners)
     (fail "source executable selection admitted native declarations or lost source originals")
   let proofs = scopeModuleInterfaceProofs scope
-      candidates = [(product',proof) | product' <- scopeProducts scope
-        , Just proof <- [Map.lookup (originalUnit product',originalModule product') proofs]
+      selectedOwner key proof = case kind of
+        ExecutableOriginalFixture -> any
+          (\product' -> (originalUnit product',originalModule product') == key) (scopeProducts scope)
+        NativeDeclarationFixture -> case canonicalOrigin proof of
+          NativeAuthoredDeclaration _ -> True
+          SourceOriginal _ -> False
+      candidates = [(key,proof) | (key,proof) <- Map.toAscList proofs
+        , selectedOwner key proof
         , Just _ <- [canonicalCoreArtifact proof]
         , not (Map.null (canonicalRequirements proof))]
-  (product',proof) <- case candidates of
+  (key,proof) <- case candidates of
     value : _ -> pure value
-    [] -> fail "v9 schema fixture requires a genuine native owner with canonical Core and home dependency"
-  let key = (originalUnit product',originalModule product')
+    [] -> fail "exact-scope schema fixture requires a genuine native owner with canonical Core and home dependency"
   unless (fst key `Set.member` canonicalHomeUnits proof
       && canonicalRequirements proof == Map.fromList
         [(owner, exactSha256 iface) | owner <- Map.keys (canonicalRequirements proof)
           , (iface,_,_) <- scopeInterfaces scope
           , (exactUnit iface,exactModule iface) == owner])
-    (fail "genuine v9 context lost full-unit census or exact requirement seals")
+    (fail "genuine exact-scope context lost full-unit census or exact requirement seals")
   core <- maybe (fail "genuine canonical Core disappeared") pure (canonicalCoreArtifact proof)
   coreBytes <- BS.readFile (canonicalCorePath core)
   unless (sha coreBytes == canonicalCoreSha256 core)
-    (fail "genuine v9 fixture has substituted Core bytes")
-  interfaces <- values (fields !! 4)
+    (fail "genuine exact-scope fixture has substituted Core bytes")
+  interfaces <- values (scopeCodecField ScopeCodecInterfaces fixture)
   selected <- maybe (fail "genuine native interface row missing") pure
     (find (matches key) interfaces)
   selectedFields <- row 8 selected
@@ -70,25 +85,36 @@ exactScopeV9Checks manifest = do
   certificateBytes <- BS.readFile (canonicalCertificatePath proof)
   certificateTerm <- decode certificateBytes
   certificateFields <- row 13 certificateTerm
-  let replaced value = TList (replace 4 (TList (map (replaceOwner key value) interfaces)) fields)
+  let replaced value = scopeCodecTerm (replaceScopeCodecField ScopeCodecInterfaces
+        (TList (map (replaceOwner key value) interfaces)) fixture)
       evidence value = replaced (TList (replace 7 value selectedFields))
-      badCertificate expected value = withTemporary (takeDirectory manifest) "exact-v9-cert.cbor" $ \path -> do
+      badCertificate expected value = withTemporary (takeDirectory manifest) "exact-scope-cert.cbor" $ \path -> do
         let bytes = encode value
             replacement = TList (replace 2 (TString (T.pack (sha bytes)))
               (replace 1 (TString (T.pack path)) role))
         BS.writeFile path bytes
         refuse manifest expected (evidence replacement)
-  forM_ ["2","4","6","7","8"] $ \version ->
-    refuse manifest "unsupported exact scope" (TList (replace 1 (TString version) fields))
-  refuse manifest "unsupported exact scope" (TList (take 8 fields))
-  checkedPurposeCases manifest fields
-  originRoleCases manifest scope fields interfaces
+  forM_ ["2","4","6","7","8","9","10"] $ \version ->
+    refuse manifest "unsupported exact scope" (scopeCodecTerm (replaceScopeCodecField ScopeCodecVersion (TString version) fixture))
+  forM_ [8,9] $ \count ->
+    refuse manifest "unsupported exact scope" (TList (take count fields))
+  checkedPurposeCases manifest fixture
+  originRoleCases manifest scope fixture interfaces
   refuse manifest "invalid exact scope row" (replaced (TList (take 7 selectedFields)))
   forM_ [TNull,TList [],TList [TString "other"]
         ,TList (tail role),TList (role ++ [TNull])] $ \invalid ->
     refuse manifest "" (evidence invalid)
-  forM_ [TList [TString "join"],TList [TString "value"]] $ \invalid ->
-    refuse manifest "incomplete or conflicting exact owner closure" (evidence invalid)
+  -- The source-original fixture must retain its executable product. Its role
+  -- cannot be downgraded to metadata without breaking the native owner closure.
+  -- Native declarations retain their separate type-only original interface.
+  case canonicalOrigin proof of
+    SourceOriginal _ -> do
+      unless (any (\product' -> (originalUnit product',originalModule product') == key)
+          (scopeProducts scope)) (fail "source-original fixture lost its native product")
+      forM_ [TList [TString "join"],TList [TString "value"]] $ \invalid ->
+        refuse manifest "incomplete or conflicting exact owner closure" (evidence invalid)
+    NativeAuthoredDeclaration _ ->
+      unless (null (scopeProducts scope)) (fail "type-only declaration fixture acquired native products")
   refuse manifest "" (evidence (TList (replace 3 TNull role)))
   refuse manifest "" (evidence (TList (replace 4 TNull role)))
   refuse manifest "canonical module certificate changed"
@@ -148,25 +174,49 @@ exactScopeV9Checks manifest = do
       BS.writeFile path "substituted payload"
       refuse manifest "canonical module interface or package imports changed"
         (replaced (TList (replace index (TString (T.pack path)) selectedFields)))
-  -- Merely reading a type context must not hydrate or prepare its companion.
-  -- Its demanding owner validates the promised Core path and bytes separately.
-  withTemporary (takeDirectory manifest) "exact-v9-lazy-core" $ \missing -> do
-    removeFile missing
-    let lazyRole = TList (replace 3 (TString (T.pack missing)) role)
-    readCandidate manifest (evidence lazyRole) >>= either fail (\accepted ->
-      unless (Map.member key (scopeCanonicalInterfaces accepted))
-        (fail "type-only scope read demanded canonical Core"))
+  -- Raw proof validation and metadata promotion do not demand Core. A fresh
+  -- exact request snapshots every promised companion, and executable promotion
+  -- demands the independently validated bytes.
+  forM_ [True,False] $ \missing ->
+    withTemporary (takeDirectory manifest) "exact-scope-core" $ \path -> do
+      if missing then removeFile path else BS.writeFile path "substituted Core"
+      metadata <- validateCanonicalInterfaceProof scope key
+        (canonicalCertificatePath proof) (canonicalCertificateSha256 proof)
+        (Just (path,canonicalCoreSha256 core)) >>= either fail pure
+      promoted <- captureCanonicalProofs Nothing [(metadata,MetadataInterfaceUse)]
+      unless (length promoted == 1) (fail "metadata-only proof promotion lost its owner")
+      demanded <- try (captureCanonicalProofs Nothing [(metadata,ExecutableInterfaceUse)])
+        :: IO (Either IOException [CanonicalInterfaceProof])
+      case demanded of
+        Left failure
+          | missing && isDoesNotExistError failure && ioeGetFileName failure == Just path -> pure ()
+          | not missing && ioeGetErrorString failure == "admitted defining Core changed during capture: " ++ path -> pure ()
+        Left failure -> fail ("executable Core refusal came from another boundary: " ++ show failure)
+        Right _ -> fail "executable proof promotion admitted unavailable Core"
+      let alteredRole = TList (replace 3 (TString (T.pack path)) role)
+      refuse manifest (if missing then path else "admitted defining Core changed during capture")
+        (evidence alteredRole)
+  -- The already admitted request keeps its captured bytes after disk drift;
+  -- a fresh acquisition sees the changed input and refuses it.
+  (do BS.writeFile (canonicalCorePath core) "changed after request capture"
+      retained <- canonicalProofOriginalBytes proof (canonicalCorePath core) (canonicalCoreSha256 core)
+      unless (retained == coreBytes) (fail "admitted scope reopened original Core after disk drift")
+      readExactScope manifest >>= \case
+        Left reason | "admitted defining Core changed during capture" `isInfixOf` reason -> pure ()
+        Left reason -> fail ("fresh snapshot refusal came from another boundary: " ++ reason)
+        Right _ -> fail "fresh exact scope admitted changed original Core")
+    `finally` BS.writeFile (canonicalCorePath core) coreBytes
   unchanged <- BS.readFile manifest
-  unless (unchanged == originalBytes) (fail "v9 schema checks changed the producer manifest")
-  putStrLn "exact scope v9: genuine native context, typed roles, certificate seals and lazy Core checks passed"
+  unless (unchanged == originalBytes) (fail "exact-scope schema checks changed the producer manifest")
+  putStrLn "exact scope: genuine native context, typed roles, certificate seals, metadata promotion and captured Core checks passed"
   where
     -- A fixed altered seal for negative wire cases.
     differentSHA = TString (T.replicate 64 "f")
 
 -- Mutate only request-purpose syntax around the genuine immutable owner
 -- closure. These parsing checks do not issue executable admission receipts.
-checkedPurposeCases :: FilePath -> [Term] -> IO ()
-checkedPurposeCases manifest fields = do
+checkedPurposeCases :: FilePath -> ScopeCodecFixture -> IO ()
+checkedPurposeCases manifest fixture = do
   let paths = [takeDirectory manifest]
       readPurpose purpose = readPurposeCodecFixture (takeDirectory manifest) paths purpose >>= \case
         TList values -> pure values
@@ -178,7 +228,7 @@ checkedPurposeCases manifest fields = do
       acceptsCell purpose = case purpose of ExactCellPurpose _ _ -> True; _ -> False
       acceptsItem purpose = case purpose of ExactItemPurpose _ _ -> True; _ -> False
       acceptsInspection purpose = case purpose of ExactInspectionPurpose _ _ -> True; _ -> False
-      envelope purpose = TList (replace 8 purpose fields)
+      envelope purpose = scopeCodecTerm (replaceScopeCodecField ScopeCodecPurpose purpose fixture)
   forM_ [("cell-check2",cell),("cell-program1",cell),("checked-item3",item),("checked-display3",item),("host-activation-input1",item)] $
     \(legacy,purpose) -> refuse manifest "" (envelope (TList (TString legacy : tail purpose)))
   noPurpose <- readCandidate manifest (envelope TNull) >>= either fail pure
@@ -222,13 +272,13 @@ nativeOriginChecks manifest = do
   unless (any (\proof -> case canonicalOrigin proof of
       NativeAuthoredDeclaration _ -> True
       SourceOriginal _ -> False) (Map.elems (scopeModuleInterfaceProofs scope)))
-    (fail "v9 origin fixture lacks a genuine native authored declaration")
-  exactScopeV9Checks manifest
+    (fail "exact-scope origin fixture lacks a genuine native authored declaration")
+  exactScopeChecksFor NativeDeclarationFixture manifest
 
 -- A role is a claim about authenticated producer origin, not permission to
 -- relabel a source proof.
-originRoleCases :: FilePath -> ExactScope -> [Term] -> [Term] -> IO ()
-originRoleCases manifest scope fields interfaces = do
+originRoleCases :: FilePath -> ExactScope -> ScopeCodecFixture -> [Term] -> IO ()
+originRoleCases manifest scope fixture interfaces = do
   let proofs = Map.toAscList (scopeModuleInterfaceProofs scope)
   forM_ proofs $ \(key,proof) -> do
     selected <- maybe (fail "origin proof lacks its genuine interface row") pure
@@ -242,7 +292,8 @@ originRoleCases manifest scope fields interfaces = do
       (fail "genuine scope role differs from canonical origin")
     let changed = TList (replace 7 (TList (replace 0 (TString contradictory) role)) selectedFields)
     refuse manifest "canonical module origin differs from its exact interface role"
-      (TList (replace 4 (TList (map (replaceOwner key changed) interfaces)) fields))
+      (scopeCodecTerm (replaceScopeCodecField ScopeCodecInterfaces
+        (TList (map (replaceOwner key changed) interfaces)) fixture))
     case canonicalOrigin proof of
       SourceOriginal _ -> pure ()
       NativeAuthoredDeclaration (Generation generation) -> do
@@ -253,8 +304,8 @@ originRoleCases manifest scope fields interfaces = do
                     (replace 1 (TString (T.pack path)) role))
                   alteredRow = TList (replace 7 alteredRole selectedFields)
               BS.writeFile path bytes
-              refuse manifest expected (TList (replace 4
-                (TList (map (replaceOwner key alteredRow) interfaces)) fields))
+              refuse manifest expected (scopeCodecTerm (replaceScopeCodecField ScopeCodecInterfaces
+                (TList (map (replaceOwner key alteredRow) interfaces)) fixture))
             otherGeneration = if generation == 1 then TInt 2 else TInt 1
         changedOrigin "canonical module origin differs from its exact interface role"
           (TList [TString "source-original",TList []])
@@ -326,11 +377,11 @@ refuse manifest expected term = do
   result <- readCandidate manifest term
   case result of
     Left message | expected `isInfixOf` message -> pure ()
-                 | otherwise -> fail ("v9 schema refusal came from another boundary: " ++ message)
-    Right _ -> fail "v9 schema admitted substituted evidence"
+                 | otherwise -> fail ("exact-scope schema refusal came from another boundary: " ++ message)
+    Right _ -> fail "exact-scope schema admitted substituted evidence"
 
 readCandidate :: FilePath -> Term -> IO (Either String ExactScope)
-readCandidate manifest term = withTemporary (takeDirectory manifest) "exact-v9-scope.cbor" $ \path -> do
+readCandidate manifest term = withTemporary (takeDirectory manifest) "exact-scope.cbor" $ \path -> do
   BS.writeFile path (encode term)
   readExactScope path
 
@@ -346,11 +397,11 @@ withTemporary directory name action = bracket
 
 row :: Int -> Term -> IO [Term]
 row size (TList fields) | length fields == size = pure fields
-row _ _ = fail "genuine v9 fixture has another row shape"
+row _ _ = fail "genuine exact-scope fixture has another row shape"
 
 values :: Term -> IO [Term]
 values (TList fields) = pure fields
-values _ = fail "genuine v9 fixture has another array shape"
+values _ = fail "genuine exact-scope fixture has another array shape"
 
 matches :: (String,String) -> Term -> Bool
 matches (unit,name) (TList (TString actualUnit : TString actualName : _)) =
@@ -371,7 +422,7 @@ encode = toStrictByteString . encodeTerm
 decode :: BS.ByteString -> IO Term
 decode bytes = case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
   Right (remaining,value) | BL.null remaining -> pure value
-  _ -> fail "genuine v9 fixture has invalid or trailing CBOR"
+  _ -> fail "genuine exact-scope fixture has invalid or trailing CBOR"
 
 sha :: BS.ByteString -> String
 sha = concatMap (\byte -> let rendered = showHex byte ""

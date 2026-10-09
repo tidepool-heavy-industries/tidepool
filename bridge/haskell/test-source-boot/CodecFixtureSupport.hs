@@ -1,4 +1,4 @@
--- Structural fixtures and observations come from the production Rust codecs.
+-- Structural fixtures and observations come from the production codecs.
 -- This adapter has no compiler capture or execution-admission operation.
 module CodecFixtureSupport
   ( CandidateCodecCase(..), writeCandidateCodecFixture
@@ -6,6 +6,8 @@ module CodecFixtureSupport
   , ReceiptCodecFacts(..), readReceiptCodecFacts
   , CodecImportOwner(..), CertificateCodecFacts(..), readCertificateCodecFacts, readSegmentItemCodecFacts
   , CompilerInputCodecFacts(..), readCompilerInputCodecFacts
+  , ScopeCodecFixture, ScopeCodecField(..), readScopeCodecFixture
+  , scopeCodecField, replaceScopeCodecField, scopeCodecTerm
   , readCodecTerm
   ) where
 
@@ -25,6 +27,63 @@ import System.FilePath ((</>))
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.CheckedCell (RequestHelperRecipe(..))
+import Tidepool.ExactScope (ExactScope, readExactScope)
+
+-- Read the production decoder first, then retain every envelope field for
+-- targeted mutations. This is one structural adapter, not an authority issuer;
+-- published-original selections must survive unrelated evidence mutations.
+data ScopeCodecFixture = ScopeCodecFixture
+  { codecScopeMagic :: Term
+  , codecScopeVersion :: Term
+  , codecScopeSemantic :: Term
+  , codecScopeProducer :: Term
+  , codecScopeInterfaces :: Term
+  , codecScopeLexical :: Term
+  , codecScopeProducts :: Term
+  , codecScopeExecution :: Term
+  , codecScopePurpose :: Term
+  , codecScopePublished :: Term
+  }
+
+data ScopeCodecField
+  = ScopeCodecVersion
+  | ScopeCodecInterfaces
+  | ScopeCodecNativeProducts
+  | ScopeCodecExecution
+  | ScopeCodecPurpose
+
+readScopeCodecFixture :: FilePath -> IO (ExactScope, ScopeCodecFixture)
+readScopeCodecFixture path = do
+  scope <- readExactScope path >>= either fail pure
+  term <- readCodecTerm path
+  fixture <- case term of
+    TList [magic,version,semantic,producer,interfaces,lexical,products,execution,purpose,published] ->
+      pure (ScopeCodecFixture magic version semantic producer interfaces lexical products execution purpose published)
+    _ -> fail "production-admitted exact scope needs a current mutation adapter"
+  pure (scope,fixture)
+
+scopeCodecField :: ScopeCodecField -> ScopeCodecFixture -> Term
+scopeCodecField field fixture = case field of
+  ScopeCodecVersion -> codecScopeVersion fixture
+  ScopeCodecInterfaces -> codecScopeInterfaces fixture
+  ScopeCodecNativeProducts -> codecScopeProducts fixture
+  ScopeCodecExecution -> codecScopeExecution fixture
+  ScopeCodecPurpose -> codecScopePurpose fixture
+
+replaceScopeCodecField :: ScopeCodecField -> Term -> ScopeCodecFixture -> ScopeCodecFixture
+replaceScopeCodecField field value fixture = case field of
+  ScopeCodecVersion -> fixture {codecScopeVersion=value}
+  ScopeCodecInterfaces -> fixture {codecScopeInterfaces=value}
+  ScopeCodecNativeProducts -> fixture {codecScopeProducts=value}
+  ScopeCodecExecution -> fixture {codecScopeExecution=value}
+  ScopeCodecPurpose -> fixture {codecScopePurpose=value}
+
+scopeCodecTerm :: ScopeCodecFixture -> Term
+scopeCodecTerm fixture = TList
+  [ codecScopeMagic fixture, codecScopeVersion fixture, codecScopeSemantic fixture
+  , codecScopeProducer fixture, codecScopeInterfaces fixture, codecScopeLexical fixture
+  , codecScopeProducts fixture, codecScopeExecution fixture, codecScopePurpose fixture
+  , codecScopePublished fixture ]
 
 data PurposeCodecCase
   = CodecCellPurpose

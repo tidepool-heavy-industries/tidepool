@@ -3,7 +3,7 @@ module SourceBootCases where
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import CandidateExecutionSourcesTest (executionScopeDescriptorChecks)
 
-import ExactScopeV9Test (exactScopeV9Checks, nativeOriginChecks, candidateCanonicalChecks)
+import ExactScopeV9Test (exactScopeChecks, nativeOriginChecks, candidateCanonicalChecks)
 
 import SourceBootFixtureSupport
 
@@ -282,7 +282,7 @@ sourceBootReuseAt work = do
         Just _ -> False) candidates) $
     fail "SOURCE SCC candidate issued unsupported execution source custody"
   putStrLn "SOURCE execution custody: CacheEven/CacheOdd recipes absent; ordinary NativeScopeBase/NativeScopeOwner recipes admitted"
-  exactScopeV9Checks nativeScope
+  exactScopeChecks nativeScope
   let nativeOwner = SessionModule LibMod (Generation 1)
       authoredSource = replaceExtension (sessionHiPath work nativeOwner) "hs"
   createDirectoryIfMissing True (takeDirectory authoredSource)
