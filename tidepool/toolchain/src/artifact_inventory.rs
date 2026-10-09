@@ -3380,9 +3380,7 @@ mod tests {
         assert_eq!(retained.interface_dependencies().len(), 1);
         assert!(retained
             .native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(published)])
-            .unwrap()
-            .bindings
-            .is_empty());
+            .is_err());
         drop(retained);
         assert_eq!(inventory.node_count(), 0);
     }

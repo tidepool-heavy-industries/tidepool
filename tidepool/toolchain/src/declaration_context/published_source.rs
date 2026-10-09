@@ -421,11 +421,12 @@ mod tests {
                     producer,
                     crate::certified_products::tests::recovered_witness_fixtures(&[
                         crate::certified_products::fixture_finalized_product_with_requirements(
-                            crate::certified_products::tests::original_groups_fixture(
+                            crate::certified_products::tests::original_groups_fixture_with_interface(
                                 module,
                                 groups,
                                 version,
                                 &BTreeMap::new(),
+                                format!("interface-{module}").into_bytes(),
                             ),
                             producer,
                             Some(requirements),
