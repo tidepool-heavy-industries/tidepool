@@ -302,7 +302,12 @@ impl CompilerInputProjection {
         for entry in selected.values() {
             for required in &entry.requirements {
                 let role = self.roles.get(required).ok_or_else(|| {
-                    failure("compiler input projection omits an interface dependency")
+                    admission_failure(ArtifactInventoryFailure::MissingDependency {
+                        artifact: entry.descriptor.id,
+                        dependent: entry.descriptor.owner.clone(),
+                        required: required.clone(),
+                        dependency: ArtifactDependency::Interface,
+                    })
                 })?;
                 if entry.interface_seals.get(required).is_some_and(|seal| {
                     metadata.artifacts[&role.interface()]
@@ -310,8 +315,11 @@ impl CompilerInputProjection {
                         .interface_sha256
                         != *seal
                 }) {
-                    return Err(failure(
-                        "compiler input projection changes an interface seal",
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::InterfaceSealMismatch {
+                            dependent: entry.descriptor.owner.clone(),
+                            required: required.clone(),
+                        },
                     ));
                 }
             }
