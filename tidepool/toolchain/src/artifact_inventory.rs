@@ -60,6 +60,40 @@ pub struct NativeGroupKey {
     pub original_ordinal: u32,
 }
 
+/// Immutable issuer-selected artifacts and executable groups. Decoding these
+/// facts grants no authority; retention checks them against authenticated live
+/// custody and requires their complete exact dependency closure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExactArtifactSelection(Arc<ExactArtifactSelectionFacts>);
+
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExactArtifactSelectionFacts {
+    artifacts: Vec<ArtifactId>,
+    native_groups: Vec<NativeGroupKey>,
+}
+
+impl Serialize for ExactArtifactSelection {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExactArtifactSelection {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ExactArtifactSelectionFacts::deserialize(deserializer).map(|facts| Self(Arc::new(facts)))
+    }
+}
+
+impl ExactArtifactSelection {
+    pub(crate) fn capture(view: &ArtifactView) -> Self {
+        Self(Arc::new(ExactArtifactSelectionFacts {
+            artifacts: view.artifact_ids(),
+            native_groups: view.selected_native_groups().into_iter().collect(),
+        }))
+    }
+}
+
 /// Whole-module demand and a checked compiler entry cross the same admission
 /// owner. A raw ordinal or recovered selection cannot mint a checked entry.
 #[derive(Clone, Copy, Debug)]
@@ -2209,10 +2243,89 @@ impl ArtifactView {
         }
         let native_custody = retained_ids.difference(&initial).copied().collect();
         drop(state);
-        let mut retained =
+        let retained =
             self.lease
                 .inventory
                 .retain(selected, native_custody, Vec::new(), Vec::new());
+        self.retain_projected_materializations(retained)
+    }
+
+    /// Reopen an issuer's immutable selection inside subsequently grown custody.
+    /// Additional available artifacts and demanded groups cannot change it.
+    pub(crate) fn select_issued(
+        &self,
+        roots: Vec<ArtifactId>,
+        selection: &ExactArtifactSelection,
+    ) -> Result<Self, CompileError> {
+        let ids = selection
+            .0
+            .artifacts
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let groups = selection
+            .0
+            .native_groups
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if ids.len() != selection.0.artifacts.len()
+            || groups.len() != selection.0.native_groups.len()
+        {
+            return Err(failure("duplicate issued artifact selection"));
+        }
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &self.read_projection(&state).nodes;
+        if roots.iter().any(|id| !ids.contains(id))
+            || ids
+                .iter()
+                .any(|id| !owned.contains(&InventoryNodeKey::Artifact(*id)))
+            || groups
+                .iter()
+                .any(|group| !owned.contains(&InventoryNodeKey::Group(*group)))
+        {
+            return Err(failure("issued selection is outside retained custody"));
+        }
+        let root_ids = roots.iter().copied().collect::<BTreeSet<_>>();
+        let selected = roots
+            .into_iter()
+            .map(InventoryNodeKey::Artifact)
+            .chain(
+                groups
+                    .iter()
+                    .filter(|group| root_ids.contains(&group.artifact))
+                    .copied()
+                    .map(InventoryNodeKey::Group),
+            )
+            .collect::<Vec<_>>();
+        let initial = admitted_closure(&state, selected.iter().copied());
+        let native_custody = ids
+            .difference(&artifact_ids(&initial))
+            .copied()
+            .collect::<Vec<_>>();
+        let closure = admitted_closure(
+            &state,
+            selected.iter().copied().chain(
+                native_custody
+                    .iter()
+                    .copied()
+                    .map(InventoryNodeKey::Artifact),
+            ),
+        );
+        if artifact_ids(&closure) != ids || native_groups(&closure) != groups {
+            return Err(failure(
+                "issued selection differs from its exact dependency closure",
+            ));
+        }
+        drop(state);
+        let retained =
+            self.lease
+                .inventory
+                .retain(selected, native_custody, Vec::new(), Vec::new());
+        self.retain_projected_materializations(retained)
+    }
+
+    fn retain_projected_materializations(&self, mut retained: Self) -> Result<Self, CompileError> {
         let mut materializations = Vec::new();
         if !retained.is_empty() {
             self.collect_materializations(&mut materializations, &mut BTreeSet::new())?;

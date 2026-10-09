@@ -21,6 +21,7 @@ pub enum CompilerInputRole {
         original: ArtifactId,
         source_revision: String,
         original_input_identity: String,
+        selection: ExactArtifactSelection,
         selection_sha256: [u8; 32],
     },
 }

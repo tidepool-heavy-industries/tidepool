@@ -83,6 +83,7 @@ impl ExactDeclarationContext {
             original,
             source_revision,
             original_input_identity,
+            selection,
             ..
         } = role
         else {
@@ -95,7 +96,7 @@ impl ExactDeclarationContext {
         }
         let closure = self
             .inventory
-            .select_roots(self.published_artifact_roots(root, *original)?)?;
+            .select_issued(self.published_artifact_roots(root, *original)?, selection)?;
         let metadata = closure.metadata_snapshot();
         let entry = metadata
             .artifacts
@@ -231,9 +232,16 @@ impl ExactDeclarationContext {
         root: &ExactModuleIdentity,
         original: ArtifactId,
     ) -> Result<Self, CompileError> {
-        let inventory = self
-            .inventory
-            .select_roots(self.published_artifact_roots(root, original)?)?;
+        let roots = self.published_artifact_roots(root, original)?;
+        let inventory =
+            match self.compiler_projection.roles().iter().find(|role| {
+                role.original() == Some(original) && role.is_published_source_original()
+            }) {
+                Some(CompilerInputRole::PublishedSourceOriginal { selection, .. }) => {
+                    self.inventory.select_issued(roots, selection)?
+                }
+                _ => self.inventory.select_roots(roots)?,
+            };
         let ids = inventory
             .descriptors()
             .into_iter()
@@ -312,6 +320,9 @@ impl ExactDeclarationContext {
             original: entry.descriptor.id,
             source_revision: revision.into(),
             original_input_identity: input_identity.into(),
+            selection: crate::artifact_inventory::ExactArtifactSelection::capture(
+                &context.inventory,
+            ),
             selection_sha256: [0; 32],
         };
         let digest = context.published_selection_sha256(root, &role)?;
@@ -370,6 +381,7 @@ impl ExactDeclarationContext {
                         source_revision,
                         original_input_identity,
                         selection_sha256,
+                        ..
                     } = role
                     else {
                         return None;
@@ -671,34 +683,47 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(recovered.semantic_sha256(), published.semantic_sha256());
-            let scratch = tempfile::tempdir().unwrap();
-            let products = recovery_artifacts::materialize_certified_products(
-                scratch.path(),
-                producer,
-                &published.recovery_products(),
-            )
-            .unwrap();
-            let interfaces = published
-                .materialize_module_interfaces(scratch.path())
+            for snapshot in [published.as_ref(), &continued] {
+                let scratch = tempfile::tempdir().unwrap();
+                let products = recovery_artifacts::materialize_certified_products(
+                    scratch.path(),
+                    producer,
+                    &snapshot.recovery_products(),
+                )
                 .unwrap();
-            let roles: Vec<CompilerInputRole> = serde_json::from_slice(
-                &serde_json::to_vec(&published.compiler_input_roles()).unwrap(),
-            )
-            .unwrap();
-            let durable = ExactDeclarationContext::capture_recovery_with_inventory(
-                scratch.path(),
-                &products,
-                &interfaces,
-                &[],
-                &[],
-                &published.artifact_view().descriptors(),
-                &published.artifact_view().dependencies(),
-                &[early],
-                &roles,
-                published.lexical.clone(),
-            )
-            .unwrap();
-            assert_eq!(durable.semantic_sha256(), published.semantic_sha256());
+                let interfaces = snapshot
+                    .materialize_module_interfaces(scratch.path())
+                    .unwrap();
+                let roles: Vec<CompilerInputRole> = serde_json::from_slice(
+                    &serde_json::to_vec(&snapshot.compiler_input_roles()).unwrap(),
+                )
+                .unwrap();
+                let durable = ExactDeclarationContext::capture_recovery_with_inventory(
+                    scratch.path(),
+                    &products,
+                    &interfaces,
+                    &[],
+                    &[],
+                    &snapshot.artifact_view().descriptors(),
+                    &snapshot.artifact_view().dependencies(),
+                    &snapshot
+                        .artifact_view()
+                        .selected_native_groups()
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                    &roles,
+                    snapshot.lexical.clone(),
+                )
+                .unwrap();
+                assert_eq!(durable.semantic_sha256(), snapshot.semantic_sha256());
+                assert_eq!(
+                    durable.published_source_original_selections().unwrap()[0]
+                        .context()
+                        .semantic_sha256(),
+                    published.semantic_sha256(),
+                    "durable continuation retains the original publication selection",
+                );
+            }
             let mut missing = recovery_inventory;
             missing.entries.remove(&old.descriptor.id);
             assert!(
@@ -720,3 +745,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "published_source/history_properties.rs"]
+mod history_properties;
