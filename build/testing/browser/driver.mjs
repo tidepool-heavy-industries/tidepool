@@ -374,8 +374,8 @@ async function runJourney(ready) {
       requireString(requestId, 'provider barrier request_id');
       const request = await waitForCompletedRequest(conversationId, requestId);
       await page.getByRole('region', { name: 'Selected worker Chat' })
-        .getByRole('region', { name: 'Conversation messages' })
-        .getByRole('group', { name: 'Retained conversation items' })
+        .getByRole('region', { name: 'Conversation', exact: true })
+        .getByRole('list', { name: 'Conversation entries' })
         .getByText(expectedText, { exact: false }).waitFor({ timeout: 30_000 });
       await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: 'Timeline', exact: true }).click();
       const row = page.getByRole('table', { name: 'Conversation activity timeline' })
