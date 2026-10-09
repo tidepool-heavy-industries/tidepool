@@ -5,7 +5,7 @@
 module Tidepool.CompilerExecution
   ( CompilerExecutionGrant, compilerExecutionGrant, serialCompilerExecutionGrant
   , compilerModuleJobs
-  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, runCompilerWorklist, dependencyClosedReuse
+  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, runCompilerWorklist, runCompilerWorklistWithStarted, dependencyClosedReuse
   ) where
 
 import Control.Concurrent (forkFinally, killThread)
@@ -77,18 +77,24 @@ runCompilerTasks executor action completed inputs =
 -- coordinator. Completed ancestor tasks never wait behind a nested collector.
 runCompilerWorklist :: CompilerExecutor -> (input -> IO output)
   -> (input -> output -> IO [input]) -> [input] -> IO [output]
-runCompilerWorklist (CompilerExecutor queue state) action completed inputs = mask $ \restore -> do
+runCompilerWorklist executor action completed inputs =
+  runCompilerWorklistWithStarted executor action (const (pure ())) completed inputs
+
+runCompilerWorklistWithStarted :: CompilerExecutor -> (input -> IO output)
+  -> (input -> IO ()) -> (input -> output -> IO [input]) -> [input] -> IO [output]
+runCompilerWorklistWithStarted (CompilerExecutor queue state) action started completed inputs = mask $ \restore -> do
   events <- newChan
   let submit first tasks = forM_ (zip [first..] tasks) $ \(ordinal, input) -> do
         result <- newEmptyMVar
         let settle outcome = do
               first <- tryPutMVar result outcome
-              when first (writeChan events (ordinal, input, outcome))
+              when first (writeChan events (Right (ordinal, input, outcome)))
         key <- modifyMVar state $ \(ExecutorState closed next pending) ->
           if closed then throwIO ThreadKilled else pure
             (ExecutorState False (next + 1)
               (Map.insert next (settle . Left) pending), next)
         writeChan queue $ mask $ \run -> do
+          writeChan events (Left input)
           outcome <- try (run (action input))
           modifyMVar_ state $ \(ExecutorState closed next pending) ->
             pure (ExecutorState closed next (Map.delete key pending))
@@ -100,12 +106,15 @@ runCompilerWorklist (CompilerExecutor queue state) action completed inputs = mas
             _ -> pure ()
       collect 0 _ outputs = pure (Map.elems outputs)
       collect remaining next outputs = do
-        (ordinal, input, outcome) <- restore (readChan events)
-        output <- either throwIO pure outcome
-        additions <- restore (completed input output)
-        submit next additions
-        collect (remaining - 1 + length additions) (next + length additions)
-          (Map.insert ordinal output outputs)
+        event <- restore (readChan events)
+        case event of
+          Left input -> restore (started input) >> collect remaining next outputs
+          Right (ordinal,input,outcome) -> do
+            output <- either throwIO pure outcome
+            additions <- restore (completed input output)
+            submit next additions
+            collect (remaining - 1 + length additions) (next + length additions)
+              (Map.insert ordinal output outputs)
   submit 0 inputs
   collect (length inputs) (length inputs) Map.empty
 
