@@ -574,6 +574,50 @@ pub(crate) fn assert_selected_authored_private_inputs(
     let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
     let authored_root = native_context.authored_native_root(generation).unwrap();
     let selected_before = native_context.inventory.selected_native_groups();
+    let assert_exact_offer = |context: &ExactDeclarationContext, name: &str, expected: bool| {
+        let before = context.inventory.selected_native_groups();
+        let offer = crate::artifacts::ModuleCandidateOffer::select_in_context(
+            producer_bytes,
+            &[root.to_path_buf()],
+            &root.join(name),
+            Arc::new(ExactCompileContext::new(Arc::new(context.clone()))),
+        )
+        .expect("actual exact offer preserves the issued canonical context");
+        let scope: Value = ciborium::de::from_reader(
+            std::fs::read(offer.exact_scope_path().unwrap())
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        let owner = certificate.product().owner();
+        let originals = scope.as_array().unwrap()[6].as_array().unwrap();
+        let offered = originals
+            .iter()
+            .map(|row| row.as_array().unwrap())
+            .filter(|row| row[0] == text(&owner.unit) && row[1] == text(&owner.module))
+            .collect::<Vec<_>>();
+        if expected {
+            let [row] = offered.as_slice() else {
+                panic!("complete selected authored original must have one private offer");
+            };
+            assert_eq!(
+                &row[..5],
+                &[
+                    text(&owner.unit),
+                    text(&owner.module),
+                    text(hex(&owner.module_version.0)),
+                    text(hex(&owner.skinny_iface_sha256)),
+                    text(hex(&owner.product_sha256)),
+                ]
+            );
+        } else {
+            assert!(
+                offered.is_empty(),
+                "custody or partial demand grants no full original offer"
+            );
+        }
+        assert_eq!(context.inventory.selected_native_groups(), before);
+    };
     let authored_groups = selected_before
         .iter()
         .filter(|group| group.artifact == authored_root)
@@ -616,11 +660,15 @@ pub(crate) fn assert_selected_authored_private_inputs(
             .selected_native_groups,
         selected_before
     );
+    assert_exact_offer(&native_context, "full-authored-exact-offer", true);
     // Reuse the genuine certificate and independently remove execution
     // roots. Neither type custody nor an incomplete group selection can
     // supply the complete authored original to another compiler request.
     let mut valid_sparse_refusals = 0;
-    for omitted in std::iter::once(None).chain(authored_groups.iter().map(Some)) {
+    for (selection_index, omitted) in std::iter::once(None)
+        .chain(authored_groups.iter().map(Some))
+        .enumerate()
+    {
         let selected = match omitted {
             None => BTreeSet::new(),
             Some(omitted) => selected_before
@@ -654,6 +702,11 @@ pub(crate) fn assert_selected_authored_private_inputs(
             .roles()
             .iter()
             .all(|role| role.original() != Some(authored_root))));
+        assert_exact_offer(
+            &partial,
+            &format!("partial-authored-exact-offer-{selection_index}"),
+            false,
+        );
         if omitted.is_some()
             && partial
                 .inventory
