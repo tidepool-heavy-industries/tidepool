@@ -9,7 +9,7 @@ import Tidepool.Actors.Exomonad
 
 Right selectedTree <- boundWorktree
 Right selectedState <- observeSubmission (worktreeId selectedTree)
-let selectedTask = Work.task [label|typed-source|] "keep the original task" ["README.md"] "return the same source and obligation" (headOid (submittedHead selectedState))
+let selectedTask = Work.task "typed-source" "keep the original task" ["README.md"] "return the same source and obligation" (headOid (submittedHead selectedState))
 Right selectedAgent <- spawnSubagent (FreshCtx (Work.taskContext selectedTask))
   (ForkWorktree currentCheckout)
   ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
