@@ -860,6 +860,8 @@ pub(crate) struct ResidentWorkbenchTools {
     /// Installer source roots belong to the installed implementation, not the
     /// actor's published declaration and value surface.
     _installation_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    /// Exact source selection retained with a prepared candidate or installation.
+    _source_original: Option<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
     code: InstalledToolCode,
     /// Exact installer row retained with its rooted dispatcher.
     pub(crate) dispatcher_effects: String,
@@ -891,7 +893,8 @@ pub(crate) struct PreparedRequestReceiver {
 
 #[derive(Clone, Copy)]
 enum ToolInstallationPurpose {
-    ToolsOnly,
+    InitialTools,
+    CandidateTools,
     SpawnApplication,
 }
 
@@ -4668,6 +4671,42 @@ where
         'a,
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
     > {
+        self.prepare_source_tools(
+            context,
+            install,
+            granted_effects,
+            ToolInstallationPurpose::InitialTools,
+        )
+    }
+
+    /// Prepare a replacement without publishing into its continuing namespace.
+    pub(crate) fn prepare_candidate_tools<'a>(
+        &'a self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<exomonad_tool::ActorEffectKey>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
+        self.prepare_source_tools(
+            context,
+            install,
+            granted_effects,
+            ToolInstallationPurpose::CandidateTools,
+        )
+    }
+
+    fn prepare_source_tools<'a>(
+        &'a self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<exomonad_tool::ActorEffectKey>,
+        purpose: ToolInstallationPurpose,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
         let span = tracing::info_span!(target: "exomonad_actor::workbench_phase", "agent_spec_prepare", actor = %context.actor, install);
         Box::pin(
             async move {
@@ -4684,7 +4723,7 @@ where
                     granted_effects,
                     ready.effects,
                     InstalledToolCode::SourcePrepared(ready.prepared),
-                    ToolInstallationPurpose::ToolsOnly,
+                    purpose,
                 )
                 .await
                 .map(|installation| installation.tools)
@@ -4711,7 +4750,7 @@ where
                 install,
                 granted_effects,
                 installer,
-                ToolInstallationPurpose::ToolsOnly,
+                ToolInstallationPurpose::InitialTools,
             )
             .await
             .map(|installation| installation.tools)
@@ -4865,7 +4904,7 @@ where
         let registration = abort_guard.registration();
         let installed_effect_support = self.access.source.installed_effect_support().to_vec();
         let handler_effect_support = self.access.handler_effect_support.clone();
-        let (step, pending_originals) = registration
+        let (step, pending_originals, source_original) = registration
             .scope(self.access.with_machine(compile_context.clone(), {
                 let prepared = code.prepared().cloned();
                 let installer = match &code {
@@ -4878,14 +4917,19 @@ where
                             session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
                             let entry =
                                 session.prepare_startup_entry(prepared.entry.compiled().code())?;
-                            let pending = public_original
-                                .map(|selection| {
-                                    session.stage_published_source_originals_in(
-                                        public_scope,
-                                        selection,
-                                    )
-                                })
-                                .transpose()?;
+                            let pending = match purpose {
+                                ToolInstallationPurpose::InitialTools => public_original
+                                    .as_ref()
+                                    .map(|selection| {
+                                        session.stage_published_source_originals_in(
+                                            public_scope,
+                                            Arc::clone(selection),
+                                        )
+                                    })
+                                    .transpose()?,
+                                ToolInstallationPurpose::CandidateTools
+                                | ToolInstallationPurpose::SpawnApplication => None,
+                            };
                             (
                                 session.run_startup_entry(entry),
                                 prepared.entry.compiled().warnings.warnings.clone(),
@@ -4914,7 +4958,7 @@ where
                         warnings,
                         outcome,
                     )?;
-                    Ok((step, pending_originals))
+                    Ok((step, pending_originals, public_original))
                 }
             }))
             .await?;
@@ -5020,7 +5064,7 @@ where
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
                     let (settled, receiver) = match purpose {
-                        ToolInstallationPurpose::ToolsOnly => (settled, None),
+                        ToolInstallationPurpose::InitialTools | ToolInstallationPurpose::CandidateTools => (settled, None),
                         ToolInstallationPurpose::SpawnApplication => {
                             let ResidentOutcome::Suspended { hole, request, .. } = settled else {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -5057,6 +5101,7 @@ where
                             declarations,
                             dispatch: Arc::new(dispatch),
                             _installation_scope: installation_scope,
+                            _source_original: source_original,
                             code,
                             dispatcher_effects,
                             slots,
@@ -16532,10 +16577,12 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .unwrap();
         assert!(warm_view.exact_declaration_context().is_none());
-        let first = workbench
-            .prepare_tools(context.clone(), 1, vec![])
-            .await
-            .unwrap();
+        let first = Arc::new(
+            workbench
+                .prepare_tools(context.clone(), 1, vec![])
+                .await
+                .unwrap(),
+        );
         workbench
             .access
             .with_machine(context.clone(), {
@@ -16655,10 +16702,12 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             })
             .await
             .unwrap();
-        let second = workbench
-            .prepare_tools(context.clone(), 2, vec![])
-            .await
-            .unwrap();
+        let second = Arc::new(
+            workbench
+                .prepare_tools(context.clone(), 2, vec![])
+                .await
+                .unwrap(),
+        );
         workbench
             .access
             .with_machine(context.clone(), move |session, _, _| {
@@ -16709,6 +16758,181 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             completed_executions
         );
         assert_eq!(first.declarations, second.declarations);
+        struct CandidateCommit(crate::CheckpointSourceLayer);
+        impl crate::StagedActorSourceReload for CandidateCommit {
+            fn source(&self) -> &crate::CheckpointSourceLayer {
+                &self.0
+            }
+            fn commit(
+                self: Box<Self>,
+                publication: &Arc<tidepool_runtime::session::PublicationDecision>,
+                on_visible: Box<dyn FnOnce() + '_>,
+            ) -> crate::SourceLayerReload {
+                let Some(claim) = publication.claim_commit() else {
+                    return crate::SourceLayerReload::Cancelled;
+                };
+                on_visible();
+                claim.published();
+                crate::SourceLayerReload::Published {
+                    previous: "original".into(),
+                    revision: "candidate".into(),
+                    changed: Vec::new(),
+                }
+            }
+        }
+        #[derive(Clone, Copy)]
+        enum CandidateOutcome {
+            Refused,
+            Cancelled,
+            Published,
+        }
+        let candidate_compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        for (index, outcome) in [
+            CandidateOutcome::Refused,
+            CandidateOutcome::Cancelled,
+            CandidateOutcome::Published,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (before, visibility, handles, custody) = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    Ok((
+                        session
+                            .compile_view_in(context.placement.lexical_scope)
+                            .unwrap(),
+                        session
+                            .public_visibility_snapshot_in(context.placement.lexical_scope)
+                            .unwrap(),
+                        session.value_handle_count(),
+                        session.outstanding_custody(),
+                    ))
+                })
+                .await
+                .unwrap();
+            let candidate = Arc::new(
+                workbench
+                    .prepare_candidate_tools(context.clone(), 3 + index as u64, vec![])
+                    .await
+                    .unwrap(),
+            );
+            let candidate_scope = candidate._installation_scope.scope();
+            assert!(
+                candidate._source_original.is_some(),
+                "the candidate retains its exact issued source selection privately"
+            );
+            assert!(Arc::ptr_eq(
+                candidate.code.prepared().unwrap(),
+                &warmed.prepared
+            ));
+            workbench
+                .access
+                .with_machine(context.clone(), {
+                    let before = before.clone();
+                    let visibility = visibility.clone();
+                    move |session, context, _| {
+                        assert_eq!(
+                            session
+                                .compile_view_in(context.placement.lexical_scope)
+                                .unwrap(),
+                            before
+                        );
+                        assert_eq!(
+                            session
+                                .public_visibility_snapshot_in(context.placement.lexical_scope)
+                                .unwrap(),
+                            visibility
+                        );
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+            let source = crate::CheckpointSourceLayer::default();
+            let old =
+                InstalledToolLease::new(context.actor, source.clone(), Some(Arc::clone(&first)));
+            let current =
+                InstalledToolLease::new(context.actor, source.clone(), Some(Arc::clone(&second)));
+            let state = InstalledToolsState::default();
+            state.publish(current.clone());
+            let decision = tidepool_runtime::session::PublicationDecision::new();
+            if matches!(outcome, CandidateOutcome::Cancelled) {
+                decision.request_cancellation();
+            }
+            let result = state.commit_spec_reload(
+                if matches!(outcome, CandidateOutcome::Refused) {
+                    &old
+                } else {
+                    &current
+                },
+                Arc::clone(&candidate),
+                Box::new(CandidateCommit(source)),
+                &decision,
+            );
+            match outcome {
+                CandidateOutcome::Refused => {
+                    assert!(matches!(result, crate::SourceLayerReload::Unavailable(_)))
+                }
+                CandidateOutcome::Cancelled => {
+                    assert!(matches!(result, crate::SourceLayerReload::Cancelled))
+                }
+                CandidateOutcome::Published => {
+                    assert!(matches!(result, crate::SourceLayerReload::Published { .. }))
+                }
+            }
+            let expected = if matches!(outcome, CandidateOutcome::Published) {
+                &candidate
+            } else {
+                &second
+            };
+            assert!(Arc::ptr_eq(&state.current_tools().unwrap(), expected));
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    assert_eq!(
+                        session
+                            .compile_view_in(context.placement.lexical_scope)
+                            .unwrap(),
+                        before
+                    );
+                    assert_eq!(
+                        session
+                            .public_visibility_snapshot_in(context.placement.lexical_scope)
+                            .unwrap(),
+                        visibility
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            state.clear();
+            drop(candidate);
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context.clone(),
+                handles,
+                custody,
+                Vec::new(),
+                "source candidate settlement",
+            )
+            .await;
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    assert!(session
+                        .public_visibility_snapshot_in(candidate_scope)
+                        .is_none());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            candidate_compiler_calls,
+            "candidate preparation reuses the immutable original without compiler requests"
+        );
         crate::agent_spec::preparation::tests::ready_bound_preserves_installed_lease(Arc::clone(
             &first.code.prepared().expect("source-prepared installation"),
         ))
