@@ -20338,7 +20338,7 @@ pub(crate) mod request_tests {
             .expect("a second genuine alias shadows the first");
         assert_ne!(binding, current_binding);
         let borrowed_binding = if shadowed { binding } else { current_binding };
-        let (before, public_before) = workbench
+        let (before, roots_before, public_before) = workbench
             .access
             .with_machine(context.clone(), move |session, _, _| {
                 assert_eq!(
@@ -20350,6 +20350,7 @@ pub(crate) mod request_tests {
                 );
                 Ok((
                     session.value_handle_count(),
+                    session.persistent_roots_count(),
                     session
                         .public_visibility_snapshot_in(original_scope)
                         .unwrap(),
@@ -20420,7 +20421,7 @@ pub(crate) mod request_tests {
         let continuation_id = continuation.cont_id().to_owned();
         let pending_id = continuation_id.clone();
         let evidence_continuation = continuation.clone();
-        let (types, custody_before_resume) = workbench
+        let (types, custody_before_resume, handles_before_resume, roots_before_resume) = workbench
             .access
             .with_machine(context.clone(), move |session, _, _| {
                 assert!(
@@ -20445,7 +20446,12 @@ pub(crate) mod request_tests {
                 assert!(session
                     .request_scope_types_match(&types, site)
                     .map_err(ResidentError::Prepared)?);
-                Ok((types, session.outstanding_custody()))
+                Ok((
+                    types,
+                    session.outstanding_custody(),
+                    session.value_handle_count(),
+                    session.persistent_roots_count(),
+                ))
             })
             .await
             .unwrap();
@@ -20508,9 +20514,11 @@ pub(crate) mod request_tests {
                 drop(result);
                 assert_eq!(
                     session.value_handle_count(),
-                    before + 1,
-                    "only the completed requestScope binding adds a root"
+                    handles_before_resume + 1,
+                    "resuming the accessor adds only its completed requestScope binding"
                 );
+                assert_eq!(session.scope_binding_count(scope), 1);
+                assert_eq!(session.persistent_roots_count(), roots_before_resume + 1);
                 assert_eq!(
                     session
                         .current_binding_in(original_scope, "sessionInput")
@@ -20524,9 +20532,11 @@ pub(crate) mod request_tests {
                 assert_eq!(session.outstanding_custody(), custody_before_resume);
                 assert_eq!(
                     session.retire_scope(scope).roots_released,
-                    1,
-                    "only the settled reply's owned root is released"
+                    roots_before_resume + 1 - roots_before,
+                    "retirement releases the private native support and settled reply roots"
                 );
+                assert_eq!(session.scope_binding_count(scope), 0);
+                assert_eq!(session.persistent_roots_count(), roots_before);
                 assert_eq!(session.value_handle_count(), before);
                 assert_eq!(
                     session
