@@ -242,12 +242,15 @@ fn parse_owned_invocation(args: &[OsString]) -> Result<OwnedInvocation<'_>, Fron
         };
         let flag = flag.to_str().unwrap();
         let mut count = std::iter::once(count);
-        let count = usize::try_from(number(&mut count, flag)?)
-            .map_err(|_| FrontendError::Usage(format!("{flag} is too large")))?;
-        *selected = Some(
+        let count = number(&mut count, flag)?;
+        *selected = Some(if flag == "--workers" {
+            let count = usize::try_from(count)
+                .map_err(|_| FrontendError::Usage(format!("{flag} is too large")))?;
             std::num::NonZeroUsize::new(count)
-                .ok_or_else(|| FrontendError::Usage(format!("{flag} must be at least 1")))?,
-        );
+                .ok_or_else(|| FrontendError::Usage(format!("{flag} must be at least 1")))?
+        } else {
+            compiler_job_count(count, flag)?
+        });
         remaining = rest;
     }
     let [separator, program, child_args @ ..] = remaining else {
@@ -877,14 +880,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
             }
             "--log-path" => log_path = Some(PathBuf::from(next(&mut args, option)?)),
             "--foreground-jobs" | "--preparation-jobs" => {
-                let count = number(&mut args, option)?;
-                if count == 0 || count > u64::from(u32::MAX) {
-                    return Err(FrontendError::Usage(format!(
-                        "{option} requires a positive 32-bit job count"
-                    )));
-                }
-                let count = usize::try_from(count)
-                    .map_err(|_| FrontendError::Usage(format!("{option} is too large")))?;
+                let count = compiler_job_count(number(&mut args, option)?, option)?.get();
                 if option == "--foreground-jobs" {
                     foreground_jobs = Some(count);
                 } else {
@@ -924,6 +920,17 @@ fn next<'a>(
     args.next()
         .map(OsString::as_os_str)
         .ok_or_else(|| FrontendError::Usage(format!("{option} requires a value")))
+}
+
+fn compiler_job_count(count: u64, option: &str) -> Result<std::num::NonZeroUsize, FrontendError> {
+    if count == 0 || count > u64::from(u32::MAX) {
+        return Err(FrontendError::Usage(format!(
+            "{option} requires a positive 32-bit job count"
+        )));
+    }
+    let count = usize::try_from(count)
+        .map_err(|_| FrontendError::Usage(format!("{option} is too large")))?;
+    Ok(std::num::NonZeroUsize::new(count).unwrap())
 }
 
 fn number<'a>(
@@ -1331,10 +1338,21 @@ mod tests {
     proptest::proptest! {
         #![proptest_config(owned_evidence_property_config())]
         #[test]
+        fn owned_compiler_allowances_refuse_values_outside_daemon_domain(
+            count in (u64::from(u32::MAX) + 1)..=u64::MAX,
+            foreground in proptest::prelude::any::<bool>(),
+        ) {
+            let flag = if foreground { "--foreground-jobs" } else { "--preparation-jobs" };
+            let args = [OsString::from("/tmp/owned"), OsString::from(flag), count.to_string().into(),
+                OsString::from("--"), OsString::from("child")];
+            proptest::prop_assert!(parse_owned_invocation(&args).is_err());
+        }
+
+        #[test]
         fn owned_compiler_allowances_roundtrip_independently_of_worker_count(
             workers in 1_usize..8,
-            foreground in 1_usize..=64,
-            preparation in 1_usize..=64,
+            foreground in 1_u32..=u32::MAX,
+            preparation in 1_u32..=u32::MAX,
             reverse in proptest::prelude::any::<bool>(),
         ) {
             let mut options = vec![
@@ -1353,8 +1371,8 @@ mod tests {
             );
             let config = parse_daemon(&arguments[1..]).unwrap();
             proptest::prop_assert_eq!(config.workers, Some(workers));
-            proptest::prop_assert_eq!(config.foreground_jobs, Some(foreground));
-            proptest::prop_assert_eq!(config.preparation_jobs, Some(preparation));
+            proptest::prop_assert_eq!(config.foreground_jobs, Some(foreground as usize));
+            proptest::prop_assert_eq!(config.preparation_jobs, Some(preparation as usize));
             proptest::prop_assert_eq!(invocation.child_args, &[OsString::from("--foreground-jobs"), OsString::from("child-owned")]);
         }
     }
@@ -1362,7 +1380,7 @@ mod tests {
     #[test]
     fn owned_compiler_allowances_refuse_invalid_or_duplicate_options() {
         for flag in ["--foreground-jobs", "--preparation-jobs"] {
-            for value in ["0", "-1", "invalid", "18446744073709551616"] {
+            for value in ["0", "-1", "invalid", "4294967296", "18446744073709551616"] {
                 assert!(parse_owned_invocation(
                     &["/tmp/owned", flag, value, "--", "child"].map(OsString::from)
                 )
@@ -1379,6 +1397,27 @@ mod tests {
             parse_owned_invocation(&args).unwrap().allowances,
             crate::CompilerJobAllowances::default()
         );
+    }
+
+    #[test]
+    fn owned_compiler_allowance_boundaries_preserve_worker_domain() {
+        for flag in ["--foreground-jobs", "--preparation-jobs"] {
+            let args = ["/tmp/owned", flag, "4294967295", "--", "child"].map(OsString::from);
+            let invocation = parse_owned_invocation(&args).unwrap();
+            let selected = if flag == "--foreground-jobs" {
+                invocation.allowances.foreground
+            } else {
+                invocation.allowances.preparation
+            };
+            assert_eq!(selected.unwrap().get(), u32::MAX as usize);
+        }
+        if usize::BITS > 32 {
+            let args = ["/tmp/owned", "--workers", "4294967296", "--", "child"].map(OsString::from);
+            assert_eq!(
+                parse_owned_invocation(&args).unwrap().workers as u64,
+                1_u64 << 32
+            );
+        }
     }
 
     #[test]

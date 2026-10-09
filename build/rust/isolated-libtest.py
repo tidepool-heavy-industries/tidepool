@@ -435,8 +435,8 @@ def parse_args(argv):
     for flag in ('foreground_jobs', 'preparation_jobs'):
         value = getattr(options, flag)
         if value is not None:
-            if value <= 0 or value > (1 << 64) - 1:
-                parser.error('--' + flag.replace('_', '-') + ' must be a positive u64')
+            if value <= 0 or value > (1 << 32) - 1:
+                parser.error('--' + flag.replace('_', '-') + ' must be a positive u32')
             if options.compiler_mode != 'owned-resident':
                 parser.error('compiler job allowances require --compiler-mode owned-resident')
     if options.retain_artifacts and options.output_dir is None:
@@ -1105,8 +1105,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     if (foreground_jobs is not None or preparation_jobs is not None) and compiler_mode != 'owned-resident':
         raise ValueError('compiler job allowances require owned-resident mode')
     for value in (foreground_jobs, preparation_jobs):
-        if value is not None and (type(value) is not int or not 0 < value < 1 << 64):
-            raise ValueError('compiler job allowances must be positive u64 values')
+        if value is not None and (type(value) is not int or not 0 < value < 1 << 32):
+            raise ValueError('compiler job allowances must be positive u32 values')
     record['process_cleanup_scope'] = 'delegated_service' if service_slice is not None else 'process_group'
     args = [binary, '--exact', name, '--nocapture']
     if ignored:

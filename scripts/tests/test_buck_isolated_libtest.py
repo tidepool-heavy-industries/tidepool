@@ -629,7 +629,7 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def test_compiler_allowance_parser_refuses_invalid_values_and_direct_mode(self):
         for flag in ('--foreground-jobs', '--preparation-jobs'):
-            for value in ('0', '-1', 'invalid', str(1 << 64)):
+            for value in ('0', '-1', 'invalid', str(1 << 32), str(1 << 64)):
                 with self.subTest(flag=flag, value=value), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     runner.parse_args([str(self.binary), '--compiler-mode', 'owned-resident',
                                        '--output-dir', self.tmp.name, flag, value])
@@ -639,6 +639,20 @@ class IsolatedLibtestTests(unittest.TestCase):
                                          '--output-dir', self.tmp.name, flag, '16', '--jobs', '3'])
             self.assertEqual(options.jobs, 3)
             self.assertEqual(getattr(options, flag[2:].replace('-', '_')), 16)
+            options = runner.parse_args([str(self.binary), '--compiler-mode', 'owned-resident',
+                                         '--output-dir', self.tmp.name, flag, str((1 << 32) - 1)])
+            self.assertEqual(getattr(options, flag[2:].replace('-', '_')), (1 << 32) - 1)
+
+    def test_compiler_allowance_domain_refuses_before_root_identity_or_launch(self):
+        for flag in ('foreground_jobs', 'preparation_jobs'):
+            root = Path(self.tmp.name) / flag
+            with self.subTest(flag=flag), patch.object(runner, 'capture_launch_inputs') as identity, \
+                 patch.object(runner, 'execute') as execute, self.assertRaisesRegex(ValueError, 'positive u32'):
+                runner.run_one(str(self.binary), 'suite::works', False, 10, {},
+                    artifact_root=root, compiler_mode='owned-resident', **{flag: 1 << 32})
+            self.assertFalse(root.exists())
+            identity.assert_not_called()
+            execute.assert_not_called()
 
     def test_compiler_grant_summary_preserves_capacity_caps_and_missing_evidence(self):
         requested = {'requested_foreground_jobs': 16, 'requested_preparation_jobs': 8}

@@ -1074,6 +1074,9 @@ class NativeQualificationTests(unittest.TestCase):
             with self.subTest(width=width):
                 self.assert_run_scheduling('owned-resident', width, width + 1)
 
+    def test_run_accepts_maximum_u32_compiler_allowances_without_real_launch(self):
+        self.assert_run_scheduling('owned-resident', (1 << 32) - 1, (1 << 32) - 1)
+
     def test_run_retains_behavior_pass_but_refuses_wrong_compiler_allowance_receipt(self):
         self.assert_run_scheduling('owned-resident', 16, 8, receipt_foreground_jobs=2, expected_code=1)
 
@@ -1148,6 +1151,7 @@ class NativeQualificationTests(unittest.TestCase):
 
     def test_invalid_run_scheduling_refuses_before_verification_or_launch(self):
         invalid = (['--foreground-jobs', '0'], ['--preparation-jobs', '-1'],
+                   ['--foreground-jobs', str(1 << 32)], ['--preparation-jobs', str(1 << 32)],
                    ['--foreground-jobs', str(1 << 64)], ['--jobs', '0'], ['--jobs', '-1'], ['--service-slice', 'app.slice'],
                    ['--delegated-service', '--service-slice', '../unsafe.slice'],
                    ['--delegated-service', '--service-slice', 'not-a-slice'])

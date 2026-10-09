@@ -1412,8 +1412,8 @@ def run_cohort(args) -> int:
         raise ValueError('diagnostic startup overrides cannot qualify a frozen cohort')
     allowances = {name: getattr(args, name, None) for name in ('foreground_jobs', 'preparation_jobs')}
     for name, value in allowances.items():
-        if value is not None and (type(value) is not int or not 0 < value < 1 << 64):
-            raise ValueError('--' + name.replace('_', '-') + ' must be a positive u64')
+        if value is not None and (type(value) is not int or not 0 < value < 1 << 32):
+            raise ValueError('--' + name.replace('_', '-') + ' must be a positive u32')
     if args.jobs <= 0:
         raise ValueError("--jobs must be positive")
     if args.service_slice is not None and not args.delegated_service:
