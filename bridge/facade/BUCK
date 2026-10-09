@@ -3946,6 +3946,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f73636166666f6c645f70726570617265645f6368696c642e6873",
+    src = "src/actor_host/scaffold_prepared_child.hs",
+    out = "scaffold_prepared_child.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f73656c65637465645f776f726b73706163655f6368696c645f726573756c742e6873",
     src = "src/actor_host/selected_workspace_child_result.hs",
     out = "selected_workspace_child_result.hs",

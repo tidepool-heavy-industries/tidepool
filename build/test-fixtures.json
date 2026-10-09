@@ -204,6 +204,7 @@
     "bridge/facade/src/actor_host/roster_observe.hs",
     "bridge/facade/src/actor_host/roster_setup.hs",
     "bridge/facade/src/actor_host/scaffold_expired_output.hs",
+    "bridge/facade/src/actor_host/scaffold_prepared_child.hs",
     "bridge/facade/src/actor_host/selected_workspace_child_result.hs",
     "bridge/facade/src/actor_host/selected_workspace_child_setup.hs",
     "bridge/facade/src/actor_host/shared_api_guide_unavailable.hs",
