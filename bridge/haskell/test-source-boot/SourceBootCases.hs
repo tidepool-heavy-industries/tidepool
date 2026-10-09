@@ -6415,6 +6415,30 @@ requireMixed count result = unless
     ++ show (map candidateModule (pprAcceptedCandidates result))
     ++ " prepared=" ++ show (preparedNames result))
 
+-- Only GHC source failures, including dependency-loader diagnostics, can
+-- satisfy a failed compile. A completed compile must reject all candidates.
+requireBootRefusal :: String -> IO PreparedPipelineResult -> IO ()
+requireBootRefusal label action = sourceFailureDiagnostics action >>= \case
+  Left diagnostics
+    | any (\diagnostic -> dSeverity diagnostic == DiagError && not (null (dMessage diagnostic))) diagnostics -> pure ()
+    | otherwise -> fail (label ++ " failed without a source error diagnostic: " ++ show diagnostics)
+  Right result -> requireRefused label result
+
+bootRefusalFailureIsolation :: IO ()
+bootRefusalFailureIsolation = do
+  let marker = "injected unrelated boot fixture IO failure"
+      refuse = requireBootRefusal "injected boot refusal"
+  ioFailure <- try (refuse (throwIO (userError marker))) :: IO (Either IOException ())
+  unless (case ioFailure of
+      Left exception -> isUserError exception && ioeGetErrorString exception == marker
+      Right _ -> False) (fail "boot refusal accepted or replaced an unrelated IO failure")
+  cancelled <- try (refuse (throwIO ThreadKilled)) :: IO (Either AsyncException ())
+  unless (case cancelled of Left ThreadKilled -> True; _ -> False)
+    (fail "boot refusal accepted or replaced asynchronous cancellation")
+  workerFailure <- try (refuse (throwIO DependencyWorkerFailure)) :: IO (Either DependencyLoadFailure ())
+  unless (case workerFailure of Left DependencyWorkerFailure -> True; _ -> False)
+    (fail "boot refusal accepted or replaced a dependency worker failure")
+
 exerciseFamilyRefusal :: FilePath -> IO ()
 exerciseFamilyRefusal work = do
   let boot = work </> "CacheEven.hs-boot"
@@ -6422,10 +6446,7 @@ exerciseFamilyRefusal work = do
   -- The same nominal family has a different kind in the current boot input.
   (do writeFile boot (unlines [if line == "type family Payload a"
         then "type family Payload a b" else line | line <- lines (BSC.unpack original)])
-      changed <- try (reuseFresh work) :: IO (Either SomeException PreparedPipelineResult)
-      case changed of
-        Left _ -> pure ()
-        Right result -> requireRefused "changed boot family arity" result)
+      requireBootRefusal "changed boot family arity" (reuseFresh work))
     `finally` BS.writeFile boot original
   reuseFresh work >>= requireMixed 1
 
@@ -6469,11 +6490,9 @@ exerciseRefusalsWith requireAccepted work reuse = do
   -- remain unchanged. Fresh boot validation must refuse the old SCC.
   let boot = work </> "CacheEven.hs-boot"
   original <- BS.readFile boot
-  (do BS.writeFile boot "module CacheEven where\nimport Prelude\neven' :: Bool -> Bool\n"
-      changed <- try reuse :: IO (Either SomeException PreparedPipelineResult)
-      case changed of
-        Left _ -> pure ()
-        Right result -> requireRefused "changed boot ABI" result)
+  (do writeFile boot (unlines [if line == "even' :: Int -> Parity"
+        then "even' :: Bool -> Bool" else line | line <- lines (BSC.unpack original)])
+      requireBootRefusal "changed boot ABI" reuse)
     `finally` BS.writeFile boot original
   reuse >>= requireAccepted "resident reuse after ABI refusal"
   -- CPP has readable inputs outside the bounded source graph. Refuse the

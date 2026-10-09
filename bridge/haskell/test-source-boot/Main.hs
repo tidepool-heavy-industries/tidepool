@@ -37,6 +37,7 @@ tests = testGroup "source-boot"
   , testCase "native graph scheduling equality" nativeGraphSchedulingEquality
   , testCase "candidate compact inventory" $ candidateCompactInventory
   , testCase "candidate GHC load" $ candidateGhcLoad
+  , testCase "boot refusal failure isolation" bootRefusalFailureIsolation
   , testCase "SOURCE boot reuse" $ withTiming (withScratch sourceBootReuseAt)
   , testCase "candidate request site siblings" $ candidateRequestSitedSiblings
   , testCase "canonical current source" $ canonicalCurrentSource
