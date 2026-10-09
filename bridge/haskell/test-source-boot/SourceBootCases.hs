@@ -740,7 +740,11 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     -- An ordinary request admits the worker's default search roots. Its
     -- unchanged summaries must not supply that broader search order to the
     -- next exact request, whose source selection owns only sealed roots.
-    _ <- compile CheckedEnvironment Set.empty GeneralCompile Nothing consumer includes Nothing
+    warm <- compile CheckedEnvironment Set.empty GeneralCompile Nothing consumer includes Nothing
+    unless (any ((/= includes) . importPaths . ms_hspp_opts)
+        [summary | ModuleNode _ summary <- mgModSummaries'
+          (hsc_mod_graph (prHscEnv (pprPipelineResult warm)))]) $
+      fail "ordinary-to-exact control lacks historical broader summary roots"
     _ <- check compile purpose
     receipts <- listDirectory (work </> ".exact-compilations")
     let receiptPath = work </> ".exact-compilations" </> head receipts </> "receipt.cbor"
@@ -748,6 +752,29 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     unless (Set.fromList (codecReceiptSourceSelected receiptFacts)
         == Set.fromList [("main","CanonicalSource"),("main","CanonicalDependency")]) $
       fail "canonical source receipt lost its typed transitive source-selected closure"
+    let emptyRoot = work </> "empty-search-root"
+    createDirectory emptyRoot
+    admission <- maybe (fail "current-source fixture lacks its checked purpose") pure
+      (scopeCheckedCell admitted)
+    -- Generate the nearby search-order/product-role combinations. Current
+    -- Finder selection is the oracle: the empty root supplies no provider,
+    -- and both operations must retain the same original type-only closure.
+    forM_ [[emptyRoot,work],[work,emptyRoot],[work,work]] $ \search ->
+      forM_ [CheckedEnvironment,PreparedProducts Nothing] $ \selection -> do
+        _ <- compile CheckedEnvironment Set.empty GeneralCompile Nothing consumer search Nothing
+        let currentScope = admitted {scopePurpose=ExactCellPurpose admission search}
+        selected <- compile selection Set.empty (ExactScopeCompile purpose currentScope)
+          (Just session) consumer search Nothing
+        currentCompilation <- maybe (fail "search transition omitted exact compilation") pure
+          (preparedExactCompilation selected)
+        currentSelection <- maybe (fail "search transition omitted current source proof") pure
+          (compilationSourceSelection currentCompilation)
+        unless (Set.fromList [key | (key,_,_,_) <- selectedOriginalRows currentSelection]
+            == Set.fromList [("main","CanonicalSource"),("main","CanonicalDependency")]
+            && null (scopeProducts (compilationScope currentCompilation))
+            && null (scopeExecutionGraphs (compilationScope currentCompilation))) $
+          fail "search/product-role transition changed canonical owners or granted execution custody"
+    _ <- check compile purpose
     -- The next authored import must consume this cell's completed original
     -- capture through the same proof used after Rust persistence.
     forM_ ["CanonicalLocalSupport.hs","CanonicalLocalConsumer.hs"] $ \name ->
