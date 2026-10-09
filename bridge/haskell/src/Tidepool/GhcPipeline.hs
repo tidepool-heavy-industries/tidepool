@@ -575,7 +575,8 @@ programSourceImports _ = Nothing
 -- | Complete direct home imports of a fresh original, combining selected source
 -- owners with retained exact owners. Fresh SOURCE imports resolve through their
 -- boot witnesses; exact SOURCE imports are refused before pipeline publication.
--- Package imports confer no home requirement.
+-- Package imports confer no home requirement. The lexical row is one canonical
+-- set, independent of its fresh/retained partition or authored import order.
 preparedHomeRequirements :: PreparedPipelineResult -> String -> String -> Either String [(String, String)]
 preparedHomeRequirements prepared unit owner = do
   fresh <- selectedFreshHomeRequirements (preparedFreshDependencies prepared) unit owner
@@ -584,7 +585,7 @@ preparedHomeRequirements prepared unit owner = do
         , ((sourceUnit,sourceName,False), edges) <- compilationExactImports compilation
         , sourceUnit == unit, sourceName == owner
         , (_,name,_,importedUnit) <- edges]
-  pure (nub (fresh ++ exact))
+  pure (Set.toAscList (Set.fromList (fresh ++ exact)))
 
 -- | Metadata has no executable projection. The environment
 -- retains dependency interfaces and the target's exact checked reader scope.

@@ -41,6 +41,7 @@ tests = testGroup "source-boot"
   , testCase "SOURCE boot reuse" $ withTiming (withScratch sourceBootReuseAt)
   , testCase "candidate request site siblings" $ candidateRequestSitedSiblings
   , testCase "canonical current source" $ canonicalCurrentSource
+  , testCase "canonical mixed source adjacency" canonicalMixedSourceAdjacency
   , testCase "completed program source imports" $ completedProgramSourceImports
   , testCase "completed program import pairing" $ completedProgramSourceImportPairing
   , testCase "canonical source obligations" $ canonicalSourceObligations

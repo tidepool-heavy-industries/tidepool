@@ -170,6 +170,10 @@ imports sealed by canonical issuance. Retained canonical type requirements
 alone grant no lexical selection. Fresh dependencies remain fresh; import shapes
 do not retain an original child or add compiler execution obligations. Session
 implementation anchors use their existing independent checked-value and lexical authorities, never ordinary source-selection rows.
+Fresh-source and retained exact imports form one canonical set-valued lexical
+row through `preparedHomeRequirements`. Their provenance partition and authored
+order do not change adjacency. Ordered source search roots remain a separate
+selection contract.
 The current GHC session's Finder roots own that search order. Reused module
 summaries may keep preprocessing flags from an earlier request; their historical
 include paths do not grant current lookup authority or invalidate its sealed roots.

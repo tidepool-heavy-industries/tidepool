@@ -107,7 +107,7 @@ import System.Directory
   , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory, canonicalizePath )
 import System.Environment (setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>), takeBaseName, takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
+import System.FilePath ((</>), (<.>), takeBaseName, takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
 import System.IO (hPutStrLn, hSetFileSize, withBinaryFile, IOMode(WriteMode), stderr, openBinaryTempFile, hClose)
 import System.IO.Error (isUserError, ioeGetErrorString)
 import System.Process (readProcessWithExitCode)
@@ -699,6 +699,87 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
         unless (fmap renderType (crResultType checked) == Just "Command") $
           fail "dependency-ordered command value injection changed its captured type"
   putStrLn "checked command value: complete type closure, delayed injection and missing/changed-owner refusal passed"
+
+-- Direct source imports have set semantics. Their fresh/retained provenance and
+-- authored order must not change the row installed for a completed original.
+canonicalMixedSourceAdjacency :: IO ()
+canonicalMixedSourceAdjacency = withScratch $ \work -> do
+  let leaves = ["CanonicalMixedA","CanonicalMixedB","CanonicalMixedZ"]
+      support = ("main","CanonicalMixedSupport")
+      expected = [("main",name) | name <- leaves]
+      originalRoot = work </> "original"
+      target = work </> "CanonicalMixedConsumer.hs"
+      includes = [work]
+  createDirectory originalRoot
+  forM_ (leaves ++ [snd support,"CanonicalMixedConsumer"]) $ \name ->
+    forM_ [work,originalRoot] $ \root ->
+      copyFile ("test-source-boot/fixtures" </> name <.> "hs") (root </> name <.> "hs")
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (originalRoot </> "CanonicalMixedConsumer.hs") [originalRoot] Nothing
+  fixture <- capturePreparedFixture originalRoot original
+  parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
+    "import CanonicalMixedSupport\n(1, 2, 3 :: Int)" >>= either (fail . show) pure
+  let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
+  withResidentPipelineSelected includes $ \compile ->
+    forM_ [0::Int .. 7] $ \mask' -> forM_ [False,True] $ \reversed -> do
+      let history = work </> (show mask' ++ "-" ++ show reversed)
+          retained = [name | (index,name) <- zip [0..] leaves, testBit mask' index]
+          authored = if reversed then reverse leaves else leaves
+      createDirectory history
+      writeFile (work </> snd support <.> "hs") (unlines
+        (["module CanonicalMixedSupport (Answer) where"]
+          ++ ["import " ++ name ++ " (" ++ [last name] ++ ")" | name <- authored]
+          ++ ["type Answer = (A, B, Z)"]))
+      scopePath <- if null retained then writeGenuineEmptyMetadataScope history
+        else writeGenuineMetadataScope history retained fixture
+      base <- readExactScope scopePath >>= either fail pure
+      lexicalBase <- extendExactScopeGeneration base [] []
+        [(("main",name),[]) | name <- retained] >>= either fail pure
+      admitted <- admitCheckedScope lexicalBase includes []
+      let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
+      prepared <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose admitted)
+        (Just session) target includes Nothing
+      requirements <- either fail pure (preparedHomeRequirements prepared (fst support) (snd support))
+      unless (requirements == expected) $
+        fail ("mixed source provenance changed canonical adjacency: " ++ show (retained,authored,requirements))
+      let captureDirectory = history </> "capture"
+      createDirectory captureDirectory
+      originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult prepared))
+        (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) captureDirectory
+      certified <- writeCertifiedProductsKeeping includes originals captureDirectory prepared Nothing []
+      let proofs = certifiedSourceOriginals certified
+          admissions = finalizedLocalAdmissions (certifiedFinalizedArtifacts certified)
+      rows <- forM (Map.toAscList proofs) $ \(key,proof) -> do
+        capture <- maybe (fail "mixed source original lacks finalized interface custody") pure
+          (Map.lookup key admissions)
+        imports <- either fail pure (preparedHomeRequirements prepared (fst key) (snd key))
+        pure (key,localFinalizedInterface capture,proof,imports)
+      inherited <- either fail pure (extendSourceSelectedOriginals
+        (preparedExactCompilation prepared >>= compilationSourceSelection) admitted)
+      captured <- extendExactScopeGeneration inherited
+        [(row,ModuleInterfaceEvidence proof) | (_,row,proof,_) <- rows]
+        [] [(key,imports) | (key,_,_,imports) <- rows] >>= either fail pure
+      rechecked <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose captured)
+        (Just session) target includes Nothing
+      selected <- maybe (fail "mixed source history omitted its current original proof") pure
+        (preparedExactCompilation rechecked >>= compilationSourceSelection)
+      either fail (const (pure ())) (extendSourceSelectedOriginals (Just selected) captured)
+      let evidence = selectedOriginalEvidence selected
+          change key edit = selected {selectedOriginalEvidence=evidence
+            {dependencyModules=[if (dependencyModuleUnit node,dependencyModuleName node) == key
+                then node {dependencyModuleImports=edit (dependencyModuleImports node)} else node
+              | node <- dependencyModules evidence]}}
+          missing = change support (filter ((/= head leaves) . dependencyImportName))
+          extra = change ("main",last leaves)
+            (DependencyImport DependencyUnqualified (head leaves) False (Just (work </> head leaves <.> "hs")) :)
+          permuted = selected {selectedOriginalEvidence=evidence
+            {dependencyModules=[node {dependencyModuleImports=reverse (dependencyModuleImports node)}
+              | node <- reverse (dependencyModules evidence)]}}
+      either fail (const (pure ())) (extendSourceSelectedOriginals (Just permuted) captured)
+      forM_ [missing,extra] $ \mutated ->
+        unless (either (const True) (const False) (extendSourceSelectedOriginals (Just mutated) captured)) $
+          fail "mixed source graph admitted a missing or extra inherited identity"
+  putStrLn "mixed source adjacency: 16 fresh/retained partitions and import permutations, inherited rechecks and identity refusals"
 
 canonicalCurrentSource :: IO ()
 canonicalCurrentSource = withTiming $ withScratch $ \work -> do
