@@ -9,6 +9,21 @@ import tomllib
 CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 
 
+def supports_native_facade_build_dependency(package_name, dependency):
+    """Admit only the dependencies of the declared facade build-script action.
+
+    Admission does not replace resolution of the exact Cargo kind, target and
+    source identity by each graph projection.
+    """
+    return (
+        package_name == "tidepool"
+        and dependency["kind"] == "build"
+        and dependency["name"] in {"tidepool-toolchain", "serde", "serde_json"}
+        and dependency["rename"] is None
+        and dependency["target"] is None
+    )
+
+
 def parse_locked_git_source(source):
     """Accept only HTTPS git sources pinned by a full Cargo.lock object id."""
     if not isinstance(source, str) or not source.startswith("git+https://"):

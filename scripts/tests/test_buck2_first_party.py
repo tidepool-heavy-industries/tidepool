@@ -689,6 +689,11 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertFalse(list(self.root.rglob(".BUCK.*.tmp")))
 
     def test_facade_buildscript_declares_embedded_sources_and_out_dir(self):
+        self.write("bridge/facade/build.rs",
+                   'mod scaffold_gitlink { include!("src/exomonad/scaffold_gitlink.rs"); }\nfn main() {}\n')
+        self.write("bridge/facade/src/exomonad/scaffold_gitlink.rs",
+                   'const DECLARED: &str = include_str!("revision.txt");\n')
+        self.write("bridge/facade/src/exomonad/revision.txt", "declared revision\n")
         metadata = json.loads(self.metadata.read_text())
         facade = next(p for p in metadata["packages"] if p["name"] == "tidepool")
         toolchain = next(p for p in metadata["packages"] if p["name"] == "tidepool-toolchain")
@@ -702,6 +707,25 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             "name": "tidepool_toolchain", "pkg": toolchain["id"],
             "dep_kinds": [{"kind": "build", "target": None}],
         })
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        third_party = self.root / "third-party/rust/Cargo.toml"
+        with third_party.open("a") as output:
+            for name, version in [("serde", "1.0.229"), ("serde_json", "1.0.151")]:
+                output.write(f'{name} = {{ version = "={version}" }}\n')
+                package_id = f"{registry}#{name}@{version}"
+                metadata["packages"].append({
+                    "id": package_id, "name": name, "version": version, "source": registry,
+                })
+                for kind in (None, "build"):
+                    facade["dependencies"].append({
+                        "name": name, "rename": None, "kind": kind, "target": None,
+                        "optional": False, "uses_default_features": True,
+                        "features": ["derive"] if name == "serde" else [], "req": f"={version}",
+                    })
+                node["deps"].append({
+                    "name": name, "pkg": package_id,
+                    "dep_kinds": [{"kind": kind, "target": None} for kind in (None, "build")],
+                })
         self.metadata.write_text(json.dumps(metadata))
         result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -712,12 +736,18 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn("//tidepool/toolchain:tidepool_toolchain", build_rule["deps"])
         library_rule = self.rule("bridge/facade", "tidepool", "tidepool_rust_library")
         self.assertNotIn("//tidepool/toolchain:tidepool_toolchain", library_rule.get("deps", []))
+        for name in ("serde", "serde_json"):
+            self.assertIn(f"//third-party/rust:{name}", build_rule["deps"])
+            self.assertIn(f"//third-party/rust:{name}", library_rule["deps"])
         self.assertEqual(build_rule["crate_root"], "bridge/facade/build.rs")
         self.assertEqual(groups["tidepool_build_script_sources"]["build.rs"], "bridge/facade/build.rs")
+        for path in ("src/exomonad/scaffold_gitlink.rs", "src/exomonad/revision.txt"):
+            self.assertEqual(groups["tidepool_build_script_sources"][path], "bridge/facade/" + path)
         run = self.rule("bridge/facade", "tidepool_build_script_run", "tidepool_buildscript_run")
         self.assertEqual(run["env"]["TIDEPOOL_EMBED_HASKELL"], "1")
         self.assertEqual(run["env"]["TIDEPOOL_BUILD_SOURCE_ROOT"], ".")
         inputs = self.rule("bridge/facade", "tidepool_build_source_tree", "tidepool_facade_build_inputs")
+        self.assertEqual(inputs["workspace_gitlink"], "//build/rust:workspace_gitlink")
         self.assertEqual(inputs["haskell_sources"], "//bridge/haskell:facade_embedded_sources")
         self.assertEqual(inputs["workspace_sources"], "//exomonad/examples/workspace:facade_scaffold_sources")
         self.assertEqual(sum(arguments.get("env", {}).get("OUT_DIR") ==
@@ -727,6 +757,31 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                              for _, arguments in buck.values()
                              for dependency in arguments.get("deps", []) + list(arguments.get("named_deps", {}).values())))
         self.assertIn("src/lib.rs", groups["tidepool_sources"])
+        previous = {path: path.read_bytes() for path in self.root.rglob("BUCK")}
+        for name in ("serde", "serde_json"):
+            with self.subTest(missing_build_edge=name):
+                edge = next(edge for edge in node["deps"] if edge["name"] == name)
+                edge["dep_kinds"] = [{"kind": None, "target": None}]
+                self.metadata.write_text(json.dumps(metadata))
+                refused = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn(f"missing or ambiguous resolved dependency {name} in tidepool", refused.stderr)
+                for path, contents in previous.items():
+                    self.assertEqual(path.read_bytes(), contents, path)
+                edge["dep_kinds"].append({"kind": "build", "target": None})
+
+    def test_facade_buildscript_refuses_missing_rust_include_before_publication(self):
+        control = self.generate("--package", "tidepool")
+        self.assertEqual(control.returncode, 0, control.stderr)
+        descriptor = self.root / "build/native-workspace-gitlink.json"
+        previous = {path: path.read_bytes() for path in self.root.rglob("BUCK")}
+        previous[descriptor] = descriptor.read_bytes()
+        self.write("bridge/facade/build.rs", 'include!("missing.rs");\n')
+        refused = self.generate("--package", "tidepool")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("missing compile-time input", refused.stderr)
+        for path, contents in previous.items():
+            self.assertEqual(path.read_bytes(), contents, path)
 
     def test_facade_action_surface_keeps_nix_policy_out_of_path_resources(self):
         metadata = json.loads(self.metadata.read_text())

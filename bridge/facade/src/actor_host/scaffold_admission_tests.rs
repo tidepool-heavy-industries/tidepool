@@ -28,6 +28,106 @@ pub(super) fn scaffold(config: &mut super::ActorHostConfig) {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the matched native prepared root entry and workspace bundle"]
+async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_originals() {
+    assert!(std::env::var_os("TIDEPOOL_PREPARED_ROOT_ENTRY").is_some());
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 2);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start_prepared_configured(&settings, &provider, |config| {
+        scaffold(config);
+        let embedded = config
+            .embedded
+            .clone()
+            .expect("the hosted test owns its transport settings");
+        crate::exomonad::edit_fixture_project_config(
+            &config.workspace.join(".exomonad"),
+            |project| {
+                project.launch.embedded = Some(embedded);
+            },
+        );
+        commit_workspace(&config.workspace);
+        config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
+    })
+    .await
+    .expect("the shipped workspace must prepare and select its completed deployment");
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            let installation = host
+                .context
+                .observer
+                .installation(host.context.actor.identity())
+                .await;
+            assert!(matches!(
+                installation.acquisition.as_ref(),
+                Some(exomonad_actor::ToolsetAcquisition::DeploymentOriginal { .. })
+            ));
+            host.input("Inspect and fork the prepared default workspace.")
+                .await
+                .unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = VecDeque::new();
+            next_hosted_script_round(&mut requests, &mut pending, &root)
+                .await
+                .call(
+                    "prepared-default-binding",
+                    "let trialSeed = 41 :: Int\ndisplay trialSeed",
+                );
+            let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            round.assert_value("prepared-default-binding", "41");
+            round.function(
+                "prepared-default-lookup",
+                "lookup",
+                serde_json::json!({"queries": ["checkpoint", "spawnSubagent"]}),
+            );
+            let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            let lookup = round.settled_output("prepared-default-lookup");
+            assert_eq!(lookup["status"], "committed", "{lookup}");
+            let output = lookup["items"][0]["output"].as_str().unwrap();
+            for name in ["checkpoint", "spawnSubagent"] {
+                let block = output
+                    .split("\n\n")
+                    .find(|block| block.starts_with(&format!("{name}\n")))
+                    .unwrap_or_else(|| panic!("missing lookup result for {name}: {lookup}"));
+                assert!(
+                    block
+                        .split_once("::")
+                        .is_some_and(|(_, signature)| !signature.trim().is_empty()),
+                    "{lookup}"
+                );
+            }
+            round.call(
+                "prepared-default-child",
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/scaffold_prepared_child.hs",
+                ),
+            );
+            let child_round =
+                tokio::time::timeout(std::time::Duration::from_secs(300), requests.recv())
+                    .await
+                    .expect("the prepared default spec must admit its child")
+                    .expect("the child's native provider request");
+            if child_round.origin().actor() == &root {
+                child_round.assert_value("prepared-default-child", "42");
+                panic!("the typed reply must come from the forked child");
+            }
+            let child = child_round.origin().actor().clone();
+            child_round.call("prepared-default-reply", "respond (trialSeed + 1 :: Int)");
+            let child_round = next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            assert_eq!(
+                child_round.settled_output("prepared-default-reply")["status"],
+                "replied"
+            );
+            child_round.finish();
+            let completed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            completed.assert_value("prepared-default-child", "42");
+            completed.finish();
+        })
+    })
+    .await;
+}
+
 /// Provider requests execute the package and pin delivered by `exomonad new`.
 #[tokio::test(flavor = "multi_thread")]
 async fn freshly_scaffolded_agent_spec_installs_notebook_and_workspace_tools() {

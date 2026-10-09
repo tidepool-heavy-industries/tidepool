@@ -8,6 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
+mod scaffold_gitlink {
+    include!("src/exomonad/scaffold_gitlink.rs");
+}
+
 fn main() {
     // Shared target directories must not reuse another checkout's source paths.
     println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
@@ -111,6 +115,15 @@ fn emit_empty_bundle(symbol: &str, output: &str) {
 /// The project-owned files `exomonad new` writes, alongside the URL for the
 /// generic workspace repository it clones.
 fn emit_scaffold_package(repository: PathBuf) {
+    println!("cargo:rerun-if-changed=src/exomonad/scaffold_gitlink.rs");
+    let gitlink = repository.join("build/native-workspace-gitlink.json");
+    println!("cargo:rerun-if-changed={}", gitlink.display());
+    let revision = scaffold_gitlink::read_workspace_revision(&gitlink).unwrap_or_else(|error| {
+        panic!(
+            "read declared workspace gitlink {}: {error}",
+            gitlink.display()
+        )
+    });
     let template = repository.join("exomonad/examples/workspace/.exomonad");
     let mut entries = Vec::new();
     for name in ["AgentSpec.hs", "WORKBENCH.md"] {
@@ -164,6 +177,10 @@ fn emit_scaffold_package(repository: PathBuf) {
     out.push_str(&format!(
         "pub(crate) static DEFAULT_WORKSPACE_URL: &str = {:?};\n",
         "https://github.com/tidepool-heavy-industries/exomonad-default-workspace.git"
+    ));
+    out.push_str(&format!(
+        "/// The declared `.exomonad/workspace` Gitlink.\n\
+         pub(crate) const DEFAULT_WORKSPACE_REV: &str = {revision:?};\n"
     ));
 
     #[allow(

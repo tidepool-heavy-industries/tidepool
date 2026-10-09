@@ -456,7 +456,7 @@ fn run_inspections_with_policy(
     }
     let imports = match request.effects {
         Some(_) => format!(
-            "{}\nqualified Data.Proxy\nqualified Tidepool.Effects.Core\n",
+            "{}\nqualified Data.Proxy\nqualified Tidepool.Effects.Core\nqualified Tidepool.Agent.Contract\n",
             request.imports
         ),
         None => request.imports.to_owned(),
@@ -1924,38 +1924,72 @@ mod tests {
         let session = tempfile::tempdir().unwrap();
         let mut effects_include = eval_harness::effects_include().to_vec();
         effects_include.push(eval_harness::prelude_path());
+        effects_include.push(eval_harness::actor_sources_path());
         let include = effects_include
             .iter()
             .map(std::path::PathBuf::as_path)
             .collect::<Vec<_>>();
-        let results = run_inspections(InspectionRequest {
-            exact_context: None,
-            preamble: concat!(
-                "{-# LANGUAGE NoImplicitPrelude, DataKinds, TypeOperators #-}\n",
-                "module Expr where\n",
-                "import Prelude\n",
-                "import qualified Tidepool.Effects.Core as LookupEffects\n",
-            ),
-            imports: "",
-            include: &include,
-            session_root: session.path(),
-            inject_modules: &[],
-            queries: &[InspectionQuery::Info("map".into())],
-            effects: Some(
-                "Tidepool.Effects.Core.AgentTools ': \
-                 Tidepool.Effects.Core.ContextReadWrite ': '[]",
-            ),
-        })
-        .unwrap();
+        let inspect = |queries: &[InspectionQuery]| {
+            run_inspections(InspectionRequest {
+                exact_context: None,
+                preamble: concat!(
+                    "{-# LANGUAGE NoImplicitPrelude, DataKinds, TypeOperators #-}\n",
+                    "{-# LANGUAGE FlexibleContexts, TypeFamilies, ConstraintKinds #-}\n",
+                    "module Expr where\n",
+                    "import Prelude\n",
+                    "import qualified Tidepool.Effects.Core as LookupEffects\n",
+                    "import Tidepool.Actors.Spawn (checkpoint, spawnSubagent)\n",
+                ),
+                imports: "",
+                include: &include,
+                session_root: session.path(),
+                inject_modules: &[],
+                queries,
+                effects: Some(
+                    "Tidepool.Effects.Core.AgentTools ': \
+                 Tidepool.Agent.Contract.SyncEffects \
+                 (Tidepool.Effects.Core.AgentLaunch ': '[])",
+                ),
+            })
+            .unwrap()
+        };
+        let names = [
+            ("map", None),
+            ("checkpoint", Some("ContextCheckpoint")),
+            ("spawnSubagent", Some("AgentRef")),
+        ];
+        let queries = names.map(|(name, _)| InspectionQuery::Info(name.into()));
+        let results = inspect(&queries);
 
-        assert!(
-            matches!(
-                results.as_slice(),
-                [InspectionResult::Info { query, entries }]
-                    if query == "map" && !entries.is_empty()
-            ),
-            "{results:?}"
-        );
+        assert_eq!(results.len(), names.len());
+        for (result, (name, result_type)) in results.iter().zip(names) {
+            assert!(
+                matches!(result, InspectionResult::Info { query, entries }
+                    if query == name && entries.iter().any(|entry|
+                        entry.name == name && entry.kind == "value"
+                        && matches!(entry.availability,
+                            InspectionAvailability::Available | InspectionAvailability::Polymorphic)
+                        && result_type.is_none_or(|result_type|
+                            entry.references.iter().any(|reference| reference.name == result_type)))),
+                "{result:?}"
+            );
+        }
+
+        // The homogeneous type-query path assembles an additional shared module.
+        let queries =
+            ["checkpoint", "spawnSubagent"].map(|name| InspectionQuery::TypeOf(name.into()));
+        let results = inspect(&queries);
+        assert_eq!(results.len(), 2);
+        for (result, (name, result_type)) in results.iter().zip([
+            ("checkpoint", "ContextCheckpoint"),
+            ("spawnSubagent", "AgentRef"),
+        ]) {
+            assert!(
+                matches!(result, InspectionResult::Type { expression, display, .. }
+                    if expression == name && display.contains(result_type)),
+                "{result:?}"
+            );
+        }
     }
 
     #[test]

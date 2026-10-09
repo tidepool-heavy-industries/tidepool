@@ -54,6 +54,7 @@ HARNESS_THREE_ACTOR_PERFORMANCE_TESTS = [
 HARNESS_PERFORMANCE_REPORTER = "scripts/harness-usecase-perf-report.py"
 PREPARED_CHILD_TESTS = [
     "actor_host::prepared_runtime_acceptance::production_prepared_toolset_twenty_children_execute_original_native_probe",
+    "actor_host::scaffold_admission_tests::prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_originals",
 ]
 DESCRIPTOR = "share/exomonad/qualification.json"
 QUALIFICATION_SCHEMA = 2
@@ -115,7 +116,7 @@ def cohorts() -> dict:
                                     "compiler_mode": "owned-resident"},
             "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900,
                    "compiler_mode": "owned-resident"},
-            "prepared-child": {"tests": PREPARED_CHILD_TESTS, "expected_count": 1,
+            "prepared-child": {"tests": PREPARED_CHILD_TESTS, "expected_count": len(PREPARED_CHILD_TESTS),
                                "ignored": True, "timeout": 1800,
                                "compiler_mode": "owned-resident", "max_jobs": 1},
             "harness-performance": {"tests": HARNESS_PERFORMANCE_TESTS, "expected_count": 1,

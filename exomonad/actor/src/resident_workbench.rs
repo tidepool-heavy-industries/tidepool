@@ -2261,15 +2261,10 @@ where
     }
     if !session
         .parked_program_provenance(hole)
-        .is_some_and(|provenance| {
-            provenance
-                .sites()
-                .iter()
-                .any(|evidence| evidence.site == site && evidence.inputs.is_empty())
-        })
+        .is_some_and(|provenance| provenance.has_completion_site(site))
     {
         return Err(ResidentActorWorkbenchError::ActorProtocol(
-            "request receiver registration has no compiler-issued completion site".into(),
+            format!("request receiver registration has no compiler-issued completion site: requested {site}"),
         ));
     }
     session
@@ -15748,7 +15743,7 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn explicit_spawn_installer_requires_exactly_one_request_receiver() {
         with_test_compiler_owner(async {
-            let (mut session, context, mut source, root) = host_mount_fixture();
+            let (session, public_context, mut source, _root) = host_mount_fixture();
             let authored = tempfile::tempdir().unwrap();
             std::fs::write(
                 authored.path().join("CapturedSpecInstaller.hs"),
@@ -15758,112 +15753,73 @@ pub(crate) mod request_tests {
             let mut include_roots = source.base_include.to_vec();
             include_roots.push(authored.path().to_path_buf());
             source.base_include = include_roots.into();
-            let preamble =
-                insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller");
-            let templates =
-                resident_workbench_templates(&preamble, &context.haskell_effects_alias, "");
-            let include = source
-                .base_include
-                .iter()
-                .map(PathBuf::as_path)
-                .collect::<Vec<_>>();
-            let turn = run_turn(TurnRequest {
-                exact_context: None,
-                session_id: Some(context.placement.session),
-                turn_text: include_str!("fixtures/captured-spec-installer-bind.hs"),
-                templates: &templates,
-                include: &include,
-                session_root: root.path(),
-                inject_modules: &[],
-                gen: 1,
-                verdict: None,
-                target: None,
-                retained_imports: &[],
-            })
-            .unwrap();
-            let TurnResult::Bind {
-                bound, compiled, ..
-            } = turn
-            else {
-                panic!("captured installer variants bind")
-            };
-            assert_eq!(bound.len(), 3, "capture each installer from one compile");
-            assert!(matches!(
-                session.run_projected_bind_with_sites(
-                    "captured_installer_variants",
-                    compiled.code(),
-                    &bound,
-                    tidepool_repr::Generation(1),
-                ),
-                Ok(ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. })
-            ));
-            let installer = Arc::new(
-                session
-                    .retain_binding_custody_in(
-                        context.placement.lexical_scope,
-                        "installer",
-                        tidepool_repr::SessionVarId::from_extract(
-                            bound
-                                .iter()
-                                .find(|binder| binder.name == "installer")
-                                .expect("compiler-issued installer binder")
-                                .var_id,
-                        ),
-                    )
-                    .unwrap()
-                    .unwrap(),
-            );
-            let application_installer = Arc::new(
-                session
-                    .retain_binding_custody_in(
-                        context.placement.lexical_scope,
-                        "applicationInstaller",
-                        tidepool_repr::SessionVarId::from_extract(
-                            bound
-                                .iter()
-                                .find(|binder| binder.name == "applicationInstaller")
-                                .expect("compiler-issued applicationInstaller binder")
-                                .var_id,
-                        ),
-                    )
-                    .unwrap()
-                    .unwrap(),
-            );
-            let duplicate_installer = Arc::new(
-                session
-                    .retain_binding_custody_in(
-                        context.placement.lexical_scope,
-                        "duplicateReceiverInstaller",
-                        tidepool_repr::SessionVarId::from_extract(
-                            bound
-                                .iter()
-                                .find(|binder| binder.name == "duplicateReceiverInstaller")
-                                .expect("compiler-issued duplicateReceiverInstaller binder")
-                                .var_id,
-                        ),
-                    )
-                    .unwrap()
-                    .unwrap(),
-            );
-            let baseline_roots = session.persistent_roots_count();
-            let baseline_handles = session.value_handle_count();
-            let baseline_custody = session.outstanding_custody();
-            let producer_bindings = bound
-                .iter()
-                .map(|binder| {
-                    (
-                        binder.name.clone(),
-                        tidepool_repr::SessionVarId::from_extract(binder.var_id),
-                    )
-                })
-                .collect::<Vec<_>>();
-            eprintln!(
-                "explicit installer baseline persistent/handles/custody={:?}",
-                (baseline_roots, baseline_handles, baseline_custody),
-            );
+            source.preamble =
+                insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller").into();
             let machines = Arc::new(ActorMachineRegistry::new());
-            machines.insert_idle(context.placement.session, Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            machines.insert_idle(public_context.placement.session, Box::new(session));
+            let (workbench, private_context) = ResidentActorWorkbench::new(machines, source, None)
+                .admit_private_cell_for_test(public_context.clone())
+                .await
+                .unwrap();
+            workbench
+                .execute_cell_for_test(
+                    private_context.clone(),
+                    include_str!("fixtures/captured-spec-installer-bind.hs"),
+                )
+                .await
+                .unwrap();
+            workbench
+                .publish_completed_cell_for_test(private_context)
+                .await
+                .unwrap();
+            let context = public_context;
+            let (
+                installer,
+                application_installer,
+                duplicate_installer,
+                baseline_handles,
+                baseline_custody,
+                producer_bindings,
+            ) = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    let scope = context.placement.lexical_scope;
+                    let bindings = [
+                        "installer",
+                        "applicationInstaller",
+                        "duplicateReceiverInstaller",
+                    ]
+                    .into_iter()
+                    .map(|name| {
+                        let identity = session
+                            .current_binding_in(scope, name)
+                            .expect("published compiler-issued installer binding")
+                            .0;
+                        (name.to_owned(), identity)
+                    })
+                    .collect::<Vec<_>>();
+                    let mut retained = Vec::new();
+                    for (name, identity) in &bindings {
+                        retained.push(Arc::new(
+                            session
+                                .retain_binding_custody_in(scope, name, *identity)?
+                                .expect("published installer retains its original custody"),
+                        ));
+                    }
+                    let duplicate = retained.pop().unwrap();
+                    let application = retained.pop().unwrap();
+                    let installer = retained.pop().unwrap();
+                    Ok((
+                        installer,
+                        application,
+                        duplicate,
+                        session.value_handle_count(),
+                        session.outstanding_custody(),
+                        bindings,
+                    ))
+                })
+                .await
+                .unwrap();
             let before_preparations = tidepool_extract_cmd::extract_spawn_count();
 
             // The same captured application value is accepted only by public

@@ -8,6 +8,7 @@ import tomllib
 
 from buck2_cargo_features import (
     CRATES_IO_SOURCE,
+    supports_native_facade_build_dependency,
     NATIVE_PACKAGES,
     reject_local_feature_requests,
     FeatureSelectionError,
@@ -93,11 +94,7 @@ for package in selected:
                 raise SystemExit(f"Unmodeled codegen build dependency: {dependency['name']}")
             continue
         if kind == "build":
-            if not (
-                package["name"] == "tidepool"
-                and dependency["name"] == "tidepool-toolchain"
-                and dependency.get("target") is None
-            ):
+            if not supports_native_facade_build_dependency(package["name"], dependency):
                 raise SystemExit(f"Model build dependency for {package['name']}: {dependency['name']}")
         dependency_key = dependency["rename"] or dependency["name"]
         if dependency["optional"] and dependency_key not in active_dependencies:

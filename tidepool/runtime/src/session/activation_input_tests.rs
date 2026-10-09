@@ -1859,9 +1859,16 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             .selected_native_sites()
             .expect("typed entries carry their sealed native-site selection");
         assert_eq!(
+            &value.provenance.native_sites, selected,
+            "settled custody retains exactly the issuer's selected native rows"
+        );
+        assert_eq!(
+            &reobserved[index].native_sites, selected,
+            "later installation cannot widen earlier native site authority"
+        );
+        assert_eq!(
             selected
-                .iter()
-                .copied()
+                .ids()
                 .filter(|site| shared_sites.contains(site) || local_sites.contains(site))
                 .collect::<std::collections::BTreeSet<_>>(),
             expected[index],
@@ -1910,6 +1917,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             |history| {
                 let mut composed = (*values[0].provenance).clone();
                 let mut oracle = std::collections::BTreeSet::new();
+                let mut native_oracle = values[0]
+                    .provenance
+                    .native_sites
+                    .ids()
+                    .collect::<std::collections::BTreeSet<_>>();
                 for (index, after_installation) in history {
                     let observed = if after_installation {
                         &reobserved[index]
@@ -1918,6 +1930,14 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                     };
                     composed.merge(observed).unwrap();
                     oracle.extend(expected[index].iter().copied());
+                    native_oracle.extend(values[index].provenance.native_sites.ids());
+                    prop_assert_eq!(
+                        composed
+                            .native_sites
+                            .ids()
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        native_oracle.clone()
+                    );
                     prop_assert_eq!(
                         composed
                             .authenticated_inputs
@@ -1938,6 +1958,37 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             },
         )
         .unwrap();
+
+    let issued_request = values[1]
+        .provenance
+        .sites
+        .values()
+        .find(|site| shared_sites.contains(&site.site))
+        .unwrap();
+    let mut conflicting_observation = issued_request.clone();
+    conflicting_observation.inputs.clear();
+    conflicting_observation.input_type_witnesses.clear();
+    let observed_only = ProgramProvenance::from_sites(&[conflicting_observation]).unwrap();
+    assert!(
+        observed_only.native_sites.ids().next().is_none(),
+        "public sidecar construction cannot issue original native authority"
+    );
+    assert!(
+        !observed_only.has_completion_site(issued_request.site),
+        "an unsealed zero-input observation cannot issue completion authority"
+    );
+    for (left, right) in [
+        (values[1].provenance.as_ref(), &observed_only),
+        (&observed_only, values[1].provenance.as_ref()),
+    ] {
+        let mut combined = left.clone();
+        let before = combined.clone();
+        assert!(
+            combined.merge(right).is_err(),
+            "native input and observed completion cannot share one site id"
+        );
+        assert_eq!(combined, before, "refused authority composition is atomic");
+    }
 
     let receiver_parcel = source.export_custody(values.remove(0)).unwrap();
     let action = values.remove(0);
@@ -1984,6 +2035,10 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         .unwrap();
     assert!(receiver.provenance.authenticated_inputs.is_empty());
     assert!(Arc::ptr_eq(&payload.provenance, &original));
+    assert_eq!(
+        payload.provenance.native_sites, original.native_sites,
+        "parcel export/import keeps original native site rows"
+    );
     let activation = suspended(
         destination
             .run_rooted_application(
