@@ -44,6 +44,7 @@ import GHC.Types.SourceError (SourceError)
 import GHC.Unit.External (ExternalPackageState(..))
 import GHC.Unit.Home.ModInfo
 import GHC.Unit.Module.ModDetails (ModDetails(..))
+import GHC.Unit.Module.ModIface (set_mi_insts, set_mi_fam_insts)
 import GHC.Unit.Types (stringToUnit, GenWithIsBoot(..))
 import GHC.Unit.Home (homeUnitId)
 import GHC.Driver.Env (hsc_home_unit)
@@ -605,7 +606,7 @@ interfaceInventoryExhaustive hsc iface = pure $ do
       [instance_ | hmi <- hmis, instance_ <- instEnvElts (md_insts (hm_details hmi))]
     localClasses = [instance_ | instance_ <- implementationClasses,
       exportIdentity (is_dfun_name instance_) `elem` map (exportIdentity . ifDFun) (mi_insts iface)]
-    localFamilies = uniqueFamilyInstances
+    localFamilies = nubBy (\a b -> fi_axiom a == fi_axiom b)
       [family | hmi <- hmis, family <- md_fam_insts (hm_details hmi),
       exportIdentity (coAxiomName (fi_axiom family)) `elem`
         map (exportIdentity . ifFamInstAxiom) (mi_fam_insts iface)]
