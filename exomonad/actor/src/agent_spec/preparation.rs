@@ -440,6 +440,74 @@ impl ToolsetPreparation {
 pub(crate) mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "requires matched named packaged entries and native catalog"]
+    fn builtin_loader_accepts_named_original_and_refuses_another_program() {
+        struct RestoreBuiltinRoot(std::ffi::OsString);
+        impl Drop for RestoreBuiltinRoot {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::set_var("TIDEPOOL_PREPARED_BUILTIN_ENTRIES", &self.0);
+                }
+            }
+        }
+        fn copy_entry(source: &std::path::Path, target: &std::path::Path) {
+            std::fs::create_dir(target).unwrap();
+            for item in std::fs::read_dir(source).unwrap() {
+                let item = item.unwrap();
+                let destination = target.join(item.file_name());
+                let kind = item.file_type().unwrap();
+                if kind.is_dir() {
+                    copy_entry(&item.path(), &destination);
+                } else {
+                    assert!(kind.is_file());
+                    std::fs::copy(item.path(), destination).unwrap();
+                }
+            }
+        }
+
+        let original_root = std::env::var_os("TIDEPOOL_PREPARED_BUILTIN_ENTRIES")
+            .expect("component regression requires the selected packaged entries");
+        let _restore = RestoreBuiltinRoot(original_root.clone());
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        for policy in [
+            BuiltinToolsetPolicy::Workbench,
+            BuiltinToolsetPolicy::AsyncWorkbench,
+        ] {
+            let program = builtin_program(policy).unwrap().unwrap();
+            let loaded = load_builtin_installer(&program).unwrap();
+            assert!(loaded.original_compile_input().is_some());
+            let mut wrong_selection = program.clone();
+            wrong_selection.manifest_blake3 = "0".repeat(64);
+            assert!(load_builtin_installer(&wrong_selection).is_err());
+        }
+
+        // Another genuinely issued program remains valid native output. Placing
+        // it under the selected policy cannot change its exact named provenance.
+        let substituted = tempfile::tempdir().unwrap();
+        copy_entry(
+            &PathBuf::from(original_root).join(BuiltinToolsetPolicy::AsyncWorkbench.name()),
+            &substituted
+                .path()
+                .join(BuiltinToolsetPolicy::Workbench.name()),
+        );
+        unsafe {
+            std::env::set_var("TIDEPOOL_PREPARED_BUILTIN_ENTRIES", substituted.path());
+        }
+        let program = builtin_program(BuiltinToolsetPolicy::Workbench)
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(load_builtin_installer(&program), Err(PreparationFailure::Source(message))
+            if message == "built-in installer differs from its declared named source")
+        );
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before,
+            "opening valid or refused originals must never submit compilation"
+        );
+    }
+
     fn recipe(entry: &str) -> InstallerRecipe {
         InstallerRecipe {
             builtin: None,
@@ -1170,12 +1238,10 @@ fn load_builtin_installer(
     let loaded =
         tidepool_toolchain::artifacts::load_production_entry(&directory, &authority, &sources)
             .map_err(preparation_auth_failure)?;
-    if loaded.source()
-        != sources
-            .snapshot_root
-            .join(program.policy.source_name())
-            .to_string_lossy()
-    {
+    let named_source = sources.snapshot_root.join(program.policy.source_name());
+    let source_contents = std::fs::read_to_string(&named_source)
+        .map_err(|error| PreparationFailure::Source(error.to_string()))?;
+    if loaded.source_path() != named_source || loaded.source() != source_contents {
         return Err(PreparationFailure::Source(
             "built-in installer differs from its declared named source".into(),
         ));

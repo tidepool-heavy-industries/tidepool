@@ -157,6 +157,7 @@ pub struct ProductionEntryOutput {
     sites: Vec<YieldSite>,
     products: Arc<SealedTurnProducts>,
     source: String,
+    source_path: PathBuf,
 }
 
 impl ProductionEntryOutput {
@@ -174,6 +175,10 @@ impl ProductionEntryOutput {
     }
     pub fn source(&self) -> &str {
         &self.source
+    }
+    /// Exact named source from the validated original-entry provenance.
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
     }
     pub fn yield_sites(&self) -> &[YieldSite] {
         &self.sites
@@ -646,6 +651,7 @@ pub fn load_selected_production_entry(
         sites,
         products: Arc::new(products),
         source,
+        source_path: manifest.source,
     })
 }
 
