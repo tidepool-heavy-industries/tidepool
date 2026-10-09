@@ -18,7 +18,7 @@ cellProgramStateChecks :: IO ()
 cellProgramStateChecks = do
   let prologue = SourcePrologue [] [] emptyCompilerDefaultRecipe
       exact = ExactScope "" "" "" "" emptyScopeInputs [] [] [] []
-        NoCheckedPurpose Nothing Set.empty
+        NoCheckedPurpose Nothing Set.empty Set.empty
       initial = initialProgramCellState prologue exact Map.empty
       item index kind names form = CellAnalysisItem (CellSourceSpan index 1 index 2) (show index)
         (StmtBinders kind names []) [] False form
