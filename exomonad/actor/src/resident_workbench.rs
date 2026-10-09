@@ -5770,7 +5770,6 @@ where
                     _authority: authority.clone(),
                     cell,
                     include: prepared.include,
-                    declaration_imports: snapshot.view.workbench_imports(),
                     compile_inputs: snapshot.view.compile_inputs().clone(),
                 });
                 Ok(specification)
@@ -5861,7 +5860,6 @@ where
             .into_iter()
             .map(|item| PreparedCellItem {
                 ready: PreparedCellStep {
-                    specification: specification.clone(),
                     prefix: prefix
                         .as_ref()
                         .expect("nonempty complete cell has a prefix")
@@ -6146,11 +6144,7 @@ where
         block: ParsedBlock,
         prepared: PreparedCellItem,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        let PreparedCellStep {
-            specification,
-            prefix,
-            item,
-        } = &prepared.ready;
+        let PreparedCellStep { prefix, item } = &prepared.ready;
         let item = item.clone();
         let prefix = prefix.clone();
         tracing::info!(target: "exomonad_actor::workbench_phase", phase = "checked_item_admit_started", "workbench phase");
@@ -6185,8 +6179,7 @@ where
                 installed_bindings: binders,
             });
         }
-        let specification = specification.clone();
-        let ready = consume_admitted_cell_item(&specification, reservation, &block)?;
+        let ready = consume_admitted_cell_item(reservation, &block)?;
         let ready = match ready {
             CompiledBlock::Ready(ready) => *ready,
             CompiledBlock::Rejected(diagnostic) => {
@@ -6237,150 +6230,6 @@ where
             name: binding,
             mounted: Some(mounted),
         })
-    }
-
-    /// Compile-and-run one scope-free Bind/Expr fragment — the tool
-    /// installer's own shape, with no request/response context — with the
-    /// resident machine checked out only for the snapshot and the
-    /// install-and-run step, released for the GHC compile in between. The
-    /// split uses [`split_staleness`] to detect a stale snapshot. It is
-    /// attempted once; a stale snapshot falls straight through to the original
-    /// single-checkout [`begin_fragment`], for the reason
-    /// [`Self::prepare_cell`] gives.
-    pub(crate) async fn begin_fragment_split(
-        &self,
-        context: crate::ActorSessionContext,
-        source: ActorWorkbenchSource,
-        block: ParsedBlock,
-        verdict: Option<TurnClassification>,
-    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        // Carries one cancellation edge across every off-checkout GHC call
-        // this fragment makes: dropping this future
-        // before it settles interrupts whichever compile is in flight,
-        // rather than leaving it to finish unobserved.
-        let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
-        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
-        let (stage, changed) = 'split: {
-            let snapshot_source = source.clone();
-
-            let snapshot_block = block.clone();
-            let snapshot_verdict = verdict.clone();
-            let snapshot = self
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    snapshot_fragment_compile(
-                        session,
-                        context,
-                        &snapshot_source,
-                        &snapshot_block,
-                        snapshot_verdict.as_ref(),
-                    )
-                })
-                .await?;
-
-            // No checkout held here: the GHC compile runs concurrently with
-            // every other actor's turn against this session.
-            let compile_source = source.clone();
-            let compile_block_text = block.clone();
-            let effects = context.haskell_effects_alias.clone();
-            let compile_cancellation = cancellation.clone();
-            let compiler_work = register_compiler_work()?;
-            let (snapshot, compiled) =
-                crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                    compiler_work.run(compile_cancellation, || {
-                        let compiled = compile_fragment_off_checkout(
-                            &snapshot,
-                            &compile_source,
-                            &effects,
-                            &compile_block_text,
-                        );
-                        compiled.map(|compiled| (snapshot, compiled))
-                    })
-                }))
-                .await
-                .map_err(ResidentActorWorkbenchError::Join)??;
-            let ready = match compiled {
-                CompiledBlock::Rejected(diagnostic) => {
-                    // The rejection was derived from `snapshot.view`, taken
-                    // before the machine was released for this compile.
-                    // Re-derive the view once more before trusting it: if
-                    // something else wrote to a scope this compile actually
-                    // read from in the meantime, the rejection is stale and
-                    // the fragment recompiles under one checkout, exactly as
-                    // an install-time mismatch does.
-                    let revalidate_source = source.clone();
-
-                    let revalidate_against = snapshot.view.clone();
-                    let stale = self
-                        .access
-                        .with_machine(context.clone(), move |session, context, _| {
-                            if session.machine_disposition()
-                                == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
-                            {
-                                return Err(ResidentActorWorkbenchError::MachineLost);
-                            }
-                            let fresh_view =
-                                actor_compile_view(session, context, &revalidate_source)?;
-                            Ok(split_staleness(
-                                session,
-                                &fresh_view,
-                                &revalidate_against,
-                                None,
-                            ))
-                        })
-                        .await?;
-                    match stale {
-                        None => {
-                            cancel_on_drop.0 = None;
-                            return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
-                        }
-                        Some(changed) => break 'split ("rejection revalidation", changed),
-                    }
-                }
-                CompiledBlock::Ready(ready) => *ready,
-            };
-
-            // Revalidate the GHC-compiled `ready` against the current
-            // source-side view in one short checkout, then hand off to
-            // `begin_ready_block_split` for the JIT
-            // install: that keeps this split's own Cranelift compile off
-            // any checkout too, exactly as `begin_prepared_cell_item`
-            // already does for a planned cell's item install, instead of
-            // running it under the checkout this closure used to hold for
-            // `begin_ready_block`'s whole install-and-run.
-            let install_source = source.clone();
-
-            let stale = self
-                .access
-                .with_machine(context.clone(), move |session, context, _| {
-                    if session.machine_disposition()
-                        == Some(tidepool_codegen::machine::MachineDisposition::Unavailable)
-                    {
-                        return Err(ResidentActorWorkbenchError::MachineLost);
-                    }
-                    let fresh_view = actor_compile_view(session, context, &install_source)?;
-                    Ok(split_staleness(session, &fresh_view, &snapshot.view, None))
-                })
-                .await?;
-            if let Some(changed) = stale {
-                break 'split ("install", changed);
-            }
-            let install_block = block.clone();
-            let step = begin_ready_block_split(&self.access, context.clone(), install_block, ready);
-            let step = step.await?;
-            cancel_on_drop.0 = None;
-            return Ok(step);
-        };
-        log_split_stale("fragment", &context, stage, changed, false);
-
-        cancel_on_drop.0 = None;
-        let step = self
-            .access
-            .with_machine(context.clone(), move |session, context, _| {
-                begin_fragment(session, context, &source, None, block, verdict.as_ref())
-            })
-            .await?;
-        Ok(step)
     }
 
     /// Service structured inspection without holding the resident machine
@@ -6536,289 +6385,7 @@ where
     }
 }
 
-/// A short-checkout snapshot for `begin_fragment_split`'s split compile:
-/// the exact source-side view this compile targets, its reserved value
-/// generation, the prepared programs still linked against every live
-/// prepared binding, the turn classification a bare-expression item resolves
-/// to (GHC-sourced when not already known), and — for an expression item —
-/// a fresh observation name unique among this scope's visible bindings at
-/// snapshot time.
-struct FragmentCompileSnapshot {
-    view: crate::ActorCompileView,
-    generation: tidepool_repr::Generation,
-    retained: Vec<(SymbolIdentity, u64)>,
-    verdict: Option<TurnClassification>,
-    observation_name: Option<String>,
-}
-
-/// Take the checkout-scoped snapshot a split fragment compile needs, then
-/// release the checkout. Read-only against the session except for the
-/// atomic generation reservation.
-fn snapshot_fragment_compile<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    block: &ParsedBlock,
-    checked_verdict: Option<&TurnClassification>,
-) -> Result<FragmentCompileSnapshot, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let view = actor_compile_view(session, context, source)?;
-    let generation = view.next_value_generation();
-    let verdict = match checked_verdict {
-        Some(checked) => Some(checked.clone()),
-        None => tidepool_runtime::session::classify_block(&[&block.source])
-            .map_err(|error| {
-                let mut diagnostic = classify_compile(&error);
-                diagnostic.message = error.to_string();
-                ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
-            })?
-            .into_iter()
-            .next(),
-    };
-    if verdict
-        .as_ref()
-        .is_none_or(|verdict| verdict.kind != TurnKind::Decl)
-    {
-        session.reserve_value_generations_through(generation);
-    }
-    let retained = session.prepared_retained();
-    let observation_name = if verdict
-        .as_ref()
-        .is_some_and(|verdict| verdict.kind == TurnKind::Expr)
-    {
-        let visible = session.workbench_bindings_in(context.placement.lexical_scope);
-        let mut name = format!("observation{}", generation.0);
-        while visible.iter().any(|binding| binding.name == name) {
-            name.push('_');
-        }
-        Some(name)
-    } else {
-        None
-    };
-    Ok(FragmentCompileSnapshot {
-        view,
-        generation,
-        retained,
-        verdict,
-        observation_name,
-    })
-}
-
-/// The GHC-compile half of a split fragment compile: everything
-/// [`snapshot_fragment_compile`]'s checkout-only prerequisites make
-/// possible once they are already in hand. No session or checkout touched
-/// here; `begin_fragment_split` runs this with the machine
-/// released. Restricted to `begin_fragment`'s own calling convention (no
-/// staged cell prefix or prologue override) — the shape the tool installer and every other
-/// `begin_fragment_split` caller compiles.
-fn compile_fragment_off_checkout(
-    snapshot: &FragmentCompileSnapshot,
-    source: &ActorWorkbenchSource,
-    effect_stack: &str,
-    block: &ParsedBlock,
-) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
-    let prepared = source.prepare(&snapshot.view);
-    let mut templates =
-        resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
-    let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-    let mut verdict = snapshot.verdict.clone();
-    let observation = if let Some(name) = &snapshot.observation_name {
-        let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-        let lifts = vec![
-            tidepool_runtime::session::ExpressionLift::Effectful,
-            tidepool_runtime::session::ExpressionLift::Pure,
-        ];
-        templates = lifts
-            .into_iter()
-            .map(|lift| tidepool_runtime::session::TurnTemplate {
-                kind: tidepool_runtime::session::TemplateSelector::Bind,
-                source: tidepool_runtime::session::turn::assemble_observation_module(
-                    &preamble,
-                    "__result",
-                    effect_stack,
-                    "{{TURN}}",
-                    lift,
-                    None,
-                ),
-            })
-            .collect();
-        verdict = Some(TurnClassification {
-            kind: TurnKind::Bind,
-            binders: vec![name.clone()],
-            items: Vec::new(),
-        });
-        Some((name.clone(), None))
-    } else {
-        None
-    };
-    let request = TurnRequest {
-        exact_context: snapshot.view.exact_compile_context(),
-        session_id: Some(snapshot.view.session_id()),
-        turn_text: &block.source,
-        templates: &templates,
-        include: &include_refs,
-        session_root: snapshot.view.session_root(),
-        inject_modules: &prepared.injected,
-        gen: snapshot.generation.0,
-        verdict,
-        target: None,
-        retained_imports: &snapshot.retained,
-    };
-    match run_turn(request) {
-        Ok(result) => Ok(CompiledBlock::Ready(Box::new(ReadyBlock {
-            result,
-            generation: snapshot.generation,
-            declaration_source: block.source.clone(),
-            declaration_imports: snapshot.view.workbench_imports(),
-            observation,
-        }))),
-        Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
-            let label = format!("<cell item {}>", block.ordinal);
-            Ok(CompiledBlock::Rejected(render_turn_compile_rejection(
-                &failure.error,
-                failure.attempted_source.as_deref(),
-                &block.source,
-                &label,
-            )))
-        }
-        Err(failure) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
-            classify_compile(&failure.error),
-        )),
-    }
-}
-
-fn begin_fragment<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    request_scope: Option<&RequestWorkbenchScope>,
-    block: ParsedBlock,
-    verdict: Option<&TurnClassification>,
-) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let source = source.clone().for_workbench(context, request_scope);
-    let compiled = match compile_block(
-        session,
-        context,
-        &source,
-        &context.haskell_effects_alias,
-        &block,
-        verdict,
-    )? {
-        CompiledBlock::Ready(compiled) => compiled,
-        CompiledBlock::Rejected(diagnostic) => {
-            return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
-        }
-    };
-    begin_ready_block(session, context, block, *compiled)
-}
-
-fn begin_ready_block<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    block: ParsedBlock,
-    compiled: ReadyBlock,
-) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let ReadyBlock {
-        result,
-        generation,
-        declaration_source,
-        declaration_imports,
-        observation,
-    } = compiled;
-    match result {
-        TurnResult::Decl(receipt) => {
-            let result = match session.define_scoped_with_imports_in(
-                context.placement.lexical_scope,
-                &[&declaration_source],
-                &declaration_imports,
-            ) {
-                Ok(generation) => ResidentWorkbenchStep::Committed {
-                    output: declaration_receipt(&receipt.binders, false, generation.0),
-                    value: None,
-                    warnings: Vec::new(),
-                    installed_bindings: receipt.binders.clone(),
-                },
-                Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
-                    ResidentWorkbenchStep::Rejected(failure.rejection_for_input(
-                        &format!("<cell item {}>", block.ordinal),
-                        &block.source,
-                    ))
-                }
-                Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
-                    ResidentWorkbenchStep::Rejected(classify_session(&error).message.into())
-                }
-                Err(error) => {
-                    return Err(ResidentActorWorkbenchError::Resident(
-                        ResidentError::Session(error),
-                    ))
-                }
-            };
-            Ok(result)
-        }
-        TurnResult::Bind {
-            bound,
-            compiled,
-            variant,
-            ..
-        } => {
-            let warnings = compiled.warnings.warnings.clone();
-            let outcome = match bound.as_slice() {
-                [] => {
-                    session.run_with_sites("actor_interactive_discard_bind", compiled.into_code())
-                }
-                [binder] if observation.is_some() => session.run_observation_with_sites(
-                    compiled.into_code(),
-                    binder,
-                    generation,
-                    observation
-                        .as_ref()
-                        .and_then(|(_, effectful)| *effectful)
-                        .unwrap_or(variant == 0),
-                ),
-                [binder] => session.run_bind_with_sites(
-                    "actor_interactive_bind",
-                    compiled.into_code(),
-                    binder,
-                    generation,
-                ),
-                binders => session.run_projected_bind_with_sites(
-                    "actor_interactive_pattern_bind",
-                    compiled.into_code(),
-                    binders,
-                    generation,
-                ),
-            };
-            finish_bind_step(
-                session,
-                context,
-                &block,
-                bound,
-                warnings,
-                observation.is_some(),
-                outcome,
-            )
-        }
-        TurnResult::Expr { .. } => Err(ResidentActorWorkbenchError::ActorProtocol(
-            "workbench expression compiled without its observation binding".into(),
-        )),
-    }
-}
-
-/// The shared tail of a Bind turn, whichever entry ran it: the
-/// single-checkout match in [`begin_ready_block`] or the off-checkout split
-/// in [`begin_ready_block_split`]. Builds the turn's [`WorkbenchDisplay`]
-/// from the retained binders and settles the fragment.
+/// Settle an executed whole-cell binding using its retained binders and warnings.
 fn finish_bind_step<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -6851,10 +6418,7 @@ where
     )
 }
 
-/// [`PendingPreparedMode`] a [`TurnResult::Bind`]'s shape resolves to,
-/// exactly as [`begin_ready_block`]'s own `match bound.as_slice()` chooses
-/// which `run_*_with_sites` to call -- kept in sync with that match by
-/// [`begin_ready_block_split`]'s fallback still calling the originals.
+/// Select the native installation mode from binders and observation metadata.
 fn pending_mode_for(
     bound: &[BoundBinder],
     generation: tidepool_repr::Generation,
@@ -6901,7 +6465,7 @@ enum PreparedSnapshotAttempt {
 }
 
 /// Install a compiled item without holding the machine during native compilation.
-/// Stale imports relink the same compiled turn; declarations commit directly.
+/// Stale native imports relink the same immutable compiled binding program.
 #[tracing::instrument(target = "exomonad_actor::workbench_phase", skip_all, fields(actor = %context.actor, item = block.ordinal))]
 async fn begin_ready_block_split<H, O>(
     access: &ResidentMachineAccess<H, O>,
@@ -6914,59 +6478,11 @@ where
     O: OutputSink + Sync + 'static,
 {
     let ReadyBlock {
-        result,
+        bound,
+        compiled: compiled_turn,
         generation,
-        declaration_source,
-        declaration_imports,
         observation,
     } = compiled;
-    let (bound, compiled_turn) = match result {
-        TurnResult::Decl(receipt) => {
-            let block = block.clone();
-            return access
-                .with_machine(context, move |session, context, _| {
-                    match session.define_scoped_with_imports_in(
-                        context.placement.lexical_scope,
-                        &[&declaration_source],
-                        &declaration_imports,
-                    ) {
-                        Ok(generation) => Ok(ResidentWorkbenchStep::Committed {
-                            output: declaration_receipt(&receipt.binders, false, generation.0),
-                            value: None,
-                            warnings: Vec::new(),
-                            installed_bindings: receipt.binders.clone(),
-                        }),
-                        Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
-                            Ok(ResidentWorkbenchStep::Rejected(
-                                failure.rejection_for_input(
-                                    &format!("<cell item {}>", block.ordinal),
-                                    &block.source,
-                                ),
-                            ))
-                        }
-                        Err(error)
-                            if classify_session(&error).class == FailureClass::UserHaskell =>
-                        {
-                            Ok(ResidentWorkbenchStep::Rejected(
-                                classify_session(&error).message.into(),
-                            ))
-                        }
-                        Err(error) => Err(ResidentActorWorkbenchError::Resident(
-                            ResidentError::Session(error),
-                        )),
-                    }
-                })
-                .await;
-        }
-        TurnResult::Bind {
-            bound, compiled, ..
-        } => (bound, compiled),
-        TurnResult::Expr { .. } => {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "workbench expression compiled without its observation binding".into(),
-            ));
-        }
-    };
     let warnings = compiled_turn.warnings.warnings.clone();
 
     'split: for install_attempt in 1..=CHEAP_RETRY_ATTEMPTS {
@@ -7031,58 +6547,73 @@ where
         // Revalidation found a stale import: another actor's turn changed
         // a shared binding between the snapshot and this checkout. The
         // GHC-compiled turn is still current; relink and recompile it.
-        log_split_stale(
-            "prepared install",
-            &context,
-            "install",
-            SplitStaleView::PreparedImports,
-            install_attempt < CHEAP_RETRY_ATTEMPTS,
-        );
+        log_stale_native_imports(&context, install_attempt < CHEAP_RETRY_ATTEMPTS);
     }
 
-    // Fallback: either this session had no machine yet to snapshot against
-    // (the bootstrap case), or the split attempt hit a stale import.
-    // Single checkout, exactly as `begin_ready_block`'s Bind arm.
     access
         .with_machine(context, move |session, context, _| {
-            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "native_item_bootstrap_started", "workbench phase");
-            let outcome = match bound.as_slice() {
-                [] => session
-                    .run_with_sites("actor_interactive_discard_bind", compiled_turn.into_code()),
-                [binder] if observation.is_some() => session.run_observation_with_sites(
-                    compiled_turn.into_code(),
-                    binder,
-                    generation,
-                    observation
-                        .as_ref()
-                        .and_then(|(_, effectful)| *effectful)
-                        .unwrap_or(false),
-                ),
-                [binder] => session.run_bind_with_sites(
-                    "actor_interactive_bind",
-                    compiled_turn.into_code(),
-                    binder,
-                    generation,
-                ),
-                binders => session.run_projected_bind_with_sites(
-                    "actor_interactive_pattern_bind",
-                    compiled_turn.into_code(),
-                    binders,
-                    generation,
-                ),
-            };
-            tracing::info!(target: "exomonad_actor::workbench_phase", phase = "native_item_bootstrap_completed", "workbench phase");
-            finish_bind_step(
+            begin_ready_bind_in_checkout(
                 session,
                 context,
                 &block,
                 bound,
-                warnings,
-                observation.is_some(),
-                outcome,
+                compiled_turn,
+                generation,
+                observation,
             )
         })
         .await
+}
+
+fn begin_ready_bind_in_checkout<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    block: &ParsedBlock,
+    bound: Vec<BoundBinder>,
+    compiled: CompiledTurn,
+    generation: tidepool_repr::Generation,
+    observation: Option<(String, Option<bool>)>,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "native_item_bootstrap_started", "workbench phase");
+    let warnings = compiled.warnings.warnings.clone();
+    let outcome = match bound.as_slice() {
+        [] => session.run_with_sites("actor_interactive_discard_bind", compiled.into_code()),
+        [binder] if observation.is_some() => session.run_observation_with_sites(
+            compiled.into_code(),
+            binder,
+            generation,
+            observation
+                .as_ref()
+                .and_then(|(_, effectful)| *effectful)
+                .unwrap_or(false),
+        ),
+        [binder] => session.run_bind_with_sites(
+            "actor_interactive_bind",
+            compiled.into_code(),
+            binder,
+            generation,
+        ),
+        binders => session.run_projected_bind_with_sites(
+            "actor_interactive_pattern_bind",
+            compiled.into_code(),
+            binders,
+            generation,
+        ),
+    };
+    tracing::info!(target: "exomonad_actor::workbench_phase", phase = "native_item_bootstrap_completed", "workbench phase");
+    finish_bind_step(
+        session,
+        context,
+        block,
+        bound,
+        warnings,
+        observation.is_some(),
+        outcome,
+    )
 }
 
 fn declaration_receipt(binders: &[String], prologue_only: bool, generation: u64) -> String {
@@ -10722,10 +10253,9 @@ fn unexpected_boundary(
 }
 
 struct ReadyBlock {
-    result: TurnResult,
+    bound: Vec<BoundBinder>,
+    compiled: CompiledTurn,
     generation: tidepool_repr::Generation,
-    declaration_source: String,
-    declaration_imports: SourceImports,
     observation: Option<(String, Option<bool>)>,
 }
 
@@ -10771,12 +10301,10 @@ struct WorkbenchCompilationSpec {
     _authority: Arc<crate::resident_actor::WorkbenchCompilationAuthority>,
     cell: tidepool_toolchain::checked_cell::CheckedCellSpecification,
     include: Vec<PathBuf>,
-    declaration_imports: SourceImports,
     compile_inputs: tidepool_runtime::session::RuntimeCompileInputs,
 }
 
 struct PreparedCellStep {
-    specification: Arc<WorkbenchCompilationSpec>,
     prefix: Arc<tidepool_runtime::session::RuntimeCheckedPrefix>,
     item: tidepool_toolchain::checked_cell::ExactCheckedItem,
 }
@@ -10876,7 +10404,6 @@ where
 }
 
 fn consume_admitted_cell_item(
-    specification: &WorkbenchCompilationSpec,
     reservation: Arc<tidepool_runtime::session::RuntimeCheckedItemAdmission>,
     block: &ParsedBlock,
 ) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
@@ -10922,97 +10449,43 @@ fn consume_admitted_cell_item(
             Ok((name.to_owned(), Some(effectful)))
         })
         .transpose()?;
+    let TurnResult::Bind {
+        bound, compiled, ..
+    } = result
+    else {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(
+            "admitted native item lacks its compiled binding program".into(),
+        ));
+    };
     Ok(CompiledBlock::Ready(Box::new(ReadyBlock {
-        result,
+        bound,
+        compiled,
         generation: reservation.generation(),
-        declaration_source: block.source.clone(),
-        declaration_imports: specification.declaration_imports.clone(),
         observation,
     })))
 }
 
-/// Which part of the session a split-compile re-checkout found changed since
-/// the snapshot it compiled against. Named in the INFO line
-/// [`log_split_stale`] writes for every stale attempt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SplitStaleView {
-    /// [`crate::ActorCompileView::is_current_for`] failed: a scope this
-    /// cell reads committed a value, import, or declaration, or a value
-    /// module the cell could reach was released.
-    CompileView,
-    /// The session-wide declaration log's next module advanced, so this
-    /// cell's declaration candidate names a generation someone else took.
-    DeclarationModule,
-    /// Adopting the already-validated declaration candidate lost the race
-    /// for its generation.
-    StagedDeclaration,
-    /// [`ResidentSession::revalidate_and_run_prepared`] found an import of
-    /// the compiled program changed since its snapshot.
-    PreparedImports,
-}
-
-/// Off-checkout attempts for a split whose retry is cheap: the prepared
-/// install, whose retry relinks and Cranelift-compiles GHC output that is
-/// still current, and the display render, whose GHC part is one small
-/// generated bundle. A stale first attempt re-snapshots and compiles again
-/// with the machine released; only a second stale attempt runs under one
-/// checkout.
-///
-/// The fragment (tool-installer) split makes one attempt before its
-/// single-checkout fallback. Planned cells refuse stale admission; their
-/// immutable program never recompiles through this retry policy.
+/// Native installation can relink the same immutable whole-cell item twice
+/// outside the checkout before using the shared bootstrap installer.
 const CHEAP_RETRY_ATTEMPTS: usize = 2;
 
-/// One INFO line per stale split attempt, naming the path, the stage that
-/// found the snapshot stale, what changed, and whether the path recompiles
-/// off-checkout (`retrying`) or falls back to its single-checkout compile.
-fn log_split_stale(
-    path: &'static str,
-    context: &crate::ActorSessionContext,
-    stage: &'static str,
-    changed: SplitStaleView,
-    retrying: bool,
-) {
+fn log_stale_native_imports(context: &crate::ActorSessionContext, retrying: bool) {
     if retrying {
         tracing::info!(
             actor = context.actor.id.0,
-            path,
-            stage,
-            changed = ?changed,
+            path = "prepared install",
+            stage = "install",
+            changed = "PreparedImports",
             "split compile went stale; recompiling off-checkout against a fresh snapshot"
         );
     } else {
         tracing::info!(
             actor = context.actor.id.0,
-            path,
-            stage,
-            changed = ?changed,
+            path = "prepared install",
+            stage = "install",
+            changed = "PreparedImports",
             "split compile went stale; compiling under one checkout"
         );
-    }
-}
-
-/// The freshness check every split-compile re-checkout makes: the compile
-/// view first, then (when this cell's work depends on it) the declaration
-/// log's next module.
-fn split_staleness<H, O>(
-    session: &ResidentSession<H, O>,
-    fresh: &crate::ActorCompileView,
-    compiled_against: &crate::ActorCompileView,
-    candidate_module: Option<tidepool_repr::SessionModule>,
-) -> Option<SplitStaleView>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    if !fresh.is_current_for(compiled_against) {
-        return Some(SplitStaleView::CompileView);
-    }
-    match candidate_module {
-        Some(candidate) if session.next_declaration_module() != Some(candidate) => {
-            Some(SplitStaleView::DeclarationModule)
-        }
-        _ => None,
     }
 }
 
@@ -11358,15 +10831,6 @@ fn text_binding_carrier_imports() -> SourceImports {
 const TEXT_BINDING_TYPE_NAME: &str = "TidepoolHostText.Text";
 const TEXT_BINDING_ANCHOR: &str = "case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length";
 
-/// The verdict for a block this runtime wrote itself: `<binder> <- pure …`,
-/// one bound name, no declaration exports. Classification is its own compiler
-/// round trip, and for a generated block it can only answer what the
-/// generator already knows — so a generated block states its shape instead of
-/// asking. Authored source still classifies; only these fixed shapes skip it.
-fn generated_bind_verdict(binder: &str) -> TurnClassification {
-    generated_binds_verdict(&[binder.to_string()])
-}
-
 /// The verdict for a generated pattern bind.  The compiler owns each name's
 /// stable identity and type; Rust supplies only the fixed tuple shape that it
 /// just generated.
@@ -11375,213 +10839,6 @@ fn generated_binds_verdict(binders: &[String]) -> TurnClassification {
         kind: TurnKind::Bind,
         binders: binders.to_vec(),
         items: Vec::new(),
-    }
-}
-
-/// `verdict` is `None` for authored source, whose shape only GHC can answer,
-/// and `Some` for a block this runtime generated (see
-/// [`generated_bind_verdict`]).
-#[allow(clippy::too_many_arguments)]
-fn compile_block<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    effect_stack: &str,
-    block: &ParsedBlock,
-    verdict: Option<&TurnClassification>,
-) -> Result<CompiledBlock, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let compile_view = actor_compile_view(session, context, source)?;
-    compile_block_in_view(
-        session,
-        context,
-        source,
-        effect_stack,
-        block,
-        compile_view,
-        &[],
-        verdict,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compile_block_in_view<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    effect_stack: &str,
-    block: &ParsedBlock,
-    compile_view: crate::ActorCompileView,
-    staged_names: &[String],
-    checked_verdict: Option<&TurnClassification>,
-    prologue: Option<&tidepool_runtime::session::SourcePrologue>,
-) -> Result<CompiledBlock, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let verdict = match checked_verdict {
-        Some(checked) => Some(checked.clone()),
-        None => tidepool_runtime::session::classify_block(&[&block.source])
-            .map_err(|error| {
-                let mut diagnostic = classify_compile(&error);
-                diagnostic.message = error.to_string();
-                ResidentActorWorkbenchError::CompileInfrastructure(diagnostic)
-            })?
-            .into_iter()
-            .next(),
-    };
-    // A failed worker may already have published a thin value interface.
-    // Its identity is never reused, whether compilation or execution succeeds.
-    if verdict
-        .as_ref()
-        .is_none_or(|verdict| verdict.kind != TurnKind::Decl)
-    {
-        session.reserve_value_generations_through(compile_view.next_value_generation());
-    }
-    // On the prepared route the same compile also projects the turn's program,
-    // linked against every live prepared binding; on Core this is `None`.
-    let retained = session.prepared_retained();
-    let visible_names = session
-        .workbench_bindings_in(context.placement.lexical_scope)
-        .into_iter()
-        .map(|binding| binding.name)
-        .collect::<Vec<_>>();
-    compile_block_off_checkout(
-        context,
-        source,
-        effect_stack,
-        block,
-        compile_view,
-        staged_names,
-        verdict.as_ref(),
-        prologue,
-        &retained,
-        &visible_names,
-    )
-}
-
-/// The GHC-compile half of [`compile_block_in_view`], run against an
-/// already-resolved `verdict` and one already-taken `compile_view` with no
-/// session or checkout held. `retained` and `visible_names` are the exact
-/// snapshots taken before releasing the checkout. The caller reserves the
-/// target value generation. This path compiles fresh fragments and generated
-/// source; planned cells consume their admitted program items.
-#[allow(clippy::too_many_arguments)]
-fn compile_block_off_checkout(
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    effect_stack: &str,
-    block: &ParsedBlock,
-    compile_view: crate::ActorCompileView,
-    staged_names: &[String],
-    verdict: Option<&TurnClassification>,
-    prologue: Option<&tidepool_runtime::session::SourcePrologue>,
-    retained: &[(SymbolIdentity, u64)],
-    visible_names: &[String],
-) -> Result<CompiledBlock, ResidentActorWorkbenchError> {
-    let mut prepared = source.prepare(&compile_view);
-    if let Some(prologue) = prologue {
-        prepared.preamble = prepared.preamble.replacen(
-            "\nmodule ",
-            &format!("\n{}module ", prologue.pragma_text()),
-            1,
-        );
-        prepared.preamble = insert_preamble_imports(
-            &prepared.preamble,
-            &prologue.workbench_imports().template_text(),
-        );
-    }
-    let mut templates =
-        resident_workbench_templates(&prepared.preamble, effect_stack, &prepared.imports);
-    let include_refs: Vec<_> = prepared.include.iter().map(PathBuf::as_path).collect();
-    let mut verdict = verdict.cloned();
-    let observation = if verdict
-        .as_ref()
-        .is_some_and(|verdict| verdict.kind == TurnKind::Expr)
-    {
-        let mut name = format!("observation{}", compile_view.next_value_generation().0);
-        while visible_names.iter().any(|existing| existing == &name)
-            || staged_names.iter().any(|staged| staged == &name)
-        {
-            name.push('_');
-        }
-        let preamble = insert_preamble_imports(&prepared.preamble, &prepared.imports);
-        let lifts = vec![
-            tidepool_runtime::session::ExpressionLift::Effectful,
-            tidepool_runtime::session::ExpressionLift::Pure,
-        ];
-        templates = lifts
-            .into_iter()
-            .map(|lift| tidepool_runtime::session::TurnTemplate {
-                kind: tidepool_runtime::session::TemplateSelector::Bind,
-                source: tidepool_runtime::session::turn::assemble_observation_module(
-                    &preamble,
-                    "__result",
-                    effect_stack,
-                    "{{TURN}}",
-                    lift,
-                    None,
-                ),
-            })
-            .collect();
-        verdict = Some(TurnClassification {
-            kind: TurnKind::Bind,
-            binders: vec![name.clone()],
-            items: Vec::new(),
-        });
-        Some((name, None))
-    } else {
-        None
-    };
-    tracing::debug!(
-        actor_id = context.actor.id.0,
-        incarnation = context.actor.incarnation.0,
-        lexical_scope = ?context.placement.lexical_scope,
-        generation = compile_view.next_value_generation().0,
-        imports = %compile_view.turn_imports(),
-        injected = ?prepared.injected,
-        source = %block.source,
-        "compiling resident actor workbench item"
-    );
-    let request = TurnRequest {
-        exact_context: compile_view.exact_compile_context(),
-        session_id: Some(compile_view.session_id()),
-        turn_text: &block.source,
-        templates: &templates,
-        include: &include_refs,
-        session_root: compile_view.session_root(),
-        inject_modules: &prepared.injected,
-        gen: compile_view.next_value_generation().0,
-        verdict,
-        target: None,
-        retained_imports: retained,
-    };
-    let compiled = run_turn(request);
-    match compiled {
-        Ok(result) => Ok(CompiledBlock::Ready(Box::new(ReadyBlock {
-            result,
-            generation: compile_view.next_value_generation(),
-            declaration_source: block.source.clone(),
-            declaration_imports: compile_view.workbench_imports(),
-            observation,
-        }))),
-        Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
-            let label = format!("<cell item {}>", block.ordinal);
-            Ok(CompiledBlock::Rejected(render_turn_compile_rejection(
-                &failure.error,
-                failure.attempted_source.as_deref(),
-                &block.source,
-                &label,
-            )))
-        }
-        Err(failure) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
-            classify_compile(&failure.error),
-        )),
     }
 }
 
@@ -12501,80 +11758,26 @@ pub(crate) mod request_tests {
         )
     }
 
-    #[test]
-    fn typed_host_mount_carriers_compile_and_bind() {
-        let (mut session, context, source, session_root) = host_mount_fixture();
-        let input = mount_json_input(
-            &mut session,
-            &context,
-            &source,
-            &serde_json::json!({
-                "nested": [true, null, {"long": "x".repeat(16 * 1024)}]
-            }),
-            None,
-        )
-        .expect("nested JSON carrier mounts");
-        assert!(session
-            .binding_names_in(context.placement.lexical_scope)
-            .iter()
-            .all(|name| name != &input.name));
-
-        let mut input_source = source.clone();
-        input_source
-            .workbench_imports
-            .extend_text(&format!("qualified {} as TidepoolHostInput", input.module));
-        input_source
-            .workbench_imports
-            .extend_text("qualified Data.Map as TidepoolHostMap");
-        input_source
-            .workbench_imports
-            .extend_text("qualified Tidepool.Aeson as TidepoolHostJson");
-        input_source.preamble = format!(
-            "{}\ninput = TidepoolHostInput.{}\n",
-            input_source.preamble, input.name
-        )
-        .into();
-        let json_step = begin_fragment(
-            &mut session,
-            &context,
-            &input_source,
-            None,
-            ParsedBlock {
-                ordinal: 1,
-                total: 1,
-                source: "jsonSeen <- pure (case input of { TidepoolHostJson.Object fields -> if TidepoolHostMap.member \"nested\" fields then () else error \"missing nested key\"; _ -> error \"expected object\" })".into(),
-            },
-            None,)
-        .expect("mounted JSON is executable from the request alias");
-        assert!(matches!(json_step, ResidentWorkbenchStep::Committed { .. }));
-        mount_text_binding(
-            &mut session,
-            &context,
-            &source,
-            "tool_result",
-            "tool output",
-            None,
-        )
-        .expect("Text carrier mounts after the JSON request executes");
-        let mut text_source = source.clone();
-        text_source
-            .workbench_imports
-            .extend_text("qualified Data.Text as TidepoolHostText");
-        let text_step = begin_fragment(
-            &mut session,
-            &context,
-            &text_source,
-            None,
-            ParsedBlock {
-                ordinal: 1,
-                total: 1,
-                source: "textSeen <- pure (if tool_result == TidepoolHostText.pack \"tool output\" then () else error \"unexpected mounted text\")".into(),
-            },
-            None,
-        )
-        .expect("mounted Text is executable");
-        assert!(matches!(text_step, ResidentWorkbenchStep::Committed { .. }));
-        session.retire_host_binding_owner(session_root.path(), &input.binder);
+    #[tokio::test]
+    async fn typed_host_mount_carriers_compile_and_bind() {
+        with_test_compiler_owner(async {
+            let (machines, context, mut source, _root) = actor_registry_fixture();
+            source.workbench_imports.extend_text("qualified Data.Text as TidepoolHostText");
+            let (workbench, context) = ResidentActorWorkbench::new(machines, source, None)
+                .with_json_input(Some(serde_json::json!({
+                    "nested": [true, null, {"long": "x".repeat(16 * 1024)}]
+                })))
+                .admit_private_cell_for_test(context).await.unwrap();
+            workbench.execute_cell_for_test(context.clone(),
+                include_str!("fixtures/host-json-nested.hs"))
+                .await.expect("whole-cell execution sees the original nested JSON request input");
+            workbench.bind_tool_result(context.clone(), "tool_result".into(), "tool output".into())
+                .await.expect("Text carrier mounts after JSON execution")
+                .accept().unwrap();
+            workbench.execute_cell_for_test(context,
+                "textSeen <- pure (if tool_result == TidepoolHostText.pack \"tool output\" then () else error \"unexpected mounted text\")")
+                .await.expect("whole-cell execution reads the accepted Text carrier");
+        }).await;
     }
 
     /// A split compile takes its `ActorCompileView` snapshot, compiles
@@ -14244,6 +13447,21 @@ pub(crate) mod request_tests {
             }
             drop(dependencies);
             Ok(())
+        }
+
+        async fn publish_cell_for_test(
+            &self,
+            context: crate::ActorSessionContext,
+            source: &str,
+        ) -> Result<(), ResidentActorWorkbenchError> {
+            let (writer, context) = workbench_runner_for_test(self)
+                .application_workbench()
+                .admit_private_cell_for_test(context)
+                .await?;
+            writer
+                .execute_cell_for_test(context.clone(), source)
+                .await?;
+            writer.publish_completed_cell_for_test(context).await
         }
 
         async fn publish_completed_cell_for_test(
@@ -16954,7 +16172,7 @@ pub(crate) mod request_tests {
         let installation_scope = tools._installation_scope.scope();
         assert_ne!(installation_scope, context.placement.lexical_scope);
         let cleanup_owner = owner.clone();
-        let (admission, installed_public) = workbench
+        let (readiness, installed_public) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
                 let after = session
@@ -16971,44 +16189,46 @@ pub(crate) mod request_tests {
                 assert!(session
                     .public_visibility_snapshot_in(installation_scope)
                     .is_some());
-                let admission = session
-                    .begin_durable_private_execution(&owner, context.placement.lexical_scope)
+                let readiness = session
+                    .durable_public_readiness(&owner, context.placement.lexical_scope)
                     .map_err(|error| {
                         ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                     })?;
-                Ok((admission, after))
+                Ok((readiness, after))
             })
             .await
             .expect("ordinary private notebook admission after tool installation");
+        let descriptor = crate::ActorDescriptor::new("installer-child", context.placement)
+            .with_actor_path(tidepool_repr::ActorPath::parse("root/installer-child").unwrap())
+            .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+        let public_owner = crate::resident_actor::WorkbenchPublicOwner::issue(
+            &context,
+            &descriptor,
+            Some(readiness),
+        )
+        .unwrap();
+        let execution = Arc::new(
+            workbench_runner_for_test(&workbench)
+                .begin_private_execution(
+                    context.clone(),
+                    public_owner,
+                    tidepool_runtime::session::PublicationDecision::new(),
+                )
+                .await
+                .unwrap(),
+        );
         let mut private_context = context.clone();
-        private_context.placement.lexical_scope = admission.private_scope();
-        let step = workbench
-            .begin_fragment_split(
-                private_context.clone(),
-                source,
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: "pure (7 :: Int)".into(),
-                },
-                None,
-            )
+        private_context.placement.lexical_scope = execution.private_scope;
+        let private_workbench = workbench_runner_for_test(&workbench)
+            .application_workbench()
+            .with_compilation_authority(workbench.compilation_authority.clone().unwrap())
+            .with_private_execution(execution.clone());
+        private_workbench
+            .execute_cell_for_test(private_context, "pure (7 :: Int)")
             .await
-            .unwrap();
-        match step {
-            ResidentWorkbenchStep::Running { fragment, outcome } => {
-                workbench
-                    .settle_item(private_context, *fragment, (*outcome).into())
-                    .await
-                    .unwrap();
-            }
-            ResidentWorkbenchStep::Committed { .. } => {}
-            _ => panic!(
-                "ordinary private notebook did not execute: {}",
-                describe_step(&step)
-            ),
-        }
-        drop(admission);
+            .expect("ordinary durable private notebook executes its whole-cell program");
+        drop(private_workbench);
+        drop(execution);
         drop(tools);
         workbench
             .access
@@ -19946,11 +19166,7 @@ pub(crate) mod request_tests {
             .expect("closed request scope compiles with site evidence");
         assert_eq!(checked.items.len(), 1);
         let PreparedCell { mut items, .. } = prepared;
-        let PreparedCellStep {
-            specification,
-            prefix,
-            item,
-        } = items.remove(0).ready;
+        let PreparedCellStep { prefix, item } = items.remove(0).ready;
         let reservation = workbench
             .access
             .with_machine(context, move |session, _, _| {
@@ -19961,7 +19177,6 @@ pub(crate) mod request_tests {
             .await
             .unwrap();
         let compiled = consume_admitted_cell_item(
-            &specification,
             reservation,
             &ParsedBlock {
                 ordinal: 1,
@@ -19973,9 +19188,7 @@ pub(crate) mod request_tests {
         let CompiledBlock::Ready(ready) = compiled else {
             panic!("ready request native product")
         };
-        let TurnResult::Bind { compiled, .. } = &ready.result else {
-            panic!("request scope bind")
-        };
+        let compiled = &ready.compiled;
         assert!(
             compiled.asks.iter().any(|site| site.inputs.len() == 3),
             "currentRequest carries input, result, and ResponseResult result evidence"
@@ -20836,29 +20049,25 @@ pub(crate) mod request_tests {
     }
 
     async fn activation_refuses_reserved_declaration_without_public_mutation_with_compiler_owner() {
-        let (mut session, context, source, mut inputs, _root) = activation_input_fixture(|_| {});
-        let step = begin_fragment(
-            &mut session,
-            &context,
-            &source,
-            None,
-            ParsedBlock {
-                ordinal: 1,
-                total: 1,
-                source: "sessionInput = ()".into(),
-            },
-            None,
-        )
-        .unwrap();
-        assert!(matches!(step, ResidentWorkbenchStep::Committed { .. }));
+        let (session, context, source, mut inputs, _root) = activation_input_fixture(|_| {});
         let public_scope = context.placement.lexical_scope;
-        let before = session.public_visibility_snapshot_in(public_scope).unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(context.placement.session, Box::new(session));
         let workbench = ResidentActorWorkbench::new(machines, source, None)
             .with_compilation_authority(
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
             );
+        workbench
+            .publish_cell_for_test(context.clone(), "sessionInput = ()")
+            .await
+            .unwrap();
+        let before = workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                Ok(session.public_visibility_snapshot_in(public_scope).unwrap())
+            })
+            .await
+            .unwrap();
         let descriptor = crate::ActorDescriptor::new("reserved input fixture", context.placement);
         let owner = crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
             .unwrap();
@@ -20921,25 +20130,10 @@ pub(crate) mod request_tests {
     async fn request_scope_alias_borrow_refuses_a_shadowed_mount_with_compiler_owner() {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
-        let step = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source,
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: "sourceValue <- pure ()".into(),
-                },
-                None,
-            )
+        workbench
+            .publish_cell_for_test(context.clone(), "sourceValue <- pure ()")
             .await
-            .expect("source value compiles");
-        if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
-            workbench
-                .settle_item(context.clone(), *fragment, (*outcome).into())
-                .await
-                .expect("source value binds");
-        }
+            .expect("source value executes and publishes through its private whole cell");
         let scope = context.placement.lexical_scope;
         let first = mount_request_scope_test_input(&workbench, context.clone())
             .await
@@ -20987,32 +20181,10 @@ pub(crate) mod request_tests {
             .extend_text("qualified Tidepool.Agent.Reply as TidepoolReply");
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
         let runner = ResidentActorRunner::new(machines, source.clone());
-        let step = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source,
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: "sourceValue <- pure ()".into(),
-                },
-                None,
-            )
+        workbench
+            .publish_cell_for_test(context.clone(), "sourceValue <- pure ()")
             .await
-            .unwrap();
-        match step {
-            ResidentWorkbenchStep::Running { fragment, outcome } => {
-                workbench
-                    .settle_item(context.clone(), *fragment, (*outcome).into())
-                    .await
-                    .unwrap();
-            }
-            ResidentWorkbenchStep::Committed { .. } => {}
-            ResidentWorkbenchStep::Rejected(rejection) => {
-                panic!("source binding rejected: {}", rejection.output)
-            }
-            _ => panic!("source binding did not complete"),
-        }
+            .expect("source value executes and publishes through its private whole cell");
         let original_scope = context.placement.lexical_scope;
         let binding = mount_request_scope_test_input(&workbench, context.clone())
             .await
@@ -21419,25 +20591,10 @@ pub(crate) mod request_tests {
             .public_visibility_snapshot(context.clone())
             .await
             .expect("initial public view");
-        let step = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source,
-                ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: "snapshotValue <- pure (42 :: Int)".into(),
-                },
-                None,
-            )
+        workbench
+            .publish_cell_for_test(context.clone(), "snapshotValue <- pure (42 :: Int)")
             .await
-            .expect("Haskell binding compiles");
-        if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
-            workbench
-                .settle_item(context.clone(), *fragment, (*outcome).into())
-                .await
-                .expect("Haskell binding settles");
-        }
+            .expect("source value executes and publishes through its private whole cell");
         let bound = runner
             .public_visibility_snapshot(context.clone())
             .await
@@ -21453,19 +20610,10 @@ pub(crate) mod request_tests {
             .iter()
             .any(|(name, _)| name == "snapshotValue"));
 
-        runner
-            .access
-            .with_machine(context.clone(), |session, context, _| {
-                session
-                    .define_scoped_in(
-                        context.placement.lexical_scope,
-                        &["data SnapshotTag = SnapshotTag"],
-                    )
-                    .expect("declaration commits");
-                Ok(())
-            })
+        workbench
+            .publish_cell_for_test(context.clone(), "data SnapshotTag = SnapshotTag")
             .await
-            .expect("declaration checkout");
+            .expect("declaration publishes through its private whole cell");
         let declared = runner
             .public_visibility_snapshot(context)
             .await
@@ -22459,21 +21607,41 @@ pub(crate) mod request_tests {
     {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = Arc::new(ResidentActorWorkbench::new(
-            Arc::clone(&machines),
-            source.clone(),
-            None,
-        ));
-        let (block, verdict) = suspending_fragment();
-        let unrelated = workbench
-            .begin_fragment_split(context.clone(), source.clone(), block, Some(verdict))
+        let (workbench, context) = ResidentActorWorkbench::new(Arc::clone(&machines), source, None)
+            .admit_private_cell_for_test(context)
             .await
-            .expect("unrelated fragment parks");
+            .unwrap();
+        let workbench = Arc::new(workbench);
+        let (block, _) = suspending_fragment();
+        let unrelated = workbench
+            .begin_cell_for_test(context.clone(), block)
+            .await
+            .expect("unrelated whole-cell item parks");
         let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {
             panic!("expected unrelated suspension")
         };
         let unrelated_id = outcome.continuation_id().to_owned();
 
+        let (block, _) = suspending_fragment();
+        let (checked, prepared) = workbench
+            .prepare_cell(context.clone(), block.source)
+            .await
+            .unwrap();
+        let PreparedCell {
+            mut items,
+            dependencies,
+        } = prepared;
+        assert_eq!(
+            items.len(),
+            1,
+            "late checkout consumes a real prepared whole-cell item"
+        );
+        let item = items.pop().unwrap();
+        let block = ParsedBlock {
+            ordinal: 1,
+            total: 1,
+            source: checked.items[0].source.clone(),
+        };
         let (parked_tx, parked_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let task_workbench = Arc::clone(&workbench);
@@ -22488,14 +21656,29 @@ pub(crate) mod request_tests {
                         checkout_workbench
                             .access
                             .with_machine(task_context, move |session, context, _| {
-                                let (block, verdict) = suspending_fragment();
-                                let step = begin_fragment(
+                                let PreparedCellStep { prefix, item } = item.ready;
+                                let reservation =
+                                    session.admit_checked_item(prefix, item).map_err(|error| {
+                                        ResidentActorWorkbenchError::Resident(error.into())
+                                    })?;
+                                let ready = consume_admitted_cell_item(reservation, &block)?;
+                                let CompiledBlock::Ready(ready) = ready else {
+                                    panic!("prepared whole-cell item must be executable");
+                                };
+                                let ReadyBlock {
+                                    bound,
+                                    compiled,
+                                    generation,
+                                    observation,
+                                } = *ready;
+                                let step = begin_ready_bind_in_checkout(
                                     session,
                                     context,
-                                    &source,
-                                    None,
-                                    block,
-                                    Some(&verdict),
+                                    &block,
+                                    bound,
+                                    compiled,
+                                    generation,
+                                    observation,
                                 )?;
                                 let ResidentWorkbenchStep::Running { outcome, .. } = &step else {
                                     panic!("expected late suspension")
@@ -22533,6 +21716,7 @@ pub(crate) mod request_tests {
                 .expect("inspect parked holes");
             if !ids.contains(&late_id) {
                 assert!(ids.contains(&unrelated_id));
+                drop(dependencies);
                 break;
             }
             assert!(
