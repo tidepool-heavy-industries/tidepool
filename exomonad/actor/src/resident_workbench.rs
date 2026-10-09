@@ -19743,7 +19743,7 @@ pub(crate) mod request_tests {
         );
         let mut inputs = Vec::new();
         for request in 1_i64..=2 {
-            let submission = suspend(session.resume(reservation, request).unwrap());
+            let submission = suspend(session.resume(reservation, Ok::<i64, ()>(request)).unwrap());
             let payload = session
                 .live_payload_handle(submission.cont_id())
                 .unwrap()
@@ -19779,7 +19779,7 @@ pub(crate) mod request_tests {
                 .expect("original authenticated input site");
             inputs.push((activation, input));
             assert!(session.parked_holes().contains(&submission.cont_id()));
-            let next = session.resume(submission, ()).unwrap();
+            let next = session.resume(submission, Ok::<(), ()>(())).unwrap();
             if request == 1 {
                 reservation = suspend(next);
             } else {

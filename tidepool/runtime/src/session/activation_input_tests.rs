@@ -3583,7 +3583,11 @@ fn assert_unpublished_input(
 ) {
     assert_eq!(resident.value_handle_count(), handles_with_input - 1);
     assert_eq!(resident.outstanding_custody(), 0);
-    assert_eq!(resident.persistent_roots_count(), persistent_roots);
+    assert_eq!(
+        resident.persistent_roots_count(),
+        persistent_roots - 1,
+        "refusal releases the affine input's owned root without publishing a binding"
+    );
     assert_eq!(
         resident.public_visibility_snapshot_in(scope).as_ref(),
         Some(visibility)
