@@ -5265,13 +5265,17 @@ enum OriginalNativeUse {
 }
 
 pub(crate) fn validate_available_originals_with_validation(
-    products: &[&crate::recovery_artifacts::CertifiedRecoveryProduct],
+    available: &BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    >,
+    advertised: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<()> {
-    validate_owned_originals_with_validation(
-        products,
+    validate_selected_originals_with_validation(
+        available,
         &[],
-        products,
+        advertised,
         validation,
         OriginalNativeUse::Availability,
     )
@@ -5507,6 +5511,25 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
     selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<Vec<PendingCertifiedGroup>> {
+    validate_selected_originals_with_validation(
+        available,
+        current_groups,
+        selected,
+        validation,
+        OriginalNativeUse::SelectedGroups,
+    )
+}
+
+fn validate_selected_originals_with_validation(
+    available: &BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    >,
+    current_groups: &[PendingCertifiedGroup],
+    selected: &BTreeSet<crate::artifact_inventory::NativeGroupKey>,
+    validation: &mut PackageInterfaceValidation,
+    native_use: OriginalNativeUse,
+) -> CertResult<Vec<PendingCertifiedGroup>> {
     use crate::artifact_inventory::NativeGroupKey;
     let mut native_ids = std::collections::HashMap::new();
     let mut home_modules = BTreeSet::new();
@@ -5631,7 +5654,7 @@ pub(crate) fn certify_selected_owned_products_in_context_with_validation(
                 PendingImportOwner::Retained { .. } => {}
             }
         }
-        if !inherited.contains(key) {
+        if native_use == OriginalNativeUse::SelectedGroups && !inherited.contains(key) {
             additional.push(group.admitted());
         }
     }
