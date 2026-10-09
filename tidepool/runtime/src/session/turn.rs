@@ -7481,6 +7481,7 @@ mod tests {
             ModuleEnv, PersistentSession, PublicManifestCommit, PublicationDecision,
             RecoveryPublicOwner, SessionLib, SourceImports,
         };
+        use std::collections::BTreeSet;
         use tidepool_codegen::scope::ScopeId;
         use tidepool_repr::{SessionId, SessionModule};
         use tidepool_testing::effect_surface::TestEffectSurface;
@@ -7573,6 +7574,41 @@ mod tests {
             .lexical_graph()
             .iter()
             .all(|node| node.owner.module != original.product().owner().module));
+        let original_artifact = context.authored_native_root(original_generation.0).unwrap();
+        let issued_original_groups = original
+            .artifact_view()
+            .selected_native_groups()
+            .into_iter()
+            .filter(|key| key.artifact == original_artifact)
+            .collect::<BTreeSet<_>>();
+        assert!(!issued_original_groups.is_empty());
+        assert_eq!(
+            context
+                .artifact_view()
+                .selected_native_groups()
+                .into_iter()
+                .filter(|key| key.artifact == original_artifact)
+                .collect::<BTreeSet<_>>(),
+            issued_original_groups,
+            "the join must retain the original issuer's executable selection"
+        );
+        let canonical_interface = context
+            .artifact_view()
+            .descriptors()
+            .into_iter()
+            .find(|descriptor| {
+                descriptor.owner.module == original.product().owner().module
+                    && descriptor.kind
+                        == tidepool_toolchain::artifact_inventory::ArtifactKind::CanonicalModuleInterface
+            })
+            .unwrap()
+            .id;
+        assert!(context.compiler_input_roles().contains(
+            &tidepool_toolchain::artifact_inventory::CompilerInputRole::InterfaceOnly {
+                interface: canonical_interface,
+            }
+        ));
+        let published_context_digest = context.semantic_sha256();
 
         let imports = view.turn_imports(&SourceImports::new());
         let include = view.include_paths(effects.include_paths());
@@ -7688,6 +7724,7 @@ mod tests {
             )
             .unwrap();
         let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        assert_eq!(context.semantic_sha256(), published_context_digest);
         assert_eq!(checked.items.len(), 1);
         let item = checked.checked_item(0).unwrap();
         assert_eq!(item.admission_digest(), admission.digest());

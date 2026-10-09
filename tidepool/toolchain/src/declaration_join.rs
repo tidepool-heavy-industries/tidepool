@@ -2108,6 +2108,13 @@ mod authored_tests {
             )
             .expect("the same compile front door must issue the baseline producer"),
         );
+        let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
+        crate::declaration_context::assert_selected_authored_private_inputs(
+            &baseline,
+            baseline_module.gen.0,
+            root.path(),
+            endpoint.identity().producer_bytes(),
+        );
         let context = Arc::new(
             ExactDeclarationContext::new(std::slice::from_ref(&baseline), &[], Vec::new()).unwrap(),
         );

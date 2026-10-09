@@ -132,6 +132,57 @@ pub(crate) struct OriginalCompilerInputs {
 }
 
 impl OriginalCompilerInputs {
+    /// A resident cell may privately reuse a complete authored original whose
+    /// executable groups are already selected. A lexical join can hide its
+    /// source owner without withdrawing that issued native selection.
+    pub(crate) fn from_selected_authored_declarations(
+        context: &ExactDeclarationContext,
+        producer: CanonicalProducerIdentity,
+    ) -> Result<Option<Self>, CompileError> {
+        let metadata = context.inventory.metadata_snapshot();
+        let selected = metadata
+            .selected_native_groups
+            .iter()
+            .map(|group| group.artifact)
+            .collect::<BTreeSet<_>>();
+        let mut products = Vec::new();
+        for id in selected {
+            let entry = metadata
+                .artifacts
+                .get(&id)
+                .ok_or_else(|| failure("selected native group lost its original artifact"))?;
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(failure("selected native group has no original product"));
+            };
+            if !product.module_interface().is_some_and(|interface| {
+                matches!(
+                    interface.origin(),
+                    crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
+                )
+            }) {
+                continue;
+            }
+            // A selected dependency group alone grants no availability for
+            // other bodies in the same original module.
+            let complete = crate::certified_products::original_available_groups(product)
+                .map_err(compiler_evidence_failure)?
+                .all(|group| {
+                    metadata.selected_native_groups.contains(&NativeGroupKey {
+                        artifact: id,
+                        original_ordinal: group.original_ordinal(),
+                    })
+                });
+            if complete {
+                products.push(product.clone());
+            }
+        }
+        if products.is_empty() {
+            Ok(None)
+        } else {
+            Self::from_native_availability(context, producer, &products).map(Some)
+        }
+    }
+
     pub(crate) fn from_selection(
         selection: &crate::certified_products::CertifiedSourceSelection,
         artifacts: &ArtifactView,
@@ -250,7 +301,7 @@ impl OriginalCompilerInputs {
         })
     }
 
-    fn merge(&self, other: &Self) -> Result<Self, CompileError> {
+    pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
         let projection = self.projection.merge(&other.projection)?;
         let artifacts = self.artifacts.merge(&other.artifacts)?;
         projection.validate(&artifacts)?;
@@ -6033,6 +6084,9 @@ fn compose_lexical_nodes<'a>(
 
 #[cfg(test)]
 pub(crate) use tests::assert_source_selected_receipt_pairing;
+
+#[cfg(test)]
+pub(crate) use native_availability_tests::assert_selected_authored_private_inputs;
 
 #[cfg(test)]
 mod native_availability_tests;
