@@ -1878,6 +1878,31 @@ impl CompiledTurn {
         self.certification.as_ref()?.original_compile_input.as_ref()
     }
 
+    /// Select compiler roles from this exact completed output, independently
+    /// of the wider native artifact custody retained by the turn.
+    pub fn original_execution_context(
+        &self,
+    ) -> Result<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, CompileError>
+    {
+        let certification = self.certification.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("turn has no original compiler certification".into())
+        })?;
+        let input = certification
+            .original_compile_input
+            .as_ref()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("turn has no original compiler input".into())
+            })?;
+        input.original_execution_context(
+            &self.prepared,
+            &certification.groups,
+            &certification.target_owners,
+            &certification.package_interfaces,
+            &self.table,
+            &self.asks,
+        )
+    }
+
     /// Exact original artifact identities retained by this compiler output.
     pub fn source_artifacts(
         &self,
