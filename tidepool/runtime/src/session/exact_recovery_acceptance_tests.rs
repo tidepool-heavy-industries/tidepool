@@ -325,21 +325,10 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
         .recovery_products()
         .iter()
         .any(|product| product.owner() == &original_owner));
-    let native_root = |owner| {
-        certificate
-            .artifact_view()
-            .entries()
-            .into_iter()
-            .find_map(|entry| {
-                matches!(&entry.payload,
-                tidepool_toolchain::artifact_inventory::ArtifactPayload::Original(product)
-                if product.owner() == owner)
-                .then_some(entry.descriptor.id)
-            })
-            .unwrap()
-    };
-    let original_root = native_root(&original_owner);
-    let dependent_root = native_root(certificate.product().owner());
+    let selected = session.compile_view_in(private).unwrap();
+    let context = selected.exact_declaration_context().unwrap();
+    let original_root = context.authored_native_root(original.0).unwrap();
+    let dependent_root = context.authored_native_root(dependent.0).unwrap();
     assert!(certificate
         .artifact_view()
         .dependencies()
