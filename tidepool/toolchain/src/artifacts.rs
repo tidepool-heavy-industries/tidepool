@@ -496,6 +496,9 @@ pub struct CompiledArtifacts {
     /// declaration owners have separate protected admission and do not acquire
     /// source lookup witnesses. A later compile must revalidate its own inputs.
     pub module_inventory: Option<Vec<cache::ModuleEvidence>>,
+    /// Authenticated consumed bytes and resolutions from this transaction,
+    /// including sources that supplied interfaces without native originals.
+    pub(crate) completed_source_evidence: Option<cache::CompletedSourceEvidence>,
     pub(crate) exact_source_admission: Option<crate::declaration_context::ExactSourceAdmission>,
 }
 
@@ -4668,6 +4671,7 @@ fn compile_invocation_inner(
         artifacts.source_selection = Some(certified.source_selection);
         artifacts.certified_groups = certified.groups.to_vec();
         artifacts.recovery_products = certified.recovery_products.to_vec();
+        artifacts.completed_source_evidence = valid_evidence.cloned();
         artifacts.exact_source_admission = exact_source;
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
             CompileError::ExtractFailed("bound compiler producer identity length".into())
@@ -5447,6 +5451,7 @@ pub(crate) fn assemble(
         source_selection: None,
         producer_identity: None,
         module_inventory: None,
+        completed_source_evidence: None,
         exact_source_admission: None,
     })
 }

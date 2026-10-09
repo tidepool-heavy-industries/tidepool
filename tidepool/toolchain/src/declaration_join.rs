@@ -670,12 +670,16 @@ fn certify_authored_declaration_inner(
         unit: selected.owner().unit.clone(),
         module: selected.owner().module.clone(),
     };
-    let source_imports = compiled
-        .exact_source_admission
-        .as_ref()
-        .map(|admission| admission.home_imports())
-        .transpose()?
-        .unwrap_or_default();
+    let source_imports = match compiled.exact_source_admission.as_ref() {
+        Some(admission) => admission.home_imports()?,
+        None => crate::declaration_context::consumed_source_home_imports(
+            compiled
+                .completed_source_evidence
+                .as_ref()
+                .ok_or_else(|| contract("authored certification has no completed source proof"))?,
+            &Default::default(),
+        )?,
+    };
     let artifact_context = planned::authored_interface_context(
         context.as_ref(),
         &compiled.artifact_view,
@@ -692,6 +696,7 @@ fn certify_authored_declaration_inner(
             toolchain_identity_sha256,
             &evidence,
             compiled.exact_source_admission.as_ref(),
+            &source_imports,
             Some(&artifact_context),
             &[],
             includes,
@@ -2094,7 +2099,16 @@ mod authored_tests {
     fn authored_declaration_in_exact_context_keeps_its_native_origin() {
         let root = tempfile::tempdir().unwrap();
         let baseline_module = SessionModule::lib(Generation(1));
-        let baseline_source = "module Tidepool.Session.Lib.G1 where\nbaseline = (40 :: Int)\n{-# NOINLINE baseline #-}\nalternateBaseline = (41 :: Int)\n{-# NOINLINE alternateBaseline #-}\n";
+        let support_source =
+            include_str!("../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs")
+                .replace(" where\n", " where\nimport PrefixUnrelatedSupport ()\n");
+        std::fs::write(root.path().join("PrefixSelectedSupport.hs"), support_source).unwrap();
+        std::fs::write(
+            root.path().join("PrefixUnrelatedSupport.hs"),
+            include_str!("../tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs"),
+        )
+        .unwrap();
+        let baseline_source = "module Tidepool.Session.Lib.G1 where\nimport PrefixSelectedSupport ()\nbaseline = (40 :: Int)\n{-# NOINLINE baseline #-}\nalternateBaseline = (41 :: Int)\n{-# NOINLINE alternateBaseline #-}\n";
         let baseline_path = root.path().join(baseline_module.relative_hs_path());
         std::fs::create_dir_all(baseline_path.parent().unwrap()).unwrap();
         std::fs::write(&baseline_path, baseline_source).unwrap();
@@ -2108,6 +2122,34 @@ mod authored_tests {
             )
             .expect("the same compile front door must issue the baseline producer"),
         );
+        let selected_support = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "PrefixSelectedSupport".into(),
+        };
+        let transitive_support = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "PrefixUnrelatedSupport".into(),
+        };
+        let source_surface = baseline.shared_source_lexical_surface(&[]).unwrap();
+        assert!(source_surface.lexical.iter().any(|node| {
+            node.owner == selected_support && node.imports == [transitive_support.clone()]
+        }));
+        assert!(source_surface
+            .lexical
+            .iter()
+            .any(|node| node.owner == transitive_support && node.imports.is_empty()));
+        for support in [&selected_support, &transitive_support] {
+            assert!(baseline
+                .artifact_view()
+                .descriptors()
+                .iter()
+                .any(|descriptor| descriptor.owner == *support
+                    && descriptor.kind
+                        == crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface));
+            assert!(baseline.recovery_products().iter().all(|product| {
+                product.owner().unit != support.unit || product.owner().module != support.module
+            }));
+        }
         let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
         crate::declaration_context::assert_selected_authored_private_inputs(
             &baseline,

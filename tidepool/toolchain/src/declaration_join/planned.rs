@@ -44,6 +44,7 @@ pub(super) fn admit_authored_artifact_closure(
     toolchain_identity_sha256: [u8; 32],
     evidence: &[crate::cache::ModuleEvidence],
     source_admission: Option<&ExactSourceAdmission>,
+    source_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
     context: Option<&Arc<ExactDeclarationContext>>,
     program_source_lexical: &[ExactLexicalNode],
     includes: &[PathBuf],
@@ -65,6 +66,7 @@ pub(super) fn admit_authored_artifact_closure(
         toolchain_identity_sha256,
         evidence,
         source_admission,
+        source_imports,
         context,
         program_source_lexical,
         includes,
@@ -92,6 +94,7 @@ fn admit_authored_artifact_closure_inner(
     toolchain_identity_sha256: [u8; 32],
     evidence: &[crate::cache::ModuleEvidence],
     source_admission: Option<&ExactSourceAdmission>,
+    source_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
     context: Option<&Arc<ExactDeclarationContext>>,
     program_source_lexical: &[ExactLexicalNode],
     includes: &[PathBuf],
@@ -121,7 +124,7 @@ fn admit_authored_artifact_closure_inner(
         .map_err(|error| contract(format!("authored artifact closure rejected: {error}")))?;
     let mut artifacts = Vec::with_capacity(products.len());
     let mut original_imports = Vec::new();
-    let mut source_lexical_imports = Vec::new();
+    let source_lexical_imports;
     for (product, reference) in products.iter().zip(&references) {
         let owner = product.owner();
         let identity = ExactModuleIdentity {
@@ -215,7 +218,7 @@ fn admit_authored_artifact_closure_inner(
             }),
         });
     }
-    if let Some(admitted) = source_admission {
+    {
         let mut available_owners = products
             .iter()
             .map(|product| ExactModuleIdentity {
@@ -232,15 +235,16 @@ fn admit_authored_artifact_closure_inner(
                     .map(|descriptor| descriptor.owner),
             );
         }
-        let source_imports = admitted.home_imports()?;
         let inherited_source = merge_program_source_lexical(
             context.map_or(&[], |context| context.lexical_graph()),
             program_source_lexical,
         )?;
-        if tracing::enabled!(
-            target: "tidepool_toolchain::planned_source_admission",
-            tracing::Level::DEBUG
-        ) {
+        if let Some(admitted) = source_admission.filter(|_| {
+            tracing::enabled!(
+                target: "tidepool_toolchain::planned_source_admission",
+                tracing::Level::DEBUG
+            )
+        }) {
             let witness_source = bounded_source_path(admitted.witness.source_path());
             let source_owner = admitted
                 .evidence
@@ -370,7 +374,7 @@ fn admit_authored_artifact_closure_inner(
                 "validated planned declaration source imports"
             );
         }
-        merge_admitted_source_imports(&mut original_imports, &source_imports, &available_owners)?;
+        merge_admitted_source_imports(&mut original_imports, source_imports, &available_owners)?;
         let mut implementations = context
             .into_iter()
             .flat_map(|context| context.artifact_view().source_implementation_roles())
@@ -396,7 +400,7 @@ fn admit_authored_artifact_closure_inner(
         }
         source_lexical_imports = inherited_source_lexical_imports(
             selected_owner,
-            &source_imports,
+            source_imports,
             &inherited_source,
             &implementations,
             &available_owners,
@@ -436,7 +440,7 @@ fn inherited_type_interfaces(
     })
 }
 
-/// Add only source adjacency authenticated by the current exact admission.
+/// Add only source adjacency authenticated by the completed compilation.
 /// Interface requirements establish artifact dependencies, not lexical edges.
 fn merge_admitted_source_imports(
     original_imports: &mut Vec<ExactInterfaceOwner>,
@@ -782,6 +786,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
             toolchain_identity_sha256,
             evidence,
             Some(source_admission),
+            &source_admission.home_imports()?,
             Some(&artifact_context),
             admission.request.program_source_lexical(),
             includes,
@@ -1210,6 +1215,7 @@ mod tests {
                 [1; 32],
                 &evidence,
                 None,
+                &BTreeMap::new(),
                 None,
                 &[],
                 &[root.path().to_path_buf()],
@@ -1372,6 +1378,7 @@ mod tests {
                 [1; 32],
                 &evidence,
                 None,
+                &BTreeMap::new(),
                 None,
                 &[],
                 &[root.path().to_path_buf()],
@@ -1391,6 +1398,7 @@ mod tests {
                 [1; 32],
                 &evidence,
                 None,
+                &BTreeMap::new(),
                 None,
                 &[],
                 &[root.path().to_path_buf()],
@@ -1579,6 +1587,66 @@ mod tests {
             &program,
         )
         .is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn completed_source_adjacency_retains_exact_type_only_chains(length in 1usize..9) {
+            let root = module("Authored");
+            let sources = (0..length)
+                .map(|index| module(&format!("TypeOnly{index}")))
+                .collect::<Vec<_>>();
+            let expected = sources.iter().enumerate().map(|(index, owner)| ExactLexicalNode {
+                owner: owner.clone(),
+                imports: sources.get(index + 1).cloned().into_iter().collect(),
+            }).collect::<Vec<_>>();
+            let mut admitted = expected.iter()
+                .map(|node| (node.owner.clone(), node.imports.clone()))
+                .collect::<BTreeMap<_, _>>();
+            admitted.insert(root.clone(), vec![sources[0].clone()]);
+            let transient = module("UnretainedProbe");
+            admitted.insert(transient.clone(), vec![]);
+            let available: BTreeSet<_> = sources.iter().cloned().chain([root.clone()]).collect();
+            let original = ExactInterfaceOwner {
+                owner: root.clone(),
+                requirements: vec![sources[0].clone()],
+            };
+            let surface = |rows: Vec<ExactInterfaceOwner>| {
+                let imports = rows.into_iter().map(|row| (row.owner, row.requirements)).collect();
+                original_source_lexical_surface(&root, &imports, &[], &BTreeMap::new())
+            };
+            let mut rows = vec![original.clone()];
+            merge_admitted_source_imports(&mut rows, &admitted, &available).unwrap();
+            proptest::prop_assert!(rows.iter().all(|row| row.owner != transient));
+            proptest::prop_assert_eq!(surface(rows).unwrap().lexical, expected);
+
+            let mut missing = admitted.clone();
+            missing.remove(sources.last().unwrap());
+            let mut rows = vec![original.clone()];
+            merge_admitted_source_imports(&mut rows, &missing, &available).unwrap();
+            proptest::prop_assert!(matches!(surface(rows), Err(CompileError::ExtractFailed(_))));
+
+            let mut wrong_unit = available.clone();
+            let tail = sources.last().unwrap();
+            wrong_unit.remove(tail);
+            wrong_unit.insert(ExactModuleIdentity { unit: "other".into(), module: tail.module.clone() });
+            let mut rows = vec![original.clone()];
+            merge_admitted_source_imports(&mut rows, &admitted, &wrong_unit).unwrap();
+            proptest::prop_assert!(matches!(surface(rows), Err(CompileError::ExtractFailed(_))));
+
+            let mut conflicting = admitted.clone();
+            conflicting.insert(root.clone(), vec![]);
+            let mut rows = vec![original.clone()];
+            proptest::prop_assert!(matches!(
+                merge_admitted_source_imports(&mut rows, &conflicting, &available),
+                Err(CompileError::ExtractFailed(_))
+            ));
+            let mut duplicate = vec![original.clone(), original];
+            proptest::prop_assert!(matches!(
+                merge_admitted_source_imports(&mut duplicate, &admitted, &available),
+                Err(CompileError::ExtractFailed(_))
+            ));
+        }
     }
 
     #[test]
