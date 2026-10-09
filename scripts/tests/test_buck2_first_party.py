@@ -758,14 +758,17 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                              for dependency in arguments.get("deps", []) + list(arguments.get("named_deps", {}).values())))
         self.assertIn("src/lib.rs", groups["tidepool_sources"])
         previous = {path: path.read_bytes() for path in self.root.rglob("BUCK")}
-        serde_edge = next(edge for edge in node["deps"] if edge["name"] == "serde")
-        serde_edge["dep_kinds"] = [{"kind": None, "target": None}]
-        self.metadata.write_text(json.dumps(metadata))
-        refused = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("missing or ambiguous resolved dependency serde in tidepool", refused.stderr)
-        for path, contents in previous.items():
-            self.assertEqual(path.read_bytes(), contents, path)
+        for name in ("serde", "serde_json"):
+            with self.subTest(missing_build_edge=name):
+                edge = next(edge for edge in node["deps"] if edge["name"] == name)
+                edge["dep_kinds"] = [{"kind": None, "target": None}]
+                self.metadata.write_text(json.dumps(metadata))
+                refused = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn(f"missing or ambiguous resolved dependency {name} in tidepool", refused.stderr)
+                for path, contents in previous.items():
+                    self.assertEqual(path.read_bytes(), contents, path)
+                edge["dep_kinds"].append({"kind": "build", "target": None})
 
     def test_facade_buildscript_refuses_missing_rust_include_before_publication(self):
         control = self.generate("--package", "tidepool")

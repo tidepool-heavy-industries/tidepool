@@ -184,6 +184,10 @@ print(open(os.environ['FAKE_METADATA']).read())
             "tidepool-handlers": [],
             "tidepool": [
                 ("tidepool-toolchain", "build", None, True, []),
+                ("serde", None, None, True, ["derive"]),
+                ("serde", "build", None, True, ["derive"]),
+                ("serde_json", None, None, True, []),
+                ("serde_json", "build", None, True, []),
                 ("harness", None, None, True, [], "harness_git", "git"),
                 ("harness", None, None, True, [], "harness_registry", "registry"),
                 ("tidepool-testing", "dev", None, True, []),
@@ -279,6 +283,46 @@ print(open(os.environ['FAKE_METADATA']).read())
         self.assertNotIn("cc", deps)
         self.assertNotIn("tidepool-bridge-derive", deps)
         self.assertNotIn("tidepool-test-data", deps)
+
+    def test_facade_build_dependencies_preserve_normal_edges_and_fail_closed(self):
+        control = self.run_generator()
+        self.assertEqual(control.returncode, 0, control.stderr)
+        manifest_path = self.output / "Cargo.toml"
+        previous = manifest_path.read_bytes()
+        dependencies = tomllib.loads(previous.decode())["dependencies"]
+        self.assertIn("derive", dependencies["serde"]["features"])
+        self.assertTrue(dependencies["serde"]["default-features"])
+        self.assertTrue(dependencies["serde_json"]["default-features"])
+        for name in ("serde", "serde_json"):
+            with self.subTest(missing_build_edge=name):
+                metadata, _ = self.fixture_metadata()
+                facade = next(p for p in metadata["packages"] if p["name"] == "tidepool")
+                node = next(n for n in metadata["resolve"]["nodes"] if n["id"] == facade["id"])
+                node["deps"] = [
+                    edge for edge in node["deps"]
+                    if not (edge["name"] == name and edge["dep_kinds"][0]["kind"] == "build")
+                ]
+                self.assertTrue(any(edge["name"] == name for edge in node["deps"]))
+                result = self.run_generator(metadata)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"Missing or ambiguous Linux-resolved dependency {name}", result.stderr)
+                self.assertEqual(manifest_path.read_bytes(), previous)
+        for field, value in (("name", "new-build-helper"), ("rename", "serde_alias"),
+                             ("target", "cfg(unix)")):
+            with self.subTest(unmodeled_build_declaration=field):
+                metadata, _ = self.fixture_metadata()
+                facade = next(p for p in metadata["packages"] if p["name"] == "tidepool")
+                dependency = next(d for d in facade["dependencies"]
+                                  if d["name"] == "serde" and d["kind"] == "build")
+                dependency[field] = value
+                if field == "target":
+                    # Keep the alias unambiguous so build admission owns this refusal.
+                    facade["dependencies"] = [d for d in facade["dependencies"]
+                                              if not (d["name"] == "serde" and d["kind"] is None)]
+                result = self.run_generator(metadata)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Model build dependency for tidepool", result.stderr)
+                self.assertEqual(manifest_path.read_bytes(), previous)
 
     def test_unmodeled_codegen_build_dependency_is_rejected(self):
         metadata, _ = self.fixture_metadata()

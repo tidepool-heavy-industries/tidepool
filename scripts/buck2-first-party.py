@@ -14,6 +14,7 @@ import tomllib
 
 from buck2_cargo_features import (
     CRATES_IO_SOURCE,
+    supports_native_facade_build_dependency,
     NATIVE_PACKAGES,
     reject_local_feature_requests,
     FeatureSelectionError,
@@ -282,12 +283,7 @@ def dependency_sets(package, enabled_dependencies, forwarded_features, include_d
                 and dependency["rename"] is None
                 and dependency["target"] is None
             )
-            facade_native = (
-                package["name"] == "tidepool"
-                and dependency["name"] in {"tidepool-toolchain", "serde", "serde_json"}
-                and dependency["rename"] is None
-                and dependency["target"] is None
-            )
+            facade_native = supports_native_facade_build_dependency(package["name"], dependency)
             if codegen_native:
                 continue
             if not facade_native:
