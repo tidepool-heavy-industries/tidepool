@@ -519,10 +519,13 @@ class NativeQualificationTests(unittest.TestCase):
         self.assertEqual(len(set(regressions['tests'])), 5)
         self.assertFalse(regressions['ignored'])
 
-    def test_recursive_m3_seals_one_case_and_uses_existing_runtime_owner(self):
+    def test_recursive_m3_seals_recursive_and_asynchronous_cases_with_existing_runtime_owner(self):
         recursive = qualification.cohorts()['m3-recursive']
-        self.assertEqual(recursive['tests'], qualification.M3_RECURSIVE_TESTS)
-        self.assertEqual(recursive['expected_count'], 1)
+        self.assertEqual(recursive['tests'], [
+            'actor_host::scripted_recursive_acceptance::production_harness_recursive_captured_helper_and_typed_replies',
+            'actor_host::embedded_agent_spec_tests::accepted_reply_resumes_after_parked_notebook_and_provider_completion',
+        ])
+        self.assertEqual(recursive['expected_count'], 2)
         self.assertTrue(recursive['ignored'])
         self.assertEqual(recursive['compiler_mode'], 'owned-resident')
         self.assertEqual(recursive['max_jobs'], 1)
@@ -531,6 +534,64 @@ class NativeQualificationTests(unittest.TestCase):
         self.assertEqual(set(recursive['required_environment']),
                          {'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'})
         self.assertNotIn('measurement_reporter', recursive)
+
+    def test_recursive_m3_requires_both_exact_executed_receipts(self):
+        recursive, asynchronous = qualification.M3_RECURSIVE_TESTS
+        for mutation in ('control', 'missing_asynchronous', 'duplicate_recursive',
+                         'zero_asynchronous', 'failed_asynchronous'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor_path = root / 'descriptor.json'
+                descriptor_path.write_text('sealed descriptor')
+                environment = {name: '/frozen/' + name for name in
+                               qualification.cohorts()['m3-recursive']['required_environment']}
+                descriptor = {
+                    'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                    'cohorts': qualification.cohorts(), 'stdlib_mode': 'catalog-backed',
+                    'startup_mode': 'prepared', 'environment': environment,
+                    'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
+                    'source_oid': 'a' * 40, 'harness_revision': 'b' * 40, 'profile': 'fast-dev',
+                }
+                output = root / 'evidence'
+
+                def execute(command, **kwargs):
+                    self.assertEqual([command[index + 1] for index, value in enumerate(command)
+                                      if value == '--exact'], [recursive, asynchronous])
+                    self.assertEqual(command[command.index('--expected-count') + 1], '2')
+                    self.assertEqual(command[command.index('--jobs') + 1], '1')
+                    self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
+                    self.assertIn('--ignored', command)
+                    self.assertIn('--delegated-service', command)
+                    self.assertEqual(command[command.index('--service-slice') + 1],
+                                     'tidepool-completion-build.slice')
+                    self.assertEqual(kwargs['env'], qualification.execution_environment(descriptor))
+                    tests = output / 'tests'
+                    tests.mkdir()
+                    names = [recursive] if mutation == 'missing_asynchronous' else [recursive, asynchronous]
+                    if mutation == 'duplicate_recursive':
+                        names[1] = recursive
+                    for index, name in enumerate(names):
+                        qualification.write_json(tests / f'{index}.json', {
+                            'test': name,
+                            'passed': not (index == 1 and mutation == 'failed_asynchronous'),
+                            'execution': {'executed_test_count': int(not (index == 1 and mutation == 'zero_asynchronous')),
+                                          'exit_code': 0},
+                        })
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch.dict(os.environ, {}, clear=True), \
+                     patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run', side_effect=execute):
+                    code = qualification.main([
+                        'run', str(descriptor_path), '--cohort', 'm3-recursive', '--jobs', '1',
+                        '--output', str(output), '--delegated-service',
+                        '--service-slice', 'tidepool-completion-build.slice',
+                    ])
+                report = json.loads((output / 'report.json').read_text())
+                self.assertEqual(code, int(mutation != 'control'))
+                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['expected_count'], 2)
+                self.assertEqual(report['runner_exit_code'], 0)
 
     def test_recursive_m3_missing_bundle_resources_refuses_before_execution(self):
         with tempfile.TemporaryDirectory() as directory:

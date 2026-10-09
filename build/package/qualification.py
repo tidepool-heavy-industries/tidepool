@@ -53,6 +53,7 @@ HARNESS_THREE_ACTOR_PERFORMANCE_TESTS = [
 ]
 M3_RECURSIVE_TESTS = [
     "actor_host::scripted_recursive_acceptance::production_harness_recursive_captured_helper_and_typed_replies",
+    "actor_host::embedded_agent_spec_tests::accepted_reply_resumes_after_parked_notebook_and_provider_completion",
 ]
 HARNESS_PERFORMANCE_REPORTER = "scripts/harness-usecase-perf-report.py"
 PREPARED_CHILD_TESTS = [
@@ -151,7 +152,7 @@ def cohorts() -> dict:
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY"]},
             "m3-recursive": {
-                "tests": M3_RECURSIVE_TESTS, "expected_count": 1,
+                "tests": M3_RECURSIVE_TESTS, "expected_count": len(M3_RECURSIVE_TESTS),
                 "ignored": True, "timeout": 1800, "compiler_mode": "owned-resident",
                 "max_jobs": 1, "retain_artifacts": True,
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",

@@ -345,15 +345,20 @@ Preserve older frozen descriptors and their reports unchanged when introducing
 this new cohort; build and freeze the new candidate rather than editing an old
 qualification contract.
 
-The `m3-recursive` cohort selects one separate scripted-provider acceptance case:
+The `m3-recursive` cohort selects two scripted-provider acceptance cases. The
+recursive case exercises this ancestry:
 an actual Sol 6.1 root requests a Luna child, which requests a Luna grandchild.
 Both ancestors remain pending while the grandchild's provider response is held.
 The child and grandchild execute the root's captured native helper, and typed
 replies carry its value of 42 back to the root. The case checks exact actor
 ancestry, inherited context, distinct fork worktrees, a leaf effect-row refusal,
-and confirmed descendant and host cleanup. Provider replies alone are scripted.
+and confirmed descendant and host cleanup. The asynchronous case parks two real
+notebook calls before a child reply arrives. The parent's typed watch must
+receive the first accepted failure value while a later success reply, notebook
+completion, and provider completion settle through the hosted runtime. Both
+cases require confirmed host and descendant cleanup. Provider replies alone are scripted.
 It uses the same frozen bundle, prepared catalog/root entry, owned resident
-compiler and counted runner as the other runtime cohorts, with one test process.
+compiler and counted runner as the other runtime cohorts, serially with one test process.
 It does not invoke the performance reporter. Older frozen descriptors retain
 their own readers and rosters; rebuild and freeze the candidate that adds this
 cohort.
