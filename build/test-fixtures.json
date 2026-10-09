@@ -247,6 +247,7 @@
     "exomonad/actor/src/fixtures/host-job-first.hs",
     "exomonad/actor/src/fixtures/host-job-retained.hs",
     "exomonad/actor/src/fixtures/host-json-first.hs",
+    "exomonad/actor/src/fixtures/host-json-nested.hs",
     "exomonad/actor/src/fixtures/host-json-retained.hs",
     "exomonad/actor/src/fixtures/host-text-first.hs",
     "exomonad/actor/src/fixtures/host-text-retained.hs",

@@ -375,6 +375,7 @@ filegroup(
         "exomonad/actor/src/fixtures/host-job-first.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f686f73742d6a6f622d66697273742e6873",
         "exomonad/actor/src/fixtures/host-job-retained.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f686f73742d6a6f622d72657461696e65642e6873",
         "exomonad/actor/src/fixtures/host-json-first.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f686f73742d6a736f6e2d66697273742e6873",
+        "exomonad/actor/src/fixtures/host-json-nested.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f686f73742d6a736f6e2d6e65737465642e6873",
         "exomonad/actor/src/fixtures/host-json-retained.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f686f73742d6a736f6e2d72657461696e65642e6873",
         "exomonad/actor/src/fixtures/host-text-first.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f686f73742d746578742d66697273742e6873",
         "exomonad/actor/src/fixtures/host-text-retained.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f686f73742d746578742d72657461696e65642e6873",
