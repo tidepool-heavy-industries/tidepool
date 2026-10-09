@@ -341,7 +341,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                 self.assertIn(expected, result.stderr)
                 self.assertEqual((self.root / "bridge/facade/BUCK").read_text(), "retained graph\n")
 
-    def test_partial_projection_keeps_manifest_and_tree_coherent_for_new_includes(self):
+    def test_partial_projection_refuses_new_includes_before_publication(self):
         old = "bridge/facade/src/actor_host/old.hs"
         new = "bridge/facade/src/actor_host/new.hs"
         for path in (old, new):
@@ -350,16 +350,35 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                    'const SOURCE: &str = include_str!("new.hs");')
         manifest = json.dumps({"schema": 1, "kind": "haskell-test-fixtures", "files": [old]})
         self.write("build/test-fixtures.json", manifest)
+        self.write("bridge/facade/BUCK", "retained facade graph\n")
+        self.write("bridge/testing/BUCK", "retained fixture graph\n")
+        result = self.generate("--package", "tidepool")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("need complete native graph regeneration", result.stderr)
+        self.assertEqual((self.root / "build/test-fixtures.json").read_text(), manifest)
+        self.assertEqual((self.root / "bridge/facade/BUCK").read_text(), "retained facade graph\n")
+        self.assertEqual((self.root / "bridge/testing/BUCK").read_text(), "retained fixture graph\n")
+
+    def test_partial_projection_preserves_registered_includes_and_unselected_fixtures(self):
+        old = "bridge/facade/src/actor_host/old.hs"
+        new = "bridge/facade/src/actor_host/new.hs"
+        for path in (old, new):
+            self.write(path, "value = 1\n")
+        self.write("bridge/facade/src/actor_host/tests.rs",
+                   'const SOURCE: &str = include_str!("new.hs");')
+        manifest = json.dumps({"schema": 1, "kind": "haskell-test-fixtures", "files": [old, new]})
+        self.write("build/test-fixtures.json", manifest)
         result = self.generate("--package", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)
         tree = self.rule("bridge/testing", "haskell_test_fixtures", "filegroup")
-        self.assertEqual(set(tree["srcs"]), {old})
+        self.assertEqual(set(tree["srcs"]), {old, new})
         self.assertEqual((self.root / "build/test-fixtures.json").read_text(), manifest)
         old_label = tree["srcs"][old].partition(":")[2]
         self.assertEqual(self.rule("bridge/facade", old_label, "export_file")["src"],
                          "src/actor_host/old.hs")
-        # The unmigrated source remains an ordinary compiler input until the
-        # complete projection can issue its matching runtime manifest entry.
+        new_label = tree["srcs"][new].partition(":")[2]
+        self.assertEqual(self.rule("bridge/facade", new_label, "export_file")["src"],
+                         "src/actor_host/new.hs")
         self.assertIn("src/actor_host/new.hs", self.groups("bridge/facade")[1]["tidepool_unit_tests_sources"])
 
     def test_integration_executable_inputs_use_the_declared_binary_owner(self):
@@ -619,6 +638,10 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.write("bridge/facade/src/actor_host/m1_cancel_performance.rs",
                    'const SOURCE: &str = include_str!("m1_cancel_cell.hs");\n')
         self.write("bridge/facade/src/actor_host/m1_cancel_cell.hs", "sleep (seconds 300)\n")
+        self.write("build/test-fixtures.json", json.dumps({
+            "schema": 1, "kind": "haskell-test-fixtures",
+            "files": ["bridge/facade/src/actor_host/m1_cancel_cell.hs"],
+        }))
         result = self.generate("--package", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)
         _, groups = self.groups("bridge/facade")
@@ -968,6 +991,11 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.write(".exomonad/workspace/Jev/Operators.hs", "module Jev.Operators where\n")
         self.write("exomonad/examples/workspace/.exomonad/AgentSpec.hs", "module AgentSpec where\n")
         self.write("exomonad/examples/workspace/.exomonad/prompts/review.md", "review prompt\n")
+        self.write("build/test-fixtures.json", json.dumps({
+            "schema": 1, "kind": "haskell-test-fixtures",
+            "files": [".exomonad/workspace/Jev/Operators.hs",
+                      "exomonad/examples/workspace/.exomonad/AgentSpec.hs"],
+        }))
 
         result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
 
