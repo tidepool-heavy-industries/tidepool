@@ -20,6 +20,9 @@ struct ReplyDriver {
     applied: Arc<Notify>,
     resumes: Arc<AtomicUsize>,
     accepted: bool,
+    sibling: Option<oneshot::Receiver<()>>,
+    sibling_entered: Arc<Notify>,
+    mailbox_calls: Arc<AtomicUsize>,
 }
 
 fn response(status: WorkbenchRunStatus) -> WorkbenchResponse {
@@ -34,6 +37,39 @@ fn response(status: WorkbenchRunStatus) -> WorkbenchResponse {
 }
 
 impl KernelBehavior for ReplyDriver {
+    fn accepts_mailbox(&self) -> bool {
+        !self.accepted
+    }
+
+    fn allows_independent_workbench_admission(&self) -> bool {
+        true
+    }
+
+    fn dispatch_workbench(
+        &mut self,
+        context: &KernelContext,
+        invocation: crate::ActorWorkbenchInvocation,
+        _: Option<Arc<crate::WorkbenchExecutionControl>>,
+    ) -> WorkbenchDispatch<Self> {
+        let actor = context.identity();
+        if invocation.request.cell_source() == Some("sibling") {
+            let sibling = self.sibling.take().expect("one parked sibling");
+            let entered = self.sibling_entered.clone();
+            return WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
+                entered.notify_one();
+                sibling.await.expect("sibling released");
+                OwnedWorkbenchCompletion::new(|_: &mut Self| {
+                    Ok(KernelStep::Continue(response(
+                        WorkbenchRunStatus::Committed,
+                    )))
+                })
+            })));
+        }
+        WorkbenchDispatch::Owned(OwnedWorkbenchTask::new(Box::pin(async move {
+            OwnedWorkbenchCompletion::new(move |driver: &mut Self| driver.accept_reply(actor))
+        })))
+    }
+
     fn start<'a>(
         &'a mut self,
         _: &'a KernelContext,
@@ -46,6 +82,7 @@ impl KernelBehavior for ReplyDriver {
         _: ActorRef,
         _: MailboxValue,
     ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        self.mailbox_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(KernelStep::Continue(())) })
     }
     fn call<'a>(
@@ -78,27 +115,7 @@ impl KernelBehavior for ReplyDriver {
         _: crate::ActorWorkbenchInvocation,
         _: Option<Arc<crate::WorkbenchExecutionControl>>,
     ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>> {
-        Box::pin(async move {
-            let request = self.request.lock().expect("fixture request admitted");
-            let result = self.registry.begin_reply(context.identity(), request);
-            if self.accepted {
-                assert!(
-                    matches!(
-                        result,
-                        Err(crate::ReplyError::Stale | crate::ReplyError::AlreadySettled)
-                    ),
-                    "duplicate reply: {result:?}"
-                );
-                return Ok(KernelStep::Continue(response(
-                    WorkbenchRunStatus::Committed,
-                )));
-            }
-            result.expect("presented request accepts one reply");
-            self.accepted = true;
-            Ok(KernelStep::ContinueLater(response(
-                WorkbenchRunStatus::Replied,
-            )))
-        })
+        Box::pin(async move { self.accept_reply(context.identity()) })
     }
     fn dispatch_resume(
         &mut self,
@@ -182,6 +199,33 @@ impl KernelBehavior for ReplyDriver {
     fn child_exited(&mut self, _: ChildExitNotice) {}
 }
 
+impl ReplyDriver {
+    fn accept_reply(
+        &mut self,
+        actor: ActorRef,
+    ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
+        let request = self.request.lock().expect("fixture request admitted");
+        let result = self.registry.begin_reply(actor, request);
+        if self.accepted {
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::ReplyError::Stale | crate::ReplyError::AlreadySettled)
+                ),
+                "duplicate reply: {result:?}"
+            );
+            return Ok(KernelStep::Continue(response(
+                WorkbenchRunStatus::Committed,
+            )));
+        }
+        result.expect("presented request accepts one reply");
+        self.accepted = true;
+        Ok(KernelStep::ContinueLater(response(
+            WorkbenchRunStatus::Replied,
+        )))
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ReadOperation {
     Observe,
@@ -189,6 +233,7 @@ enum ReadOperation {
     DuplicateReply,
     StaleCompletion,
     StaleSettlement,
+    MailboxInput,
 }
 #[derive(Clone, Copy, Debug)]
 enum Completion {
@@ -198,6 +243,7 @@ enum Completion {
 }
 #[derive(Clone, Debug)]
 struct History {
+    sibling_settles_before_reply: bool,
     before: Vec<ReadOperation>,
     completion: Completion,
     after: Vec<ReadOperation>,
@@ -210,10 +256,12 @@ fn histories() -> impl Strategy<Value = History> {
             Just(ReadOperation::Subscribe),
             Just(ReadOperation::DuplicateReply),
             Just(ReadOperation::StaleCompletion),
-            Just(ReadOperation::StaleSettlement)
+            Just(ReadOperation::StaleSettlement),
+            Just(ReadOperation::MailboxInput)
         ]
     };
     (
+        any::<bool>(),
         proptest::collection::vec(reads(), 0..8),
         prop_oneof![
             Just(Completion::Success),
@@ -222,11 +270,14 @@ fn histories() -> impl Strategy<Value = History> {
         ],
         proptest::collection::vec(reads(), 0..8),
     )
-        .prop_map(|(before, completion, after)| History {
-            before,
-            completion,
-            after,
-        })
+        .prop_map(
+            |(sibling_settles_before_reply, before, completion, after)| History {
+                sibling_settles_before_reply,
+                before,
+                completion,
+                after,
+            },
+        )
 }
 
 #[derive(Default, Debug)]
@@ -240,6 +291,10 @@ struct Coverage {
     successes: usize,
     failures: usize,
     shutdowns: usize,
+    inputs: usize,
+    dropped_inputs: Arc<AtomicUsize>,
+    immediate_resumes: usize,
+    deferred_resumes: usize,
 }
 
 fn send_workbench(
@@ -296,6 +351,9 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
     let entered = Arc::new(Notify::new());
     let applied = Arc::new(Notify::new());
     let resumes = Arc::new(AtomicUsize::new(0));
+    let mailbox_calls = Arc::new(AtomicUsize::new(0));
+    let (sibling_release, sibling) = oneshot::channel();
+    let sibling_entered = Arc::new(Notify::new());
     let (actor, task) = spawn_local_actor(
         None,
         ReplyDriver {
@@ -306,6 +364,9 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
             applied: applied.clone(),
             resumes: resumes.clone(),
             accepted: false,
+            sibling: Some(sibling),
+            sibling_entered: sibling_entered.clone(),
+            mailbox_calls: mailbox_calls.clone(),
         },
     )
     .await
@@ -321,6 +382,30 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
     check_observation(&registry, owner, request, None);
     let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
     let mut subscriptions = vec![registry.subscribe_watch(owner, watch).unwrap()];
+    let (sibling_send, sibling_reply) = oneshot::channel();
+    actor
+        .address()
+        .send_message(KernelMessage::Workbench {
+            invocation: crate::ActorWorkbenchInvocation::unbound(
+                WorkbenchRequest::from_cell_input("sibling"),
+            ),
+            control: None,
+            reply: sibling_send.into(),
+        })
+        .unwrap();
+    sibling_entered.notified().await;
+    let mut sibling_release = Some(sibling_release);
+    let mut sibling_reply = Some(sibling_reply);
+    if history.sibling_settles_before_reply {
+        sibling_release.take().unwrap().send(()).unwrap();
+        assert_eq!(
+            sibling_reply.take().unwrap().await.unwrap().unwrap().status,
+            WorkbenchRunStatus::Committed
+        );
+        coverage.immediate_resumes += 1;
+    } else {
+        coverage.deferred_resumes += 1;
+    }
     let control = crate::WorkbenchExecutionControl::untracked();
     let reply = send_workbench(&actor, Some(control.clone()))
         .await
@@ -328,8 +413,45 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         .unwrap();
     assert_eq!(reply.status, WorkbenchRunStatus::Replied);
     assert!(matches!(control.terminal_reply(), Some(Ok(_))));
+    if !history.sibling_settles_before_reply {
+        assert_eq!(
+            resumes.load(Ordering::SeqCst),
+            0,
+            "actor continuation remains exclusive while the sibling is parked"
+        );
+    }
+    // ContinueLater sends Resume in the same mailbox turn that settles this
+    // reply. Releasing the sibling now queues its completion behind that wake.
+    let mut late_reply = send_workbench(&actor, None);
+    read_operation(
+        ReadOperation::MailboxInput,
+        &actor,
+        &registry,
+        owner,
+        request,
+        watch,
+        None,
+        &mut subscriptions,
+        coverage,
+    )
+    .await;
+    check_observation(&registry, owner, request, None);
+    if let Some(release) = sibling_release {
+        release.send(()).unwrap();
+        assert_eq!(
+            sibling_reply.unwrap().await.unwrap().unwrap().status,
+            WorkbenchRunStatus::Committed
+        );
+    }
     entered.notified().await;
     assert_eq!(resumes.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(
+            late_reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "queued continuation fences new independent notebook admission"
+    );
     check_observation(&registry, owner, request, None);
     assert!(
         matches!(
@@ -388,6 +510,13 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         }
     }
     check_observation(&registry, owner, request, Some(history.completion));
+    // This pre-existing call precedes the queued shutdown. Its refused
+    // duplicate may finish after the continuation, without replacing the
+    // request's first settlement or opening an ordinary mailbox receiver.
+    assert_eq!(
+        late_reply.await.unwrap().unwrap().status,
+        WorkbenchRunStatus::Committed
+    );
     for operation in &history.after {
         read_operation(
             *operation,
@@ -451,6 +580,16 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         check_observation(&registry, owner, request, Some(history.completion));
     }
     task.await.unwrap();
+    assert_eq!(
+        mailbox_calls.load(Ordering::SeqCst),
+        0,
+        "a continuation wake cannot admit ordinary input without a receiver"
+    );
+    assert_eq!(
+        coverage.dropped_inputs.load(Ordering::SeqCst),
+        coverage.inputs,
+        "queued input custody is released at retirement"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -466,6 +605,13 @@ async fn read_operation(
     coverage: &mut Coverage,
 ) {
     match operation {
+        ReadOperation::MailboxInput => {
+            let _ = actor.cast(
+                owner,
+                MailboxValue::probe(tidepool_repr::SessionId(1), coverage.dropped_inputs.clone()),
+            );
+            coverage.inputs += 1;
+        }
         ReadOperation::Observe => coverage.observations += 1,
         ReadOperation::Subscribe => {
             subscriptions.push(registry.subscribe_watch(owner, watch).unwrap());
@@ -531,31 +677,35 @@ async fn read_operation(
 #[test]
 fn fixed_reply_delivery_histories_preserve_pending_until_continuation_settles() {
     let mut coverage = Coverage::default();
-    for completion in [
-        Completion::Success,
-        Completion::Failure,
-        Completion::Shutdown,
-    ] {
-        let operations = vec![
-            ReadOperation::Observe,
-            ReadOperation::Subscribe,
-            ReadOperation::DuplicateReply,
-            ReadOperation::StaleCompletion,
-            ReadOperation::StaleSettlement,
-        ];
-        replay(
-            &History {
-                before: operations.clone(),
-                completion,
-                after: operations,
-            },
-            &mut coverage,
-        )
-        .unwrap();
+    for sibling_settles_before_reply in [false, true] {
+        for completion in [
+            Completion::Success,
+            Completion::Failure,
+            Completion::Shutdown,
+        ] {
+            let operations = vec![
+                ReadOperation::Observe,
+                ReadOperation::Subscribe,
+                ReadOperation::DuplicateReply,
+                ReadOperation::StaleCompletion,
+                ReadOperation::StaleSettlement,
+                ReadOperation::MailboxInput,
+            ];
+            replay(
+                &History {
+                    sibling_settles_before_reply,
+                    before: operations.clone(),
+                    completion,
+                    after: operations,
+                },
+                &mut coverage,
+            )
+            .unwrap();
+        }
     }
     assert_eq!(
         (coverage.successes, coverage.failures, coverage.shutdowns),
-        (1, 1, 1)
+        (2, 2, 2)
     );
     eprintln!("reply deterministic coverage: {coverage:?}");
 }

@@ -3150,9 +3150,10 @@ fn retain_unconfirmed_exit(terminal: &RetainedActorExit, actor: ActorRef, detail
     }
 }
 
-/// Hosted invocations and settlement do not require a resident receiver.
+/// Actor continuations and hosted work do not require a resident receiver.
 /// Their queued forms retain the same admission boundary.
 enum DeferredControl {
+    ActorContinuation,
     Workbench,
     HostedInvocation,
     HostedSettlement,
@@ -3162,6 +3163,9 @@ enum DeferredControl {
 
 fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
     match message {
+        // ContinueLater owns progress while the behavior has no mailbox
+        // receiver. It remains exclusive until every parked task has settled.
+        KernelMessage::Resume { .. } => Some(DeferredControl::ActorContinuation),
         KernelMessage::Workbench { .. } | KernelMessage::ReplaceSpec { .. } => {
             Some(DeferredControl::Workbench)
         }
