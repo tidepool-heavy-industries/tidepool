@@ -54,6 +54,22 @@ fn declaration(generation: u64, native: bool) -> CertifiedRecoveryProduct {
 // Each row independently varies source/native origin, native byte custody and
 // the issued compiler interface role. The lexical graph selects only Target.
 fn original_context(rows: &[(bool, bool, bool)]) -> Arc<ExactDeclarationContext> {
+    let products = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (native, _, _))| declaration(index as u64 + 1, *native))
+        .collect::<Vec<_>>();
+    let issued = crate::certified_products::tests::recovered_witness_fixtures(&products)
+        .into_iter()
+        .map(|original| original.product)
+        .collect::<Vec<_>>();
+    original_context_with_products(rows, issued)
+}
+
+fn original_context_with_products(
+    rows: &[(bool, bool, bool)],
+    products: Vec<CertifiedRecoveryProduct>,
+) -> Arc<ExactDeclarationContext> {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let target = ExactModuleIdentity {
         unit: "main".into(),
@@ -69,8 +85,8 @@ fn original_context(rows: &[(bool, bool, bool)]) -> Arc<ExactDeclarationContext>
         interface: target_entry.descriptor.id,
     }];
     let mut entries = vec![target_entry];
-    for (index, (native, custody, selected)) in rows.iter().enumerate() {
-        let product = declaration(index as u64 + 1, *native);
+    assert_eq!(rows.len(), products.len());
+    for ((_, custody, selected), product) in rows.iter().zip(products) {
         let interface = Arc::new(ArtifactEntry::canonical(
             product.module_interface().unwrap().clone(),
         ));
@@ -149,6 +165,18 @@ fn original_native_declaration_body_is_available_without_heap_or_lexical_promoti
     assert!(
         offered_native_owners(&earlier).is_empty(),
         "a later declaration cannot enter an earlier capture"
+    );
+    let unissued =
+        original_context_with_products(&[(true, true, true)], vec![declaration(1, true)]);
+    assert!(
+        matches!(
+            original_native_declaration_inputs(&unissued, PRODUCER),
+            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                crate::certified_products::CertificationError::Mismatch(
+                    "native availability lacks authenticated census"
+                ))
+        ),
+        "finalized canonical custody cannot issue a native availability census"
     );
 }
 
