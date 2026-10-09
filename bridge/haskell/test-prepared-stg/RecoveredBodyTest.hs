@@ -818,7 +818,8 @@ assertRecoveredKindRep root = do
     Right (program,_) | not partialThunk -> assert
       (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings program)))
       "partial candidate changed its canonical constructor contract"
-    result -> fail ("partial candidate disagreed with its exact entry contract: " ++ show result)
+    Left failure -> fail ("partial candidate disagreed with its exact entry contract: " ++ show failure)
+    Right _ -> fail "partial candidate accepted an incorrect emitted entry form"
   complete <- either (fail . ("completed constructor projection failed: " ++) . show) pure
     (projectPreparedTarget krepContext modules)
   assert (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings complete)))
