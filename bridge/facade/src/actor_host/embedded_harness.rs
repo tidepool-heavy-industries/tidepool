@@ -1051,10 +1051,16 @@ fn bounded_tool_error_message(
 ) -> String {
     use std::fmt::Write;
 
+    // The same summary crosses native and provider output. Reserve the
+    // provider's framing through its owner rather than duplicating its prefix.
+    let provider_framing_bytes = ProviderError::Tool(ToolFailure::from(""))
+        .into_tool_failure()
+        .message()
+        .len();
     const OMITTED: &str = "\n[Detail or receipt output omitted from this message. Inspect the issued native settlement for originalOperation via ResidentToolEndpoint::retained_operation(exact ToolInvocationContext).terminal(). This native API reference does not establish admission, application success or release. Do not resubmit source to retrieve retained evidence.]";
     let mut out = BoundedErrorMessage {
         text: String::new(),
-        limit: TOOL_ERROR_MESSAGE_BYTE_BUDGET - OMITTED.len(),
+        limit: TOOL_ERROR_MESSAGE_BYTE_BUDGET - OMITTED.len() - provider_framing_bytes,
         omitted: false,
     };
     if let Some(operation) = operation {

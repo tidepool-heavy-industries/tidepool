@@ -108,6 +108,7 @@ proptest! {
             Just(Disposition::Committed), Just(Disposition::Rejected), Just(Disposition::Unknown),
         ],
         depth in 0usize..20,
+        has_receipt in any::<bool>(),
     ) {
         let detail: String = characters.into_iter().collect();
         let mut item = receipt(0, "receipt payload must not be formatted into the message".repeat(output_repetition), &[disposition]);
@@ -115,13 +116,66 @@ proptest! {
         for _ in 0..depth { value = json!({"diagnostic": value}); }
         item.value = Some(value);
         let operation = origin();
-        let failure = provider_tool_error(error(vec![item], detail.repeat(repetition), Publication::NotPublished {
+        let receipts = if has_receipt { vec![item] } else { Vec::new() };
+        let error = error(receipts, detail.repeat(repetition), Publication::NotPublished {
             reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
-        }), Some(&operation)).into_tool_failure();
+        });
+        let raw_bytes = bounded_tool_error_message(&error, Some(&operation)).len();
+        let failure = provider_tool_error(error, Some(&operation)).into_tool_failure();
+        if failure.message().len() > TOOL_ERROR_MESSAGE_BYTE_BUDGET {
+            eprintln!("message budget witness: has_receipt={has_receipt} raw_bytes={raw_bytes} projected_bytes={} detail_bytes={} repetition={repetition}", failure.message().len(), detail.len());
+        }
         check_failure(&failure, &operation);
-        prop_assert_eq!(&failure.metadata().unwrap()["items"][0]["operations"][0]["disposition"], &json!(disposition));
-        prop_assert_eq!(&failure.metadata().unwrap()["publication"]["status"], &json!("notPublished"));
+        let metadata = failure.metadata().unwrap();
+        prop_assert_eq!(&metadata["class"], &json!("version-skew"));
+        prop_assert_eq!(&metadata["phase"], &json!("compile"));
+        prop_assert_eq!(&metadata["cause"]["kind"], &json!("extractor_contract"));
+        if has_receipt {
+            prop_assert_eq!(&metadata["items"][0]["operations"][0]["disposition"], &json!(disposition));
+        } else {
+            prop_assert_eq!(&metadata["items"], &json!([]));
+        }
+        prop_assert_eq!(&metadata["publication"]["status"], &json!("notPublished"));
     }
+}
+
+#[test]
+fn saturated_compile_failure_messages_obey_the_final_provider_budget() {
+    let operation = origin();
+    let mut lengths = Vec::new();
+    for has_receipt in [false, true] {
+        let receipts = if has_receipt {
+            vec![receipt(
+                0,
+                "retained output".into(),
+                &[Disposition::Committed],
+            )]
+        } else {
+            Vec::new()
+        };
+        let error = error(
+            receipts,
+            "λ".repeat(10000),
+            Publication::NotPublished {
+                reason: tidepool_runtime::session::WorkbenchNotPublishedReason::Failed,
+            },
+        );
+        let raw = bounded_tool_error_message(&error, Some(&operation));
+        let projected = provider_tool_error(error, Some(&operation)).into_tool_failure();
+        eprintln!(
+            "saturated provider budget: has_receipt={has_receipt} raw_bytes={} projected_bytes={}",
+            raw.len(),
+            projected.message().len()
+        );
+        lengths.push(projected.message().len());
+        assert_eq!(projected.metadata().unwrap()["class"], "version-skew");
+    }
+    assert!(
+        lengths
+            .iter()
+            .all(|length| *length <= TOOL_ERROR_MESSAGE_BYTE_BUDGET),
+        "projected bytes={lengths:?}"
+    );
 }
 
 #[test]
