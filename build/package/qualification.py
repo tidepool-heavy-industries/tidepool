@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from typing import NamedTuple
 
 M2_SURVIVAL_TEST = "actor_host::embedded_captured_unfold_tests::embedded_captured_children_and_capture_survive_failure_of_the_unfinished_parent_cell"
 M2_NOMINAL_JOIN_TEST = "actor_host::embedded_captured_unfold_tests::embedded_same_root_parked_nominal_a_joins_later_b_publication"
@@ -1101,6 +1102,26 @@ def execution_environment(descriptor: dict) -> dict:
     environment.update(descriptor["environment"])
     return environment
 
+
+class NativeRunnerResources(NamedTuple):
+    """Path declarations from a bundle environment, not ambient selections.
+
+    The qualification owner has already verified these inputs. The runner still
+    resolves each declared path and clears undeclared compiler selectors before
+    execution; this selection grants no artifact or compiler authority.
+    """
+    names: tuple[str, ...]
+
+    @classmethod
+    def from_environment(cls, environment: dict, *, require_catalog: bool = False):
+        return cls(tuple(name for name in (
+            "TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
+            "TIDEPOOL_PREPARED_BUILTIN_ENTRIES", "TIDEPOOL_TEST_FIXTURE_ROOT",
+        ) if name in environment or (require_catalog and name == "TIDEPOOL_COMPILER_MODULES")))
+
+    def arguments(self) -> list[str]:
+        return [argument for name in self.names for argument in ("--resource-env", name)]
+
 def elf_interpreter(path: Path) -> str | None:
     with path.open("rb") as source:
         header = source.read(64)
@@ -1457,11 +1478,7 @@ def run_cohort(args) -> int:
         command.extend(["--case-timeout", f"{name}={timeout}"])
     if args.delegated_service:
         command.extend(["--delegated-service", "--service-slice", service_slice])
-    # These bundle-owned resources are verified by the frozen owner. The runner
-    # must retain their declared-resource identity across delegation.
-    for name in ("TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES", "TIDEPOOL_TEST_FIXTURE_ROOT"):
-        if name in descriptor["environment"]:
-            command.extend(["--resource-env", name])
+    command.extend(NativeRunnerResources.from_environment(descriptor["environment"]).arguments())
     for name in cohort["tests"]:
         command.extend(["--exact", name])
     if cohort["ignored"]:

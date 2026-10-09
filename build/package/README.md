@@ -413,6 +413,11 @@ catalog consumer in fresh caches with checkout and Buck build inputs absent.
 The report requires one executed passing test; compilation or an empty
 selection cannot satisfy it.
 
+`NativeRunnerResources` in the bundled qualification owner declares path inputs
+for both cohort and catalog namespace launches. The isolated runner resolves
+those declarations and clears ambient compiler selections. Keep this policy in
+the bundle owner; a source helper cannot replace an older frozen bundle's policy.
+
 ```sh
 python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" catalog-gate \
   "$DESCRIPTOR" --output "$CATALOG_GATE_EVIDENCE"

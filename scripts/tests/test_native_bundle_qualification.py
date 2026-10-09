@@ -672,7 +672,7 @@ class NativeQualificationTests(unittest.TestCase):
             root = Path(directory)
             resources = {}
             for name in ('TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY',
-                         'TIDEPOOL_TEST_FIXTURE_ROOT'):
+                         'TIDEPOOL_PREPARED_BUILTIN_ENTRIES', 'TIDEPOOL_TEST_FIXTURE_ROOT'):
                 resource = root / name
                 resource.mkdir()
                 resources[name] = str(resource)
@@ -2167,6 +2167,33 @@ class CatalogSourceTests(unittest.TestCase):
 
 
 class CatalogConsumerNamespaceTests(unittest.TestCase):
+    def test_namespace_refuses_missing_bundle_resource_policy_before_launch(self):
+        script = (SCRIPT.parent / 'packaged-catalog-consumer.sh').read_text()
+        namespace_source = script.split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor = root / 'qualification.json'
+            descriptor.write_text(json.dumps({
+                'bundle_root': str(root), 'stdlib_mode': 'catalog-backed',
+                'programs': {'libtest': str(root / 'bin/tidepool-tests'),
+                             'runner': str(root / 'runner.py')},
+                'environment': {'TIDEPOOL_COMPILER_MODULES': '/frozen/catalog.json'},
+            }))
+            policy = root / 'share/exomonad/qualification.py'
+            for older_policy in (False, True):
+                with self.subTest(older_policy=older_policy):
+                    if older_policy:
+                        policy.parent.mkdir(parents=True)
+                        policy.write_text('# prior bundle without the shared resource policy\n')
+                    # No checkout/ambient helper can substitute for the exact
+                    # bundled policy; failure occurs before bubblewrap starts.
+                    with patch.object(sys, 'argv', ['namespace', str(root), str(descriptor),
+                                                   '/pinned/bwrap', str(root / 'evidence'), sys.executable]), \
+                         patch.object(subprocess, 'run') as execute, \
+                         self.assertRaises(KeyError if older_policy else FileNotFoundError):
+                        exec(compile(namespace_source, 'packaged-catalog-consumer.sh', 'exec'), {})
+                    execute.assert_not_called()
+
     def test_declared_namespace_resources_survive_isolated_runner_without_ambient_authority(self):
         script = (SCRIPT.parent / 'packaged-catalog-consumer.sh').read_text()
         namespace_source = script.split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
@@ -2178,6 +2205,11 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                     'TIDEPOOL_TEST_FIXTURE_ROOT')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            # A candidate namespace consumes its own packaged policy. An old
+            # frozen bundle cannot acquire the candidate helper implicitly.
+            policy = root / 'share/exomonad/qualification.py'
+            policy.parent.mkdir(parents=True)
+            shutil.copyfile(SCRIPT, policy)
             paths = {}
             for name in ('TIDEPOOL_COMPILER_MODULES', *optional):
                 path = root / name
