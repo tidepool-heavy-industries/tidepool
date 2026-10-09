@@ -2295,9 +2295,17 @@ impl ModuleCandidateOffer {
             validation,
         )?
         .ok_or_else(fail)?;
+        let original_owner = admission.source.generated_source_owner()?;
+        if original_owner.module != module_name {
+            return Err(fail());
+        }
         let selected_originals = sealed
             .source_selection
-            .selected_original_closure(&sealed.artifact_view)
+            .selected_authored_original_closure(
+                &sealed.artifact_view,
+                &original_owner.unit,
+                &original_owner.module,
+            )
             .map_err(compiler_evidence_failure)?;
         let products = selected_originals
             .products()

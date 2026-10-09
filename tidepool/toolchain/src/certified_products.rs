@@ -2402,6 +2402,33 @@ impl CertifiedSourceSelection {
         self.selected_original_closure_inner(view, None)
     }
 
+    /// Certify the complete newly authored original. Inherited compiler offers
+    /// retain their issued native demand; they are dependencies, not new roots.
+    pub(crate) fn selected_authored_original_closure(
+        &self,
+        view: &crate::artifact_inventory::ArtifactView,
+        unit: &str,
+        module: &str,
+    ) -> CertResult<SelectedOriginalClosure> {
+        let key = (unit.to_owned(), module.to_owned());
+        let selected = self
+            .visible_modules()
+            .find(|(owner, _)| *owner == &key)
+            .map(|(_, selected)| selected)
+            .filter(|selected| selected.native().is_some())
+            .ok_or(CertificationError::Mismatch(
+                "authored original has no issued native selection",
+            ))?;
+        Self {
+            modules: Arc::new(BTreeMap::from([(key, selected.clone())])),
+            produced_types: self.produced_types.clone(),
+        }
+        .selected_original_closure_inner(
+            view,
+            Some((unit, crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE)),
+        )
+    }
+
     /// Authored declarations require every selected original except the
     /// authenticated generated probe. Required backedges to that owner refuse.
     pub(crate) fn selected_original_closure_excluding_module(
@@ -11169,6 +11196,131 @@ pub(crate) mod tests {
                     NativeArtifactDemand::CertifiedTargetImports(&imports)
                 )
                 .is_err());
+        }
+    }
+
+    #[test]
+    fn authored_original_closure_preserves_inherited_demand_and_fresh_dependencies() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeArtifactDemand};
+
+        let scientific = full_native_fixture("Scientific", vec![(26, vec![])], 7);
+        let schema = full_native_fixture(
+            "Schema",
+            vec![
+                (195, vec![]),
+                (197, vec![]),
+                (
+                    202,
+                    vec![PendingImportOwner::Source {
+                        owner: scientific.owner().clone(),
+                        original_ordinal: 26,
+                        binder: testing::identity("Scientific", "entry_26"),
+                    }],
+                ),
+            ],
+            7,
+        );
+        let fresh = full_native_fixture("FreshDependency", vec![(5, vec![])], 7);
+        for later_group in [197, 202] {
+            let source = |ordinal| PendingImportOwner::Source {
+                owner: schema.owner().clone(),
+                original_ordinal: ordinal,
+                binder: testing::identity("Schema", &format!("entry_{ordinal}")),
+            };
+            let authored = full_native_fixture(
+                "Authored",
+                vec![
+                    (
+                        7,
+                        vec![
+                            source(195),
+                            PendingImportOwner::Source {
+                                owner: fresh.owner().clone(),
+                                original_ordinal: 5,
+                                binder: testing::identity("FreshDependency", "entry_5"),
+                            },
+                        ],
+                    ),
+                    (11, vec![source(later_group)]),
+                ],
+                7,
+            );
+            let products = [authored.clone(), schema.clone(), fresh.clone()];
+            let mut entries = products
+                .iter()
+                .map(|product| Arc::new(ArtifactEntry::original([1; 32], product.clone()).unwrap()))
+                .collect::<Vec<_>>();
+            entries.push(Arc::new(ArtifactEntry::canonical(
+                scientific.module_interface().unwrap().clone(),
+            )));
+            let inventory = ArtifactInventory::default();
+            let available = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    entries.clone(),
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let imports = [PendingImportOwner::Source {
+                owner: authored.owner().clone(),
+                original_ordinal: 7,
+                binder: testing::identity("Authored", "entry_7"),
+            }];
+            let early = inventory
+                .admit_shared_with_demand(
+                    &available,
+                    entries,
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                )
+                .unwrap();
+            let before = early.selected_native_groups();
+            let selection = CertifiedSourceSelection::from_projected_originals(
+                &products,
+                &InventoryOperation::new(Default::default()),
+            )
+            .unwrap();
+            assert!(selection.selected_original_closure(&early).is_err());
+            assert!(selection
+                .selected_authored_original_closure(&early, "fixture", "Absent")
+                .is_err());
+            let result =
+                selection.selected_authored_original_closure(&early, "fixture", "Authored");
+            assert_eq!(early.selected_native_groups(), before);
+            if later_group == 202 {
+                assert!(
+                    result.is_err(),
+                    "the complete authored body still requires its later dependency"
+                );
+                continue;
+            }
+            let closure = result.unwrap();
+            assert_eq!(closure.products(), &[authored.clone()]);
+            let selected = closure.native_closure.selected_native_groups();
+            let ordinals = |module: &str| {
+                selected
+                    .iter()
+                    .filter_map(|key| {
+                        closure
+                            .native_closure
+                            .entries()
+                            .iter()
+                            .find(|entry| entry.descriptor.id == key.artifact)
+                            .filter(|entry| entry.descriptor.owner.module == module)
+                            .map(|_| key.original_ordinal)
+                    })
+                    .collect::<BTreeSet<_>>()
+            };
+            assert_eq!(ordinals("Authored"), BTreeSet::from([7, 11]));
+            assert_eq!(ordinals("Schema"), BTreeSet::from([195, 197]));
+            assert_eq!(ordinals("FreshDependency"), BTreeSet::from([5]));
+            assert!(closure
+                .native_closure
+                .entries()
+                .iter()
+                .any(|entry| matches!(
+                    &entry.payload, crate::artifact_inventory::ArtifactPayload::Original(product)
+                    if product.same_durable_artifact(&fresh)
+                )));
         }
     }
 
