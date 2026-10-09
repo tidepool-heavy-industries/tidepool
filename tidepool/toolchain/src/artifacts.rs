@@ -1371,7 +1371,6 @@ impl ModuleCandidateOffer {
             values: values.clone(),
             original_execution: context.declarations().clone(),
         };
-        let templates = [offer.specification.template_source.clone()];
         let original_interfaces = Value::Array(
             offer
                 .original_execution

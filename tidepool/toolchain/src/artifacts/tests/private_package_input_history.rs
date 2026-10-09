@@ -540,7 +540,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         &issued.recovery_products,
         &issued.groups,
         &late_selection,
-        &catalog.interfaces,
+        &catalog,
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
@@ -570,17 +570,24 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     )
     .unwrap();
     assert_eq!(late_groups.len(), 1);
-    let direct_only = catalog.select(&[], &late_imports[1..]).unwrap();
+    let selection_operation = PackageInterfaceValidation::default().inventory.clone();
+    let direct_only = catalog
+        .select(&[], &late_imports[1..], &selection_operation)
+        .unwrap();
     assert_eq!(
         direct_only.get(&(PACKAGE_UNIT.into(), PACKAGE_MODULE.into())),
         Some(&witness)
     );
-    let native_only = catalog.select(&late_groups, &[]).unwrap();
+    let native_only = catalog
+        .select(&late_groups, &[], &selection_operation)
+        .unwrap();
     assert_eq!(
         native_only.get(&(PACKAGE_UNIT.into(), PACKAGE_MODULE.into())),
         Some(&witness)
     );
-    let late_closure = catalog.select(&late_groups, &late_imports).unwrap();
+    let late_closure = catalog
+        .select(&late_groups, &late_imports, &selection_operation)
+        .unwrap();
     let late_interfaces = certified_products::certify_target_package_interfaces_with_validation(
         &late_target,
         &late_closure,
@@ -613,9 +620,12 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     )
     .unwrap();
     assert!(all_groups.contains_key(&arbitrary_owner));
-    subset
+    subset.groups = subset
         .groups
-        .retain(|group| group.group().original_ordinal() == ORDINAL);
+        .iter()
+        .filter(|group| group.group().original_ordinal() == ORDINAL)
+        .cloned()
+        .collect();
     let selected = selected_package_closure(
         &BTreeMap::new(),
         &subset,

@@ -1290,7 +1290,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             ));
         }
     }
-    for old in &prior {
+    for old in prior.iter() {
         let retained = latest_recovery
             .iter()
             .find(|p| p.owner() == old.owner())
