@@ -13,7 +13,7 @@ export_file(name = "probe_opacity_checker", src = "probe-opacity-check.py", visi
 
 filegroup(
     name = "script_test_sources",
-    srcs = {"scripts/" + source: source for source in glob(["*.py", "*.sh", "*.toml", "tests/*.py"])},
+    srcs = {"scripts/" + source: source for source in glob(["*.py", "*.sh", "*.toml", "tests/*.py", "tests/fixtures/*.jsonl"])},
 )
 
 native_source_snapshot(
@@ -26,6 +26,7 @@ native_source_snapshot(
         ("//bridge/haskell:main_acceptance_script_tree", ""),
         ("//build/rust:qualification_inputs", ""),
         ("//build/package:qualification_inputs", ""),
+        ("//bridge/facade:native_qualification_inputs", ""),
     ],
 )
 
@@ -58,6 +59,19 @@ sh_test(
         "PATH": "$(location toolchains//:test_tools)/bin:" + read_root_config("nix", "action_path"),
     },
     resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure", "toolchains//:test_tools"],
+    visibility = ["PUBLIC"],
+)
+
+sh_test(
+    name = "native_bundle_qualification_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_native_bundle_qualification", "scripts.tests.test_buck_isolated_libtest", "scripts.tests.test_harness_usecase_perf_report"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure"],
     visibility = ["PUBLIC"],
 )
 

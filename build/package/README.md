@@ -9,6 +9,17 @@ developer path and does not establish prepared startup acceptance. Build, freeze
 and consumer qualification of one exact prepared bundle remain required before
 delivery.
 
+The package, isolated runner and performance reporter mutation controls run
+through their declared source snapshot, including the original roster and
+compiler trace fixtures:
+
+```sh
+swarm-build bash scripts/buck2-run.sh run --local-only -c remote.enabled=false \
+  -c tidepool.profile=fast-dev //scripts:native_bundle_qualification_tests
+```
+
+These script controls complement actual frozen consumer execution.
+
 Both native bundles require executable `bash`, `python3`, `dirname`, `git`,
 `bwrap`, `tmux`, `systemd-run`, `systemctl`, `nix` and `nix-store` in their declared
 runtime-tools closure. Qualification checks these inputs during assembly,
