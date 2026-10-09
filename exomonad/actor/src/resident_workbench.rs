@@ -20294,39 +20294,7 @@ pub(crate) mod request_tests {
     }
 
     async fn request_scope_alias_borrow_refuses_a_shadowed_mount_with_compiler_owner() {
-        let (machines, context, source, _root) = actor_registry_fixture();
-        let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
-        workbench
-            .publish_cell_for_test(context.clone(), "sourceValue <- pure ()")
-            .await
-            .expect("source value executes and publishes through its private whole cell");
-        let scope = context.placement.lexical_scope;
-        let first = publish_request_scope_test_input(&workbench, context.clone())
-            .await
-            .expect("first request-scope alias mount");
-        let second = publish_request_scope_test_input(&workbench, context.clone())
-            .await
-            .expect("second alias shadows the first");
-        assert_ne!(first, second);
-        workbench
-            .access
-            .with_machine(context, move |session, _, _| {
-                assert_ne!(
-                    session
-                        .current_binding_in(scope, "sessionInput")
-                        .map(|binding| binding.0),
-                    Some(first)
-                );
-                assert_eq!(
-                    session
-                        .current_binding_in(scope, "sessionInput")
-                        .map(|binding| binding.0),
-                    Some(second)
-                );
-                Ok(())
-            })
-            .await
-            .expect("shadowed input is refused by identity");
+        assert_current_request_alias_borrow(true).await;
     }
 
     #[tokio::test]
@@ -20340,6 +20308,10 @@ pub(crate) mod request_tests {
 
     async fn current_request_private_cell_borrows_scope_alias_without_extra_root_with_compiler_owner(
     ) {
+        assert_current_request_alias_borrow(false).await;
+    }
+
+    async fn assert_current_request_alias_borrow(shadowed: bool) {
         let (machines, mut context, mut source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Replies]".into();
         source
@@ -20355,10 +20327,27 @@ pub(crate) mod request_tests {
         let binding = publish_request_scope_test_input(&workbench, context.clone())
             .await
             .unwrap();
-        let before = workbench
+        let current_binding = publish_request_scope_test_input(&workbench, context.clone())
+            .await
+            .expect("a second genuine alias shadows the first");
+        assert_ne!(binding, current_binding);
+        let borrowed_binding = if shadowed { binding } else { current_binding };
+        let (before, public_before) = workbench
             .access
-            .with_machine(context.clone(), |session, _, _| {
-                Ok(session.value_handle_count())
+            .with_machine(context.clone(), move |session, _, _| {
+                assert_eq!(
+                    session
+                        .current_binding_in(original_scope, "sessionInput")
+                        .unwrap()
+                        .0,
+                    current_binding
+                );
+                Ok((
+                    session.value_handle_count(),
+                    session
+                        .public_visibility_snapshot_in(original_scope)
+                        .unwrap(),
+                ))
             })
             .await
             .unwrap();
@@ -20402,9 +20391,15 @@ pub(crate) mod request_tests {
         else {
             panic!("typed request")
         };
+        let continuation_id = continuation.cont_id().to_owned();
+        let pending_id = continuation_id.clone();
         let (types, custody_before_resume) = workbench
             .access
             .with_machine(context.clone(), move |session, _, _| {
+                assert!(
+                    session.parked_holes().contains(&pending_id.as_str()),
+                    "the actual CurrentRequest borrower is pending before resumption"
+                );
                 let types = session
                     .request_site_type_evidence(site)
                     .expect("closed unit input/reply evidence");
@@ -20421,7 +20416,7 @@ pub(crate) mod request_tests {
                     crate::RequestId(1),
                     Arc::new(types),
                     original_scope,
-                    binding,
+                    borrowed_binding,
                 )),
             )
             .await
@@ -20444,7 +20439,31 @@ pub(crate) mod request_tests {
             .unwrap();
         workbench
             .access
-            .with_machine(context, move |session, _, _| {
+            .with_machine(context, move |session, context, _| {
+                assert!(
+                    !session.parked_holes().contains(&continuation_id.as_str()),
+                    "the exact borrower continuation has settled"
+                );
+                let scope = context.placement.lexical_scope;
+                let result_id = session.current_binding_in(scope, "requestScope").unwrap().0;
+                let result = session
+                    .retain_binding_custody_in(scope, "requestScope", result_id)?
+                    .unwrap();
+                let preview = session
+                    .render_retained_preview(&result, 128)
+                    .expect("inspect the actual native RequestScope reply");
+                if shadowed {
+                    assert_eq!(
+                        preview, "(RequestUnavailable RequestInputShadowed)",
+                        "the stale binding reaches typed refusal, with matching request types"
+                    );
+                } else {
+                    assert!(
+                        preview.starts_with("(RequestActive 1 "),
+                        "the exact current input is borrowed: {preview}"
+                    );
+                }
+                drop(result);
                 assert_eq!(
                     session.value_handle_count(),
                     before + 1,
@@ -20454,7 +20473,25 @@ pub(crate) mod request_tests {
                     session
                         .current_binding_in(original_scope, "sessionInput")
                         .map(|row| row.0),
-                    Some(binding)
+                    Some(current_binding)
+                );
+                assert_eq!(
+                    session.public_visibility_snapshot_in(original_scope),
+                    Some(public_before)
+                );
+                assert_eq!(session.outstanding_custody(), custody_before_resume);
+                assert_eq!(
+                    session.retire_scope(scope).roots_released,
+                    1,
+                    "only the settled reply's owned root is released"
+                );
+                assert_eq!(session.value_handle_count(), before);
+                assert_eq!(
+                    session
+                        .current_binding_in(original_scope, "sessionInput")
+                        .unwrap()
+                        .0,
+                    current_binding
                 );
                 Ok(())
             })
