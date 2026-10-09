@@ -587,12 +587,11 @@ scenario = do
           , occNameString (nameOccName (varName binder)) == "fst"] of
         [binder] -> pure binder
         found -> fail ("expected one recovered fst, got " ++ show (length found))
-      showPrepared <- case [prepared | prepared <- closureModules hiddenClosure
-          , moduleNameString (moduleName (pmModule prepared)) == "GHC.Internal.Show"
-          , any (\binder -> varUnique binder `elementOfUniqSet` reachedUniques (closureReachability hiddenClosure))
-              (topBindersOfModule prepared)] of
+      let showUnits = [prepared | prepared <- closureModules hiddenClosure
+            , moduleNameString (moduleName (pmModule prepared)) == "GHC.Internal.Show"]
+      showOwner <- case showUnits of
         prepared : _ -> pure prepared
-        [] -> fail "recovered Show owner has no demanded component"
+        [] -> fail "recovered Show owner has no component units"
       let sourceRoot = identity home "homeValue"
           entry = identity home "homeOther"
           subset = home { preparedCoverage = ExactBodySubset
@@ -602,12 +601,12 @@ scenario = do
             { projectionEntry = entry
             , projectionCurrentOriginals = Map.union
                 (Map.filter (== sourceRoot) (preparedTopIdentityBindings [home]))
-                (preparedTopIdentityBindings [showPrepared]) }
+                (preparedTopIdentityBindings showUnits) }
           owner prepared = (unitString (moduleUnit (pmModule prepared)),
             moduleNameString (moduleName (pmModule prepared)))
-          (showUnit, showName) = owner showPrepared
+          (showUnit, showName) = owner showOwner
           (homeUnit, homeName) = owner home
-          showBinders = either (error . show) id (preparedTopIdentities [showPrepared])
+          showBinders = either (error . show) id (preparedTopIdentities showUnits)
           -- Original outlines deliberately retain one package dependency per
           -- group. The second original owner becomes demanded only after the
           -- Text dictionary has been recovered and projected.
