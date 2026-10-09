@@ -743,7 +743,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     warm <- compile CheckedEnvironment Set.empty GeneralCompile Nothing consumer includes Nothing
     unless (any ((/= includes) . importPaths . ms_hspp_opts)
         [summary | ModuleNode _ summary <- mgModSummaries'
-          (hsc_mod_graph (prHscEnv (pprPipelineResult warm)))]) $
+          (hsc_mod_graph (crHscEnv warm))]) $
       fail "ordinary-to-exact control lacks historical broader summary roots"
     _ <- check compile purpose
     receipts <- listDirectory (work </> ".exact-compilations")
@@ -759,21 +759,30 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     -- Generate the nearby search-order/product-role combinations. Current
     -- Finder selection is the oracle: the empty root supplies no provider,
     -- and both operations must retain the same original type-only closure.
-    forM_ [[emptyRoot,work],[work,emptyRoot],[work,work]] $ \search ->
-      forM_ [CheckedEnvironment,PreparedProducts Nothing] $ \selection -> do
+    forM_ [[emptyRoot,work],[work,emptyRoot],[work,work]] $ \search -> do
+      let currentScope = admitted {scopePurpose=ExactCellPurpose admission search}
+          checkCurrent = void (compile CheckedEnvironment Set.empty (ExactScopeCompile purpose currentScope)
+            (Just session) consumer search Nothing)
+          prepareCurrent = do
+            selected <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose currentScope)
+              (Just session) consumer search Nothing
+            currentCompilation <- maybe (fail "search transition omitted exact compilation") pure
+              (preparedExactCompilation selected)
+            unless (null (scopeProducts (compilationScope currentCompilation))
+                && null (scopeExecutionGraphs (compilationScope currentCompilation))) $
+              fail "source selection granted execution custody to canonical type-only originals"
+      forM_ [checkCurrent,prepareCurrent] $ \selectCurrent -> do
         _ <- compile CheckedEnvironment Set.empty GeneralCompile Nothing consumer search Nothing
-        let currentScope = admitted {scopePurpose=ExactCellPurpose admission search}
-        selected <- compile selection Set.empty (ExactScopeCompile purpose currentScope)
-          (Just session) consumer search Nothing
-        currentCompilation <- maybe (fail "search transition omitted exact compilation") pure
-          (preparedExactCompilation selected)
-        currentSelection <- maybe (fail "search transition omitted current source proof") pure
-          (compilationSourceSelection currentCompilation)
-        unless (Set.fromList [key | (key,_,_,_) <- selectedOriginalRows currentSelection]
-            == Set.fromList [("main","CanonicalSource"),("main","CanonicalDependency")]
-            && null (scopeProducts (compilationScope currentCompilation))
-            && null (scopeExecutionGraphs (compilationScope currentCompilation))) $
-          fail "search/product-role transition changed canonical owners or granted execution custody"
+        previousReceipts <- listDirectory (work </> ".exact-compilations")
+        selectCurrent
+        currentReceipts <- listDirectory (work </> ".exact-compilations")
+        currentReceipt <- case filter (`notElem` previousReceipts) currentReceipts of
+          [entry] -> pure (work </> ".exact-compilations" </> entry </> "receipt.cbor")
+          _ -> fail "search/product-role transition did not issue one exact source receipt"
+        currentFacts <- readReceiptCodecFacts work currentReceipt
+        unless (Set.fromList (codecReceiptSourceSelected currentFacts)
+            == Set.fromList [("main","CanonicalSource"),("main","CanonicalDependency")]) $
+          fail "search/product-role transition changed the canonical source closure"
     _ <- check compile purpose
     -- The next authored import must consume this cell's completed original
     -- capture through the same proof used after Rust persistence.
