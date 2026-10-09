@@ -448,6 +448,8 @@ impl EntryPreparation {
                 path: self.output.clone(),
                 source,
             })?;
+        checkpoint(EntryCheckpoint::SourceRevalidation)?;
+        sources.revalidate(source)?;
         checkpoint(EntryCheckpoint::Handoff)?;
         Ok(validated)
     }
@@ -470,6 +472,7 @@ pub(super) enum EntryCheckpoint {
     TreeSync,
     ReadyRename,
     PublicationSync,
+    SourceRevalidation,
     Handoff,
 }
 

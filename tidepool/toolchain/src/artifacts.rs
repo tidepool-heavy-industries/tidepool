@@ -7062,6 +7062,56 @@ mod module_product_tests {
 
     #[test]
     #[serial_test::serial]
+    fn retained_entry_final_source_drift_refuses_handoff_without_reexecution() {
+        use crate::toolchain::CompilerDeploymentConfiguration;
+        use production_entry::EntryCheckpoint;
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let source = authored.join("Input.hs");
+        let original = "module Input where\n__prepared = (37 :: Int)\n";
+        std::fs::write(&source, original).unwrap();
+        let sources = FrozenEntrySources::capture(&[authored], &source).unwrap();
+        let output = root.path().join("entry");
+        let changed_source = source.clone();
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reached = Arc::clone(&observed);
+        let error = production_entry::with_checkpoint_observer(
+            move |stage| {
+                if stage == EntryCheckpoint::SourceRevalidation {
+                    reached.store(true, std::sync::atomic::Ordering::SeqCst);
+                    std::fs::write(
+                        &changed_source,
+                        "module Input where\n__prepared = (91 :: Int)\n",
+                    )
+                    .unwrap();
+                }
+            },
+            || prepare_frozen_production_entry(&sources, root.path(), &output),
+        )
+        .unwrap_err();
+        assert!(
+            observed.load(std::sync::atomic::Ordering::SeqCst),
+            "drift occurs after entry publication, before returning validated custody"
+        );
+        assert!(matches!(error, CompileError::ExtractFailed(_)));
+        assert!(output.join("raw/certified-products.cbor").is_file());
+        let CompilerDeploymentConfiguration::Configured(authority) =
+            CompilerDeploymentConfiguration::from_env().unwrap()
+        else {
+            panic!("entry drift test requires matched compiler authority")
+        };
+        let selected = ProductionEntrySources::FrozenWorkspace(sources);
+        assert!(load_selected_production_entry(&output, &authority, &selected).is_err());
+        let spawns = tidepool_extract_cmd::extract_spawn_count();
+        std::fs::write(source, original).unwrap();
+        let recovered = load_selected_production_entry(&output, &authority, &selected).unwrap();
+        assert_eq!(recovered.source(), original);
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), spawns);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn retained_entry_late_cancellation_refuses_handoff_and_preserves_completed_original() {
         use crate::toolchain::CompilerDeploymentConfiguration;
         use production_entry::EntryCheckpoint;
