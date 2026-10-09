@@ -98,7 +98,10 @@ interface seal observations at admission and terminal publication. Package
 objects and shared libraries are not request snapshots. Current source selection,
 source/dependency and negative-candidate checks remain fresh. Terminal publication
 also re-observes captured original paths, refusing persistent drift while snapshot
-consumption stays independent of transient producer-path mutations.
+consumption stays independent of transient producer-path mutations. Prepared
+candidate results retain the issuer's opaque admission through certification and
+program retention. Durable support copies bind explicit path aliases to that
+same captured payload and budget; terminal publication observes both paths.
 
 Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
 original references. Exact-scope graph paths come from the retained immutable

@@ -105,6 +105,27 @@ requestInputBoundaries = withScratch $ \directory -> do
   missing <- try (capturedRequestInput owner other (digest bytes)) :: IO (Either IOException BS.ByteString)
   unless (all (either (const True) (const False)) [wrongSeal,missing])
     (fail "snapshot lookup reconstructed missing or conflicting authority from disk")
+  let copy = directory </> "durable-copy"
+  BS.writeFile copy bytes
+  aliased <- either fail pure (aliasRequestInputs [(copy,path,digest bytes)] owner)
+  (_,aliasedAgain) <- captureRequestInputs (Just aliased) (\reader -> reader copy 3)
+  copied <- capturedRequestInput aliasedAgain copy (digest bytes)
+  unless (copied == bytes && requestInputBytes aliasedAgain == requestInputBytes owner)
+    (fail "durable original alias retained or charged another payload")
+  unless (case aliasRequestInputs [(copy,path,replicate 64 '0')] owner of Left _ -> True; _ -> False)
+    (fail "durable original alias accepted a conflicting seal")
+  (_,independentCopy) <- captureRequestInputs Nothing (\reader -> reader copy 3)
+  transferredAlias <- either fail pure (mergeRequestInputs aliased [aliasedAgain,independentCopy])
+  unless (requestInputBytes transferredAlias == requestInputBytes owner)
+    (fail "alias transfer charged a captured copy twice")
+  removeFile copy
+  missingAlias <- revalidateRequestInputs transferredAlias
+  unless (either (const True) (const False) missingAlias)
+    (fail "terminal publication ignored a missing durable support alias")
+  stableAlias <- capturedRequestInput transferredAlias copy (digest bytes)
+  unless (stableAlias == bytes) (fail "deleted durable alias changed captured consumption")
+  BS.writeFile copy bytes
+  revalidateRequestInputs transferredAlias >>= either fail pure
   let config = "TIDEPOOL_REQUEST_CAPTURE_BYTES"
       restore Nothing = unsetEnv config
       restore (Just value) = setEnv config value

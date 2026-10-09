@@ -5,7 +5,7 @@
 -- independently admitted candidate/exact evidence remain compiler inputs.
 module Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces, newPreparedOriginalInterfaceArtifacts
+  , certifiedSourceOriginals, certifiedExecutionSource, writeCertifiedProductsKeeping, retainedOriginalInterfaces, newPreparedOriginalInterfaceArtifacts, retainProgramProducts, programLexicalRequirements, programSourceRequirements
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts, prepareOriginalProductsWithExecutor
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
@@ -29,7 +29,7 @@ import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe, isJust)
+import Data.Maybe (mapMaybe, isJust, fromMaybe, isNothing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -56,9 +56,11 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
-  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), scopeValueInterfaces
-  , revalidateExactScope, writeExactCompilation, scopeCanonicalInterfaces, scopeInterfaceBytes
-  , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected )
+  ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  , revalidateExactScope, writeCheckedExactCompilation, scopeCanonicalInterfaces, scopeInterfaceBytes, scopeOriginalBytes, canonicalProofInterfaceBytes, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
+  , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
+  , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
+  , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalSourceSha256 )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
   , prepareModuleProductEncoding, prepareModuleProductEncodingFromGroups, encodeModuleProductInventory )
@@ -75,18 +77,20 @@ import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..), WireProgram
   , GlobalDecl(..), ProjectedGroup(..) )
+import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(..), SourceRecipeUnavailable(..), ExecutionSourceRecipe(..)
   , ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceFailure(..), executionIdentityKey, issueExecutionSourceRecipe
-  , executionSourceInheritedOwners )
+  , executionSourceInheritedOwners, ExecutionSourceRef(..), executionSourceProspectiveReferences )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, LocalFinalizedAdmission
-  , finalizedLocalAdmissions, localFinalizedCore )
+  , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedSourceSha256 )
 import Tidepool.GhcPipeline
-  ( PreparedPipelineResult(..), PipelineResult(..), PreparedModuleObserver(..), PreparedModuleCompletionInputs(..)
-  , preparedFreshDependencies, preparedExactCompilation )
+  ( PreparedPipelineResult(..), pprAcceptedCandidates, PipelineResult(..), PreparedModuleObserver(..), PreparedModuleCompletionInputs(..)
+  , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
+  , preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
@@ -586,7 +590,12 @@ newPreparedOriginalInterfaceArtifacts prepared directory =
     readRetained artifact = case compilationScope <$> preparedExactCompilation prepared of
       Just scope | artifact `elem` ([iface | (iface,_,_) <- scopeInterfaces scope] ++ scopeValueInterfaces scope) ->
         scopeInterfaceBytes scope artifact
-      _ -> BS.readFile (exactPath artifact)
+      _ -> case [preparedCandidateProof admission | admission <- pprCandidateAdmissions prepared
+          , let candidate = preparedCandidateOriginal admission
+          , (candidateUnit candidate,candidateModule candidate,candidateInterface candidate)
+              == (exactUnit artifact,exactModule artifact,exactPath artifact)] of
+        [proof] -> canonicalProofInterfaceBytes proof artifact
+        _ -> fail "retained interface lacks its prepared admission owner"
 
 writeCertifiedProductsKeeping
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedModuleProducts
@@ -657,10 +666,6 @@ writeCertifiedProducts kind includes originalInterfaces outDir prepared productC
             { dependencyCacheSafe = False, dependencySelectionComplete = False }
     timeDetailPhase timing "module_products" "dependency_evidence" $
       writeDependencyEvidence outDir finalDependencies
-    forM_ (preparedExactCompilation prepared) $ \compilation -> do
-      verified <- revalidateExactScope hscEnv (compilationScope compilation)
-      either (ioError . userError) pure verified
-      writeExactCompilation compilation freshDependencies
     evidenceBytes <- timeDetailPhase timing "module_products" "certificate_inputs" $
       BS.readFile (outDir </> "dependencies.json")
     sourceRecipe <- case preparedExactCompilation prepared of
@@ -710,6 +715,9 @@ writeCertifiedProducts kind includes originalInterfaces outDir prepared productC
         let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
         captureFinalizedSourceOriginals compilation (pprAcceptedCandidates prepared)
           (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
+    revalidatePreparedCandidateInputs prepared
+    forM_ (preparedExactCompilation prepared) $ \compilation ->
+      writeCheckedExactCompilation hscEnv compilation freshDependencies
     pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions targetContext)
 
 
@@ -770,7 +778,7 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
       sidecar <- case Map.lookup owner retained of
         Just original -> do
           let (iface,path,seal) = admittedOriginalInterface original
-          captured <- BS.readFile path
+          captured <- canonicalProofOriginalBytes (admittedOriginalProof original) path seal
           unless (shaHex captured == seal && shaHex bytes == exactSha256 iface)
             (fail "retained original interface or package capture changed")
           pure captured
@@ -935,3 +943,184 @@ exactProgramProductVersionFromDigest scope unit owner sourceDigest iface product
       [(byte,"")] -> BS.cons byte (unhex rest)
       _ -> error "admitted digest is not hexadecimal"
     unhex _ = error "admitted digest is not even length"
+
+retainProgramProducts
+  :: FilePath -> PreparedPipelineResult
+  -> CertifiedOriginalProducts -> String -> ExactScope -> IO ExactScope
+retainProgramProducts directory prepared certified target initial = do
+  selected <- either fail pure (extendSourceSelectedOriginals
+    (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
+  finalized <- foldM retainInterface (selected,[],[],[]) (Map.toAscList localInterfaces)
+  (cached,additions,pendingProducts,pendingLexical) <- foldM retainCached finalized (zip [0::Int ..] (pprCandidateAdmissions prepared))
+  admitted <- extendExactScopeGeneration cached additions pendingProducts pendingLexical >>= either fail pure
+  promoted <- foldM retain admitted (zip [0::Int ..] products)
+  let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
+  inherited <- either throwIO pure
+    (extendExactExecutionSources (concatMap fst parcels) (map snd parcels) promoted)
+  retained <- case certifiedExecutionSource certified of
+    ExactExecutionSourceAvailable graph -> do
+      let prospective = [ExecutionSourceRef (executionOwnerIdentity owner) (executionGraphSha256 graph)
+            | owner <- executionGraphOwners graph, executionOwnerFresh owner
+            , executionModule (executionOwnerIdentity owner) /= target]
+      references <- either throwIO pure (executionSourceProspectiveReferences
+        (graph : scopeExecutionGraphs inherited) (scopeExecutionOwners inherited) prospective)
+      extended <- either throwIO pure
+        (extendExactExecutionSourcesWithinBudget [graph] references inherited)
+      pure (fromMaybe inherited extended)
+    ExactExecutionSourceUnavailable _ -> pure inherited
+    OrdinaryExecutionSource -> fail "exact program products lack exact source recipe outcome"
+  revalidatePreparedCandidateInputs prepared
+  let env = prHscEnv (pprPipelineResult prepared)
+  revalidateExactScope env retained >>= either fail pure
+  forM_ (preparedExactCompilation prepared) $ \compilation ->
+    writeCheckedExactCompilation env compilation (preparedFreshDependencies prepared)
+  pure retained
+  where
+    localInterfaces = Map.filterWithKey (\(_,owner) _ -> owner /= target)
+      (finalizedLocalAdmissions (certifiedFinalizedArtifacts certified))
+    products = [product' | product' <- certifiedOriginalProducts certified
+      , let (_, owner, _, _) = moduleProductInput product', T.unpack owner /= target]
+    supportOwners = [(candidateUnit candidate,candidateModule candidate)
+      | candidate <- pprAcceptedCandidates prepared]
+      ++ Map.keys localInterfaces
+    retainInterface (scope,additions,stagedProducts,stagedLexical) (key,proof) = do
+      canonical <- maybe (fail "supporting source original lacks complete canonical proof") pure
+        (Map.lookup key (certifiedSourceOriginals certified))
+      let row@(interface,_,packagesSha) = localFinalizedInterface proof
+          existing = [current | current@(artifact,_,_) <- selectedInterfacesOf scope additions
+            , (exactUnit artifact,exactModule artifact) == key]
+      lexicalRequirements <- programSourceRequirements prepared (fst key) (snd key)
+        >>= programLexicalRequirements scope supportOwners
+      case existing of
+        [] -> pure (scope, additions ++ [(row,ModuleInterfaceEvidence canonical)],
+          stagedProducts,stagedLexical ++ [(key,lexicalRequirements)])
+        [(old,_,oldPackagesSha)]
+          | exactSha256 old == exactSha256 interface
+          , exactRequirements old == exactRequirements interface
+          , oldPackagesSha == packagesSha
+          , lookup key (scopeLexical scope ++ stagedLexical) == Just lexicalRequirements
+          , Just (ModuleInterfaceEvidence oldCanonical) <- Map.lookup key (selectedEvidenceOf scope additions)
+          , canonicalCertificateSha256 oldCanonical == canonicalCertificateSha256 canonical -> pure (scope,additions,stagedProducts,stagedLexical)
+        _ -> fail "fresh finalization conflicts with an admitted original owner"
+    retainCached (scope,additions,stagedProducts,stagedLexical) (index, admission) = do
+      let candidate = preparedCandidateOriginal admission
+          proof = preparedCandidateProof admission
+          unit = candidateUnit candidate
+          owner = candidateModule candidate
+          key = (unit,owner)
+      interfaceBytes <- canonicalProofOriginalBytes proof (candidateInterface candidate) (candidateInterfaceSha256 candidate)
+      packageBytes <- canonicalProofOriginalBytes proof (candidatePackageImports candidate) (candidatePackageImportsSha256 candidate)
+      productBytes <- canonicalProofOriginalBytes proof (candidateProductPath candidate) (candidateProductSha256 candidate)
+      let requirements = candidateInterfaceRequirements candidate
+      lexicalRequirements <- programSourceRequirements prepared unit owner >>= programLexicalRequirements scope supportOwners
+      let groups = map originalGroupFromCandidate (candidateGroups candidate)
+          existingInterfaces = [(artifact,packages,sha)
+            | (artifact,packages,sha) <- selectedInterfacesOf scope additions
+            , (exactUnit artifact,exactModule artifact) == key]
+          existingProducts = [original | original <- scopeProducts scope ++ stagedProducts
+            , (originalUnit original,originalModule original) == key]
+      case (existingInterfaces,existingProducts) of
+        ([],[]) -> do
+          let stem = directory </> "retained-cached-original-" ++ show index
+              interfacePath = stem ++ ".hi"
+              packagesPath = stem ++ ".hi.packages"
+              productPath = stem ++ ".product.cbor"
+              interface = ExactIfaceArtifact unit owner interfacePath
+                (candidateInterfaceSha256 candidate) requirements
+              original = ExactProduct unit owner (candidateModuleVersion candidate)
+                (candidateInterfaceSha256 candidate) (candidateProductSha256 candidate) productPath groups
+          -- Keep the producer's original framing and module version. This
+          -- private support entry cannot become a replacement source owner.
+          BS.writeFile interfacePath interfaceBytes
+          BS.writeFile packagesPath packageBytes
+          BS.writeFile productPath productBytes
+          relocated <- either fail pure (relocateCanonicalInterfaceProof proof
+            (interface,packagesPath,candidatePackageImportsSha256 candidate)
+            (Just (productPath,candidateProductSha256 candidate)))
+          pure (scope,additions ++ [((interface,packagesPath,candidatePackageImportsSha256 candidate),ModuleInterfaceEvidence relocated)],
+            stagedProducts ++ [original],stagedLexical ++ [(key,lexicalRequirements)])
+        ([(interface,packagesPath,packagesSha)],[original])
+          | lookup key (scopeLexical scope ++ stagedLexical) == Just lexicalRequirements
+          , exactRequirements interface == requirements
+          , exactSha256 interface == candidateInterfaceSha256 candidate
+          , packagesSha == candidatePackageImportsSha256 candidate
+          , originalVersion original == candidateModuleVersion candidate
+          , originalIfaceSha256 original == candidateInterfaceSha256 candidate
+          , originalProductSha256 original == candidateProductSha256 candidate
+          , originalGroups original == groups -> do
+              currentInterface <- scopeOriginalBytes scope (exactPath interface) (exactSha256 interface)
+              currentPackages <- scopeOriginalBytes scope packagesPath packagesSha
+              currentProduct <- scopeOriginalBytes scope (originalProductPath original) (originalProductSha256 original)
+              unless (currentInterface == interfaceBytes && currentPackages == packageBytes
+                  && currentProduct == productBytes) $
+                fail "retained cached supporting original changed between cell slots"
+              case Map.lookup key (selectedEvidenceOf scope additions) of
+                Just (ModuleInterfaceEvidence retained)
+                  | canonicalCertificateSha256 retained == canonicalCertificateSha256 proof -> pure (scope,additions,stagedProducts,stagedLexical)
+                _ -> fail "cached source product conflicts with retained canonical evidence"
+        _ -> fail "cached source product conflicts with an admitted original owner"
+    selectedInterfacesOf scope additions = scopeInterfaces scope ++ map fst additions
+    selectedEvidenceOf scope additions = Map.union
+      (Map.fromList [((exactUnit interface,exactModule interface),evidence)
+        | ((interface,_,_),evidence) <- additions]) (scopeInterfaceEvidence scope)
+    retain scope (index, originalProduct) = do
+      let (unitText,ownerText,interfaceBytes,groups) = moduleProductInput originalProduct
+          unit = T.unpack unitText
+          owner = T.unpack ownerText
+          key = (unit,owner)
+      forM_ [original | original <- scopeProducts scope
+          , (originalUnit original,originalModule original) == key] $ \original ->
+        fail ("new native product replaces an admitted original owner: " ++ show key
+          ++ "; admitted ordinals=" ++ show (map originalOrdinal (originalGroups original))
+          ++ "; offered ordinals=" ++ show (map Execution.projectedOriginalOrdinal groups))
+      (sourceDigest,(interface,packagesPath,packagesSha)) <- case Map.lookup key (certifiedRetainedOriginals certified) of
+        Just original -> do
+          unless (case Map.lookup key (scopeInterfaceEvidence scope) of
+              Just (ModuleInterfaceEvidence retained) ->
+                canonicalCertificateSha256 retained == canonicalCertificateSha256 original
+              _ -> False) (fail "prepared retained original changed canonical authority")
+          row <- case [row | row@(artifact,_,_) <- scopeInterfaces scope
+              , (exactUnit artifact,exactModule artifact) == key] of
+            [row] -> pure row
+            _ -> fail "prepared retained original has no unique admitted interface"
+          pure (canonicalSourceSha256 original,row)
+        Nothing -> do
+          proof <- maybe (fail "supporting native product lacks captured finalization") pure
+            (Map.lookup key localInterfaces)
+          when (isNothing (localFinalizedCore proof))
+            (fail "supporting native product lacks finalized Core")
+          pure (localFinalizedSourceSha256 proof,localFinalizedInterface proof)
+      unless (exactSha256 interface == shaHex interfaceBytes)
+        (fail "supporting native product differs from finalized interface")
+      packageBytes <- case Map.lookup key (certifiedRetainedOriginals certified) of
+        Just original -> canonicalProofOriginalBytes original packagesPath packagesSha
+        Nothing -> BS.readFile packagesPath
+      unless (shaHex packageBytes == packagesSha)
+        (fail "supporting native package capture changed")
+      let productBytes = moduleProductBytes originalProduct
+      version <- case Map.lookup key (certifiedRetainedOriginals certified) of
+        Just _ -> maybe (fail "retained native product lacks its certified demand graph identity") pure
+          (Map.lookup key (certifiedRetainedNativeVersions certified))
+        Nothing -> pure (exactProgramProductVersionFromDigest scope unit owner sourceDigest interfaceBytes productBytes packageBytes)
+      let stem = directory </> "retained-original-" ++ show index
+          productPath = stem ++ ".product.cbor"
+          original = ExactProduct unit owner version
+            (shaHex interfaceBytes) (shaHex productBytes) productPath
+            (map originalGroupFromProjected groups)
+      BS.writeFile productPath productBytes
+      extendExactScopeGeneration scope [] [original] [] >>= either fail pure
+
+-- Interface requirements retain every exact hydration owner. Only selected
+-- lexical owners contribute edges to the instance/family traversal graph.
+programLexicalRequirements :: ExactScope -> [(String,String)] -> [(String,String)] -> IO [(String,String)]
+programLexicalRequirements scope freshOwners requirements = do
+  let interfaces = Set.fromList (freshOwners ++ [(exactUnit artifact,exactModule artifact)
+        | (artifact,_,_) <- scopeInterfaces scope])
+      lexical = Set.fromList (freshOwners ++ map fst (scopeLexical scope))
+  unless (all (`Set.member` interfaces) requirements)
+    (fail "program interface requirement leaves admitted exact owner closure")
+  pure (filter (`Set.member` lexical) requirements)
+
+programSourceRequirements :: PreparedPipelineResult -> String -> String -> IO [(String, String)]
+programSourceRequirements prepared unit owner =
+  either fail pure (preparedHomeRequirements prepared unit owner)

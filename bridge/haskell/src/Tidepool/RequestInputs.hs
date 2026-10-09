@@ -4,7 +4,7 @@
 module Tidepool.RequestInputs
   ( RequestOriginalInputs, RequestInputReader, captureRequestInputs
   , CapturedRequestInput, capturedInputBytes, capturedInputSha256, capturedRequestInputToken
-  , capturedRequestInput, mergeRequestInputs, requestInputRetained, retainRequestEncodedBytes, requestInputBytes, revalidateRequestInputs, revalidateRequestInputsWith ) where
+  , capturedRequestInput, mergeRequestInputs, aliasRequestInputs, requestInputRetained, retainRequestEncodedBytes, requestInputBytes, revalidateRequestInputs, revalidateRequestInputsWith ) where
 
 import Control.Exception (IOException, try, finally)
 import Control.Monad (unless, when, forM_, foldM)
@@ -30,15 +30,15 @@ capturedInputSha256 (CapturedRequestInput _ sha) = sha
 data CapturedInput = CapturedInput BS.ByteString String
 instance Eq CapturedInput where
   CapturedInput a shaA == CapturedInput b shaB = BS.length a == BS.length b && shaA == shaB
-data RequestOriginalInputs = RequestOriginalInputs Integer Integer (Map.Map FilePath CapturedInput) (Map.Map String CapturedInput)
+data RequestOriginalInputs = RequestOriginalInputs Integer Integer (Map.Map FilePath CapturedInput) (Map.Map String CapturedInput) (Map.Map FilePath FilePath)
   deriving Eq
 
 instance Show RequestOriginalInputs where
-  show (RequestOriginalInputs limit used inputs encoded) = "RequestOriginalInputs "
-    ++ show (limit,used,Map.size inputs,Map.size encoded)
+  show (RequestOriginalInputs limit used inputs encoded aliases) = "RequestOriginalInputs "
+    ++ show (limit,used,Map.size inputs,Map.size encoded,Map.size aliases)
 
 requestInputBytes :: RequestOriginalInputs -> Integer
-requestInputBytes (RequestOriginalInputs _ used _ _) = used
+requestInputBytes (RequestOriginalInputs _ used _ _ _) = used
 
 -- Each extension shares the preceding immutable map. The budget charges every
 -- retained encoded byte, including graphs, Core and home package sidecars;
@@ -55,12 +55,12 @@ captureRequestInputs previous action = do
         Just value -> case readMaybe value of
           Just amount | amount > 0 -> pure amount
           _ -> fail "TIDEPOOL_REQUEST_CAPTURE_BYTES must be a positive integer"
-      pure (RequestOriginalInputs limit 0 Map.empty Map.empty)
+      pure (RequestOriginalInputs limit 0 Map.empty Map.empty Map.empty)
   state <- newMVar (True,initial)
-  let readInput path bound = modifyMVar state $ \(open,originals@(RequestOriginalInputs limit used inputs encoded)) -> do
+  let readInput path bound = modifyMVar state $ \(open,originals@(RequestOriginalInputs limit used inputs encoded aliases)) -> do
         unless open (fail "request admission reader used after sealing")
         when (bound < 0) (fail "negative request input bound")
-        case Map.lookup path inputs of
+        case Map.lookup (Map.findWithDefault path path aliases) inputs of
           Just (CapturedInput bytes _) -> do
             when (BS.length bytes > bound) (fail "captured request input exceeds its consumer byte bound")
             pure ((open,originals),bytes)
@@ -71,7 +71,7 @@ captureRequestInputs previous action = do
               (fail "request original input capture exceeds its byte budget or artifact bound")
             let captured = CapturedInput bytes (digest bytes)
                 next = RequestOriginalInputs limit (used + toInteger (BS.length bytes))
-                  (Map.insert path captured inputs) encoded
+                  (Map.insert path captured inputs) encoded aliases
             pure ((open,next),bytes)
   result <- action readInput `finally` modifyMVar_ state (\(_,inputs) -> pure (False,inputs))
   (_,sealed) <- readMVar state
@@ -81,8 +81,8 @@ capturedRequestInput :: RequestOriginalInputs -> FilePath -> String -> IO BS.Byt
 capturedRequestInput inputs path expected = capturedInputBytes <$> capturedRequestInputToken inputs path expected
 
 capturedRequestInputToken :: RequestOriginalInputs -> FilePath -> String -> IO CapturedRequestInput
-capturedRequestInputToken (RequestOriginalInputs _ _ inputs _) path expected =
-  case Map.lookup path inputs of
+capturedRequestInputToken (RequestOriginalInputs _ _ inputs _ aliases) path expected =
+  case Map.lookup (Map.findWithDefault path path aliases) inputs of
     Just (CapturedInput bytes actual) | actual == expected -> pure (CapturedRequestInput bytes actual)
     _ -> fail "request input is absent or differs from its admitted seal"
 
@@ -93,44 +93,63 @@ mergeRequestInputs :: RequestOriginalInputs -> [RequestOriginalInputs]
   -> Either String RequestOriginalInputs
 mergeRequestInputs = foldM merge
   where
-    merge receiving (RequestOriginalInputs _ _ files encoded) = do
+    merge receiving (RequestOriginalInputs _ _ files encoded aliases) = do
       withFiles <- foldM addFile receiving (Map.toAscList files)
-      foldM addEncoded withFiles (Map.toAscList encoded)
-    addFile owner@(RequestOriginalInputs limit used files encoded) (path,input@(CapturedInput bytes _)) =
-      case Map.lookup path files of
+      withEncoded <- foldM addEncoded withFiles (Map.toAscList encoded)
+      aliasRequestInputs [(alias,path,sha) | (alias,path) <- Map.toAscList aliases
+        , Just (CapturedInput _ sha) <- [Map.lookup path files]] withEncoded
+    addFile owner@(RequestOriginalInputs limit used files encoded aliases) (path,input@(CapturedInput bytes _)) =
+      case Map.lookup (Map.findWithDefault path path aliases) files of
         Just old | old == input -> Right owner
         Just _ -> Left "request capture transfer conflicts with an admitted path"
         Nothing | used + toInteger (BS.length bytes) <= limit ->
           Right (RequestOriginalInputs limit (used + toInteger (BS.length bytes))
-            (Map.insert path input files) encoded)
+            (Map.insert path input files) encoded aliases)
         _ -> Left "request capture transfer exceeds the receiving byte budget"
-    addEncoded owner@(RequestOriginalInputs limit used files encoded) (sha,input@(CapturedInput bytes _)) =
+    addEncoded owner@(RequestOriginalInputs limit used files encoded aliases) (sha,input@(CapturedInput bytes _)) =
       case Map.lookup sha encoded of
         Just old | old == input -> Right owner
         Just _ -> Left "request capture transfer conflicts with an encoded input"
         Nothing | used + toInteger (BS.length bytes) <= limit ->
           Right (RequestOriginalInputs limit (used + toInteger (BS.length bytes))
-            files (Map.insert sha input encoded))
+            files (Map.insert sha input encoded) aliases)
         _ -> Left "request capture transfer exceeds the receiving byte budget"
+
+-- Durable copies of an admitted original share its payload and budget. Aliases
+-- are explicit custody transfers; both source and copied paths remain terminal
+-- observations, and neither is reopened by intermediate consumers.
+aliasRequestInputs :: [(FilePath,FilePath,String)] -> RequestOriginalInputs
+  -> Either String RequestOriginalInputs
+aliasRequestInputs aliasesToAdd receiving = foldM addAlias receiving aliasesToAdd
+  where
+    addAlias owner@(RequestOriginalInputs limit used files encoded aliases) (alias,path,sha) = do
+      let primary = Map.findWithDefault path path aliases
+      input <- case Map.lookup primary files of
+        Just value@(CapturedInput _ seal) | seal == sha -> Right value
+        _ -> Left "request alias lacks its admitted original seal"
+      case Map.lookup (Map.findWithDefault alias alias aliases) files of
+        Just old | old == input -> Right owner
+        Just _ -> Left "request alias conflicts with an admitted path"
+        Nothing -> Right (RequestOriginalInputs limit used files encoded (Map.insert alias primary aliases))
 
 -- An encoded graph issued inside the request has no mutable producer path.
 -- Its owning scope retains the bytes and facts together; charge those bytes in
 -- the same request budget without introducing a path or a second file store.
 retainRequestEncodedBytes :: [BS.ByteString] -> RequestOriginalInputs -> Maybe RequestOriginalInputs
 retainRequestEncodedBytes [] owner = Just owner
-retainRequestEncodedBytes (bytes:rest) owner@(RequestOriginalInputs limit used files encoded) =
+retainRequestEncodedBytes (bytes:rest) owner@(RequestOriginalInputs limit used files encoded aliases) =
   let sha = digest bytes
   in case Map.lookup sha encoded of
     Just _ -> retainRequestEncodedBytes rest owner
     Nothing | used + toInteger (BS.length bytes) <= limit ->
       retainRequestEncodedBytes rest (RequestOriginalInputs limit
         (used + toInteger (BS.length bytes)) files
-        (Map.insert sha (CapturedInput bytes sha) encoded))
+        (Map.insert sha (CapturedInput bytes sha) encoded) aliases)
     _ -> Nothing
 
 requestInputRetained :: RequestOriginalInputs -> FilePath -> String -> Bool
-requestInputRetained (RequestOriginalInputs _ _ inputs _) path expected =
-  case Map.lookup path inputs of
+requestInputRetained (RequestOriginalInputs _ _ inputs _ aliases) path expected =
+  case Map.lookup (Map.findWithDefault path path aliases) inputs of
     Just (CapturedInput _ actual) -> actual == expected
     Nothing -> False
 
@@ -141,12 +160,13 @@ revalidateRequestInputs :: RequestOriginalInputs -> IO (Either String ())
 revalidateRequestInputs inputs = withFileObservations (\observations -> revalidateRequestInputsWith observations inputs)
 
 revalidateRequestInputsWith :: FileObservations -> RequestOriginalInputs -> IO (Either String ())
-revalidateRequestInputsWith observations (RequestOriginalInputs _ _ inputs _) = do
-  result <- try $ forM_ (Map.toAscList inputs) $ \(path,CapturedInput bytes sha) -> do
+revalidateRequestInputsWith observations (RequestOriginalInputs _ _ inputs _ aliases) = do
+  let paths = Map.union inputs (Map.mapMaybe (`Map.lookup` inputs) aliases)
+  result <- try $ forM_ (Map.toAscList paths) $ \(path,CapturedInput bytes sha) -> do
     current <- observeFile observations path (Just (BS.length bytes))
     unless (observedByteCount current == BS.length bytes && observedSha256 current == sha)
       (fail "request original input changed before publication")
-  pure (either (Left . show) Right (result :: Either IOException ()))
+  pure (either (Left . ("request original input changed before publication: " ++) . show) Right (result :: Either IOException ()))
 
 digest :: BS.ByteString -> String
 digest = concatMap (\byte -> let rendered = showHex byte ""

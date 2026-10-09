@@ -48,7 +48,7 @@ import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope, newOriginalInterfaceArtifacts
   , noCheckedValueImports, installExactLexicalGraph )
 import Tidepool.GhcPipeline
-  ( PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), runPipelineSelected )
+  ( PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), pprAcceptedCandidates, runPipelineSelected )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedStg (pmModule, pmBindings, pmSiteRejections)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)

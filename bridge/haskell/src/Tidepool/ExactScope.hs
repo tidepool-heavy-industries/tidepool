@@ -9,7 +9,7 @@ module Tidepool.ExactScope
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
-  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes
+  , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
   , captureFinalizedSourceOriginals, compilationOriginalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
@@ -18,7 +18,7 @@ module Tidepool.ExactScope
   , canonicalProofMatchesOwner
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , readExactScope, revalidateExactScope, validateExactScopeEnvironment, scopeValueInterfaces
-  , scopeInterfaceBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes
+  , scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes
   , writeExactCompilation, writeCheckedExactCompilation, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
@@ -56,7 +56,7 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isAlreadyExistsError)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
 import GHC.Unit.Module.ModIface (ModIface)
-import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, CapturedRequestInput, capturedInputBytes, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, mergeRequestInputs, capturedRequestInput, revalidateRequestInputsWith)
+import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, CapturedRequestInput, capturedInputBytes, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -716,6 +716,45 @@ canonicalProofInterfaceBytes proof iface = do
   case proofInputCustody proof of
     CapturedCanonicalInputs owner -> capturedRequestInput owner (exactPath iface) (exactSha256 iface)
     DescriptorInputs -> fail "canonical interface has not been captured for consumption"
+
+canonicalProofOriginalBytes :: CanonicalInterfaceProof -> FilePath -> String -> IO BS.ByteString
+canonicalProofOriginalBytes proof path sha = case proofInputCustody proof of
+  CapturedCanonicalInputs owner -> capturedRequestInput owner path sha
+  DescriptorInputs -> fail "canonical originals have not been captured for consumption"
+
+revalidateCanonicalProofInputs :: [CanonicalInterfaceProof] -> IO (Either String ())
+revalidateCanonicalProofInputs proofs = case traverse capturedOwner proofs of
+  Left reason -> pure (Left reason)
+  Right [] -> pure (Right ())
+  Right (first:rest) -> case mergeRequestInputs first rest of
+    Left reason -> pure (Left reason)
+    Right owner -> revalidateRequestInputs owner
+  where
+    capturedOwner proof = case proofInputCustody proof of
+      CapturedCanonicalInputs owner -> Right owner
+      DescriptorInputs -> Left "canonical originals have not been captured for publication"
+
+-- A retained support row changes paths, never its authenticated facts. The
+-- request owner records aliases of the one captured payload for durable copies.
+relocateCanonicalInterfaceProof :: CanonicalInterfaceProof -> InterfaceRow -> Maybe (FilePath,String)
+  -> Either String CanonicalInterfaceProof
+relocateCanonicalInterfaceProof proof row@(iface,packages,packageSha) native = do
+  let (oldIface,oldPackages,oldPackageSha) = proofInterfaceInput proof
+  unless (iface {exactPath=exactPath oldIface} == oldIface && packageSha == oldPackageSha
+      && fmap snd native == fmap snd (proofNativeInput proof))
+    (Left "retained canonical row changes its authenticated original facts")
+  owner <- case proofInputCustody proof of
+    CapturedCanonicalInputs captured -> Right captured
+    DescriptorInputs -> Left "retained canonical row lacks captured custody"
+  relocated <- aliasRequestInputs
+    ([(exactPath iface,exactPath oldIface,exactSha256 iface),(packages,oldPackages,packageSha)]
+      ++ [(new,old,sha) | Just (new,sha) <- [native], Just (old,_) <- [proofNativeInput proof]]) owner
+  pure proof {proofInterfaceInput=row,proofNativeInput=native,proofInputCustody=CapturedCanonicalInputs relocated}
+
+scopeOriginalBytes :: ExactScope -> FilePath -> String -> IO BS.ByteString
+scopeOriginalBytes scope path sha = do
+  owner <- maybe (fail "exact scope input custody is not sealed") pure (scopeCapturedInputs scope)
+  capturedRequestInput owner path sha
 
 captureCoreWith :: RequestInputReader -> CanonicalInterfaceAdmission -> IO ()
 captureCoreWith reader admission = do

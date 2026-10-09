@@ -3,7 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..), PreparedPipelineResult(..), PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
+  ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..), PreparedPipelineResult(..), AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
   , PreparedDependencies, preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , ProgramSourceImports, retainProgramSourceImports, withProgramSourceImports
   , runPipelineSelected, runPipelineSessionSelected
@@ -257,8 +257,8 @@ import Tidepool.ExactScope
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission, scopeCanonicalInterfaces
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
-  , validateCandidateCanonicalInterfaceProof, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes
-  , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
+  , validateCandidateCanonicalInterfaceProof, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, revalidateCanonicalProofInputs
+  , canonicalCertificateSha256, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements
   , scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
 import Tidepool.ExecutionSource
@@ -366,9 +366,24 @@ data PreparedPipelineResult = PreparedPipelineResult
   , pprProductInterfaces :: Map.Map ModuleName ModIface
   , pprFinalizedModules :: Map.Map ModuleName FinalizedModule
   , pprPackageImports :: Map.Map ModuleName PackageImportEvidence
-  , pprAcceptedCandidates :: [ModuleCandidate]
+  , pprCandidateAdmissions :: [AdmittedSourceCandidate]
   , pprOriginalBindings :: Map.Map Name SymbolIdentity
   }
+
+-- The opaque admissions retain the issuer's selected descriptor, loading
+-- demand and captured owner as one value through every prepared consumer.
+pprAcceptedCandidates :: PreparedPipelineResult -> [ModuleCandidate]
+pprAcceptedCandidates = map admittedCandidateOriginal . pprCandidateAdmissions
+
+preparedCandidateOriginal :: AdmittedSourceCandidate -> ModuleCandidate
+preparedCandidateOriginal = admittedCandidateOriginal
+
+preparedCandidateProof :: AdmittedSourceCandidate -> CanonicalInterfaceProof
+preparedCandidateProof = admittedCandidateProof
+
+revalidatePreparedCandidateInputs :: PreparedPipelineResult -> IO ()
+revalidatePreparedCandidateInputs prepared =
+  revalidateAdmittedCandidateInputs (prHscEnv (pprPipelineResult prepared)) (pprCandidateAdmissions prepared)
 
 -- | One publication owns both source lookup and retained exact imports.
 -- Constructors stay private so consumers cannot pair unrelated compilations.
@@ -3886,7 +3901,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           case [(tcg, probes) | Just (tcg, probes) <- checked] of
             [(tcg, probes)] -> do
               env <- getSession
-              valid <- liftIO (revalidateAcceptedCandidates (Map.elems acceptedCandidates))
+              valid <- liftIO (revalidateAcceptedCandidates env (Map.elems acceptedCandidates))
               unless valid $ liftIO $ ioError $ userError
                 "accepted metadata candidate changed before checked receipt"
               forM_ exactCompilation $ \compilation -> do
@@ -3917,12 +3932,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , pprProductInterfaces = productInterfaces
               , pprFinalizedModules = finalizedModules
               , pprPackageImports = packageRoots
-              , pprAcceptedCandidates = []
+              , pprCandidateAdmissions = []
               , pprOriginalBindings = Map.empty
               }
           PreparedProducts _ -> do
             (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
-            valid <- liftIO $ revalidateAcceptedCandidates (Map.elems acceptedCandidates)
+            valid <- liftIO $ revalidateAcceptedCandidates (prHscEnv result) (Map.elems acceptedCandidates)
             when (not valid) $ liftIO $ ioError $ userError
               "accepted module candidate changed before artifact publication"
             originalBindings <- liftIO (availableOriginalBindings (prHscEnv result))
@@ -3935,7 +3950,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , pprProductInterfaces = productInterfaces
               , pprFinalizedModules = finalizedModules
               , pprPackageImports = packageRoots
-              , pprAcceptedCandidates = map admittedCandidateOriginal (Map.elems acceptedCandidates)
+              , pprCandidateAdmissions = Map.elems acceptedCandidates
               , pprOriginalBindings = originalBindings
               }
           PreparedSegmentProducts _ candidatePath -> do
@@ -4432,38 +4447,25 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
     emitCount timing "candidate_admission_rows_omitted" (toInteger (max 0 (Map.size observed - 128)))
   pure result
 
-revalidateAcceptedCandidates :: [AdmittedSourceCandidate] -> IO Bool
-revalidateAcceptedCandidates candidates = and <$> forM candidates (\admission -> do
-  let candidate = admittedCandidateOriginal admission
-      proof = admittedCandidateProof admission
-  readBack <- try $ do
+-- Every promoted candidate shares the batch's captured owner. Observe its
+-- union once, then check fresh sources and the current selected package roots.
+-- No current observation survives this terminal operation.
+revalidateAdmittedCandidateInputs :: HscEnv -> [AdmittedSourceCandidate] -> IO ()
+revalidateAdmittedCandidateInputs env candidates = do
+  revalidateCanonicalProofInputs (map admittedCandidateProof candidates) >>= either fail pure
+  forM_ candidates $ \admission -> do
+    let candidate = admittedCandidateOriginal admission
     (source, _) <- sourceEvidenceWithFingerprint (candidateSource candidate)
-    interface <- BS.readFile (candidateInterface candidate)
-    productBytes <- BS.readFile (candidateProductPath candidate)
-    certificate <- bounded (canonicalCertificatePath proof) (4 * 1024 * 1024)
-    coreValid <- case admittedCandidateLoading admission of
-      CandidateInterfaceOnly -> pure True
-      CandidateLoadForExecution -> case canonicalCoreArtifact proof of
-        Nothing -> pure False
-        Just core -> (== canonicalCoreSha256 core) . hexBytes . SHA256.hash
-          <$> bounded (canonicalCorePath core) (32 * 1024 * 1024)
-    packageImports <- readPackageImports (candidatePackageImports candidate)
-      (candidatePackageImportsSha256 candidate)
-      (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
-        (candidateInterface candidate) (candidateInterfaceSha256 candidate) [])
-    pure (dependencySourceSha256 source == candidateSourceSha256 candidate
-      && hexBytes (SHA256.hash interface) == candidateInterfaceSha256 candidate
-      && hexBytes (SHA256.hash productBytes) == candidateProductSha256 candidate
-      && hexBytes (SHA256.hash certificate) == canonicalCertificateSha256 proof
-      && coreValid
-      && either (const False) (const True) packageImports)
-    :: IO (Either IOException Bool)
-  pure (either (const False) id readBack))
-  where
-    bounded path' limit = do
-      bytes <- readFileAtMost path' (limit + 1)
-      unless (BS.length bytes <= limit) (ioError (userError "candidate artifact exceeds byte bound"))
-      pure bytes
+    unless (dependencySourceSha256 source == candidateSourceSha256 candidate)
+      (fail "accepted module candidate source changed before artifact publication")
+  let roots = Set.toAscList (Set.fromList
+        (concatMap (packageInterfaces . admittedCandidateRoots) candidates))
+  forM_ roots $ \root -> validatePackageImportRoot env root >>= either fail pure
+
+revalidateAcceptedCandidates :: HscEnv -> [AdmittedSourceCandidate] -> IO Bool
+revalidateAcceptedCandidates env candidates = do
+  validated <- try (revalidateAdmittedCandidateInputs env candidates) :: IO (Either IOException ())
+  pure (either (const False) (const True) validated)
 
 dependencyQualifier :: PkgQual -> DependencyQualifier
 dependencyQualifier NoPkgQual = DependencyUnqualified

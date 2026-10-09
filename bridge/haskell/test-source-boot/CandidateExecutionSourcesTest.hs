@@ -18,7 +18,7 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactScope
 import Tidepool.ExecutionSource
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..)
+  ( PipelineSelection(..), PreparedPipelineResult(..), pprAcceptedCandidates, PipelineResult(..)
   , CompilePurpose(..), runPipelineSessionSelected )
 import Tidepool.ModuleCandidates
 import Tidepool.Session (emptySessionScope, SessionScope(..))

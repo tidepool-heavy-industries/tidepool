@@ -33,7 +33,7 @@ import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Data.List (isInfixOf, isPrefixOf, sort, sortOn, stripPrefix)
-import Data.Maybe (catMaybes, isJust, isNothing, maybeToList)
+import Data.Maybe (mapMaybe, catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -114,7 +114,7 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
-  , requireOriginalExecutableGlobals, certifiedExecutionSource
+  , requireOriginalExecutableGlobals, certifiedExecutionSource, newPreparedOriginalInterfaceArtifacts, retainProgramProducts
   , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
   , prepareOriginalProductsWithCache, newOriginalProjectionCollector
   , observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
@@ -179,9 +179,9 @@ import Tidepool.ExactHydration
   , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
 import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface, ExactContextForkFailure(..))
 import Tidepool.ExtractUtil (getLibdir)
-import Tidepool.HomeProducts (hydrateCandidateHomeProducts)
+import Tidepool.HomeProducts (hydrateCandidateHomeProducts, admittedOriginalProof, admittedOriginalInterface)
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..), PipelineResult(..), CheckedEnvironmentResult(..)
+  ( PipelineSelection(..), PreparedPipelineResult(..), pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, PipelineResult(..), CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , retainProgramSourceImports, withProgramSourceImports
   , finalizedTidyGuts, FinalizedExecutionFailure(..)
@@ -207,7 +207,7 @@ import Tidepool.ExactScope
   , scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
   , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(checkedValueInterfaces), CheckedItemAdmission(..), CheckedItemPurpose(..)
-  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope, validateExactScopeEnvironment
+  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, validateExactScopeEnvironment
   , scopeModuleInterfaceProofs, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
@@ -979,37 +979,57 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
       (fail "instrumented arbitrary runIO quoter was treated as cache-safe")
     let directory = work </> "completed-originals"
     createDirectory directory
-    originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult completed))
-      (pprFinalizedModules completed) (retainedOriginalInterfaces completed) directory
+    let candidatePaths = concat
+          [[candidateInterface candidate,candidatePackageImports candidate,candidateProductPath candidate,
+            canonicalCertificatePath (preparedCandidateProof admission)]
+          | admission <- pprCandidateAdmissions completed
+          , let candidate = preparedCandidateOriginal admission]
+    candidateBytes <- mapM BS.readFile candidatePaths
+    let candidateIfaceBytes = case candidateBytes of bytes:_ -> bytes; [] -> BS.empty
+    let restoreCandidates = sequence_ (zipWith BS.writeFile candidatePaths candidateBytes)
+        disturbCandidates missing = forM_ candidatePaths $ \path ->
+          if missing then removeFile path else BS.writeFile path (BS.singleton 0)
+    originals <- bracket (disturbCandidates True) (const restoreCandidates) $ \_ ->
+      newPreparedOriginalInterfaceArtifacts completed directory
+    when reuseCandidate $ forM_ [True,False] $ \missing -> do
+      let rejectedDirectory = directory </> if missing then "certify-missing" else "certify-replaced"
+      createDirectory rejectedDirectory
+      refused <- bracket (disturbCandidates missing) (const restoreCandidates) $ \_ ->
+        try (writeCertifiedProductsKeeping includes originals rejectedDirectory completed Nothing [])
+          :: IO (Either IOException CertifiedOriginalProducts)
+      unless (case refused of Left exception -> "request original input" `isInfixOf` show exception; Right _ -> False)
+        (fail "certification failed before consuming captured candidate originals or published producer drift")
     certified <- writeCertifiedProductsKeeping includes originals directory completed Nothing []
     case certifiedExecutionSource certified of
       ExactExecutionSourceUnavailable _ -> pure ()
       _ -> fail "arbitrary runIO compilation unexpectedly issued an execution source recipe"
-    let proofs = certifiedSourceOriginals certified
-        admissions = finalizedLocalAdmissions (certifiedFinalizedArtifacts certified)
-    rows <- forM (Map.keys proofs) $ \key -> do
-      admission <- maybe (fail "completed original lost finalized interface") pure (Map.lookup key admissions)
-      lexical <- either fail pure (preparedHomeRequirements completed (fst key) (snd key))
-      pure (key,localFinalizedInterface admission,lexical)
-    cachedRows <- forM (pprAcceptedCandidates completed) $ \candidate -> do
-      let key = (candidateUnit candidate,candidateModule candidate)
-          row = (ExactIfaceArtifact (fst key) (snd key) (candidateInterface candidate)
-            (candidateInterfaceSha256 candidate) (candidateInterfaceRequirements candidate),
-            candidatePackageImports candidate,candidatePackageImportsSha256 candidate)
-      lexical <- either fail pure (preparedHomeRequirements completed (fst key) (snd key))
-      pure (key,row,lexical)
-    let allRows = rows ++ cachedRows
-        interfaces = [row | (_,row,_) <- allRows]
-    cachedProofs <- forM (pprAcceptedCandidates completed) $ \candidate -> do
-      proof <- validateCandidateCanonicalInterfaceProof (scopeProducerSha256 admitted) interfaces candidate
-        >>= either fail pure
-      pure ((candidateUnit candidate,candidateModule candidate),proof)
-    let allProofs = Map.union proofs (Map.fromList cachedProofs)
-    retained <- extendExactScopeGeneration admitted
-      [(row,ModuleInterfaceEvidence (allProofs Map.! key)) | (key,row,_) <- allRows]
-      [] [(key,lexical) | (key,_,lexical) <- allRows] >>= either fail pure
+    when reuseCandidate $ forM_ [True,False] $ \missing -> do
+      let rejectedDirectory = directory </> if missing then "retain-missing" else "retain-replaced"
+      createDirectory rejectedDirectory
+      refused <- bracket (disturbCandidates missing) (const restoreCandidates) $ \_ ->
+        try (retainProgramProducts rejectedDirectory completed certified "CompletedOriginalConsumer" admitted)
+          :: IO (Either IOException ExactScope)
+      copied <- BS.readFile (rejectedDirectory </> "retained-cached-original-0.hi")
+      unless (copied == candidateIfaceBytes
+          && case refused of Left exception -> "request original input" `isInfixOf` show exception; Right _ -> False)
+        (fail "retention reopened candidate originals or published persistent producer drift")
+    retained <- retainProgramProducts directory completed certified "CompletedOriginalConsumer" admitted
+    let inheritedCandidateParcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates completed)
+    when reuseCandidate $ bracket (disturbCandidates True) (const restoreCandidates) $ \_ -> do
+      let rows = [artifact | (artifact,_,_) <- scopeInterfaces retained
+            , exactModule artifact == "MetadataQuoteSupport"]
+      case rows of
+        [artifact] -> do
+          captured <- scopeInterfaceBytes retained artifact
+          unless (captured == candidateIfaceBytes && exactPath artifact `notElem` candidatePaths)
+            (fail "retained candidate did not transfer the captured owner to its durable support path")
+        _ -> fail "retained candidate has no unique durable support row"
+      refused <- revalidateExactScope (prHscEnv (pprPipelineResult completed)) retained
+      unless (either (const True) (const False) refused)
+        (fail "copied support alias hid persistent producer drift from terminal publication")
+    revalidateExactScope (prHscEnv (pprPipelineResult completed)) retained >>= either fail pure
     when reuseCandidate $ do
-      unaccepted <- retainProgramSourceImports Nothing (completed {pprAcceptedCandidates=[]})
+      unaccepted <- retainProgramSourceImports Nothing (completed {pprCandidateAdmissions=[]})
         (certifiedFinalizedArtifacts certified) retained
       unless (isNothing unaccepted)
         (fail "unaccepted cached provider issued a completed import decision")
@@ -1051,8 +1071,13 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
             && Map.keys (pprFinalizedModules quotedAgain) == [mkModuleName "CompletedOriginalConsumer"]
             && all (\owner -> ("tidepool-canonical-frontend module=" ++ owner)
                 `notElem` lines diagnostics) ["MetadataQuoter", "MetadataQuoteSupport"]
-            && null (scopeExecutionGraphs retained) && null (scopeExecutionOwners retained)) $
-          fail "later same-cell quotation lost source-less canonical Core execution"
+            && scopeExecutionGraphs retained == concatMap fst inheritedCandidateParcels
+            && scopeExecutionOwners retained == map snd inheritedCandidateParcels) $
+          fail ("later same-cell quotation lost source-less canonical Core execution: " ++ show
+            (reuseCandidate,hasIntResultLiteral 42 (prBinds (pprPipelineResult quotedAgain)),
+              counterValues "exact_execution_original_load_owners" diagnostics,
+              Map.keys (pprFinalizedModules quotedAgain),length (scopeExecutionGraphs retained),
+              length (scopeExecutionOwners retained)) ++ "\n" ++ diagnostics)
         runs <- lines <$> readFile marker
         unless (runs == initialRuns ++ ["executed"]) $
           fail "later same-cell quotation did not execute its original quoter exactly once"
@@ -3611,6 +3636,25 @@ candidateRequestSitedSiblingsAt work = do
       && coldIdentity /= changedIdentity && restoredHit && coldIdentity == restoredIdentity
       && not (preparedSiteDependenciesEquivalent cold changed)) $
     fail "canonical original site cache rebuilt a retained A/B/A view or reused a changed helper"
+  reofferedScope <- readExactScope fullScopePath >>= either fail pure
+  prepareReoffered <- newPreparedOriginalModuleTaskPreparer fullEnv fullBodies reofferedScope
+  prepareReoffered siblingsA fullOwner >>= \case
+    Just (admission,PreparedBodyReused,task) -> do
+      reusedBody <- runPreparedModuleTask task >>= evaluate >>= makeStableName
+      let key = ("main","HydratedRequestTarget")
+      currentProof <- maybe (fail "reoffered original lacks its current canonical proof") pure
+        (Map.lookup key (scopeModuleInterfaceProofs reofferedScope))
+      oldProof <- maybe (fail "original scope lost its canonical proof") pure
+        (Map.lookup key (scopeModuleInterfaceProofs fullScope))
+      returnedIdentity <- evaluate (admittedOriginalProof admission) >>= makeStableName
+      currentIdentity <- evaluate currentProof >>= makeStableName
+      oldIdentity <- evaluate oldProof >>= makeStableName
+      let currentRows = [row | row@(artifact,_,_) <- scopeInterfaces reofferedScope
+            , (exactUnit artifact,exactModule artifact) == key]
+      unless (reusedBody == coldIdentity && returnedIdentity == currentIdentity
+          && returnedIdentity /= oldIdentity && currentRows == [admittedOriginalInterface admission])
+        (fail "cached original body retained an old request admission instead of issuing current custody")
+    _ -> fail "new admitted scope rebuilt an unchanged cached original body"
   bracket (lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
     (maybe (unsetEnv "TIDEPOOL_DISABLE_BODY_REUSE") (setEnv "TIDEPOOL_DISABLE_BODY_REUSE")) $ \_ -> do
       setEnv "TIDEPOOL_DISABLE_BODY_REUSE" "1"
