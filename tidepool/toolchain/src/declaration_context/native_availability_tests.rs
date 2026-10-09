@@ -517,16 +517,19 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
     // This component oracle uses the existing finalized/native proof fixtures.
     // Genuine compiler G1-to-G2 execution is covered by the authored fixture.
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(1)).module_name();
     for length in 1..=4 {
         let products = (1..=length + 1)
             .map(|version| {
                 crate::certified_products::fixture_native_declaration_product(
-                    original_groups_fixture_with_interface(
-                        "CanonicalHistory",
+                    crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+                        "main",
+                        &module,
                         vec![(7, vec![]), (9001, vec![])],
                         version,
                         &BTreeMap::new(),
                         b"shared canonical interface".to_vec(),
+                        &BTreeMap::new(),
                     ),
                     producer.sha256(),
                     1,
@@ -702,7 +705,19 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .is_err(),
             "full body selections cannot choose an ambiguous canonical-only namespace"
         );
-        let different = product("CanonicalHistory", 240);
+        let different = fixture_finalized_product(
+            crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+                "main",
+                &module,
+                vec![(7, vec![]), (9001, vec![])],
+                240,
+                &BTreeMap::new(),
+                b"different canonical interface".to_vec(),
+                &BTreeMap::new(),
+            ),
+            producer.sha256(),
+        );
+        let different = recovered_witness_fixtures(&[different]).remove(0).product;
         assert_ne!(different.module_interface(), current.module_interface());
         let different = Arc::new(ArtifactEntry::original(producer.sha256(), different).unwrap());
         let error = context
@@ -782,7 +797,7 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
 }
 
 // The existing native-origin fixture supplies genuine certificates for narrowed
-// selections and an old dependency island beside a newer same-module issuer.
+// selections and the authenticated G2-to-G1 native dependency.
 pub(crate) fn assert_selected_authored_private_inputs(
     certificate: &Arc<CertifiedAuthoredDeclaration>,
     dependent: &CertifiedAuthoredDeclaration,

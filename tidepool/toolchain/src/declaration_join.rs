@@ -2215,35 +2215,144 @@ mod authored_tests {
         )
         .descriptor
         .id;
-        // Retain the issued native roots while withdrawing source lexical
-        // owners, so exact preparation must supply their private inputs.
-        let context =
-            ExactDeclarationContext::new(&[baseline, Arc::new(result)], &[], Vec::new()).unwrap();
-        assert!(context.authored_native_root(1).is_ok());
-        assert!(context.authored_native_root(2).is_ok());
-        assert!(context
+        let certificates = [baseline, Arc::new(result)];
+        let hidden =
+            Arc::new(ExactDeclarationContext::new(&certificates, &[], Vec::new()).unwrap());
+        let first_root = hidden.authored_native_root(1).unwrap();
+        let result_root = hidden.authored_native_root(2).unwrap();
+        assert!(hidden
             .compiler_input_roles()
             .iter()
             .any(|role| role.interface() == result_interface && role.original().is_none()));
-        let selected_before = context.artifact_view().selected_native_groups();
+        let selected_before = hidden.artifact_view().selected_native_groups();
+        let dependencies_before = hidden.artifact_view().dependencies();
+        let include = [root.path().to_path_buf()];
+        let private_offer = crate::artifacts::ModuleCandidateOffer::select_in_context(
+            endpoint.identity().producer_bytes(),
+            &include,
+            &root.path().join("hidden-native-offer"),
+            Arc::new(ExactCompileContext::new(Arc::clone(&hidden))),
+        )
+        .unwrap();
+        let packet: ciborium::value::Value = ciborium::de::from_reader(
+            std::fs::read(private_offer.exact_scope_path().unwrap())
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        let offered = packet.as_array().unwrap()[6]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row.as_array())
+            .filter(|row| {
+                row[0].as_text() == Some(&result_owner.unit)
+                    && row[1].as_text() == Some(&result_owner.module)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            offered.len(),
+            1,
+            "hidden G2 must have its exact private native offer"
+        );
+        let text = |value| ciborium::value::Value::Text(value);
+        assert_eq!(
+            &offered[0][..5],
+            &[
+                text(result_owner.unit.clone()),
+                text(result_owner.module.clone()),
+                text(crate::checked_cell::hex(&result_owner.module_version.0)),
+                text(crate::checked_cell::hex(&result_owner.skinny_iface_sha256)),
+                text(crate::checked_cell::hex(&result_owner.product_sha256)),
+            ]
+        );
+        assert!(hidden.lexical_graph().is_empty());
+        assert_eq!(
+            hidden.artifact_view().selected_native_groups(),
+            selected_before
+        );
         std::fs::remove_file(baseline_path).unwrap();
         std::fs::remove_file(path).unwrap();
-        let context = Arc::new(context);
-        let compiled = crate::artifacts::compile_invocation_in_context(
-            &crate::artifacts::CompileInvocation {
-                source: "module ExactAuthoredConsumer where\nimport Tidepool.Session.Lib.G2 (answer)\nresult = answer\n{-# NOINLINE result #-}\n",
-                targets: &["result"],
-                include: &[root.path().to_path_buf()],
-                fallback_module_name: "ExactAuthoredConsumer",
-            },
-            context.clone(),
+        let invocation = crate::artifacts::CompileInvocation {
+            source: "module ExactAuthoredConsumer where\nimport Tidepool.Session.Lib.G2 (answer)\nresult = answer\n{-# NOINLINE result #-}\n",
+            targets: &["result"], include: &include,
+            fallback_module_name: "ExactAuthoredConsumer",
+        };
+        // Private executable bytes do not authorize a fresh authored import of
+        // a hidden owner. Rust retains the typed outer refusal; the diagnostic
+        // renders the Haskell source-selection failure and its exact owner.
+        let error = match crate::artifacts::compile_invocation_in_context(
+            &invocation,
+            Arc::clone(&hidden),
             |_, _, _| {},
-        )
-        .expect("exact executable invocation retains selected originals without source replay");
+        ) {
+            Ok(_) => {
+                panic!("private native availability must not grant authored lexical authority")
+            }
+            Err(error) => error,
+        };
+        let CompileError::InputRejected(diagnostics) = error else {
+            panic!("hidden authored import must be an input refusal: {error:?}");
+        };
+        let [diagnostic] = diagnostics.as_slice() else {
+            panic!("source-selection refusal must have one complete diagnostic");
+        };
+        assert_eq!(diagnostic.severity, crate::diag::DiagnosticSeverity::Error);
+        assert!(diagnostic.span.is_none());
+        assert_eq!(
+            diagnostic.message,
+            format!(
+                "OriginalSourceSelectionRejected (ExecutionSourceUnavailable ({:?},{:?}))",
+                result_owner.unit, result_owner.module,
+            )
+        );
+        assert_eq!(
+            hidden.artifact_view().selected_native_groups(),
+            selected_before
+        );
+        assert_eq!(hidden.artifact_view().dependencies(), dependencies_before);
+
+        let context = Arc::new(
+            ExactDeclarationContext::new(
+                &certificates,
+                &[],
+                vec![ExactLexicalNode {
+                    owner: ExactModuleIdentity {
+                        unit: result_owner.unit.clone(),
+                        module: result_owner.module.clone(),
+                    },
+                    imports: Vec::new(),
+                }],
+            )
+            .unwrap(),
+        );
+        assert_eq!(context.authored_native_root(1).unwrap(), first_root);
+        assert_eq!(context.authored_native_root(2).unwrap(), result_root);
+        assert!(context
+            .compiler_input_roles()
+            .iter()
+            .any(
+                |role| role.interface() == result_interface && role.original() == Some(result_root)
+            ));
+        assert!(context
+            .compiler_input_roles()
+            .iter()
+            .all(|role| role.original() != Some(first_root)));
         assert_eq!(
             context.artifact_view().selected_native_groups(),
             selected_before
         );
+        let compiled = crate::artifacts::compile_invocation_in_context(
+            &invocation,
+            Arc::clone(&context),
+            |_, _, _| {},
+        )
+        .expect("issued lexical G2 privately retains its hidden G1 body without source replay");
+        assert_eq!(
+            context.artifact_view().selected_native_groups(),
+            selected_before
+        );
+        assert_eq!(context.artifact_view().dependencies(), dependencies_before);
         assert!(compiled.targets["result"]
             .pending_imports
             .iter()
