@@ -198,6 +198,12 @@ impl From<&crate::certified_products::CertificationError> for CompilerEvidenceFa
         use crate::recovery_artifacts::{RecoveryAdmissionFailure, RecoveryArtifactError};
         use tidepool_repr::execution_schema::ParseError;
         match error {
+            CertificationError::CapturedModulePayload(
+                RecoveryArtifactError::CompletedSourceEvidence { input, failure },
+            ) => Self::SourceEvidence {
+                input: input.clone(),
+                failure: (**failure).clone(),
+            },
             CertificationError::CompletedSourceEvidence { input, failure } => {
                 Self::SourceEvidence {
                     input: input.clone(),

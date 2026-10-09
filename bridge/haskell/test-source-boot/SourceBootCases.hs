@@ -167,7 +167,7 @@ import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencyModule(..), DependencyImport(..)
   , DependencyResolution(..), ProductAvailability(..), DependencySource(..), sourceEvidence
   , DependencyQualifier(..), renderDependencyQualifier
-  , selectedFreshHomeRequirements, renderDependencyEvidence )
+  , selectedFreshHomeRequirements, renderDependencyEvidence, validateDependencyEvidence )
 import Tidepool.ExactHydration
   ( CheckedTemplateInterface(..), CheckedTemplateImports(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
   , runExactInterfaceOperation, readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope

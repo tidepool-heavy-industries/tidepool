@@ -10,6 +10,13 @@ pub use newrecovery_v2::{RecoveryPublicOwner, RecoveryRefusal as RecoveryFormatR
 
 pub(crate) fn graph_error(path: &Path, error: RecoveryError) -> SessionError {
     match &error.kind {
+        RecoveryErrorKind::SourceEvidence { input, failure } => SessionError::Compile(
+            crate::CompileError::CompilerEvidence(Box::new(
+                tidepool_toolchain::certified_products::CertificationError::CompletedSourceEvidence {
+                    input: input.clone(), failure: Box::new(failure.clone()),
+                },
+            )),
+        ),
         RecoveryErrorKind::Format(refusal) => SessionError::RecoveryFormatRefused {
             path: path.to_path_buf(),
             refusal: *refusal,

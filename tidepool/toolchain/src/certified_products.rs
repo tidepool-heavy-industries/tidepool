@@ -2202,9 +2202,10 @@ fn package_validation_error(
     error: crate::recovery_artifacts::RecoveryArtifactError,
 ) -> CertificationError {
     match error {
-        error @ crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_) => {
-            CertificationError::CapturedModulePayload(error)
-        }
+        error @ (crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_)
+        | crate::recovery_artifacts::RecoveryArtifactError::CompletedSourceEvidence {
+            ..
+        }) => CertificationError::CapturedModulePayload(error),
         _ => CertificationError::StaleEvidence,
     }
 }
