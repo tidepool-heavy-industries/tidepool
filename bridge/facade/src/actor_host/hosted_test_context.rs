@@ -932,11 +932,11 @@ impl HostedTestRuntime {
         settings: &crate::exomonad::EmbeddedLaunchConfig,
         configure: impl FnOnce(&mut ActorHostConfig),
         transport: impl FnOnce(
-            &Arc<embedded_harness::EmbeddedHarnessRuntime>,
-            &ActorHostConfig,
-        ) -> Arc<dyn harness::engine::ResponsesTransport>
-        + Send
-        + 'static,
+                &Arc<embedded_harness::EmbeddedHarnessRuntime>,
+                &ActorHostConfig,
+            ) -> Arc<dyn harness::engine::ResponsesTransport>
+            + Send
+            + 'static,
     ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
             settings,
@@ -1001,9 +1001,13 @@ impl HostedTestRuntime {
         }
         .map_err(|error| error.to_string())?;
         runtime_directory.disable_cleanup(diagnostic_root.is_some());
+        // Run ids also name workspace journals and resource principals. Fresh
+        // hosts may share a workspace, so a private runtime directory alone
+        // does not provide a fresh run identity.
+        let run_id = uuid::Uuid::new_v4().to_string();
         let run_directory =
             tidepool_atomic_write::DirectoryAnchor::open_existing(runtime_directory.path())
-                .and_then(|root| root.child("exomonad/runs/run"))
+                .and_then(|root| root.child(std::path::Path::new("exomonad/runs").join(run_id)))
                 .map_err(|error| error.to_string())?;
         let run_root = run_directory.path().to_path_buf();
         let mut diagnostics = diagnostic_root.map(|root| HostedTestDiagnostics {
@@ -1468,11 +1472,9 @@ mod tests {
         .await;
         assert!(matches!(refused, Err(error) if error.to_string().contains("prompt changed")));
         let refused_run = root.child("refused-run").unwrap();
-        assert!(
-            prepared
-                .select_for_run(repository.path(), refused_run.path())
-                .is_err()
-        );
+        assert!(prepared
+            .select_for_run(repository.path(), refused_run.path())
+            .is_err());
         assert!(!refused_run.path().join("workspace-prepared.json").exists());
         assert_eq!(std::fs::read(selection).unwrap(), completed);
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);

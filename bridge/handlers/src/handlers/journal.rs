@@ -58,7 +58,16 @@ impl SegmentPath {
         OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&path)?;
+            .open(&path)
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "exclusively create journal segment {}: {error}",
+                        path.display()
+                    ),
+                )
+            })?;
         Ok(SegmentPath(path))
     }
 
@@ -66,7 +75,15 @@ impl SegmentPath {
     /// must serialize resumes for the journal; Exomonad's host-incarnation
     /// lease provides that process-level exclusion.
     pub fn open_existing(path: PathBuf) -> std::io::Result<Self> {
-        OpenOptions::new().append(true).open(&path)?;
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("open existing journal segment {}: {error}", path.display()),
+                )
+            })?;
         Ok(SegmentPath(path))
     }
 
@@ -472,6 +489,36 @@ impl std::error::Error for JournalAppendError {}
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn exclusive_segment_claim_refuses_collision_without_changing_existing_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claimed.jsonl");
+        SegmentPath::create_exclusive(path.clone()).unwrap();
+        std::fs::write(&path, b"retained journal bytes\n").unwrap();
+        let refusal = SegmentPath::create_exclusive(path.clone()).unwrap_err();
+        assert_eq!(refusal.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(refusal
+            .to_string()
+            .contains("exclusively create journal segment"));
+        assert!(refusal.to_string().contains(&path.display().to_string()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"retained journal bytes\n");
+        SegmentPath::open_existing(path.clone()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"retained journal bytes\n");
+    }
+
+    #[test]
+    fn opening_missing_segment_reports_path_and_does_not_create_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("absent.jsonl");
+        let refusal = SegmentPath::open_existing(path.clone()).unwrap_err();
+        assert_eq!(refusal.kind(), std::io::ErrorKind::NotFound);
+        assert!(refusal
+            .to_string()
+            .contains("open existing journal segment"));
+        assert!(refusal.to_string().contains(&path.display().to_string()));
+        assert!(!path.exists());
+    }
 
     fn tmp_file(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

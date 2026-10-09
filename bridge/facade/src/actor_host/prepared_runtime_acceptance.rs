@@ -292,6 +292,7 @@ async fn production_builtin_toolset_immediate_and_durable_launches_are_fresh() {
         "packaged default preparation submits no compiler request"
     );
     let mut actors = HashSet::new();
+    let mut run_journals = HashSet::new();
     for immediate in [true, false] {
         let (provider, mut requests) = hosted_script_provider();
         let before_start = observations.observations.lock().requests.len();
@@ -315,6 +316,20 @@ async fn production_builtin_toolset_immediate_and_durable_launches_are_fresh() {
         })
         .await
         .unwrap();
+        let run_id = host
+            .context
+            .config
+            .run_directory
+            .path()
+            .file_name()
+            .unwrap();
+        let journal =
+            crate::exomonad::exomonad_journal_path(repository.path(), run_id.to_str().unwrap());
+        assert!(journal.is_file(), "each fresh host owns its run journal");
+        assert!(
+            run_journals.insert(journal),
+            "fresh hosts sharing a workspace must have distinct run journals"
+        );
         assert!(
             actors.insert(host.context.actor.identity()),
             "each host creates a fresh actor identity"
