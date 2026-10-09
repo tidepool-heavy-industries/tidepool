@@ -2112,23 +2112,37 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('FAIL suite::works', output)
         self.assertIn('0 passed; 1 failed', output)
 
-        def child_then_empty_parent(argv, timeout):
+        reached = []
+        def child_then_empty_parent(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
+            reached.append(argv[2])
             return completed_process(
                 argv,
                 0,
-                'child output: test result: ok. 1 passed; 0 failed; 0 ignored;\n'
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n'
                 'test result: ok. 0 passed; 0 failed; 0 ignored; 1 measured; 1 filtered out;\n',
                 '',
             )
 
+        retained = Path(self.tmp.name) / 'parent-summary'
         result, output, _ = self.invoke(
-            ['--exact', 'suite::works', '--expected-count', '1'], child_then_empty_parent
+            ['--exact', 'suite::works', '--expected-count', '1',
+             '--output-dir', str(retained)], child_then_empty_parent
         )
         self.assertEqual(result, 1)
         self.assertIn('FAIL suite::works', output)
+        self.assertEqual(reached, ['suite::works'])
+        records = [json.loads(path.read_text()) for path in retained.glob('*.json')]
+        self.assertEqual(len(records), 1)
+        execution = records[0]['execution']
+        self.assertFalse(records[0]['passed'])
+        self.assertEqual(execution['status'], 'finished')
+        self.assertEqual(execution['exit_code'], 0)
+        self.assertEqual(execution['executed_test_count'], 0)
+        self.assertEqual(execution['passed_test_count'], 0)
+        self.assertEqual(execution['failed_test_count'], 0)
 
     def test_test_failure_and_timeout_are_counted(self):
         def fail(argv, timeout, environment=None):
