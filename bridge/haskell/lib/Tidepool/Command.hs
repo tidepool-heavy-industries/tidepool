@@ -627,7 +627,7 @@ resultHeading result =
   "terminal: yes · "
     <> outcomeText (commandOutcome result)
     <> case commandCleanup result of
-      CommandClean -> " · cleanup: clean\nnext: inspect outcome and output; read_output for omitted diagnostics"
+      CommandClean -> " · cleanup: clean\nnext: inspect outcome and output; expand the display or use Cmd.readCommand for omitted diagnostics"
       other -> " · cleanup: " <> T.pack (show other) <> "\nnext: inspect cleanup and retained job before releasing resources"
 
 -- | Model-facing rendering of a command outcome. 'CommandOutOfMemory' and

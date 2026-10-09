@@ -203,8 +203,10 @@ them in a workspace.
 
 ## Compose commands and judgment
 
-`Cmd.run` returns a retained result: `Cmd.stdout` is complete successful stdout
-or an explicit issue; inspect failed outcomes and stderr. `J.ask` batches
+`Cmd.run` returns a retained result. Display it to inspect the outcome, cleanup,
+stdout and stderr, including output from failed commands. Use `Cmd.stdout` when
+a computation requires successful, complete stdout; it returns an explicit issue
+otherwise. `J.ask` batches
 judgments over supplied evidence; load `exomonad-jev` for composition. `me` is
 lexically captured. `parentAgent` returns your supervisor, or `Nothing` for a
 root. `sendMessage recipient text` addresses the chosen actor. `respond value`
@@ -216,7 +218,7 @@ Use `Cmd.withArguments` to pass dynamic values as positional arguments.
 
 ```haskell source=command
 result <- Cmd.run (Cmd.bashCommand "git status --short")
-display (Cmd.stdout result)
+display result
 ```
 
 `Cmd.run command = Cmd.start command >>= Cmd.await` preserves the continuation until terminal

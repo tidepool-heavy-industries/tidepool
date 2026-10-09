@@ -1146,50 +1146,77 @@ impl exomonad_actor::FormHost for DisplayOnlyHost {
 }
 
 #[tokio::test]
-async fn published_command_example_reuses_completed_stdout() {
+async fn published_command_example_preserves_failed_output_without_replay() {
     use super::command_test_support::TestCommands;
 
     let campaign = TestCampaign::start().await;
-    campaign.run_scenario(|campaign| Box::pin(async move {
-    let root = campaign.root_installation.policy.clone();
-    let mut running = tokio::spawn({
-        let root = root.clone();
-        async move { committed(root.as_ref(), PublishedExample::Command.source()).await }
-    });
-    let backend = TestCommands::completed("README.md");
-    tokio::select! {
-        request = campaign.next_deployment(
-            "published command backend",
-            Duration::from_secs(180),
-            |event| match event {
-                LocalResidentDeployment::CommandBackend(request) => Ok(request),
-                other => Err(other),
-            },
-        ) => request.supply(Ok(backend.clone())),
-        result = &mut running => panic!("command example ended before backend admission: {result:?}"),
-    }
-    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
-    let completed = campaign.drive_actor_output(&store, running).await.unwrap();
-    assert_eq!(completed["status"], "committed", "{completed}");
-    for _ in 0..2 {
-        let retained = displayed(
-            campaign,
-            root.as_ref(),
-            "display (Cmd.stdout result == Right \"README.md\")",
-        )
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let mut running = tokio::spawn({
+                    let root = root.clone();
+                    async move { committed(root.as_ref(), PublishedExample::Command.source()).await }
+                });
+                let backend = TestCommands::completed("README.md");
+                tokio::select! {
+                    request = campaign.next_deployment(
+                        "published command backend",
+                        Duration::from_secs(180),
+                        |event| match event {
+                            LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                            other => Err(other),
+                        },
+                    ) => request.supply(Ok(backend.clone())),
+                    result = &mut running => panic!("command example ended before backend admission: {result:?}"),
+                }
+                let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let completed = campaign.drive_actor_output(&store, running).await.unwrap();
+                assert_eq!(completed["status"], "committed", "{completed}");
+                assert!(explicit_display_output(&completed)["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("README.md"), "{completed}");
+                for _ in 0..2 {
+                    let retained = displayed(
+                        campaign,
+                        root.as_ref(),
+                        "display (Cmd.stdout result == Right \"README.md\")",
+                    )
+                    .await;
+                    assert_eq!(
+                        explicit_display_output(&retained)["text"],
+                        "True",
+                        "{retained}"
+                    );
+                }
+                assert_eq!(
+                    backend.executions(),
+                    1,
+                    "reading stdout must not repeat the command"
+                );
+
+                *backend.stdout.lock() = "/workspace\nREADME.md\n".into();
+                *backend.stderr.lock() = "bash: sed: command not found\n".into();
+                backend.set_exit_code(127);
+                let failed = displayed(campaign, root.as_ref(), PublishedExample::Command.source()).await;
+                let observed = explicit_display_output(&failed)["text"].as_str().unwrap();
+                assert!(observed.contains("127"), "failed exit code missing: {failed}");
+                for stream in ["/workspace\nREADME.md\n", "bash: sed: command not found\n"] {
+                    assert!(observed.contains(stream), "stream missing from command observation: {failed}");
+                }
+                for _ in 0..2 {
+                    let retained = displayed(
+                        campaign,
+                        root.as_ref(),
+                        "display (Cmd.commandOutcome (Cmd.commandResult result) == Cmd.CommandExited 127 && Cmd.commandCleanup (Cmd.commandResult result) == Cmd.CommandClean && Cmd.stdout result == Left (Cmd.Unsuccessful (Cmd.CommandExited 127)) && Cmd.stderr result == Right \"bash: sed: command not found\\n\")",
+                    ).await;
+                    assert_eq!(explicit_display_output(&retained)["text"], "True", "{retained}");
+                }
+                assert_eq!(backend.executions(), 2, "observing failure must not replay either command");
+            })
+        })
         .await;
-        assert_eq!(
-            explicit_display_output(&retained)["text"],
-            "True",
-            "{retained}"
-        );
-    }
-    assert_eq!(
-        backend.executions(),
-        1,
-        "reading stdout must not repeat the command"
-    );
-})).await;
 }
 
 #[tokio::test]
