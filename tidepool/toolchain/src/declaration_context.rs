@@ -3850,7 +3850,7 @@ fn scope_interface_evidence(
         validation,
         MaterializationMode::Scratch,
     )
-    .map_err(failure)?;
+    .map_err(materialization_failure)?;
     Ok(Value::Array(vec![
         text(match interface.origin() {
             crate::certified_products::CanonicalOrigin::SourceOriginal { .. } => "module",
@@ -3875,6 +3875,23 @@ fn scope_interface_evidence(
 
 fn failure(message: impl std::fmt::Display) -> CompileError {
     CompileError::ExtractFailed(format!("exact declaration context: {message}"))
+}
+
+fn materialization_failure(error: recovery_artifacts::RecoveryArtifactError) -> CompileError {
+    match error {
+        recovery_artifacts::RecoveryArtifactError::Io(error)
+        | recovery_artifacts::RecoveryArtifactError::Unreadable { error, .. }
+            if error.kind() == std::io::ErrorKind::Interrupted =>
+        {
+            CompileError::Io(error)
+        }
+        error @ recovery_artifacts::RecoveryArtifactError::CompletedSourceEvidence { .. } => {
+            compiler_evidence_failure(
+                crate::certified_products::CertificationError::CapturedModulePayload(error),
+            )
+        }
+        error => failure(error),
+    }
 }
 
 fn compiler_evidence_failure(error: crate::certified_products::CertificationError) -> CompileError {
@@ -5062,11 +5079,13 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
+        crate::host_work::checkpoint()?;
         let mut native_owners = BTreeMap::new();
         for entry in entries
             .iter()
             .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
         {
+            crate::host_work::checkpoint()?;
             if let Some(previous) =
                 native_owners.insert(entry.descriptor.owner.clone(), entry.descriptor.id)
             {
@@ -5096,7 +5115,7 @@ impl ExactDeclarationContext {
                 validation,
                 mode,
             )
-            .map_err(failure)?
+            .map_err(materialization_failure)?
         };
         let native_owners = products
             .iter()
@@ -5116,7 +5135,7 @@ impl ExactDeclarationContext {
                 recovery_artifacts::materialize_module_interface(root, interface, validation, mode)
             })
             .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)?;
+            .map_err(materialization_failure)?;
         let joined = entries
             .iter()
             .filter_map(|entry| match &entry.payload {
@@ -5125,13 +5144,14 @@ impl ExactDeclarationContext {
             })
             .map(|interface| interface.materialize_with_validation(root, validation, mode))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)?;
+            .map_err(materialization_failure)?;
         let requirements = entries
             .iter()
             .map(|entry| (&entry.descriptor.owner, &entry.requirements))
             .collect::<BTreeMap<_, _>>();
         let mut artifacts = Vec::new();
         for reference in &references {
+            crate::host_work::checkpoint()?;
             let owner = identity(&reference.unit, &reference.module);
             artifacts.push(DeclarationArtifact {
                 interface: ExactIfaceArtifact {
@@ -5332,6 +5352,7 @@ impl ExactDeclarationContext {
         parents: Vec<Arc<RetainedArtifactMaterialization>>,
         directory: tempfile::TempDir,
     ) -> Result<RetainedArtifactMaterialization, CompileError> {
+        crate::host_work::checkpoint()?;
         let directory = Arc::new(directory);
         let root = directory.path();
         let mut inherited_rows = BTreeMap::new();
@@ -5360,6 +5381,7 @@ impl ExactDeclarationContext {
             .map(|reference| (identity(&reference.unit, &reference.module), reference))
             .collect::<BTreeMap<_, _>>();
         for artifact in materialized.artifacts {
+            crate::host_work::checkpoint()?;
             let entry =
                 &metadata.entries[&identity(&artifact.interface.unit, &artifact.interface.module)];
             let interface_evidence = scope_interface_evidence(entry, root, &mut validation)?;
@@ -5428,7 +5450,7 @@ impl ExactDeclarationContext {
             &metadata.selected_native_groups,
             &mut validation,
         )
-        .map_err(failure)?;
+        .map_err(compiler_evidence_failure)?;
         crate::timing::record_stage(
             crate::timing::NO_NODE,
             crate::timing::NO_ROUND,
@@ -5458,6 +5480,7 @@ impl ExactDeclarationContext {
             recovery_read_bytes = work.read_bytes, recovery_written_bytes = work.written_bytes,
             recovery_decoded_bytes = work.decoded_bytes, recovery_hash_bytes = work.hash_bytes,
             scope_written_bytes, "completed private artifact ownership");
+        crate::host_work::checkpoint()?;
         Ok(RetainedArtifactMaterialization {
             _directory: Some(Arc::clone(&directory)),
             _parents: parents,
@@ -7339,6 +7362,112 @@ mod tests {
         drop(packet);
         assert!(!owned_root.exists());
         assert!(paths.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn completed_materialization_is_retained_when_producer_stop_arrives_after_validation() {
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose,
+        };
+        let (context, _) = metadata_fixture();
+        let metadata = context.compiler_metadata_snapshot().unwrap();
+        let cancellation = CompilerTransactionCancellation::new();
+        let completed = with_compiler_transaction_cancellable(
+            cancellation.clone(),
+            |_| {},
+            || {
+                context
+                    .inventory
+                    .retain_materialization(&metadata, |parents| {
+                        let directory = tempfile::tempdir().unwrap();
+                        let result = context
+                            .materialize_retained_artifacts(&metadata, parents, directory)?;
+                        // The immutable private result has passed its final validation.
+                        cancellation.cancel();
+                        Ok(result)
+                    })
+            },
+        );
+        let retained = completed.action.unwrap();
+        assert_eq!(completed.close, CompilerTransactionClose::NotStarted);
+        let weak = Arc::downgrade(&retained);
+        let path = retained._directory.path().to_path_buf();
+        assert!(Arc::ptr_eq(
+            &retained,
+            &context
+                .inventory
+                .retained_materialization(&metadata)
+                .unwrap()
+        ));
+        drop(retained);
+        assert!(weak.upgrade().is_some());
+        assert!(path.exists());
+        drop(context);
+        assert!(weak.upgrade().is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn interrupted_materialization_preserves_completed_owner_and_fresh_scope_recovers() {
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose,
+        };
+        let (context, producer) = metadata_fixture();
+        let scratch = tempfile::tempdir().unwrap();
+        let cancelled = || {
+            let cancellation = CompilerTransactionCancellation::new();
+            cancellation.cancel();
+            cancellation
+        };
+        let cold = with_compiler_transaction_cancellable(
+            cancelled(),
+            |_| {},
+            || context.prepare_compilation(&scratch.path().join("stopped-cold"), &producer),
+        );
+        assert!(
+            matches!(cold.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        assert_eq!(cold.close, CompilerTransactionClose::NotStarted);
+        let first = context
+            .prepare_compilation(&scratch.path().join("first"), &producer)
+            .unwrap();
+        let retained = first.materialization.as_ref().unwrap();
+        let weak = Arc::downgrade(retained);
+        let owned = retained._directory.path().to_path_buf();
+        let paths = first.artifacts.clone();
+        let stopped = with_compiler_transaction_cancellable(
+            cancelled(),
+            |_| {},
+            || context.prepare_compilation(&scratch.path().join("stopped-warm"), &producer),
+        );
+        assert!(
+            matches!(stopped.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        assert_eq!(stopped.close, CompilerTransactionClose::NotStarted);
+        assert!(owned.is_dir());
+        assert!(paths
+            .iter()
+            .all(|artifact| artifact.interface.path.is_file()));
+        let fresh = with_compiler_transaction_cancellable(
+            CompilerTransactionCancellation::new(),
+            |_| {},
+            || context.prepare_compilation(&scratch.path().join("fresh"), &producer),
+        );
+        let recovered = fresh.action.unwrap();
+        assert_eq!(fresh.close, CompilerTransactionClose::NotStarted);
+        assert!(Arc::ptr_eq(
+            &weak.upgrade().unwrap(),
+            recovered.materialization.as_ref().unwrap()
+        ));
+        assert_eq!(recovered.artifacts, paths);
+        drop(context);
+        drop(first);
+        assert!(weak.upgrade().is_some());
+        drop(recovered);
+        assert!(weak.upgrade().is_none());
+        assert!(!owned.exists());
     }
 
     #[test]

@@ -883,3 +883,79 @@ fn deployment_singleton_decode_refuses_invalid_framing() {
         assert_eq!(counter.count(), index + 1);
     }
 }
+
+#[test]
+fn cancelled_configured_owner_waiter_preserves_current_and_followup_recovers() {
+    use crate::toolchain::with_configured_module_package_owner;
+    use tidepool_extract_cmd::{
+        with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+        CompilerTransactionClose,
+    };
+    let fixture = Fixture::with_modules(&["A"]);
+    let replacement = Fixture::with_modules(&["B"]);
+    let owner = std::sync::Mutex::new(ConfiguredModulePackageOwner::new());
+    let path = fixture.output.join("catalog.json");
+    let current = with_configured_module_package_owner(&owner, |owner| {
+        owner.load_under(&path, &fixture.authority, RootPolicy::Fixture)
+    })
+    .unwrap();
+    let mut held = owner.lock().unwrap();
+    let cancellation = CompilerTransactionCancellation::new();
+    let (entered, observed) = std::sync::mpsc::channel();
+    let (finished, received) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let worker_cancellation = cancellation.clone();
+        let owner = &owner;
+        let replacement = &replacement;
+        scope.spawn(move || {
+            entered.send(()).unwrap();
+            let result = with_compiler_transaction_cancellable(
+                worker_cancellation,
+                |_| {},
+                || {
+                    with_configured_module_package_owner(owner, |owner| {
+                        owner.load_under(
+                            &replacement.output.join("catalog.json"),
+                            &replacement.authority,
+                            RootPolicy::Fixture,
+                        )
+                    })
+                },
+            );
+            finished.send(result).unwrap();
+        });
+        observed
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        cancellation.cancel();
+        let result = received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            matches!(result.action, Err(ModulePackageError::Interrupted(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        assert_eq!(result.close, CompilerTransactionClose::NotStarted);
+        let retained = held
+            .load_under(&path, &fixture.authority, RootPolicy::Fixture)
+            .unwrap();
+        assert!(Arc::ptr_eq(&current, &retained));
+        drop(held);
+    });
+    let followup = with_configured_module_package_owner(&owner, |owner| {
+        owner.load_under(
+            &replacement.output.join("catalog.json"),
+            &replacement.authority,
+            RootPolicy::Fixture,
+        )
+    })
+    .unwrap();
+    assert!(!Arc::ptr_eq(&current, &followup));
+    assert!(current
+        .records
+        .iter()
+        .any(|record| record.record().module == "A"));
+    assert!(followup
+        .records
+        .iter()
+        .any(|record| record.record().module == "B"));
+}

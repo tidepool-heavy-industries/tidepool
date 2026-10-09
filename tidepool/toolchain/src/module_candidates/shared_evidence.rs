@@ -124,6 +124,8 @@ impl ValidationStage {
         proof: &SharedEvidence,
         target_source: &str,
     ) -> Result<(), crate::cache::DependencyEvidenceFailure> {
+        crate::host_work::checkpoint()
+            .map_err(|_| crate::cache::DependencyEvidenceFailure::Interrupted)?;
         let key = Arc::as_ptr(&proof.0) as usize;
         let retained = self
             .proofs
@@ -255,9 +257,7 @@ impl ReadBudget {
         }
         self.charge(reference.encoded_len)?;
         let mut bytes = Vec::new();
-        (&mut file)
-            .take(reference.encoded_len + 1)
-            .read_to_end(&mut bytes)
+        crate::host_work::read_to_end(&mut (&mut file).take(reference.encoded_len + 1), &mut bytes)
             .ok()?;
         if bytes.len() as u64 != reference.encoded_len || sha(&bytes) != reference.sha256 {
             return None;

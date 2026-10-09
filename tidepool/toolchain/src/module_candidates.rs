@@ -910,7 +910,13 @@ fn read_record(
 ) -> Option<Record> {
     budget.charge(header.payload_len)?;
     let mut payload = vec![0; usize::try_from(header.payload_len).ok()?];
-    file.read_exact(&mut payload).ok()?;
+    let mut remaining = payload.as_mut_slice();
+    while !remaining.is_empty() {
+        crate::host_work::checkpoint().ok()?;
+        let count = remaining.len().min(64 * 1024);
+        file.read_exact(&mut remaining[..count]).ok()?;
+        remaining = &mut remaining[count..];
+    }
     if sha(&payload) != header.payload_sha256 {
         return None;
     }
@@ -1686,9 +1692,11 @@ fn ordinary_records_with_limits(
         BTreeMap::new();
     let mut ambiguous = BTreeSet::new();
     for root in &roots {
+        crate::host_work::checkpoint().ok()?;
         match fs::read_dir(root_shard(&producer_dir, root)) {
             Ok(entries) => {
                 for entry in entries {
+                    crate::host_work::checkpoint().ok()?;
                     let path = entry.ok()?.path();
                     if !path.extension().is_some_and(|x| x == "cbor") {
                         continue;
@@ -1746,6 +1754,7 @@ fn ordinary_records_with_limits(
     let mut record_bytes = 0_u64;
     let mut budget = shared_evidence::ReadBudget::default();
     for (owner, (header, mut file, _)) in selected {
+        crate::host_work::checkpoint().ok()?;
         if offer.records.len() >= limits.owners {
             offer.omit(&owner, CacheOfferOmission::OwnerLimit);
             continue;
@@ -1931,6 +1940,7 @@ fn select_configured_inner(
     scratch: &Path,
     context: Option<&ExactCandidateContext>,
 ) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
+    crate::host_work::checkpoint().map_err(deployment::ModulePackageError::Interrupted)?;
     let started = std::time::Instant::now();
     let package = crate::toolchain::configured_module_package()?;
     let has_package = package.is_some();
@@ -1949,7 +1959,13 @@ fn select_configured_inner(
             .filter(|r| !deployed.contains(&(r.unit.clone(), r.module.clone())))
             .map(|r| (CandidateRecord::Encoded(r), CandidateOrigin::Ordinary)),
     );
+    crate::host_work::checkpoint().map_err(deployment::ModulePackageError::Interrupted)?;
     let selected = select_records_inner(endpoint_identity, include, scratch, records, context);
+    // Internal optional-record readers can refuse a record. A stopped scoped
+    // operation must escape this policy front door as interruption, never a miss.
+    if selected.is_none() {
+        crate::host_work::checkpoint().map_err(deployment::ModulePackageError::Interrupted)?;
+    }
     tracing::info!(target: "tidepool_toolchain::module_candidates",
         phase = "candidate_selection", elapsed_ms = started.elapsed().as_millis() as u64,
         exact_context = context.is_some(),
@@ -1994,6 +2010,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
     let mut graph_bytes = 0usize;
     let mut selection_omissions = CacheOfferDiagnostics::default();
     for (record, origin) in records {
+        crate::host_work::checkpoint().ok()?;
         let (record, product_input) = record.into().into_parts();
         let mut execution_source = record.execution_source.clone();
         if record.tag != "TPMCAN"
@@ -2528,6 +2545,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
     let mut by_owner = BTreeMap::new();
     let mut manifest = Vec::new();
     for (key, (mut record, origin, product, _)) in validated {
+        crate::host_work::checkpoint().ok()?;
         if availability.contains(&key) {
             native_availability.push(
                 crate::certified_products::certify_candidate_original_with_validation(
@@ -2724,6 +2742,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             "candidate offer omitted because its execution provenance exceeds the manifest bound");
         return None;
     }
+    crate::host_work::checkpoint().ok()?;
     let manifest_path = scratch.join("module-candidates.cbor");
     tidepool_atomic_write::write_best_effort(&manifest_path, &encoded).ok()?;
     Some(CandidateSet {

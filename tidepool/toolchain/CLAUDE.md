@@ -61,6 +61,14 @@ the former eval and invocation cache layouts; neither is read or written.
 identities for workspace capture and reload. Those identities describe a source
 snapshot; they do not determine which files a compiled program consumed.
 
+Host authentication and private materialization use `host_work` checkpoints in
+the owning compiler scope, including between bounded reads and owner-lock polls.
+Interruption remains a refusal through optional cache lookups; it cannot admit
+physical work as a miss. A partial validation stage stays operation-local and
+is discarded on refusal. Once an immutable result is fully validated, a late
+stop cannot revoke its retained owner; cancelled consumers still lack publication
+permission. Checkpoints are cooperative and do not preempt a syscall or decode.
+
 ## Segment original facts
 
 `ExactProgramSegmentAdmission` owns the physical request and consumed-source

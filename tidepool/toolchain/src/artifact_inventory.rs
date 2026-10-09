@@ -1710,11 +1710,18 @@ impl ArtifactView {
         >,
     ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
     {
-        let mut retained = self
-            .lease
-            .materialization
-            .lock()
-            .expect("materialization lock");
+        // Waiting for another producer must remain responsive to this scope's
+        // stop edge without interrupting that producer or evicting its result.
+        let mut retained = loop {
+            crate::host_work::checkpoint()?;
+            match self.lease.materialization.try_lock() {
+                Ok(retained) => break retained,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("materialization lock"),
+            }
+        };
         let key = metadata.materialization_key();
         if let Some(materialization) = retained.get(&key) {
             return Ok(Arc::clone(materialization));
@@ -2372,6 +2379,51 @@ mod view_read_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_materialization_waiter_exits_without_touching_producer() {
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose,
+        };
+        let view = ArtifactInventory::default().empty_view();
+        let metadata = view.metadata_snapshot();
+        let held = view.lease.materialization.lock().unwrap();
+        let cancellation = CompilerTransactionCancellation::new();
+        let (entered, observed) = std::sync::mpsc::channel();
+        let (finished, received) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker_cancellation = cancellation.clone();
+            let view = &view;
+            let metadata = &metadata;
+            scope.spawn(move || {
+                entered.send(()).unwrap();
+                let result = with_compiler_transaction_cancellable(
+                    worker_cancellation,
+                    |_| {},
+                    || {
+                        view.retain_materialization(metadata, |_| {
+                            panic!("cancelled waiter cannot prepare")
+                        })
+                    },
+                );
+                finished.send(result).unwrap();
+            });
+            observed
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            cancellation.cancel();
+            let result = received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert!(
+                matches!(result.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+            );
+            assert_eq!(result.close, CompilerTransactionClose::NotStarted);
+            assert!(held.is_empty());
+            drop(held);
+        });
+    }
 
     #[test]
     fn native_requirement_index_refuses_interface_edges() {

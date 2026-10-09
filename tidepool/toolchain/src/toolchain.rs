@@ -112,12 +112,22 @@ pub fn configured_module_package(
 /// lock; their consumers retain their own shared custody.
 pub(crate) fn with_configured_module_package_owner<T>(
     owner: &std::sync::Mutex<crate::module_candidates::deployment::ConfiguredModulePackageOwner>,
-    operation: impl FnOnce(&mut crate::module_candidates::deployment::ConfiguredModulePackageOwner) -> T,
-) -> T {
+    operation: impl FnOnce(
+        &mut crate::module_candidates::deployment::ConfiguredModulePackageOwner,
+    ) -> Result<T, ModulePackageError>,
+) -> Result<T, ModulePackageError> {
     let waiting = std::time::Instant::now();
-    let mut owner = owner
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut owner = loop {
+        crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
+        match owner.try_lock() {
+            Ok(owner) => break owner,
+            Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    };
+    crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
     tracing::debug!(target: "tidepool_toolchain::module_candidates",
         phase = "configured_package_owner_wait", elapsed_ms = waiting.elapsed().as_millis() as u64);
     operation(&mut owner)

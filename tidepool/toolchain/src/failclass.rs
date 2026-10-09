@@ -146,6 +146,7 @@ pub enum CompileFailureCause {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompilerEvidenceFailure {
+    Interrupted,
     SourceEvidence {
         input: std::path::PathBuf,
         failure: crate::cache::DependencyEvidenceFailure,
@@ -198,6 +199,7 @@ impl From<&crate::certified_products::CertificationError> for CompilerEvidenceFa
         use crate::recovery_artifacts::{RecoveryAdmissionFailure, RecoveryArtifactError};
         use tidepool_repr::execution_schema::ParseError;
         match error {
+            CertificationError::Interrupted(_) => Self::Interrupted,
             CertificationError::CapturedModulePayload(
                 RecoveryArtifactError::CompletedSourceEvidence { input, failure },
             ) => Self::SourceEvidence {
@@ -296,6 +298,7 @@ impl From<&crate::certified_products::CertificationError> for CompilerEvidenceFa
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ModulePackageFailure {
+    Interrupted,
     Io {
         path: std::path::PathBuf,
     },
@@ -325,6 +328,7 @@ impl From<&crate::toolchain::ModulePackageError> for ModulePackageFailure {
     fn from(error: &crate::toolchain::ModulePackageError) -> Self {
         use crate::toolchain::ModulePackageError;
         match error {
+            ModulePackageError::Interrupted(_) => Self::Interrupted,
             ModulePackageError::Io { path, .. } => Self::Io { path: path.clone() },
             ModulePackageError::Format(_) => Self::Format,
             ModulePackageError::Bounds => Self::Bounds,
@@ -403,6 +407,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
                 _ => FailureClass::Infra,
             };
             FailureEnvelope::new(class, Phase::Compile, err.to_string())
+        }
+        CompileError::ModulePackage(crate::toolchain::ModulePackageError::Interrupted(_)) => {
+            FailureEnvelope::new(FailureClass::Infra, Phase::Compile, err.to_string())
         }
         // Real GHC rejections carry `Diagnostics`. This arm is reserved for a
         // malformed extractor artifact or impossible internal request shape.
