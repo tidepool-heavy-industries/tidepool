@@ -14246,6 +14246,31 @@ pub(crate) mod request_tests {
                 .unwrap()
         }
 
+        async fn begin_cell_for_test(
+            &self,
+            context: crate::ActorSessionContext,
+            block: ParsedBlock,
+        ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+            let (checked, prepared) = self
+                .prepare_cell(context.clone(), block.source.clone())
+                .await?;
+            let PreparedCell {
+                mut items,
+                dependencies,
+            } = prepared;
+            assert_eq!(checked.items.len(), 1, "fixture is one whole-cell item");
+            assert_eq!(items.len(), 1);
+            let block = ParsedBlock {
+                source: checked.items[0].source.clone(),
+                ..block
+            };
+            let step = self
+                .begin_prepared_cell_item(context, block, items.pop().unwrap())
+                .await;
+            drop(dependencies);
+            step
+        }
+
         async fn execute_cell_for_test(
             &self,
             context: crate::ActorSessionContext,
@@ -21976,6 +22001,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let retained = workbench
             .access
             .with_machine(context.clone(), |session, context, _| {
@@ -21992,9 +22021,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             Some(retained),
         );
         let registration = guard.registration();
-        let (block, verdict) = suspending_fragment();
+        let (block, _) = suspending_fragment();
         let step = registration
-            .scope(workbench.begin_fragment_split(context.clone(), source, block, Some(verdict)))
+            .scope(workbench.begin_cell_for_test(context.clone(), block))
             .await
             .expect("real native frame parks under the installation guard");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -22108,13 +22137,17 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let runner = Arc::new(ResidentActorRunner::new(
             Arc::clone(&machines),
             source.clone(),
         ));
-        let (block, verdict) = suspending_fragment();
+        let (block, _) = suspending_fragment();
         let step = workbench
-            .begin_fragment_split(context.clone(), source, block, Some(verdict))
+            .begin_cell_for_test(context.clone(), block)
             .await
             .expect("fragment parks");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -22187,18 +22220,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert!(!parked, "failed external work must retire its continuation");
     }
 
-    /// `prepare_tools` holds a suspended `ResidentHole` (from
-    /// `begin_fragment_split`) across the `await` for a second machine
-    /// checkout that decodes and resumes it. If the task driving that await
-    /// is dropped before the checkout is granted, nothing else resumes or
-    /// aborts the parked continuation — unless `ParkedHoleAbortGuard`, armed
-    /// across exactly that gap, is still attached. This reproduces the gap's
-    /// shape directly against the guard (not the full tool-installer
-    /// pipeline, which needs a real spec file this unit test has no reason
-    /// to stand up): park a hole through `begin_fragment_split`, arm a guard
-    /// over it, and drop the task carrying the guard before it ever reaches
-    /// (and disarms) a checkout — the same failure `prepare_tools` itself
-    /// cannot observe without this guard.
+    /// Abandoning a task between parking a whole-cell continuation and
+    /// its resuming checkout must retire the exact guarded hole.
     #[tokio::test]
     async fn dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole() {
         with_test_compiler_owner(dropping_the_task_that_holds_an_armed_parked_hole_guard_aborts_the_hole_with_compiler_owner()).await;
@@ -22210,17 +22233,18 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let mut suspend_context = context.clone();
         suspend_context.haskell_effects_alias =
             "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = Arc::new(ResidentActorWorkbench::new(
-            Arc::clone(&machines),
-            source.clone(),
-            None,
-        ));
-
-        let (block, verdict) = suspending_fragment();
-        let step = workbench
-            .begin_fragment_split(suspend_context.clone(), source, block, Some(verdict))
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let (workbench, suspend_context) = workbench
+            .admit_private_cell_for_test(suspend_context)
             .await
-            .expect("fragment split suspends waiting on a host answer");
+            .unwrap();
+        let workbench = Arc::new(workbench);
+
+        let (block, _) = suspending_fragment();
+        let step = workbench
+            .begin_cell_for_test(suspend_context.clone(), block)
+            .await
+            .expect("whole-cell item suspends waiting on a host answer");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
             panic!("expected a suspension: {}", describe_step(&step));
         };
@@ -22307,6 +22331,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let runner = ResidentActorRunner::new(machines, source.clone());
         let cell = ParkedHoleAbortGuard::with_latest(
             &workbench.access,
@@ -22319,9 +22347,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .scope(async {
                 let mut outcomes: Vec<ResidentOutcome> = Vec::new();
                 for _ in 0..2 {
-                    let (block, verdict) = suspending_fragment();
+                    let (block, _) = suspending_fragment();
                     let step = workbench
-                        .begin_fragment_split(context.clone(), source.clone(), block, Some(verdict))
+                        .begin_cell_for_test(context.clone(), block)
                         .await
                         .expect("real native fragment parks");
                     let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -22463,17 +22491,17 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     async fn late_parked_hole_registration_aborts_only_its_own_continuation_with_compiler_owner() {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = Arc::new(ResidentActorWorkbench::new(
-            Arc::clone(&machines),
-            source.clone(),
-            None,
-        ));
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
+        let workbench = Arc::new(workbench);
         let park = |workbench: Arc<ResidentActorWorkbench<_, _>>,
-                    context: crate::ActorSessionContext,
-                    source: ActorWorkbenchSource| async move {
-            let (block, verdict) = suspending_fragment();
+                    context: crate::ActorSessionContext| async move {
+            let (block, _) = suspending_fragment();
             let step = workbench
-                .begin_fragment_split(context, source, block, Some(verdict))
+                .begin_cell_for_test(context, block)
                 .await
                 .expect("fragment parks");
             let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -22481,8 +22509,8 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             };
             ResidentOutcome::from(*outcome)
         };
-        let owned = park(Arc::clone(&workbench), context.clone(), source.clone()).await;
-        let unrelated = park(Arc::clone(&workbench), context.clone(), source).await;
+        let owned = park(Arc::clone(&workbench), context.clone()).await;
+        let unrelated = park(Arc::clone(&workbench), context.clone()).await;
         let owned_id = outcome_continuation_id(&owned).expect("owned hole");
         let unrelated_id = outcome_continuation_id(&unrelated).expect("unrelated hole");
         assert_ne!(owned_id, unrelated_id);
@@ -22642,14 +22670,15 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     {
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
-        let workbench = Arc::new(ResidentActorWorkbench::new(
-            Arc::clone(&machines),
-            source.clone(),
-            None,
-        ));
-        let (block, verdict) = suspending_fragment();
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
+        let workbench = Arc::new(workbench);
+        let (block, _) = suspending_fragment();
         let unrelated = workbench
-            .begin_fragment_split(context.clone(), source.clone(), block, Some(verdict))
+            .begin_cell_for_test(context.clone(), block)
             .await
             .expect("unrelated fragment parks");
         let ResidentWorkbenchStep::Running { outcome, .. } = unrelated else {
@@ -22667,9 +22696,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     task_context.clone(),
                     "cancelled slot".into(),
                     async {
-                        let (block, verdict) = suspending_fragment();
+                        let (block, _) = suspending_fragment();
                         let step = slot_workbench
-                            .begin_fragment_split(task_context, source, block, Some(verdict))
+                            .begin_cell_for_test(task_context, block)
                             .await
                             .expect("slot fragment parks");
                         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -22748,6 +22777,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let guard = ParkedHoleAbortGuard::with_latest(
             &workbench.access,
             context.clone(),
@@ -22756,14 +22789,9 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         let registration = guard.registration();
         for attempt in 0..2 {
-            let (block, verdict) = suspending_fragment();
+            let (block, _) = suspending_fragment();
             let step = registration
-                .scope(workbench.begin_fragment_split(
-                    context.clone(),
-                    source.clone(),
-                    block,
-                    Some(verdict),
-                ))
+                .scope(workbench.begin_cell_for_test(context.clone(), block))
                 .await
                 .expect("real native fragment starts");
             let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
@@ -22807,6 +22835,10 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         let (machines, mut context, source, _root) = actor_registry_fixture();
         context.haskell_effects_alias = "'[Exomonad.Notifications, Exomonad.ActorContext]".into();
         let workbench = ResidentActorWorkbench::new(machines.clone(), source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let authority = Arc::new(());
         let authority_weak = Arc::downgrade(&authority);
         let mut failed_cleanup_context = context.clone();
@@ -22820,7 +22852,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         );
         let cleanup_weak = Arc::downgrade(&guard.shared);
         let registration = guard.registration();
-        let (block, verdict) = suspending_fragment();
+        let (block, _) = suspending_fragment();
         let (step, nested_cleanup_weak) = registration
             .scope(workbench.with_exact_continuation_cleanup(
                 failed_cleanup_context,
@@ -22829,9 +22861,7 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
                     let nested_cleanup_weak = SLOT_CONTINUATION_OWNER
                         .try_with(|owner| Arc::downgrade(&owner.0))
                         .expect("nested production cleanup owner is installed");
-                    let step = workbench
-                        .begin_fragment_split(context.clone(), source, block, Some(verdict))
-                        .await;
+                    let step = workbench.begin_cell_for_test(context.clone(), block).await;
                     (step, nested_cleanup_weak)
                 },
             ))
