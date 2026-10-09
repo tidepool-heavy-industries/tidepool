@@ -406,13 +406,7 @@ fn admit_authored_artifact_closure_inner(
         context.map_or_else(Vec::new, |context| context.joined_interfaces().to_vec());
     if let Some(context) = context {
         let inherited = context.materialize_scratch(&scratch)?;
-        artifacts.extend(inherited.artifacts.into_iter().filter(|artifact| {
-            artifact.product.is_none()
-                && !products.iter().any(|product| {
-                    product.owner().unit == artifact.interface.unit
-                        && product.owner().module == artifact.interface.module
-                })
-        }));
+        artifacts.extend(inherited_type_interfaces(inherited.artifacts, products));
     }
     Ok((
         scratch,
@@ -421,6 +415,25 @@ fn admit_authored_artifact_closure_inner(
         source_lexical_imports,
         joined_interfaces,
     ))
+}
+
+fn inherited_type_interfaces(
+    artifacts: Vec<DeclarationArtifact>,
+    authored: &[CertifiedRecoveryProduct],
+) -> impl Iterator<Item = DeclarationArtifact> + '_ {
+    artifacts.into_iter().filter_map(move |mut artifact| {
+        if authored.iter().any(|product| {
+            product.owner().unit == artifact.interface.unit
+                && product.owner().module == artifact.interface.module
+        }) {
+            None
+        } else {
+            // Keep the issued canonical interface in the inventory census.
+            // Its inherited native demand remains owned by the retained graph.
+            artifact.product = None;
+            Some(artifact)
+        }
+    })
 }
 
 /// Add only source adjacency authenticated by the current exact admission.
@@ -840,6 +853,65 @@ pub(crate) fn certify_same_offer_planned_declaration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_interface_census_preserves_inherited_native_interfaces_as_types() {
+        use crate::certified_products::{
+            fixture_finalized_product,
+            tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
+        };
+        let legacy = ["Authored", "Schema", "FreshDependency"].map(|module| {
+            fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    module,
+                    vec![(7, vec![])],
+                    7,
+                    &BTreeMap::new(),
+                    module.as_bytes().to_vec(),
+                ),
+                [1; 32],
+            )
+        });
+        let products = recovered_witness_fixtures(&legacy)
+            .into_iter()
+            .map(|row| row.product)
+            .collect::<Vec<_>>();
+        let durable = tempfile::tempdir().unwrap();
+        let references = crate::recovery_artifacts::materialize_certified_products(
+            durable.path(),
+            [1; 32],
+            &products,
+        )
+        .unwrap();
+        let context = ExactDeclarationContext::capture_recovery(
+            durable.path(),
+            &references,
+            &[],
+            &[],
+            vec![],
+        )
+        .unwrap();
+        let before = context.artifact_view().selected_native_groups();
+        let scratch = tempfile::tempdir().unwrap();
+        let inherited = context.materialize_scratch(&scratch).unwrap().artifacts;
+        assert_eq!(inherited.len(), 3);
+        assert!(inherited.iter().all(|artifact| artifact.product.is_some()));
+        let types = inherited_type_interfaces(inherited, &products[..1]).collect::<Vec<_>>();
+        assert_eq!(
+            types
+                .iter()
+                .map(|artifact| artifact.interface.module.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["Schema", "FreshDependency"])
+        );
+        for artifact in types {
+            assert!(artifact.product.is_none());
+            let expected = artifact.interface.module.as_bytes();
+            assert_eq!(std::fs::read(&artifact.interface.path).unwrap(), expected);
+            assert_eq!(artifact.interface.sha256, sha256(expected));
+        }
+        assert_eq!(context.artifact_view().selected_native_groups(), before);
+    }
 
     fn issued_originals(
         products: &[CertifiedRecoveryProduct],
