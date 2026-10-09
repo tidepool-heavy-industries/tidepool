@@ -8,9 +8,10 @@ First deliver a qualified native M2 server; keep this migration open until all
 superseded generation, fixture and acceptance mechanisms are removed.
 Preserve WIP, `test-source-boot/`, retained evidence and existing live hosts.
 
-The first M2 gate retains matched Harness/runtime/browser pin `2aa685129aa4`.
-The later Harness join incorporates main `26eb5fbb1ae1` and the pinned actor
-output branch, then updates all Tidepool dependency and asset pins together.
+Every M2 candidate uses its recorded source's matched Harness/runtime/browser
+contract. Cargo and Nix pins, host code, browser schemas and assets advance
+together. The frozen qualification owner verifies their exact identities;
+an older checkpoint's Harness pin is not a separate release requirement.
 
 ## Ownership rules
 
@@ -81,17 +82,22 @@ output branch, then updates all Tidepool dependency and asset pins together.
 
 ## Implementation coordination
 
-The delivery execution owner owns integration, the admitted build lane and
-production host/M2 gates; root provides architectural review while discussing
-direction with the user. Component owners use separate
-source worktrees. Agree shared interfaces before crossing ownership boundaries.
-Independent acceptance cases run concurrently under the execution owner's
-measured resource admission; a serial cohort is not a host resource policy.
-Track aggregate memory, individual process peaks and actual CPU access before
-raising concurrency. Source workers prepare changes and request validation.
-No Buck in unprovisioned source worktrees. Builds use
-the provisioned main checkout after integration, pinned tools and local-only
-execution. Review focused failure paths and compile all affected targets.
+The coordinator integrates exact reviewed candidates and qualifies the matched
+release bundle through the production host/M2 gates. Component owners use
+separate source worktrees and agree shared interfaces before crossing ownership
+boundaries. Each worker compiles its smallest affected libraries and test targets
+early through the admitted repository commands; ordinary compilation does not
+require a build owner's approval.
+Independent builds and acceptance cases run concurrently when actual process
+peaks, enclosing cgroup limits and host headroom permit. Coordinate concrete
+checkout, configuration and output conflicts; a serial cohort is not a host
+resource policy. Track aggregate memory and actual CPU access before raising
+concurrency. Buck requires a provisioned output bind mount, pinned tools and
+local-only execution unless that exact target has accepted remote evidence.
+An unprovisioned source worktree is a specific infrastructure limitation: retain
+the exact pending commands and unqualified status, then compile in an available
+provisioned checkout. Review failure paths and compile joined changes
+incrementally before full bundle assembly.
 
 ### Current compiler, native selection and shutdown work
 
