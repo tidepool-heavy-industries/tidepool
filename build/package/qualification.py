@@ -60,7 +60,7 @@ PREPARED_CHILD_TESTS = [
     "actor_host::scaffold_admission_tests::prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_originals",
 ]
 DESCRIPTOR = "share/exomonad/qualification.json"
-QUALIFICATION_SCHEMA = 2
+QUALIFICATION_SCHEMA = 3
 BROWSER_DRIVER_ROOT = "share/exomonad/browser-driver"
 BROWSER_DRIVER_TARGET = "//build/testing/browser:driver_bundle"
 BROWSER_DRIVER_SOURCES = {
@@ -71,7 +71,7 @@ BROWSER_DRIVER_SOURCES = {
 UNSET_ENVIRONMENT = (
     "TIDEPOOL_CACHE_DIR", "TIDEPOOL_COMPILE_CACHE_DIR", "TIDEPOOL_BUILD_PRODUCTS_DIR",
     "TIDEPOOL_EXTRACT_DAEMON_SOCKET", "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT", "TIDEPOOL_COMPILER_MODULES",
-    "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PREPARED_ROOT_ENTRY",
+    "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES",
     "TIDEPOOL_EXTRACT", "TIDEPOOL_PRELUDE_DIR", "TIDEPOOL_GHC_LIBDIR",
     "TIDEPOOL_TEST_SYSTEMD_RUN", "TIDEPOOL_TEST_SYSTEMCTL",
     "TIDEPOOL_TEST_FIXTURE_ROOT",
@@ -95,6 +95,10 @@ NATIVE_SOURCE_ROLES = ["stable_effects", "stdlib", "actors", "jev"]
 ROOT_ENTRY_SOURCE = "TidepoolPreparedDriver.hs"
 ROOT_ENTRY_SOURCE_OWNER = "//tidepool/runtime:tidepool-entry-source"
 ROOT_ENTRY_GENERATOR_SOURCE = "tidepool/runtime/src/bin/tidepool-entry-source.rs"
+BUILTIN_ENTRY_SOURCES = {
+    "workbench": ("TidepoolPreparedWorkbench.hs", "installDefaultWorkbench"),
+    "async_workbench": ("TidepoolPreparedAsyncWorkbench.hs", "installDefaultAsyncWorkbench"),
+}
 CATALOG_TEST = "actor_host::packaged_catalog_tests::packaged_cohort_executes_and_displays_without_build_inputs"
 REQUIRED_RUNTIME_EXECUTABLES = (
     "bash", "python3", "dirname", "git", "bwrap", "tmux", "systemd-run", "systemctl", "nix", "nix-store",
@@ -122,6 +126,12 @@ def cohorts() -> dict:
             "prepared-child": {"tests": PREPARED_CHILD_TESTS, "expected_count": len(PREPARED_CHILD_TESTS),
                                "ignored": True, "timeout": 1800,
                                "compiler_mode": "owned-resident", "max_jobs": 1},
+            "builtin-startup": {
+                "tests": ["actor_host::prepared_runtime_acceptance::production_builtin_toolset_immediate_and_durable_launches_are_fresh"],
+                "expected_count": 1, "ignored": True, "timeout": 1800,
+                "compiler_mode": "owned-resident", "max_jobs": 1,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
             "harness-performance": {"tests": HARNESS_PERFORMANCE_TESTS, "expected_count": 1,
                                     "ignored": True, "timeout": 1800,
                                     "compiler_mode": "owned-resident", "max_jobs": 1,
@@ -241,8 +251,8 @@ def catalog_source_inventory(root: Path) -> dict:
 def catalog_source_metadata(root: Path) -> dict:
     metadata = json.loads((root / CATALOG_SOURCE_METADATA).read_text())
     if (not isinstance(metadata, dict)
-            or set(metadata) != {"schema", "kind", "components", "modules", "roots", "probe", "targets", "root_entry"}
-            or metadata["schema"] != 1 or metadata["kind"] != "native-catalog-source-snapshot"
+            or set(metadata) != {"schema", "kind", "components", "modules", "roots", "probe", "targets", "root_entry", "builtin_entries"}
+            or metadata["schema"] != 2 or metadata["kind"] != "native-catalog-source-snapshot"
             or metadata["roots"] != CATALOG_SOURCE_ROOTS
             or metadata["probe"] != "TidepoolCatalog.hs" or metadata["targets"] != ["catalogSentinel"]
             or not isinstance(metadata["components"], list) or not metadata["components"]
@@ -270,6 +280,8 @@ def catalog_source_metadata(root: Path) -> dict:
         raise ValueError("catalog probe differs from its declared module cohort")
     if metadata["root_entry"] != root_entry_source_record(root):
         raise ValueError("root entry differs from its declared generated source bytes")
+    if metadata["builtin_entries"] != builtin_entry_source_records(root):
+        raise ValueError("built-in entries differ from their declared named source bytes")
     return metadata
 
 
@@ -280,6 +292,14 @@ def root_entry_source_record(root: Path) -> dict:
             "entry": "Tidepool.Actors.Internal.ExomonadDriver.rootDriver",
             "effects": "Tidepool.Actors.Internal.ExomonadDriver.RootEffects",
             "sha256": sha256(root / ROOT_ENTRY_SOURCE)}
+
+def builtin_entry_source_records(root: Path) -> dict:
+    return {name: {"path": path, "producer_target": ROOT_ENTRY_SOURCE_OWNER,
+                   "generator_source": ROOT_ENTRY_GENERATOR_SOURCE,
+                   "module": Path(path).stem, "entry": "Tidepool.Agent.Contract." + entry,
+                   "effects": "Tidepool.Agent.Contract.BuiltinDispatcherEffects",
+                   "sha256": sha256(root / path)}
+            for name, (path, entry) in BUILTIN_ENTRY_SOURCES.items()}
 
 def catalog_probe(modules: dict) -> str:
     return ("module TidepoolCatalog where\n"
@@ -310,10 +330,13 @@ def snapshot_catalog_sources(args) -> None:
             shutil.copyfile(args.effects.joinpath(*path.parts[1:]), destination)
     (root / "TidepoolCatalog.hs").write_text(catalog_probe(cohort["modules"]))
     shutil.copyfile(args.root_entry_source, root / ROOT_ENTRY_SOURCE)
+    for name, (path, _) in BUILTIN_ENTRY_SOURCES.items():
+        shutil.copyfile(getattr(args, name + "_entry_source"), root / path)
     write_json(root / CATALOG_SOURCE_METADATA, {
-        "schema": 1, "kind": "native-catalog-source-snapshot", **cohort,
+        "schema": 2, "kind": "native-catalog-source-snapshot", **cohort,
         "roots": CATALOG_SOURCE_ROOTS, "probe": "TidepoolCatalog.hs", "targets": ["catalogSentinel"],
         "root_entry": root_entry_source_record(root),
+        "builtin_entries": builtin_entry_source_records(root),
     })
     # NAR identity ignores timestamps. Fixed names and modes make the original
     # retained path stable across actions and runs with the same complete bytes.
@@ -504,7 +527,8 @@ def invoke_retained_catalog_producer(args, operation: CatalogProducerOperation) 
         "PATH": str(tools / "bin"),
     }
     environment = execution_environment({"environment": declared_environment})
-    probe, target = ((ROOT_ENTRY_SOURCE, "__prepared")
+    entry_source = BUILTIN_ENTRY_SOURCES[args.entry_name][0] if getattr(args, "entry_name", None) else ROOT_ENTRY_SOURCE
+    probe, target = ((entry_source, "__prepared")
                      if operation is CatalogProducerOperation.ENTRY else ("TidepoolCatalog.hs", "catalogSentinel"))
     command = [str(args.producer.resolve(strict=True)), operation.value, "--source", str(original / probe),
                "--target", target, "--source-root", str(original), "--output-root", str(output)]
@@ -590,11 +614,11 @@ def build_native_catalog(args) -> None:
     })
 
 
-def root_entry_selection(entry: Path, original: Path) -> dict:
+def root_entry_selection(entry: Path, original: Path, source_name: str = ROOT_ENTRY_SOURCE) -> dict:
     manifest = json.loads(entry.read_text())
     if (manifest.get("schema") != 2 or manifest.get("purpose") != "original_source"
             or manifest.get("target") != "__prepared"
-            or manifest.get("source") != str(original / ROOT_ENTRY_SOURCE)):
+            or manifest.get("source") != str(original / source_name)):
         raise ValueError("root entry does not retain the declared original settled driver")
     sources = manifest.get("sources")
     if not isinstance(sources, dict) or set(sources) != {"kind", "selection"} or sources["kind"] != "native_catalog":
@@ -605,7 +629,8 @@ def root_entry_selection(entry: Path, original: Path) -> dict:
 def build_native_root_entry(args) -> None:
     original = invoke_retained_catalog_producer(args, CatalogProducerOperation.ENTRY)
     output = args.output.absolute()
-    selection = root_entry_selection(output / "entry.json", original)
+    source_name = BUILTIN_ENTRY_SOURCES[args.entry_name][0] if getattr(args, "entry_name", None) else ROOT_ENTRY_SOURCE
+    selection = root_entry_selection(output / "entry.json", original, source_name)
     retained = json.loads(args.retention_record.read_text())
     shutil.copy2(args.retention_record, output / "source-retention.json")
     products = native_catalog_products(output, NATIVE_ROOT_ENTRY_BUILD)
@@ -618,10 +643,11 @@ def build_native_root_entry(args) -> None:
     })
 
 
-def verify_native_root_entry(root: Path, catalog: dict) -> dict:
-    directory = root / "share/exomonad/root-entry"
+def verify_native_root_entry(root: Path, catalog: dict, entry_name: str | None = None) -> dict:
+    directory = root / ("share/exomonad/builtin-entries/" + entry_name if entry_name else "share/exomonad/root-entry")
     receipt = json.loads((directory / NATIVE_ROOT_ENTRY_BUILD).read_text())
-    selection = root_entry_selection(directory / "entry.json", Path(catalog["source_selection"]["snapshot_root"]))
+    source_name = BUILTIN_ENTRY_SOURCES[entry_name][0] if entry_name else ROOT_ENTRY_SOURCE
+    selection = root_entry_selection(directory / "entry.json", Path(catalog["source_selection"]["snapshot_root"]), source_name)
     products = native_catalog_products(directory, NATIVE_ROOT_ENTRY_BUILD)
     expected = {"manifest_sha256": sha256(directory / "entry.json"), "source_selection": selection,
                 "source_inventory_sha256": catalog["source_inventory_sha256"],
@@ -635,9 +661,16 @@ def verify_native_root_entry(root: Path, catalog: dict) -> dict:
             or selection != catalog["source_selection"]):
         raise ValueError("prepared root entry differs from the complete retained source and artifact selection")
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
-    if contract.get("startup_mode") != "prepared" or contract.get("native_root_entry") != expected:
+    selected = contract.get("native_builtin_entries", {}).get(entry_name) if entry_name else contract.get("native_root_entry")
+    if contract.get("startup_mode") != "prepared" or selected != expected:
         raise ValueError("prepared root entry differs from the owning build contract")
     return expected
+
+def verify_native_builtin_entries(root: Path, catalog: dict) -> dict:
+    contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
+    if set(contract.get("native_builtin_entries", {})) != set(BUILTIN_ENTRY_SOURCES):
+        raise ValueError("prepared bundle must select both standard built-in installer policies")
+    return {name: verify_native_root_entry(root, catalog, name) for name in BUILTIN_ENTRY_SOURCES}
 
 
 def declared_haskell_sources(source: Path, bundle: Path, original_sources: Path | None = None,
@@ -687,6 +720,9 @@ def verify_build_contract(source: Path, bundle: Path, contract: dict, expected_p
                 or generated.get("generator_source") != ROOT_ENTRY_GENERATOR_SOURCE
                 or ROOT_ENTRY_GENERATOR_SOURCE not in inputs):
             raise ValueError("prepared root source lacks its declared generator build input")
+        original = Path(contract["native_catalog"]["source_selection"]["snapshot_root"])
+        if contract.get("generated_builtin_sources") != catalog_source_metadata(original)["builtin_entries"]:
+            raise ValueError("prepared built-in sources differ from their declared named snapshot")
     elif generated is not None:
         raise ValueError("unprepared bundle cannot declare a generated prepared root source")
     verify_artifact_contract(bundle, contract)
@@ -937,14 +973,15 @@ def _canonical_json(value: dict) -> bytes:
 
 
 class _VerifiedNativeCatalog:
-    __slots__ = ("bundle_root", "catalog_contract", "root_entry_contract",
+    __slots__ = ("bundle_root", "catalog_contract", "root_entry_contract", "builtin_entries_contract",
                  "source_selection", "snapshot_root", "_issuer")
 
-    def __init__(self, bundle_root: Path, catalog_contract: bytes, root_entry_contract: bytes,
+    def __init__(self, bundle_root: Path, catalog_contract: bytes, root_entry_contract: bytes, builtin_entries_contract: bytes,
                  source_selection: bytes, snapshot_root: str, issuer: object):
         object.__setattr__(self, "bundle_root", bundle_root)
         object.__setattr__(self, "catalog_contract", catalog_contract)
         object.__setattr__(self, "root_entry_contract", root_entry_contract)
+        object.__setattr__(self, "builtin_entries_contract", builtin_entries_contract)
         object.__setattr__(self, "source_selection", source_selection)
         object.__setattr__(self, "snapshot_root", snapshot_root)
         object.__setattr__(self, "_issuer", issuer)
@@ -957,6 +994,7 @@ def _verify_native_catalog_bundle(root: Path, tools: Path, contract: dict) -> _V
     root = root.resolve(strict=True)
     catalog = verify_native_catalog(root, tools)
     root_entry = verify_native_root_entry(root, contract["native_catalog"])
+    builtin_entries = verify_native_builtin_entries(root, contract["native_catalog"])
     if catalog != contract["native_catalog"]:
         raise ValueError("native catalog validation differs from the owning build contract")
     if root_entry != contract["native_root_entry"]:
@@ -965,6 +1003,7 @@ def _verify_native_catalog_bundle(root: Path, tools: Path, contract: dict) -> _V
     return _VerifiedNativeCatalog(
         root, _canonical_json(contract["native_catalog"]),
         _canonical_json(contract["native_root_entry"]),
+        _canonical_json(builtin_entries),
         _canonical_json(selection), selection["snapshot_root"],
         _VERIFIED_CATALOG_ISSUER)
 
@@ -997,13 +1036,15 @@ def _native_environment(root: Path, verified_catalog: _VerifiedNativeCatalog | N
                 or verified_catalog._issuer is not _VERIFIED_CATALOG_ISSUER
                 or verified_catalog.bundle_root != root
                 or verified_catalog.catalog_contract != _canonical_json(contract["native_catalog"])
-                or verified_catalog.root_entry_contract != _canonical_json(contract["native_root_entry"])):
+                or verified_catalog.root_entry_contract != _canonical_json(contract["native_root_entry"])
+                or verified_catalog.builtin_entries_contract != _canonical_json(contract["native_builtin_entries"])):
             raise ValueError("catalog-backed environment requires this bundle's verified catalog and root entry")
         selection = json.loads(verified_catalog.source_selection)
         if selection.get("snapshot_root") != verified_catalog.snapshot_root:
             raise ValueError("verified native catalog selection was altered")
         environment["TIDEPOOL_COMPILER_MODULES"] = str(root / "share/exomonad/catalog/catalog.json")
         environment["TIDEPOOL_PREPARED_ROOT_ENTRY"] = str(root / "share/exomonad/root-entry")
+        environment["TIDEPOOL_PREPARED_BUILTIN_ENTRIES"] = str(root / "share/exomonad/builtin-entries")
         environment["TIDEPOOL_PRELUDE_DIR"] = str(Path(selection["snapshot_root"]) / "lib")
     elif contract["stdlib_mode"] != "source-backed":
         raise ValueError("unsupported native stdlib mode")
@@ -1119,6 +1160,11 @@ def assemble(args) -> None:
             raise ValueError("qualified catalog-backed assembly requires a complete prepared root entry")
         shutil.copytree(args.catalog, shared / "catalog", symlinks=False)
         shutil.copytree(args.root_entry, shared / "root-entry", symlinks=False)
+        for name in BUILTIN_ENTRY_SOURCES:
+            source = getattr(args, name + "_entry", None)
+            if source is None:
+                raise ValueError("prepared assembly requires both built-in installer entries")
+            shutil.copytree(source, shared / "builtin-entries" / name, symlinks=False)
         receipt = json.loads((shared / "catalog" / NATIVE_CATALOG_BUILD).read_text())
         contract["stdlib_mode"] = "catalog-backed"
         contract["startup_mode"] = "prepared"
@@ -1129,10 +1175,18 @@ def assemble(args) -> None:
             ("manifest_sha256", "source_selection", "source_inventory_sha256", "product_inventory_sha256")}
         contract["generated_root_source"] = catalog_source_metadata(
             Path(receipt["source_selection"]["snapshot_root"]))["root_entry"]
+        contract["generated_builtin_sources"] = catalog_source_metadata(
+            Path(receipt["source_selection"]["snapshot_root"]))["builtin_entries"]
+        contract["native_builtin_entries"] = {}
+        for name in BUILTIN_ENTRY_SOURCES:
+            builtin_receipt = json.loads((shared / "builtin-entries" / name / NATIVE_ROOT_ENTRY_BUILD).read_text())
+            contract["native_builtin_entries"][name] = {key: builtin_receipt[key] for key in
+                ("manifest_sha256", "source_selection", "source_inventory_sha256", "product_inventory_sha256")}
     write_json(shared / "native-build-contract.json", contract)
     if contract["stdlib_mode"] == "catalog-backed":
         verify_native_catalog(root, tools)
         verify_native_root_entry(root, contract["native_catalog"])
+        verify_native_builtin_entries(root, contract["native_catalog"])
 
 def freeze(args) -> Path:
     tools = native_runtime_tools(args.bundle / "share/exomonad/runtime-tools")
@@ -1273,7 +1327,7 @@ def verify(path: Path) -> dict:
     verify_frozen_test_fixtures(root, descriptor["test_fixtures"])
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
     verify_fixture_source_contract(descriptor["test_fixtures"], contract)
-    if any(descriptor.get(field) != contract.get(field) for field in (*BUILD_CONTRACT_FIELDS, "native_catalog", "native_root_entry", "generated_root_source")):
+    if any(descriptor.get(field) != contract.get(field) for field in (*BUILD_CONTRACT_FIELDS, "native_catalog", "native_root_entry", "native_builtin_entries", "generated_root_source", "generated_builtin_sources")):
         raise ValueError("qualification differs from the owning native build contract")
     if not contract["source_inputs"] or digest_inventory(contract["source_inputs"]) != contract["source_inputs_sha256"]:
         raise ValueError("native build source manifest is missing or has an invalid digest")
@@ -1364,7 +1418,7 @@ def run_cohort(args) -> int:
         command.extend(["--delegated-service", "--service-slice", service_slice])
     # These bundle-owned resources are verified by the frozen owner. The runner
     # must retain their declared-resource identity across delegation.
-    for name in ("TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_TEST_FIXTURE_ROOT"):
+    for name in ("TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES", "TIDEPOOL_TEST_FIXTURE_ROOT"):
         if name in descriptor["environment"]:
             command.extend(["--resource-env", name])
     for name in cohort["tests"]:
@@ -1566,7 +1620,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     snapshot = commands.add_parser("snapshot-sources")
-    for key in ("sources", "effects", "jev-sources", "cohort", "root-entry-source", "output"):
+    for key in ("sources", "effects", "jev-sources", "cohort", "root-entry-source", "workbench-entry-source", "async-workbench-entry-source", "output"):
         snapshot.add_argument("--" + key, required=True, type=Path)
     retained = commands.add_parser("retain-sources")
     for key in ("snapshot", "output", "runtime-tools"):
@@ -1575,10 +1629,12 @@ def main(argv=None) -> int:
     for key in ("record", "snapshot", "runtime-tools"):
         selected.add_argument("--" + key, required=True, type=Path)
     producer_inputs = ("snapshot", "source-root", "declared-source-root", "retention-record", "retention-record-origin", "runtime-tools", "producer", "frontend", "worker", "deployment", "ghc-libdir", "libraries", "output")
-    for name in ("build-catalog", "inspect-catalog", "build-root-entry"):
+    for name in ("build-catalog", "inspect-catalog", "build-root-entry", "build-builtin-entry"):
         catalog = commands.add_parser(name)
         for key in producer_inputs:
             catalog.add_argument("--" + key, required=True, type=Path)
+        if name == "build-builtin-entry":
+            catalog.add_argument("--entry-name", required=True, choices=tuple(BUILTIN_ENTRY_SOURCES))
         if name == "inspect-catalog":
             catalog.add_argument("--timeout", required=True, type=int,
                                  help="producer wall limit in seconds (600–1800)")
@@ -1588,6 +1644,8 @@ def main(argv=None) -> int:
     stage = commands.add_parser("assemble")
     stage.add_argument("--catalog", type=Path)
     stage.add_argument("--root-entry", type=Path)
+    stage.add_argument("--workbench-entry", type=Path)
+    stage.add_argument("--async-workbench-entry", type=Path)
     for key in ("output", "host", "view-helper", "frontend", "worker", "libtest", "build-sources", "workspace-gitlink", "workspace-git-bundle", "sources", "assets", "libraries", "harness-revision", "runtime-tools", "ghc-libdir", "entrypoint-template", "test-fixtures", "fixture-manifest", "browser-driver"):
         stage.add_argument("--" + key, required=True, type=Path)
     stage.add_argument("--profile", required=True, choices=("fast-dev", "debug", "production"))
@@ -1626,7 +1684,7 @@ def main(argv=None) -> int:
             print(verify_retained_catalog_sources(args.record, args.snapshot, nix_path(args.runtime_tools)))
         elif args.command == "build-catalog":
             build_native_catalog(args)
-        elif args.command == "build-root-entry":
+        elif args.command in ("build-root-entry", "build-builtin-entry"):
             build_native_root_entry(args)
         elif args.command == "inspect-catalog":
             print(inspect_native_catalog(args))

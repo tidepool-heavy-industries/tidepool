@@ -157,8 +157,7 @@ pub(crate) enum WorkspacePreparation {
 pub(crate) struct PreparedToolsetCoverage {
     pub(crate) requested_effects: Vec<exomonad_actor::ActorEffectKey>,
     pub(crate) effective_effects: Vec<exomonad_actor::ActorEffectKey>,
-    pub(crate) recipe: String,
-    pub(crate) original: uuid::Uuid,
+    pub(crate) program: exomonad_actor::ToolsetProgramSelection,
 }
 
 fn coverage_entries(coverage: &[PreparedToolsetCoverage]) -> Result<BTreeMap<String, uuid::Uuid>> {
@@ -168,15 +167,32 @@ fn coverage_entries(coverage: &[PreparedToolsetCoverage]) -> Result<BTreeMap<Str
         );
     }
     let entry = &coverage[0];
-    if entry.recipe.len() != 64
-        || !entry.recipe.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || entry.original.is_nil()
-    {
-        return Err("prepared toolset coverage has an invalid original selection".into());
+    match &entry.program {
+        exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal { recipe, original } => {
+            if recipe.len() != 64
+                || !recipe.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || original.is_nil()
+            {
+                return Err("prepared toolset coverage has an invalid original selection".into());
+            }
+            Ok([(recipe.clone(), *original)].into_iter().collect())
+        }
+        exomonad_actor::ToolsetProgramSelection::BuiltinDeploymentProgram { program } => {
+            if program.manifest_blake3.len() != 64
+                || !program
+                    .manifest_blake3
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("prepared built-in coverage has an invalid entry selection".into());
+            }
+            if entry.effective_effects != exomonad_actor::ActorCapabilities::default().effect_keys()
+            {
+                return Err("prepared built-in coverage has a nonstandard effect row".into());
+            }
+            Ok(BTreeMap::new())
+        }
     }
-    Ok([(entry.recipe.clone(), entry.original)]
-        .into_iter()
-        .collect())
 }
 
 /// A run-local reference to an independently retained immutable deployment.
@@ -224,6 +240,7 @@ impl PreparedWorkspacePointer {
 /// for a run still validates current inputs and retains a run-local pointer.
 pub(crate) struct PreparedWorkspaceSelection {
     directory: std::sync::Arc<tidepool_atomic_write::DirectoryAnchor>,
+    prepared_toolset: Option<exomonad_actor::PreparedSourceToolset>,
 }
 
 impl PreparedWorkspaceSelection {
@@ -231,13 +248,15 @@ impl PreparedWorkspaceSelection {
         PreparedWorkspacePointer::for_directory(self.directory.path())
     }
 
-    #[cfg(test)]
     pub(crate) fn select_for_run(
         &self,
         workspace: &Path,
         run_root: &Path,
     ) -> Result<FrozenWorkspace> {
-        FrozenWorkspace::select_prepared(workspace, run_root, Some(self.directory.path()))
+        let mut selected =
+            FrozenWorkspace::select_prepared(workspace, run_root, Some(self.directory.path()))?;
+        selected.prepared_toolset = self.prepared_toolset.clone();
+        Ok(selected)
     }
 }
 
@@ -249,6 +268,7 @@ pub(crate) async fn prepare_workspace(
     directory: std::sync::Arc<tidepool_atomic_write::DirectoryAnchor>,
 ) -> Result<PreparedWorkspaceSelection> {
     let mut frozen = FrozenWorkspace::begin_preparation(workspace, &directory)?;
+    let mut prepared_toolset = None;
     if matches!(
         frozen.preparation,
         Some(WorkspacePreparation::Completed { .. })
@@ -264,19 +284,23 @@ pub(crate) async fn prepare_workspace(
             frozen.runtime_actors(),
             super::source::SourceRootOwner::Prepared(std::sync::Arc::clone(&directory)),
         )?);
-        let entries = crate::actor_host::prepare_workspace_toolsets(
+        let (entries, ready) = crate::actor_host::prepare_workspace_toolsets(
             workspace,
             &directory,
             frozen.clone(),
             source,
         )
         .await?;
+        prepared_toolset = Some(ready);
         let revision = super::source::SourceLayer::new(directory.path())
             .read_active()?
             .ok_or("workspace preparation did not settle its original source revision")?;
         frozen.complete_preparation(&directory, revision.identity, entries)?;
     }
-    Ok(PreparedWorkspaceSelection { directory })
+    Ok(PreparedWorkspaceSelection {
+        directory,
+        prepared_toolset,
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -311,6 +335,9 @@ pub struct FrozenWorkspace {
     /// deployment. Deserializing a path never supplies this physical owner.
     #[serde(skip)]
     pub(crate) prepared_deployment: Option<std::sync::Arc<tidepool_atomic_write::DirectoryAnchor>>,
+    /// Process-local immutable readiness; serialized selections never issue it.
+    #[serde(skip)]
+    pub(crate) prepared_toolset: Option<exomonad_actor::PreparedSourceToolset>,
 }
 
 impl FrozenWorkspace {
@@ -370,7 +397,7 @@ impl FrozenWorkspace {
             if selection.get("tools").is_some_and(|tools| !tools.is_null()) {
                 return Err("frozen workspace uses obsolete [haskell] tools; migrate to spec = 'Module.agentSpec' with agentSpec = defaultSpec { specTools = yourTools }, then start a new run".into());
             }
-            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(7) {
+            if selection.get("version").and_then(serde_json::Value::as_u64) != Some(8) {
                 return Err("unsupported frozen workspace format; prepare a new deployment and start a new run".into());
             }
             let mut frozen: Self = serde_json::from_value(selection)?;
@@ -620,7 +647,7 @@ impl FrozenWorkspace {
         );
         include.push(directory.join("resources"));
         let frozen = Self {
-            version: 7,
+            version: 8,
             identity,
             include,
             modules: config.haskell.modules,
@@ -637,6 +664,7 @@ impl FrozenWorkspace {
             runtime_orchestration,
             preparation: None,
             prepared_deployment: None,
+            prepared_toolset: None,
         };
         tidepool_atomic_write::write_durable(&manifest, &serde_json::to_vec_pretty(&frozen)?)?;
         Ok(frozen)
@@ -807,7 +835,8 @@ impl FrozenWorkspace {
                 &entry.requested_effects,
                 supported_effects,
             )?;
-            if actual.effective_effects != entry.effective_effects || actual.recipe != entry.recipe
+            if actual.effective_effects != entry.effective_effects
+                || actual.program != entry.program.recipe()
             {
                 return Err("prepared toolset recipe differs from actual host source or interpreter support; prepare a new deployment".into());
             }
@@ -1623,8 +1652,10 @@ mod tests {
                 .effect_keys()
                 .to_vec(),
             effective_effects: vec![exomonad_actor::ActorEffectKey::Replies],
-            recipe: recipe.clone(),
-            original,
+            program: exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal {
+                recipe: recipe.clone(),
+                original,
+            },
         }];
         let admitted = serde_json::to_vec(&coverage).unwrap();
         let expected = [(recipe.clone(), original)]
@@ -1649,8 +1680,20 @@ mod tests {
             let mut changed = coverage.clone();
             match mutation {
                 MalformedCoverage::RequestedEffectOrder => changed[0].requested_effects.reverse(),
-                MalformedCoverage::InvalidRecipe => changed[0].recipe = "invalid".into(),
-                MalformedCoverage::NilOriginal => changed[0].original = uuid::Uuid::nil(),
+                MalformedCoverage::InvalidRecipe => {
+                    changed[0].program =
+                        exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal {
+                            recipe: "invalid".into(),
+                            original,
+                        }
+                }
+                MalformedCoverage::NilOriginal => {
+                    changed[0].program =
+                        exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal {
+                            recipe: recipe.clone(),
+                            original: uuid::Uuid::nil(),
+                        }
+                }
                 MalformedCoverage::DuplicateRoot => changed.push(changed[0].clone()),
             }
             assert!(
@@ -1668,15 +1711,61 @@ mod tests {
         // cannot infer a prior selection or certify its native container.
         // The CompletedOriginal acquisition consumer validates that container.
         let mut alternate = coverage.clone();
-        alternate[0].original = uuid::Uuid::new_v4();
+        let alternate_original = uuid::Uuid::new_v4();
+        alternate[0].program = exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal {
+            recipe: recipe.clone(),
+            original: alternate_original,
+        };
         frozen.validate_toolset_coverage(&alternate).unwrap();
         assert_eq!(
             coverage_entries(&alternate).unwrap(),
-            [(recipe, alternate[0].original)]
+            [(recipe, alternate_original)]
                 .into_iter()
                 .collect::<BTreeMap<_, _>>()
         );
         assert_eq!(serde_json::to_vec(&coverage).unwrap(), admitted);
+    }
+
+    #[test]
+    fn prepared_builtin_coverage_requires_exact_standard_row_and_typed_provenance() {
+        let (_libraries, selection) = deployment_fixture();
+        let project = deployment_project("[defaults]\nmodel = 'gpt-6-sol'\n");
+        let directory = tempfile::tempdir().unwrap();
+        let frozen = FrozenWorkspace::load_with_deployment(
+            project.path(),
+            directory.path(),
+            Some(selection),
+        )
+        .unwrap();
+        let standard = exomonad_actor::ActorCapabilities::default()
+            .effect_keys()
+            .to_vec();
+        for policy in [
+            exomonad_actor::BuiltinToolsetPolicy::Workbench,
+            exomonad_actor::BuiltinToolsetPolicy::AsyncWorkbench,
+        ] {
+            let coverage = vec![PreparedToolsetCoverage {
+                requested_effects: standard.clone(),
+                effective_effects: standard.clone(),
+                program: exomonad_actor::ToolsetProgramSelection::BuiltinDeploymentProgram {
+                    program: exomonad_actor::BuiltinDeploymentProgram {
+                        policy,
+                        manifest_blake3: "a".repeat(64),
+                    },
+                },
+            }];
+            frozen.validate_toolset_coverage(&coverage).unwrap();
+            assert!(coverage_entries(&coverage).unwrap().is_empty());
+            let mut malformed = coverage.clone();
+            malformed[0].effective_effects.pop();
+            assert!(frozen.validate_toolset_coverage(&malformed).is_err());
+            let mut packet = serde_json::to_value(&coverage).unwrap();
+            packet[0]["program"]["original"] = serde_json::json!(uuid::Uuid::new_v4());
+            assert!(
+                serde_json::from_value::<Vec<PreparedToolsetCoverage>>(packet).is_err(),
+                "built-in observations cannot acquire a workspace-original UUID"
+            );
+        }
     }
 
     #[test]
@@ -1713,8 +1802,12 @@ mod tests {
         let coverage = vec![PreparedToolsetCoverage {
             requested_effects,
             effective_effects: actual.effective_effects,
-            recipe: actual.recipe,
-            original,
+            program: match actual.program {
+                exomonad_actor::ToolsetProgramRecipe::WorkspaceOriginal(recipe) => {
+                    exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal { recipe, original }
+                }
+                _ => panic!("unmatched row uses workspace original"),
+            },
         }];
         frozen.preparation = Some(WorkspacePreparation::Completed {
             original,
@@ -1753,7 +1846,12 @@ mod tests {
             if mutate_effects {
                 coverage[0].effective_effects.pop();
             } else {
-                coverage[0].recipe = if coverage[0].recipe == "a".repeat(64) {
+                let exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal { recipe, .. } =
+                    &mut coverage[0].program
+                else {
+                    panic!("workspace original fixture")
+                };
+                *recipe = if *recipe == "a".repeat(64) {
                     "b".repeat(64)
                 } else {
                     "a".repeat(64)
@@ -1915,23 +2013,19 @@ mod tests {
         ] {
             selected["preparation"] = replacement;
             std::fs::write(&manifest, serde_json::to_vec(&selected).unwrap()).unwrap();
-            assert!(
-                pointer
-                    .read_selection()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("selection changed")
-            );
-        }
-        // Hash refusal precedes deserialization, including malformed metadata.
-        std::fs::write(&manifest, b"invalid selection").unwrap();
-        assert!(
-            pointer
+            assert!(pointer
                 .read_selection()
                 .unwrap_err()
                 .to_string()
-                .contains("selection changed")
-        );
+                .contains("selection changed"));
+        }
+        // Hash refusal precedes deserialization, including malformed metadata.
+        std::fs::write(&manifest, b"invalid selection").unwrap();
+        assert!(pointer
+            .read_selection()
+            .unwrap_err()
+            .to_string()
+            .contains("selection changed"));
         std::fs::remove_file(&manifest).unwrap();
         assert!(pointer.read_selection().is_err());
         std::fs::write(&manifest, &original).unwrap();
@@ -1964,7 +2058,7 @@ mod tests {
         let manifest = directory.path().join("workspace/selection.json");
         let mut selected: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        for version in [4, 5, 6] {
+        for version in [4, 5, 6, 7] {
             selected["version"] = serde_json::json!(version);
             // An old completed inventory must be refused by its version,
             // before decoding its missing current coverage fields.
@@ -2252,7 +2346,7 @@ mod tests {
         let manifest = run.path().join("workspace/selection.json");
         let mut selection: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        assert_eq!(selection["version"], 7);
+        assert_eq!(selection["version"], 8);
         selection["tools"] = serde_json::Value::Null;
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let retained = FrozenWorkspace::load(project.path(), run.path()).unwrap();

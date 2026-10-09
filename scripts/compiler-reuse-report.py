@@ -291,7 +291,7 @@ def analyze(events):
                 if not isinstance(event, dict):
                     raise ValueError('reuse payload is not an object')
                 validate_event(event)
-                request['events'].append({'row': index, **event})
+                request['events'].append({**event, 'row': index})
             except (ValueError, TypeError) as error:
                 problems.append(f'row {index}: {error}')
                 request['parse_problems'].append(f'row {index}: {error}')
@@ -330,9 +330,31 @@ def analyze(events):
                 detail['_boundary_problem'] = 'task timing detail outside request boundaries'
             if detail.get('_boundary_problem'):
                 request_problems.append(f"row {detail['row']}: {detail['_boundary_problem']}")
+        seen_reuse_events = set()
         for event in request['events']:
-            if event['row'] <= request['start_row'] or (terminals and event['row'] >= terminals[0]):
-                request_problems.append(f"row {event['row']}: reuse event outside request boundaries")
+            if event['row'] <= request['start_row']:
+                request_problems.append(f"row {event['row']}: reuse event precedes its physical request start")
+            terminal_order = 'unknown'
+            terminal_row = None
+            if len(terminals) == 1:
+                terminal_row = terminals[0]
+                terminal_order = 'after' if event['row'] >= terminal_row else 'before'
+            # Trace subscribers can drain a worker's buffered diagnostics after
+            # its terminal event. Exact envelope identity and request digest
+            # establish ownership; row order is retained as evidence, not used
+            # as a substitute for that correlation.
+            event['correlation'] = {
+                'basis': 'exact_physical_request_identity',
+                'terminal_order': terminal_order,
+                'request_start_row': request['start_row'],
+                'request_terminal_row': terminal_row,
+            }
+            fingerprint = json.dumps(
+                {name: value for name, value in event.items() if name not in ('row', 'correlation')},
+                sort_keys=True, separators=(',', ':'))
+            if fingerprint in seen_reuse_events:
+                request_problems.append(f"row {event['row']}: duplicate reuse event for physical request")
+            seen_reuse_events.add(fingerprint)
             if len(cycle_purposes[(key[0], key[1], event['cycle'])]) != 1:
                 request_problems.append(f"cycle {event['cycle']}: conflicting purposes within worker")
         request['admission_queue_ms'] = admissions.get((key[0], key[2]), [])

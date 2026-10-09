@@ -5,13 +5,15 @@ use crate::session::RecoveryPublicationWork;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use tidepool_repr::Generation;
 use tidepool_toolchain::artifact_inventory::{ArtifactDependency, ArtifactDescriptor, ArtifactId};
 use tidepool_toolchain::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use tidepool_toolchain::recovery_artifacts::{
-    with_recovery_artifact_verification, RecoveryArtifactError, RecoveryArtifactRef,
+    capture_recovery_artifact_observations, RecoveryArtifactError, RecoveryArtifactRef,
     RecoveryArtifactWork, RecoveryJoinRef, RecoveryModuleInterfaceRef, RecoveryValueInterfaceRef,
+    RetainedRecoveryArtifactObservations,
 };
 
 #[path = "newrecovery_v2/snapshots.rs"]
@@ -442,6 +444,44 @@ pub(crate) struct RecoveryV2Read {
     pub graph: RecoveryGraph,
     pub artifact_losses: BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
     pub inventory: Option<tidepool_toolchain::declaration_join::RecoveredArtifactInventory>,
+    observations: Option<RetainedRecoveryArtifactObservations>,
+}
+
+/// Complete sealed public graph facts and writer/reader-issued physical
+/// observations. Live admission rechecks files without rebuilding those facts.
+#[derive(Clone)]
+pub(crate) struct RetainedRecoveryGraph {
+    graph: RecoveryGraph,
+    manifest_digest: blake3::Hash,
+    observations: RetainedRecoveryArtifactObservations,
+}
+
+impl RetainedRecoveryGraph {
+    pub(crate) fn observe(
+        &self,
+        graph: &RecoveryGraph,
+        path: &Path,
+        root: &Path,
+    ) -> Result<bool, RecoveryError> {
+        if self.graph.checksum() != graph.checksum() {
+            return Ok(false);
+        }
+        let file = fs::File::open(path).map_err(|error| at(path, error.to_string()))?;
+        let mut bytes = Vec::new();
+        file.take(MAX_MANIFEST_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| at(path, error.to_string()))?;
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(at(path, "recovery manifest exceeds the bounded size"));
+        }
+        if blake3::hash(&bytes) != self.manifest_digest {
+            return Ok(false);
+        }
+        self.observations
+            .observe(root, &mut RecoveryArtifactWork::default())
+            .map_err(|error| at(path, error.to_string()))?;
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -451,6 +491,16 @@ pub(crate) enum RecoveryReadPurpose {
 }
 
 impl RecoveryV2Read {
+    pub(crate) fn retain(&self, bytes: &[u8]) -> Option<RetainedRecoveryGraph> {
+        if !self.artifact_losses.is_empty() {
+            return None;
+        }
+        Some(RetainedRecoveryGraph {
+            graph: self.graph.clone(),
+            manifest_digest: blake3::hash(bytes),
+            observations: self.observations.clone()?,
+        })
+    }
     pub(crate) fn projection(
         &self,
         owner: &RecoveryPublicOwner,
@@ -502,12 +552,18 @@ pub(crate) struct StagedRecoveryManifest {
     inner: tidepool_atomic_write::StagedDurableWrite,
     graph: RecoveryGraph,
     pub(crate) work: RecoveryPublicationWork,
+    manifest_digest: blake3::Hash,
+    observations: Option<RetainedRecoveryArtifactObservations>,
 }
 
 /// A graph whose shape and checksum have been checked, or whose checksum was
 /// just produced by `seal`. Keeping that fact in the type lets staging avoid
 /// repeating the same full-graph validation at each private layer.
-struct ValidatedRecoveryGraph(RecoveryGraph, RecoveryPublicationWork);
+struct ValidatedRecoveryGraph(
+    RecoveryGraph,
+    RecoveryPublicationWork,
+    Option<RetainedRecoveryArtifactObservations>,
+);
 
 impl ValidatedRecoveryGraph {
     fn check(graph: RecoveryGraph) -> Result<Self, RecoveryError> {
@@ -518,6 +574,7 @@ impl ValidatedRecoveryGraph {
                 checksum_encode_bytes: encoded_bytes,
                 ..Default::default()
             },
+            None,
         ))
     }
 
@@ -529,6 +586,7 @@ impl ValidatedRecoveryGraph {
                 checksum_encode_bytes: encoded_bytes,
                 ..Default::default()
             },
+            None,
         ))
     }
 
@@ -537,7 +595,15 @@ impl ValidatedRecoveryGraph {
         root: &Path,
     ) -> Result<BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>, RecoveryError> {
         let mut work = RecoveryArtifactWork::default();
-        let result = self.0.validate_artifact_files_with_work(root, &mut work);
+        let result =
+            self.0
+                .capture_artifact_observations(root, &mut work)
+                .map(|(losses, observations)| {
+                    if losses.is_empty() {
+                        self.2 = Some(observations);
+                    }
+                    losses
+                });
         self.1.recovery_validation_hash_bytes += work.hash_bytes;
         result
     }
@@ -560,6 +626,21 @@ pub(crate) enum RecoveryPublishOutcome {
 }
 
 impl StagedRecoveryManifest {
+    pub(crate) fn retained_graph(
+        &self,
+        previous: Option<&RetainedRecoveryGraph>,
+    ) -> Option<RetainedRecoveryGraph> {
+        let observations = self.observations.clone().or_else(|| {
+            previous
+                .filter(|previous| previous.graph.artifacts().eq(self.graph.artifacts()))
+                .map(|previous| previous.observations.clone())
+        })?;
+        Some(RetainedRecoveryGraph {
+            graph: self.graph.clone(),
+            manifest_digest: self.manifest_digest,
+            observations,
+        })
+    }
     #[must_use]
     pub(crate) fn candidate_graph(&self) -> &RecoveryGraph {
         &self.graph
@@ -616,7 +697,7 @@ fn stage_metadata_v2(
     path: &Path,
     graph: ValidatedRecoveryGraph,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
-    let ValidatedRecoveryGraph(graph, mut work) = graph;
+    let ValidatedRecoveryGraph(graph, mut work, observations) = graph;
     let bytes = serde_json::to_vec(&graph)
         .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
     if bytes.len() > MAX_MANIFEST_BYTES {
@@ -633,6 +714,8 @@ fn stage_metadata_v2(
         inner: staged,
         graph,
         work,
+        manifest_digest: blake3::hash(&bytes),
+        observations,
     })
 }
 
@@ -834,16 +917,18 @@ pub(crate) fn read_v2_bytes(
         error.path = Some(path.to_path_buf());
         error
     })?;
+    let mut observations = None;
     let (inventory, artifact_losses) = match purpose {
-        RecoveryReadPurpose::Metadata => (
-            None,
-            graph
-                .validate_artifact_files_after_graph_validation(recovery_root)
+        RecoveryReadPurpose::Metadata => {
+            let (losses, observed) = graph
+                .capture_artifact_observations(recovery_root, &mut RecoveryArtifactWork::default())
                 .map_err(|mut error| {
                     error.path = Some(path.to_path_buf());
                     error
-                })?,
-        ),
+                })?;
+            observations = Some(observed);
+            (None, losses)
+        }
         RecoveryReadPurpose::Hydration => match graph.capture_inventory(recovery_root) {
             Ok(inventory) => (Some(inventory), BTreeMap::new()),
             Err(tidepool_toolchain::declaration_join::RecoveryInventoryError::Artifacts(
@@ -870,6 +955,7 @@ pub(crate) fn read_v2_bytes(
         graph,
         artifact_losses,
         inventory,
+        observations,
     }))
 }
 
@@ -1086,9 +1172,24 @@ impl RecoveryGraph {
         root: &Path,
         work: &mut RecoveryArtifactWork,
     ) -> Result<BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>, RecoveryError> {
+        self.capture_artifact_observations(root, work)
+            .map(|(losses, _)| losses)
+    }
+
+    pub(crate) fn capture_artifact_observations(
+        &self,
+        root: &Path,
+        work: &mut RecoveryArtifactWork,
+    ) -> Result<
+        (
+            BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
+            RetainedRecoveryArtifactObservations,
+        ),
+        RecoveryError,
+    > {
         let root = fs::canonicalize(root)
             .map_err(|e| error(format!("could not resolve recovery root: {e}")))?;
-        with_recovery_artifact_verification(&root, work, |verification| {
+        capture_recovery_artifact_observations(&root, work, |verification| {
             let mut losses = BTreeMap::new();
             for artifact in self.artifacts() {
                 for (_, path) in artifact.component_paths() {

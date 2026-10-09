@@ -17,14 +17,16 @@ EXPECTED_PHASES = (
     "first-arithmetic", "publish-retained", "lookup-retained", "reuse-retained",
     "repeat-retained", "async-yield-result", "reuse-async-action", "repeat-arithmetic",
 )
-THREE_ACTOR_PHASES = (
-    "activation", "root-setup", "root-fork-capture", "async-yield", "child-alpha-reply",
-    "child-beta-reply", "parent-publication-read", "explicit-child-cleanup",
-    "host-cleanup",
-)
+THREE_ACTOR_ROSTER_PATH = (Path(__file__).resolve().parents[1] /
+                           "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json")
+THREE_ACTOR_PHASES = tuple(json.loads(THREE_ACTOR_ROSTER_PATH.read_text()))
 KNOWN_ROSTERS = {"harness-eight-phase": EXPECTED_PHASES,
                  "three-actor-capture": THREE_ACTOR_PHASES}
 STARTUP_OWNER_SPANS = {"compile_root", "workspace_toolsets_prepare", "actor_application_prepare"}
+PROVIDER_RESPONSE_PHASES = {
+    "root-setup", "root-fork-capture", "async-yield", "child-alpha-reply",
+    "child-beta-reply", "parent-publication-read", "explicit-child-cleanup",
+}
 
 
 def startup_owner(span):
@@ -370,6 +372,9 @@ def analyze(record_path):
     for phase in phases:
         if phase["phase"] in ("environment", "activation"):
             continue
+        phase_evidence = phase.get("evidence", {})
+        if not isinstance(phase_evidence, dict):
+            phase_evidence = {}
         call_id = phase.get("call_id")
         execution_ids = sorted(dispatches.get(str(call_id), set())) if call_id else []
         phase_submissions = [request for request in submissions
@@ -425,10 +430,12 @@ def analyze(record_path):
             "phase_record": phase,
             "phase": phase["phase"], "sequence": phase.get("sequence"), "call_id": call_id,
             "completed": phase.get("completed") is True,
+            "behavior_role": phase_evidence.get("cell_role"),
             "invocation_execution": phase.get("invocation_execution"),
             "yielded_before_terminal": phase.get("yielded_before_terminal"),
             "wall_ns": nonnegative_integer(phase.get("wall_ns")),
             "first_successor_ns": nonnegative_integer(phase.get("first_successor_ns")),
+            "scripted_response_hold_ns": nonnegative_integer(phase.get("scripted_response_hold_ns")),
             "logical_compiler_requests": logical,
             "host_submission_event_count": len(phase_submissions),
             "host_submission_identity_count": len(identities),
@@ -461,6 +468,8 @@ def analyze(record_path):
             ],
             "provider_model_latency_ms": None,
             "provider_model_latency_status": "not_measured_scripted_provider",
+            "scripted_response_hold_status": "observed_test_coordination" if
+                nonnegative_integer(phase.get("scripted_response_hold_ns")) is not None else "unknown",
             "store_projection_ms": None,
             "store_projection_status": cost_coverage["store_projection_status"],
         })
@@ -513,11 +522,28 @@ def analyze(record_path):
     )
 
     invalid_phase_measurements = []
+    activation_evidence = activation.get("evidence", {}) if activation else {}
+    if not isinstance(activation_evidence, dict):
+        activation_evidence = {}
+    workspace_preparation_ns = (activation.get("workspace_preparation_ns") if activation else None)
+    if workspace_preparation_ns is None:
+        workspace_preparation_ns = activation_evidence.get("workspace_preparation_ns")
+    host_start_readiness_ns = (activation.get("host_start_readiness_ns") if activation else None)
+    if host_start_readiness_ns is None:
+        host_start_readiness_ns = activation_evidence.get("host_start_readiness_ns")
     for phase in phases:
         if phase["phase"] == "environment":
             continue
         invalid_fields = [name for name in ("wall_ns", "logical_compiler_requests")
                           if type(phase.get(name)) is not int or phase[name] < 0]
+        if cohort_name == "three-actor-capture" and phase["phase"] == "activation":
+            invalid_fields.extend(name for name, value in (
+                ("workspace_preparation_ns", workspace_preparation_ns),
+                ("host_start_readiness_ns", host_start_readiness_ns),
+            ) if type(value) is not int or value < 0)
+        if cohort_name == "three-actor-capture" and phase["phase"] in PROVIDER_RESPONSE_PHASES:
+            if type(phase.get("scripted_response_hold_ns")) is not int or phase["scripted_response_hold_ns"] < 0:
+                invalid_fields.append("scripted_response_hold_ns")
         if "first_successor_ns" in phase and (
                 type(phase["first_successor_ns"]) is not int or phase["first_successor_ns"] < 0):
             invalid_fields.append("first_successor_ns")
@@ -657,6 +683,11 @@ def analyze(record_path):
                                              "not-established-by-this-counted-test",
         },
         "activation": activation,
+        "activation_timing": {
+            "workspace_preparation_ns": nonnegative_integer(workspace_preparation_ns),
+            "host_start_readiness_ns": nonnegative_integer(host_start_readiness_ns),
+            "scope": "workspace preparation and production readiness are separate nested startup intervals",
+        },
         "phase_coverage": phase_coverage,
         "phase_measurements": {
             "status": "complete" if not invalid_phase_measurements else "partial_or_unknown",
@@ -669,6 +700,7 @@ def analyze(record_path):
             "queue_wait_is_per_admission_and_not_added_to_request_service": True,
             "missing_queue_records_mean_unknown_not_zero": True,
             "nested_runtime_cost_events_are_retained_individually_not_summed": True,
+            "scripted_response_hold_is_test_coordination_not_model_latency": True,
         },
         "harness_runtime_cost_trace": {
             "status": "events_observed" if cost_events else "no_records_observed_unknown",

@@ -57,6 +57,7 @@ impl PhaseClock {
         call_id: Option<&str>,
         boundary_kind: &str,
         source: &str,
+        scripted_response_hold_ns: Option<u128>,
         evidence: Value,
     ) {
         record_phase(
@@ -66,6 +67,7 @@ impl PhaseClock {
                 "completed": true, "role": role, "actor_id": actor,
                 "call_id": call_id, "boundary_kind": boundary_kind, "source": source,
                 "wall_ns": self.started.elapsed().as_nanos(),
+                "scripted_response_hold_ns": scripted_response_hold_ns,
                 "logical_compiler_requests": tidepool_extract_cmd::extract_spawn_count() - self.compiler_requests,
                 "compiler_count_scope": "global requests between ordered milestones; not per-actor attribution",
                 "wall_scope": "ordered milestone window; pending calls can span later phases",
@@ -255,6 +257,7 @@ async fn production_harness_three_actor_capture_phases() {
     let deployment: BTreeMap<_, _> = [
         "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT",
         "TIDEPOOL_PREPARED_ROOT_ENTRY",
+        "TIDEPOOL_PREPARED_BUILTIN_ENTRIES",
         "TIDEPOOL_COMPILER_DEPLOYMENT",
         "TIDEPOOL_COMPILER_MODULES",
         "TIDEPOOL_EXTRACT_WORKER",
@@ -305,34 +308,35 @@ async fn production_harness_three_actor_capture_phases() {
         let root = host.context.actor.identity();
         let root_name = root.to_string();
         let frozen = host.context.config.workspace_inputs.as_ref().unwrap();
-        let completed_entries = frozen.completed_entry_selections().unwrap();
-        assert!(!completed_entries.is_empty());
         let coverage = frozen.prepared_toolset_coverage().unwrap();
         assert_eq!(coverage.len(), 1, "one prepared root toolset");
         let installation = host.context.observer.installation(root).await;
-        let Some(exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original }) = installation.acquisition.as_ref() else {
-            panic!("root uses its completed deployment original");
-        };
-        assert_eq!((recipe, original), (&coverage[0].recipe, &coverage[0].original));
-        assert_eq!(completed_entries.get(recipe), Some(original));
+        assert_eq!(installation.acquisition.as_ref().and_then(exomonad_actor::ToolsetAcquisition::selection),
+            Some(coverage[0].program.clone()), "root installs its exact prepared program");
         admit_http_input(host).await;
         let mut pending = VecDeque::new();
         let mut round = next_root(host, &mut requests, &mut pending).await;
         assert_eq!(round.request.model, "gpt-6.1-sol");
         let root_session = round.request.session_id.clone();
         activation.record(&scenario_phases, 0, "root", &root_name, None, "lifecycle", "",
-            json!({"prepared_root_original": true, "http_input_admitted": true}));
+            None,
+            json!({"prepared_root_original": true, "http_input_admitted": true,
+                "workspace_preparation_ns": host.preparation_elapsed_ns(),
+                "host_start_readiness_ns": host.startup_readiness_elapsed_ns()}));
 
         let phase = PhaseClock::begin();
+        let scripted_response_hold_ns = round.scripted_response_hold_ns();
         round.call("three-actor-setup", SETUP);
         round = next_root(host, &mut requests, &mut pending).await;
         round.assert_value("three-actor-setup", "True");
-        phase.record(&scenario_phases, 1, "root", &root_name, Some("three-actor-setup"), "native-tool", SETUP, json!({"retained_value": 41}));
+        phase.record(&scenario_phases, 1, "root", &root_name, Some("three-actor-setup"), "native-tool", SETUP,
+            Some(scripted_response_hold_ns), json!({"retained_value": 41, "cell_role": "first"}));
         let prefix = round.request.input.iter().filter(|item| !item.is_configuration_update())
             .cloned().collect::<Vec<_>>();
         let effort = round.request.input.iter().rev().find_map(harness::item::Item::configuration_effort).unwrap();
         let parent = OperationId { origin: round.origin(), request: root_head(host), call: CallId(PARENT_CALL.into()) };
         let phase = PhaseClock::begin();
+        let scripted_response_hold_ns = round.scripted_response_hold_ns();
         round.async_call(PARENT_CALL, CAPTURE);
         let successor = next_root(host, &mut requests, &mut pending).await;
         assert!(!successor.request.input.iter().any(|item| item.0["call_id"] == PARENT_CALL
@@ -370,11 +374,13 @@ async fn production_harness_three_actor_capture_phases() {
             graph.iter().find(|node| node.actor == children[1].1).unwrap().bound_worktree, "distinct actual fork worktrees");
         wait_parent_parked(host, &parent).await;
         phase.record(&scenario_phases, 2, "root", &root_name, Some(PARENT_CALL), "native-tool", CAPTURE,
+            Some(scripted_response_hold_ns),
             json!({"milestone": "both captured workers admitted while parent parked", "operation": parent,
                 "model_actors": 3, "held_worker_responses": 2}));
 
         let phase = PhaseClock::begin();
         let yield_head = root_head(host);
+        let scripted_response_hold_ns = successor.scripted_response_hold_ns();
         successor.function(YIELD_CALL, "yield", json!({}));
         host.context.while_root_live("three-actor persisted Engine yield",
             tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
@@ -389,6 +395,7 @@ async fn production_harness_three_actor_capture_phases() {
             .expect("yield recorded while both scripted worker responses remain held");
         assert!(host.runtime.store().claims(&CallId(YIELD_CALL.into())).unwrap().is_empty(), "Engine builtin is not a native claim");
         phase.record(&scenario_phases, 3, "root", &root_name, Some(YIELD_CALL), "engine-builtin", "yield {}",
+            Some(scripted_response_hold_ns),
             json!({"milestone": "yield persisted with exact parent Pending and both child responses held", "parent_operation": parent}));
 
         let child_actors = children.iter().map(|(_, actor, _)| *actor).collect::<Vec<_>>();
@@ -396,6 +403,7 @@ async fn production_harness_three_actor_capture_phases() {
             let phase = PhaseClock::begin();
             let call = format!("three-actor-child-{}", if index == 0 { "alpha" } else { "beta" });
             let origin = child_round.origin();
+            let scripted_response_hold_ns = child_round.scripted_response_hold_ns();
             child_round.call(&call, "respond capturedGetter");
             let completed = host.context.while_root_live("three-actor native child reply",
                 next_hosted_script_round(&mut requests, &mut pending, origin.actor()))
@@ -404,11 +412,13 @@ async fn production_harness_three_actor_capture_phases() {
             assert_replied(&completed, &call);
             if index == 0 { assert_pending(host, &parent); }
             phase.record(&scenario_phases, 4 + index, &label, &actor.to_string(), Some(&call), "native-tool", "respond capturedGetter",
+                Some(scripted_response_hold_ns),
                 json!({"typed_reply_accepted": true, "expected_value": 42}));
             completed.finish();
         }
         let phase = PhaseClock::begin();
         round = next_root(host, &mut requests, &mut pending).await;
+        let scripted_response_hold_ns = round.scripted_response_hold_ns();
         assert_eq!(round.request.session_id, root_session);
         assert_eq!(round.request.model, "gpt-6.1-sol");
         round.assert_value(PARENT_CALL, "True");
@@ -419,9 +429,12 @@ async fn production_harness_three_actor_capture_phases() {
         round = next_root(host, &mut requests, &mut pending).await;
         round.assert_value("three-actor-read", "True");
         phase.record(&scenario_phases, 6, "root", &root_name, Some("three-actor-read"), "native-tool", READ,
-            json!({"parent_published": true, "retained_action_reused": true, "yield_parent_result_observed": true}));
+            Some(scripted_response_hold_ns),
+            json!({"parent_published": true, "retained_action_reused": true, "yield_parent_result_observed": true,
+                "cell_role": "retained_action_reuse"}));
 
         let phase = PhaseClock::begin();
+        let scripted_response_hold_ns = round.scripted_response_hold_ns();
         round.call("three-actor-cleanup", CLEANUP);
         round = next_root(host, &mut requests, &mut pending).await;
         round.assert_value("three-actor-cleanup", "True");
@@ -436,6 +449,7 @@ async fn production_harness_three_actor_capture_phases() {
             assert!(cleanup.is_confirmed(), "{cleanup:?}");
         }
         phase.record(&scenario_phases, 7, "root", &root_name, Some("three-actor-cleanup"), "native-tool", CLEANUP,
+            Some(scripted_response_hold_ns),
             json!({"checkpoint_release_idempotent": true, "child_cleanup_confirmed": 2}));
         *cleanup_clock.lock() = Some(PhaseClock::begin());
         round.finish();
@@ -452,6 +466,25 @@ async fn production_harness_three_actor_capture_phases() {
             None,
             "lifecycle",
             "",
+            None,
             json!({"production_host_shutdown_acknowledged": true}),
         );
+}
+
+#[cfg(test)]
+mod roster_tests {
+    use super::{WORKLOAD_COHORT, WORKLOAD_ROSTER};
+
+    #[test]
+    fn performance_fixture_roster_matches_report_contract() {
+        let manifest: Vec<String> = serde_json::from_str(include_str!(
+            "fixtures/three_actor_workload_roster.json"
+        ))
+        .expect("shared performance roster is valid JSON");
+        assert_eq!(WORKLOAD_COHORT, "three-actor-capture");
+        assert_eq!(manifest, WORKLOAD_ROSTER);
+        assert_eq!(manifest.first().map(String::as_str), Some("activation"));
+        assert_eq!(manifest.last().map(String::as_str), Some("host-cleanup"));
+        assert!(manifest.iter().any(|phase| phase == "explicit-child-cleanup"));
+    }
 }

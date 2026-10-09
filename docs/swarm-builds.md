@@ -89,8 +89,8 @@ catalog and deployment inputs. Build and freeze the complete matched bundle
 for release qualification. Record a concrete constraint when deferring a check;
 an idle coordinator or an inherited single-build convention is not a constraint.
 
-The existing system `build.slice` limits the Buck daemon and its descendants
-to 24 CPU equivalents and 40 GiB RAM. The existing user
+The existing system `build.slice` admits all 32 CPUs for the Buck daemon and its
+descendants, with 80 GiB memory high, 96 GiB maximum and 2 GiB maximum swap. The existing user
 `tidepool-completion-build.slice` admits all 32 CPUs, with 96 GiB memory high,
 104 GiB maximum and 2 GiB maximum swap. These are separate enclosing budgets;
 their sum is not additional physical memory. Verify the loaded properties

@@ -109,12 +109,18 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         activation["logical_compiler_requests"] = 0
         if cohort == "three-actor-capture":
             activation["sequence"] = 0
+            activation["workspace_preparation_ns"] = 11_000
+            activation["host_start_readiness_ns"] = 7_000
         workload = [
             {"schema": 1, "phase": name, "sequence": index, "completed": True,
              "call_id": "usecase-3" if name in ("reuse-retained", "root-fork-capture")
                         else f"case-{index}",
              "logical_compiler_requests": 1 if name in ("reuse-retained", "root-fork-capture") else 0,
-             "wall_ns": 1000, "source": "retained source"}
+             "wall_ns": 1000, "source": "retained source",
+             "evidence": ({"cell_role": "first"} if name == "root-setup" else
+                          {"cell_role": "repeated"} if name == "parent-publication-read" else {}),
+             **({"scripted_response_hold_ns": 250}
+                if cohort == "three-actor-capture" and name in reporter.PROVIDER_RESPONSE_PHASES else {})}
             for index, name in enumerate(reporter.KNOWN_ROSTERS[cohort]) if name != "activation"
         ]
         self.write_jsonl(phase_path, [environment, activation, *workload])
@@ -351,11 +357,19 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         rows[0]["workload_roster"] = list(reporter.THREE_ACTOR_PHASES)
         rows[1]["sequence"] = 0
         rows[1]["logical_compiler_requests"] = 0
+        rows[1]["workspace_preparation_ns"] = 11_000
+        rows[1]["host_start_readiness_ns"] = 7_000
         rows[2:] = [
             {"schema": 1, "phase": phase, "sequence": index, "completed": True,
              "call_id": "usecase-3" if phase == "root-fork-capture" else f"three-actor-{index}",
              "logical_compiler_requests": 1 if phase == "root-fork-capture" else 0,
-             "boundary_kind": "native" if phase == "root-fork-capture" else "lifecycle"}
+             "wall_ns": 1000,
+             "evidence": ({"cell_role": "first"} if phase == "root-setup" else
+                          {"cell_role": "retained_action_reuse"}
+                          if phase == "parent-publication-read" else {}),
+             "boundary_kind": "native" if phase == "root-fork-capture" else "lifecycle",
+             **({"scripted_response_hold_ns": 250}
+                if phase in reporter.PROVIDER_RESPONSE_PHASES else {})}
             for index, phase in enumerate(reporter.THREE_ACTOR_PHASES[1:], 1)
         ]
         self.write_jsonl(phase_path, rows)
@@ -363,8 +377,33 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual(report["phase_coverage"]["cohort"], "three-actor-capture")
         self.assertEqual(report["phase_coverage"]["expected_count"], 9)
         self.assertTrue(report["phase_coverage"]["complete"])
+        self.assertEqual(report["phase_measurements"]["status"], "complete")
+        self.assertEqual(report["activation_timing"]["workspace_preparation_ns"], 11_000)
+        self.assertEqual(report["activation_timing"]["host_start_readiness_ns"], 7_000)
         root_fork = next(phase for phase in report["phases"] if phase["phase"] == "root-fork-capture")
         self.assertEqual(root_fork["phase_record"]["boundary_kind"], "native")
+        self.assertEqual(root_fork["scripted_response_hold_ns"], 250)
+        self.assertEqual(root_fork["scripted_response_hold_status"], "observed_test_coordination")
+        self.assertIsNone(root_fork["provider_model_latency_ms"])
+        self.assertEqual(root_fork["provider_model_latency_status"], "not_measured_scripted_provider")
+        first = next(phase for phase in report["phases"] if phase["phase"] == "root-setup")
+        repeated = next(phase for phase in report["phases"] if phase["phase"] == "parent-publication-read")
+        self.assertEqual(first["behavior_role"], "first")
+        self.assertEqual(repeated["behavior_role"], "retained_action_reuse")
+
+    def test_recursive_measurement_requires_prep_start_and_scripted_response_timings(self):
+        record = self.make_complete_case("three-actor-capture")
+        phase_path = self.root / "artifacts/phases.jsonl"
+        rows = reporter.read_jsonl(phase_path)
+        activation = next(row for row in rows if row["phase"] == "activation")
+        del activation["workspace_preparation_ns"]
+        root_setup = next(row for row in rows if row["phase"] == "root-setup")
+        del root_setup["scripted_response_hold_ns"]
+        self.write_jsonl(phase_path, rows)
+        report = reporter.analyze(record)
+        self.assertEqual(report["phase_measurements"]["status"], "partial_or_unknown")
+        invalid = report["phase_measurements"]["invalid_records"]
+        self.assertEqual({row["phase"] for row in invalid}, {"activation", "root-setup"})
 
     def test_real_host_request_shape_without_cell_span_is_unattributed(self):
         report = reporter.analyze(self.make_case(cell_span=False))

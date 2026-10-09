@@ -884,6 +884,7 @@ struct DurableDeclarationGraph {
     /// A visible rename whose directory sync still needs confirmation. The
     /// high-water identity is already burned, even while success is withheld.
     unconfirmed: RecoveryDurability,
+    retained: parking_lot::Mutex<Option<recovery::RetainedRecoveryGraph>>,
 }
 
 /// Exact declaration module prepared for cell compilation without advancing
@@ -2386,7 +2387,21 @@ impl SessionLib {
         &mut self,
         staged: recovery::StagedRecoveryManifest,
     ) -> recovery::RecoveryPublishOutcome {
+        let retained = staged.retained_graph(
+            self.durable_graph
+                .as_ref()
+                .and_then(|state| state.retained.lock().clone())
+                .as_ref(),
+        );
         let outcome = staged.publish();
+        if !matches!(
+            &outcome,
+            recovery::RecoveryPublishOutcome::BeforeRename { .. }
+        ) {
+            if let Some(state) = &self.durable_graph {
+                *state.retained.lock() = retained;
+            }
+        }
         #[cfg(test)]
         if std::mem::take(&mut self.fail_recovery_durability_once) {
             if let recovery::RecoveryPublishOutcome::Durable { graph, publication } = outcome {

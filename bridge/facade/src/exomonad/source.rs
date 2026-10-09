@@ -2862,8 +2862,10 @@ mod tests {
                     .effect_keys()
                     .to_vec(),
                 effective_effects: Vec::new(),
-                recipe: "a".repeat(64),
-                original: original_selection,
+                program: exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal {
+                    recipe: "a".repeat(64),
+                    original: original_selection,
+                },
             }],
         });
         deployed.prepared_deployment = Some(Arc::new(
@@ -2891,7 +2893,17 @@ mod tests {
         else {
             panic!("the source observation retains its original coverage");
         };
-        coverage[0].recipe = original_recipe.recipe.clone();
+        let exomonad_actor::ToolsetProgramRecipe::WorkspaceOriginal(original_key) =
+            &original_recipe.program
+        else {
+            panic!("unmatched row uses workspace original")
+        };
+        let exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal { recipe, .. } =
+            &mut coverage[0].program
+        else {
+            panic!("workspace original fixture")
+        };
+        *recipe = original_key.clone();
         reload.entry_storage = exomonad_actor::SourceEntryStorage::CompletedOriginal {
             directory: reload.entry_storage.directory().to_path_buf(),
             selections: reload.frozen.completed_entry_selections().unwrap(),
@@ -2933,21 +2945,22 @@ mod tests {
         let current_recipe = workbench
             .source_toolset_recipe(&current, &requested, &[])
             .unwrap();
-        assert_ne!(current_recipe.recipe, original_recipe.recipe);
-        assert!(
-            reload
-                .frozen
-                .completed_entry_selections()
-                .unwrap()
-                .contains_key(&original_recipe.recipe)
-        );
-        assert!(
-            !reload
-                .frozen
-                .completed_entry_selections()
-                .unwrap()
-                .contains_key(&current_recipe.recipe)
-        );
+        assert_ne!(current_recipe.program, original_recipe.program);
+        let exomonad_actor::ToolsetProgramRecipe::WorkspaceOriginal(current_key) =
+            &current_recipe.program
+        else {
+            panic!("unmatched row uses workspace original")
+        };
+        assert!(reload
+            .frozen
+            .completed_entry_selections()
+            .unwrap()
+            .contains_key(original_key));
+        assert!(!reload
+            .frozen
+            .completed_entry_selections()
+            .unwrap()
+            .contains_key(current_key));
         let before = tidepool_extract_cmd::extract_spawn_count();
         let mut compiler_owner = exomonad_actor::CompilerPreparationOwner::new();
         let refusal = compiler_owner

@@ -21,6 +21,7 @@ module Tidepool.ExecutionProjection
   , PreparedProjection
   , prepareProjection
   , prepareProjectionWithReachability
+  , prepareComponentProjectionWithReachability
   , projectSelected
   , projectSelectedWithHostBindings
   , PreparedCandidate, projectSelectedCandidateWithHostBindings
@@ -36,6 +37,9 @@ module Tidepool.ExecutionProjection
   , PreparedReachability(..)
   , emptyPreparedReachability
   , admitReachFacts
+  , PreparedReachUpdate(..), updatePreparedReachability
+  , PreparedReferenceWorklist, emptyPreparedReferenceWorklist
+  , admitPreparedReferenceUnits, discoverPreparedReferences
   , topBinders
   , projectLiteralAtomForTest
   , assignTopIdentitySpellings
@@ -116,10 +120,12 @@ import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
+import Tidepool.FatIface (fatOriginalOwner)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
   , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmStableTopSpellings, pmOriginalTopNames
-  , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry )
+  , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry
+  , PreparedComponents, preparedComponentModules, preparedComponentVersion )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
 import Tidepool.EffectSchema qualified as Effect
@@ -968,6 +974,18 @@ prepareProjectionWithReachability context modules reach =
       ((`elementOfUniqSet` reachedUniques reach) . varUnique)
       (topBinders binding)
 
+-- Component-backed package owners retain their one declaring context and one
+-- site arena. Projection walks their units directly, in canonical owner/group
+-- order; no growing prepared module aggregate is required.
+prepareComponentProjectionWithReachability :: ProjectionContext -> [PreparedModule]
+  -> [PreparedComponents] -> PreparedReachability -> Either ProjectionError PreparedProjection
+prepareComponentProjectionWithReachability context home components reach
+  | length owners /= Set.size (Set.fromList owners) =
+      Left (InvalidPreparedRepresentation "component projection repeats a defining owner")
+  | otherwise = prepareProjectionWithReachability context
+      (home ++ concatMap preparedComponentModules components) reach
+  where owners = map (fatOriginalOwner . preparedComponentVersion) components
+
 finishProjection :: ProjectionContext -> [PreparedModule] -> VarEnv SymbolIdentity
   -> [PreparedModule] -> Either ProjectionError PreparedProjection
 finishProjection context modules identities selected =
@@ -1089,6 +1107,58 @@ combinePreparedTargetReferences context defined kept entries =
   in Map.elems (Map.fromList
        [(referenceSymbol fact, referenceBinder fact) | fact <- referenced])
 
+-- Immutable group facts are indexed once as units arrive. Target discovery
+-- examines only newly reached tops and groups whose definitions just arrived.
+data PreparedReferenceWorklist = PreparedReferenceWorklist
+  { referenceGroupOf :: Map Word64 Word64
+  , referenceGroupTops :: Map Word64 (Set.Set Word64)
+  , referenceGroupBodies :: Map Word64 [ReferenceFact]
+  , referenceNewGroups :: Set.Set Word64
+  , referenceVisitedGroups :: Set.Set Word64
+  , referenceReached :: Set.Set Word64
+  }
+
+emptyPreparedReferenceWorklist :: PreparedReferenceWorklist
+emptyPreparedReferenceWorklist = PreparedReferenceWorklist Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty
+
+admitPreparedReferenceUnits :: [(PreparedModule,Map Word64 [ReferenceFact])]
+  -> PreparedReferenceWorklist -> PreparedReferenceWorklist
+admitPreparedReferenceUnits units initial = foldl' addUnit initial units
+  where
+    addUnit known (prepared,facts) = foldl' (addGroup facts) known (pmBindings prepared)
+    addGroup facts known (binding,_) = case topBinders binding of
+      [] -> known
+      first:rest ->
+        let key = getKey (varUnique first)
+            tops = Set.fromList (map (getKey . varUnique) (first:rest))
+        in known
+          { referenceGroupOf = foldl' (\index top -> Map.insert top key index)
+              (referenceGroupOf known) (Set.toList tops)
+          , referenceGroupTops = Map.insert key tops (referenceGroupTops known)
+          , referenceGroupBodies = Map.insert key (Map.findWithDefault [] key facts) (referenceGroupBodies known)
+          , referenceNewGroups = Set.insert key (referenceNewGroups known) }
+
+-- The complete reached set is carried by the reachability owner. This frontier
+-- retains no source or compiler authority and never supplies definitions.
+discoverPreparedReferences :: ProjectionContext -> PreparedReachability
+  -> PreparedReferenceWorklist -> ([Id],PreparedReferenceWorklist)
+discoverPreparedReferences context reach known =
+  let reached = Set.fromList (map getKey (nonDetEltsUniqSet (reachedUniques reach)))
+      changed = reached `Set.difference` referenceReached known
+      groups = (Set.fromList [group | top <- Set.toList changed
+                 , Just group <- [Map.lookup top (referenceGroupOf known)]]
+          `Set.union` referenceNewGroups known) `Set.difference` referenceVisitedGroups known
+      selected = Set.filter (\group -> not (Set.null
+          (Map.findWithDefault Set.empty group (referenceGroupTops known) `Set.intersection` reached))) groups
+      references = Map.elems (Map.fromList
+        [(referenceSymbol fact,referenceBinder fact) | group <- Set.toAscList selected
+        , fact <- Map.findWithDefault [] group (referenceGroupBodies known)
+        , not (elementOfUniqSet (varUnique (referenceBinder fact)) (admittedTops reach))
+        , Map.notMember (referenceSymbol fact) (projectionRetainedGenerations context)])
+  in (references,known
+      { referenceReached=reached,referenceNewGroups=Set.empty
+      , referenceVisitedGroups=referenceVisitedGroups known `Set.union` selected })
+
 -- | Exact external value references of the selected top closure. The identity
 -- map is always computed before filtering. Recovery uses Ids, never occurrence
 -- strings or the imported-only annotations returned by stg2stg.
@@ -1192,6 +1262,17 @@ admitReachFacts seeds admitted carried = PreparedReachability
       | unique `elementOfUniqSet` visited = close visited pending
       | otherwise = close (addOneToUniqSet visited unique)
           (fromMaybe [] (lookupUFM dependencies unique) <> pending)
+
+-- Site arenas are replaceable; pure component facts are only admitted.
+-- A replacement closes from actual roots against the current complete facts.
+data PreparedReachUpdate
+  = AdmitPreparedFacts [[(Id,[Unique])]]
+  | ReplacePreparedFacts [[(Id,[Unique])]]
+
+updatePreparedReachability :: [Unique] -> PreparedReachUpdate -> PreparedReachability -> PreparedReachability
+updatePreparedReachability seeds update carried = case update of
+  AdmitPreparedFacts additions -> admitReachFacts seeds additions carried
+  ReplacePreparedFacts current -> admitReachFacts seeds current emptyPreparedReachability
 
 -- A registered replacement has no source-body dependencies. Split recursive
 -- groups for this fact query so unrelated siblings retain their own references.

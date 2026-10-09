@@ -81,6 +81,41 @@ class ReuseEvidenceControls(unittest.TestCase):
                 self.assertEqual(report['status'], 'incomplete')
                 self.assertEqual(report['requests'][0]['stages']['source_frontend']['status'], 'UNKNOWN')
 
+    def test_reuse_events_after_terminal_join_by_exact_physical_request(self):
+        rows = trace(completed([packet()]))
+        start, events, terminal = rows[0], rows[1:-1], rows[-1]
+        report = REPORT.analyze([start, terminal, *events])
+        request = report['requests'][0]
+        self.assertEqual(report['status'], 'observed')
+        self.assertEqual(request['status'], 'observed')
+        self.assertEqual(request['stages']['source_frontend']['counts'], {'hit': 1})
+        self.assertTrue(all(event['correlation'] == {
+            'basis': 'exact_physical_request_identity',
+            'terminal_order': 'after', 'request_start_row': 0, 'request_terminal_row': 1,
+        } for event in request['events']))
+
+    def test_duplicate_late_reuse_event_keeps_request_incomplete(self):
+        rows = trace(completed([packet()]))
+        duplicate = dict(rows[1])
+        duplicate['span'] = dict(rows[1]['span'])
+        report = REPORT.analyze([rows[0], rows[-1], *rows[1:-1], duplicate])
+        request = report['requests'][0]
+        self.assertEqual(report['status'], 'incomplete')
+        self.assertEqual(request['status'], 'UNKNOWN')
+        self.assertTrue(any('duplicate reuse event for physical request' in problem
+                            for problem in request['problems']))
+
+    def test_late_reuse_event_without_exact_identity_is_unlinked(self):
+        rows = trace(completed([packet()]))
+        late = dict(rows[1])
+        late['span'] = {'compile_request': 'request'}
+        report = REPORT.analyze([rows[0], rows[-1], late, *rows[2:-1]])
+        request = report['requests'][0]
+        self.assertEqual(report['status'], 'incomplete')
+        self.assertEqual(len(report['unlinked_events']), 1)
+        self.assertTrue(any('diagnostic event lacks exact request linkage' in problem
+                            for problem in report['problems']))
+
     def test_cycle_purpose_conflicts_are_refused_within_worker(self):
         end = packet('complete', items=0)
         end['purpose'] = 'lookup_type'
@@ -248,10 +283,13 @@ class ReuseEvidenceControls(unittest.TestCase):
         self.assertEqual(result['status'], 'incomplete')
         self.assertEqual(len(result['unlinked_events']), 1)
 
-    def test_event_after_terminal_is_refused(self):
+    def test_event_after_terminal_retains_physical_identity_correlation(self):
         rows = trace(completed([packet()]))
-        rows.append(rows.pop(1))
-        self.assertTrue(any('outside request boundaries' in problem for problem in REPORT.analyze(rows)['problems']))
+        report = REPORT.analyze([rows[0], rows[-1], *rows[1:-1]])
+        self.assertEqual(report['status'], 'observed')
+        self.assertTrue(all(event['correlation']['basis'] == 'exact_physical_request_identity'
+                            and event['correlation']['terminal_order'] == 'after'
+                            for event in report['requests'][0]['events']))
 
     def test_old_lowering_phase_without_interval_is_retained(self):
         rows = trace(completed([packet()]))

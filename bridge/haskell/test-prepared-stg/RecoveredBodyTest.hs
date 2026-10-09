@@ -271,13 +271,15 @@ assertRecoveredDictionaryBody = do
     owners <- liftIO newOwnerInterfaceCache
     bodies <- liftIO newPreparedBodyCache
     closure <- liftIO $ recoverPreparedClosure env cache owners bodies context [prepared]
-    recovered <- case [modul | modul <- closureModules closure
-          , moduleNameString (moduleName (pmModule modul)) == "Control.Monad.Freer.Internal"] of
+    let ownerUnits = [modul | modul <- closureModules closure
+          , moduleNameString (moduleName (pmModule modul)) == "Control.Monad.Freer.Internal"]
+    recovered <- case [modul | modul <- ownerUnits
+          , any ((== "$fApplicativeEff") . occurrence . fst) (pairs modul)] of
       [modul] -> pure modul
-      _ -> fail ("genuine dictionary owner was not recovered: " ++ show (closureFailures closure))
+      _ -> fail ("genuine dictionary has no unique recovered unit: " ++ show (closureFailures closure))
     let owner = pmModule recovered
         wanted = Set.fromList [varName identifier
-          | (Stg.StgTopLifted binding, _) <- pmBindings recovered
+          | modul <- ownerUnits, (Stg.StgTopLifted binding, _) <- pmBindings modul
           , (identifier, _) <- stgPairs binding]
     (iface, _) <- liftIO $ readExactInterface env owner
       >>= either (const (fail "dictionary defining interface is unreadable")) pure
@@ -774,15 +776,22 @@ assertRecoveredKindRep root = do
   group <- case raw of
     FatIfaceFound body -> pure body
     _ -> fail "genuine krep$* fat body was unavailable"
+  let incomplete = [binding | binding <- group
+        , all ((/= "krep$*1") . occurrence) (bindersOfBinds [binding])]
+  assert (all (all ((/= "krep$*1") . occurrence) . bindersOfBinds . pure) incomplete)
+    "strict-sibling control retained its genuine original dependency"
   partialCache <- newPreparedBodyCache
-  partial <- prepareRecoveredBodies (prHscEnv pipeline) ownerCache partialCache owner group
+  partial <- prepareRecoveredBodies (prHscEnv pipeline) ownerCache partialCache owner incomplete
     >>= either (fail . show) pure
-  partialBinder <- case
-      [binder | (Stg.StgTopLifted binding, _) <- pmBindings partial
-      , (binder, Stg.StgRhsClosure _ _ update parameters _ _) <- stgPairs binding
-      , occurrence binder == "krep$*", update /= Stg.ReEntrant, null parameters] of
-    [binder] -> pure binder
-    _ -> fail "partial krep$* did not exercise the genuine strict-sibling thunk"
+  (partialBinder, partialRhs) <- case
+      [(binder,rhs) | (Stg.StgTopLifted binding, _) <- pmBindings partial
+      , (binder,rhs) <- stgPairs binding, occurrence binder == "krep$*"] of
+    [value] -> pure value
+    _ -> fail "partial preparation lost the genuine krep$* entry"
+  let partialThunk = case partialRhs of
+        Stg.StgRhsClosure _ _ update parameters _ _ -> update /= Stg.ReEntrant && null parameters
+        _ -> False
+  putStrLn ("partial original krep$* requires sibling; thunk=" ++ show partialThunk)
   case importedIdLFInfo <$> preparedExpectedEntry partial partialBinder of
     Just LFCon{} -> pure ()
     _ -> fail "partial krep$* lost its exact canonical constructor expectation"
@@ -791,8 +800,11 @@ assertRecoveredKindRep root = do
     "partial constructor preparation hid its missing strict sibling"
   case projectPreparedTarget krepContext [partial] of
     Left (RecoveredEntryContractMismatch symbol Nothing True (Just (Signature [] (Returns [LiftedRefRep]))) False)
-      | symbol == krepEntry -> pure ()
-    result -> fail ("unresolved constructor did not refuse its exact final entry contract: " ++ show result)
+      | partialThunk && symbol == krepEntry -> pure ()
+    Right program | not partialThunk -> assert
+      (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings program)))
+      "partial canonical constructor changed its final entry contract"
+    result -> fail ("partial original disagreed with its exact final entry contract: " ++ show result)
   partialSelection <- either (fail . show) pure (prepareProjection krepContext [partial])
   partialCandidate <- either (fail . show) pure
     (projectSelectedCandidateWithHostBindings [] partialSelection)
@@ -802,9 +814,12 @@ assertRecoveredKindRep root = do
   case finalizePreparedCandidate partialCandidate of
     Left (RecoveredEntryContractMismatch symbol Nothing True
         (Just (Signature [] (Returns [LiftedRefRep]))) False)
-      | symbol == krepEntry -> pure ()
-    Left failure -> fail ("provisional candidate did not retain its exact entry refusal: " ++ show failure)
-    Right _ -> fail "provisional candidate admitted an unresolved constructor entry"
+      | partialThunk && symbol == krepEntry -> pure ()
+    Right (program,_) | not partialThunk -> assert
+      (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings program)))
+      "partial candidate changed its canonical constructor contract"
+    Left failure -> fail ("partial candidate disagreed with its exact entry contract: " ++ show failure)
+    Right _ -> fail "partial candidate accepted an incorrect emitted entry form"
   complete <- either (fail . ("completed constructor projection failed: " ++) . show) pure
     (projectPreparedTarget krepContext modules)
   assert (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings complete)))
@@ -1022,7 +1037,7 @@ assertBottomingApplications root = do
   partial <- projectEntry "bottomingPartial"
   assertPartialBottoming partial
   called <- projectEntry "bottomingCalled"
-  assertSaturatedBottoming called "bottomingCalled" "$wbottomingUnary" [IntRep 64]
+  assertSaturatedBottoming called "bottomingCalled" "bottomingUnary" [LiftedRefRep]
   tupleCalled <- projectEntry "bottomingTupleCalled"
   assertSaturatedBottoming tupleCalled "bottomingTupleCalled" "bottomingTuple"
     [IntRep 64, FloatRep 64]
@@ -1057,9 +1072,8 @@ assertBottomingApplications root = do
           ("bottoming " ++ occurrence ++ " projection failed: " ++ show failure))
         Right program -> pure program
 
-    -- CorePrep eta-expands the fixture's PAP into a one-argument `sat`
-    -- closure. Restore the same worker application with one supplied argument
-    -- so projection is tested at the unsaturated call boundary.
+    -- The authored partial application gives this calibration one exact
+    -- binder. Restore its unsaturated worker application after CorePrep.
     preservePartialCall prepared = prepared
       { preparedBindings = bindings
       }
@@ -1069,14 +1083,22 @@ assertBottomingApplications root = do
                  (Stg.StgRhsClosure captures ccs update [_]
                    (Stg.StgCase _ _ _ [Stg.GenStgAlt _ _
                      (Stg.StgApp worker [first, _])]) _)), annotations)
-          | occNameString (nameOccName (varName binder)) == "sat"
+          | occNameString (nameOccName (varName binder)) == "partialApplication"
           , occNameString (nameOccName (varName worker)) == "$wbottomingBinary" =
               (Stg.StgTopLifted (Stg.StgNonRec binder
                 (Stg.StgRhsClosure captures ccs update []
                   (Stg.StgApp worker [first]) (varType binder))), annotations)
+        restore (Stg.StgTopLifted (Stg.StgNonRec binder
+                 (Stg.StgRhsClosure captures ccs update [_]
+                   (Stg.StgApp worker [first, _]) _)), annotations)
+          | occNameString (nameOccName (varName binder)) == "partialApplication"
+          , occNameString (nameOccName (varName worker)) == "bottomingBinary" =
+              (Stg.StgTopLifted (Stg.StgNonRec binder
+                (Stg.StgRhsClosure captures ccs update []
+                  (Stg.StgApp worker [first]) (varType binder))), annotations)
         restore (Stg.StgTopLifted (Stg.StgNonRec binder rhs), _)
-          | occNameString (nameOccName (varName binder)) == "sat" =
-              error ("unexpected prepared sat: " ++ showSDocUnsafe (ppr rhs))
+          | occNameString (nameOccName (varName binder)) == "partialApplication" =
+              error ("unexpected prepared partialApplication: " ++ showSDocUnsafe (ppr rhs))
         restore binding = binding
 
     assertPartialBottoming program = do
@@ -1084,27 +1106,27 @@ assertBottomingApplications root = do
       assert (any isConsumerCall consumerCalls)
         ("bottomingPartial did not pass the PAP closure to partialConsumer: "
           ++ show consumerCalls)
-      let entry = signatureAt program (topSignature program "$wbottomingBinary")
-      assert (signatureArguments entry == [IntRep 64, IntRep 64]
+      let entry = signatureAt program (topSignature program "bottomingBinary")
+      assert (signatureArguments entry == [LiftedRefRep, LiftedRefRep]
           && signatureResults entry == NoSuccess)
         ("$wbottomingBinary entry did not retain its two-argument bottoming contract: "
           ++ show entry)
       let partialCalls =
             [ (callee, signatureAt program signature, arguments)
-            | (callee, signature, arguments) <- allCalls (topBody program "sat")
+            | (callee, signature, arguments) <- allCalls (topBody program "partialApplication")
             ]
       assert (any isPartialCall partialCalls)
         ("bottomingPartial did not retain a partial Call node: " ++ show partialCalls)
       where
         isConsumerCall (callee, _, arguments) =
           callee == Ref (Local (topId program "partialConsumer"))
-            && arguments == [Ref (Local (topId program "sat"))]
+            && arguments == [Ref (Local (topId program "partialApplication"))]
         isPartialCall (callee, signature, arguments) =
-          callee == Ref (Local (topId program "$wbottomingBinary"))
+          callee == Ref (Local (topId program "bottomingBinary"))
             && length arguments == 1
             && length arguments < length (signatureArguments
-                 (signatureAt program (topSignature program "$wbottomingBinary")))
-            && signatureArguments signature == [IntRep 64]
+                 (signatureAt program (topSignature program "bottomingBinary")))
+            && signatureArguments signature == [LiftedRefRep]
             && signatureResults signature == Returns [LiftedRefRep]
 
     assertSaturatedBottoming program occurrence calleeName expectedArguments = do

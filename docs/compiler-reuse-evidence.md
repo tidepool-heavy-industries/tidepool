@@ -81,13 +81,20 @@ python3 scripts/compiler-reuse-report.py --trace /absolute/compiler.jsonl \
 
 The report retains each raw parsed event and source row, per-request stage counts,
 accounted bytes, reasons, purpose/cycle, service time, admission queue time and
-flat phase totals. Input trace path and SHA bind retained raw details. Legacy
-counts and compile summaries remain diagnostic data, never substitutes for a
-completed stage. Indexed `legacy_observations` retain count and flat-timer rows;
+flat phase totals. Input trace path and SHA bind retained raw details. Reuse
+events join to a physical request only through its exact daemon epoch, worker,
+admission, ordinal, and matching compile-request digest. Trace subscribers may
+write those already-correlated events after the worker terminal; the report
+retains their `terminal_order` while still requiring one successful request
+terminal and each applicable stage completion. Timestamps or row order alone
+never qualify an event. Duplicate event rows, missing linkage, pre-start events,
+or missing/duplicate request terminals keep evidence incomplete. Legacy counts
+and compile summaries remain diagnostic data, never substitutes for a completed
+stage. Indexed `legacy_observations` retain count and flat-timer rows;
 `boundary_status` qualifies each against the request's start and sole terminal.
 `legacy_status` qualifies aggregates only for one successful request with no
 invalid legacy boundary observations. Missing, duplicate, pre-start or
-post-terminal boundaries leave aggregates empty/unknown, including when a
+post-terminal legacy boundaries leave aggregates empty/unknown, including when a
 valid earlier observation would otherwise supply a misleading partial subtotal.
 Timers lacking interval boundaries (including legacy lowering)
 are preserved as nonexclusive totals; do not sum overlapping phases. Queue time

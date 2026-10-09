@@ -69,6 +69,9 @@ module Tidepool.Agent.Contract
   , asyncHaskellTools
   , defaultWorkbenchSpec
   , defaultAsyncWorkbenchSpec
+  , installDefaultWorkbench
+  , installDefaultAsyncWorkbench
+  , BuiltinDispatcherEffects
   , SyncEffects
   , KnownToolEffects
   , AsyncEffects
@@ -135,6 +138,7 @@ import Tidepool.Aeson.Schema (JsonSchema (..))
 import Control.Monad.Freer (Eff, Member, raise, send)
 import Tidepool.Effects.Core (AgentTools (..))
 import Tidepool.Agent.ToolEffects
+import Tidepool.Internal.ActorProfiles (ActorEffects)
 
 -- ---------------------------------------------------------------------------
 -- Endpoint algebra and server interpretation
@@ -994,6 +998,17 @@ defaultAsyncWorkbenchSpec
   :: (KnownToolEffects effects, AsyncEffects effects)
   => AgentSpec (AsyncHaskellTools effects) effects
 defaultAsyncWorkbenchSpec = defaultSpec { specTools = asyncHaskellTools }
+
+-- | Build-owned hosted installers for the standard ordered actor row. Their
+-- dispatchers are immutable code; every installation still creates actor-local
+-- policy state through 'AgentToolsInstallWith'.
+type BuiltinDispatcherEffects = AgentTools ': SyncEffects ActorEffects
+
+installDefaultWorkbench :: Eff BuiltinDispatcherEffects ()
+installDefaultWorkbench = installSpec @ActorEffects defaultWorkbenchSpec
+
+installDefaultAsyncWorkbench :: Eff BuiltinDispatcherEffects ()
+installDefaultAsyncWorkbench = installSpec @ActorEffects defaultAsyncWorkbenchSpec
 
 -- | The entry index the retained dispatcher serves an ordinary tool call at.
 toolCallEntry :: Int

@@ -631,6 +631,8 @@ pub(super) struct HostedTestRuntime {
     readiness: tokio::sync::Mutex<mpsc::UnboundedReceiver<ActorHostReadiness>>,
     thread: Option<std::thread::JoinHandle<()>>,
     diagnostics: Option<HostedTestDiagnostics>,
+    preparation_elapsed: Option<Duration>,
+    startup_readiness_elapsed: Duration,
     _repository: exomonad_worktree::testing::TestRepo,
     _runtime: tempfile::TempDir,
 }
@@ -644,6 +646,14 @@ impl Drop for HostedTestRuntime {
 }
 
 impl HostedTestRuntime {
+    pub(super) fn preparation_elapsed_ns(&self) -> Option<u128> {
+        self.preparation_elapsed.map(|elapsed| elapsed.as_nanos())
+    }
+
+    pub(super) fn startup_readiness_elapsed_ns(&self) -> u128 {
+        self.startup_readiness_elapsed.as_nanos()
+    }
+
     /// A barrier requiring the existing production host must fail on its own
     /// terminal result, including a successful early exit. Coordination failure
     /// arrives before teardown; the host outcome retains teardown's result.
@@ -1025,6 +1035,7 @@ impl HostedTestRuntime {
             jev: None,
         };
         configure(&mut config);
+        let mut preparation_elapsed = None;
         if prepare {
             let started = std::time::Instant::now();
             let directory = Arc::new(
@@ -1039,6 +1050,7 @@ impl HostedTestRuntime {
             )
             .await
             .map_err(|error| error.to_string())?;
+            preparation_elapsed = Some(started.elapsed());
             eprintln!(
                 "prepared-runtime-first-preparation {}",
                 serde_json::json!({
@@ -1227,6 +1239,8 @@ impl HostedTestRuntime {
             readiness: tokio::sync::Mutex::new(readiness),
             thread: Some(thread),
             diagnostics,
+            preparation_elapsed,
+            startup_readiness_elapsed: elapsed,
             _repository: repository,
             _runtime: runtime_directory,
         })
@@ -1425,6 +1439,14 @@ mod tests {
         let second_inputs = retried
             .select_for_run(repository.path(), second.path())
             .unwrap();
+        assert!(
+            first_inputs.prepared_toolset.is_some(),
+            "immediate selection carries immutable readiness"
+        );
+        assert!(
+            second_inputs.prepared_toolset.is_none(),
+            "durable reopening authenticates the original independently"
+        );
         assert_eq!(first_inputs.identity(), second_inputs.identity());
         assert_eq!(
             first_inputs.completed_entry_selections().unwrap(),

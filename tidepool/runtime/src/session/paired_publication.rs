@@ -54,8 +54,11 @@ pub struct FinalExecutionIntent {
     durable_owner: Option<RecoveryPublicOwner>,
     _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
     admitted: PublicVisibilitySnapshot,
+    admitted_context: Option<Arc<ExactDeclarationContext>>,
     private: PublicVisibilitySnapshot,
     private_base: Option<DeclarationTip>,
+    final_projection: Option<Arc<super::CertifiedDeclarationProjection>>,
+    final_surface: Option<AdmittedDeclarationSurface>,
     writes: Vec<AuthoredWrite>,
     write_ids: Vec<SessionVarId>,
     source_keys: Vec<SourceLeaseKey>,
@@ -99,7 +102,55 @@ pub enum CertifiedDeclarationPublication {
 
 pub struct AcceptedDeclarationPublication {
     base: DeclarationPublicationBase,
-    receipt: Arc<AcceptedJoin>,
+    receipt: PublicationEvidence,
+}
+
+/// A publication keeps the compiler's nominal interface identity. Reusing a
+/// projection binds it to a new logical publication generation, not a new
+/// compiler request or a renamed interface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PublicationEvidence {
+    NewJoin(Arc<AcceptedJoin>),
+    ReusedProjection {
+        generation: Generation,
+        projection: Arc<super::CertifiedDeclarationProjection>,
+    },
+}
+
+impl PublicationEvidence {
+    fn receipt(&self) -> &Arc<AcceptedJoin> {
+        match self {
+            Self::NewJoin(receipt) => receipt,
+            Self::ReusedProjection { projection, .. } => projection.receipt(),
+        }
+    }
+
+    pub(super) fn matches_generation(&self, generation: Generation) -> bool {
+        match self {
+            Self::NewJoin(receipt) => {
+                receipt.reserved().module == SessionModule::lib(generation).module_name()
+            }
+            Self::ReusedProjection {
+                generation: selected,
+                ..
+            } => *selected == generation,
+        }
+    }
+
+    pub(super) fn projection(&self) -> Option<&Arc<super::CertifiedDeclarationProjection>> {
+        match self {
+            Self::ReusedProjection { projection, .. } => Some(projection),
+            Self::NewJoin(_) => None,
+        }
+    }
+}
+
+impl std::ops::Deref for PublicationEvidence {
+    type Target = AcceptedJoin;
+
+    fn deref(&self) -> &Self::Target {
+        self.receipt()
+    }
 }
 
 pub struct RejectedDeclarationPublication {
@@ -465,6 +516,7 @@ impl PersistentSession {
         }
         let intent = self.freeze_execution_intent_from_snapshot(
             admission.admitted_public(),
+            admission.view().exact_declaration_context().cloned(),
             admission.private_scope(),
             write_ids,
             source_keys,
@@ -482,6 +534,7 @@ impl PersistentSession {
     fn freeze_execution_intent_from_snapshot(
         &mut self,
         admitted: &PublicVisibilitySnapshot,
+        admitted_context: Option<Arc<ExactDeclarationContext>>,
         private_scope: ScopeId,
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
@@ -563,6 +616,13 @@ impl PersistentSession {
         write_ids.sort_by_key(|id| id.raw());
         write_ids.dedup();
         let final_declarations = tip(lib, private.declaration_tip)?;
+        let final_projection = lib
+            .log
+            .projection_at(private.declaration_tip)
+            .filter(|projection| {
+                lib.current_exact_context_in(private_scope).as_ref() == Some(projection.context())
+            })
+            .cloned();
         if write_ids.iter().any(|id| {
             self.bindings().get(*id).is_some_and(|entry| {
                 final_declarations.as_ref().is_some_and(|tip| {
@@ -619,8 +679,11 @@ impl PersistentSession {
             durable_owner,
             _private_scope_lease: private_scope_lease,
             admitted: admitted.clone(),
+            admitted_context,
             private,
             private_base,
+            final_projection,
+            final_surface: final_declarations.map(|tip| tip.surface),
             writes,
             _completed_values: write_ids
                 .iter()
@@ -739,6 +802,7 @@ impl PersistentSession {
     ) -> Result<DeclarationPublicationBase, SessionError> {
         let intent = self.freeze_execution_intent_from_snapshot(
             admitted,
+            self.lib().current_exact_context_in(admitted.scope),
             private_scope,
             write_ids,
             source_keys,
@@ -787,7 +851,96 @@ impl PersistentSession {
     }
 }
 
+struct PublicationSelection {
+    exports: Vec<DeclarationExport>,
+    instances: InstanceInventory,
+    families: Vec<ExportIdentity>,
+}
+
+fn canonical_exports(exports: &[DeclarationExport]) -> Vec<DeclarationExport> {
+    let mut exports = exports.to_vec();
+    for export in &mut exports {
+        export.children.sort();
+    }
+    exports.sort_by(|left, right| left.head.cmp(&right.head));
+    exports
+}
+
 impl DeclarationPublicationBase {
+    fn selected_facts(&self) -> Result<PublicationSelection, SessionError> {
+        let mut exports = self
+            .current_public
+            .as_ref()
+            .map(|tip| tip.exports.clone())
+            .unwrap_or_default();
+        let mut instances = self
+            .current_public
+            .as_ref()
+            .map(|tip| tip.instances.clone())
+            .unwrap_or_default();
+        let mut families = self
+            .current_public
+            .as_ref()
+            .map(|tip| tip.families.clone())
+            .unwrap_or_default();
+        for write in &self.intent.writes {
+            exports.retain(|export| !write.retractions.contains(&export.head));
+            for introduced in write.evidence.introduced_exports() {
+                exports.retain(|export| {
+                    export.head.namespace != introduced.head.namespace
+                        || export.head.occurrence != introduced.head.occurrence
+                });
+                exports.push(introduced.clone());
+            }
+            // Instances remain additive independently of lexical head removal.
+            instances = merge_instances(&self.public.path, instances, write.evidence.instances())?;
+            families.extend_from_slice(write.evidence.family_closure());
+        }
+        exports.retain(|export| {
+            !self.intent.head_replacements.iter().any(|replacement| {
+                replacement.namespace == export.head.namespace
+                    && replacement.occurrence == export.head.occurrence
+            })
+        });
+        families.sort();
+        families.dedup();
+        Ok(PublicationSelection {
+            exports: canonical_exports(&exports),
+            instances,
+            families,
+        })
+    }
+
+    fn reusable_projection(
+        &self,
+        selection: &PublicationSelection,
+    ) -> Option<Arc<super::CertifiedDeclarationProjection>> {
+        if self.public.expected_public != self.intent.admitted
+            || self.public_context != self.intent.admitted_context
+        {
+            return None;
+        }
+        let projection = self.intent.final_projection.as_ref()?;
+        let receipt = projection.receipt();
+        let final_write = self.intent.writes.last()?;
+        if final_write.generation != self.intent.private.declaration_tip
+            || selection.exports != canonical_exports(receipt.exports())
+            || selection.instances != *receipt.instances()
+            || selection.families != receipt.family_closure()
+            || self.intent.final_surface.as_ref() != Some(&self.surface)
+        {
+            return None;
+        }
+        let products = projection.context().recovery_products();
+        if self.intent.writes.iter().any(|write| {
+            !products
+                .iter()
+                .any(|product| product.owner() == write.evidence.product().owner())
+        }) {
+            return None;
+        }
+        Some(projection.clone())
+    }
     pub fn reserved_generation(&self) -> Generation {
         self.reserved
     }
@@ -796,17 +949,27 @@ impl DeclarationPublicationBase {
     }
 
     pub fn certify(self) -> Result<CertifiedDeclarationPublication, SessionError> {
-        let mut lexical = self.surface.lexical.clone();
-        let mut selected_tips = BTreeSet::new();
-        for generation in self
-            .current_public
-            .iter()
-            .map(|tip| tip.generation)
-            .chain(self.intent.private_base.iter().map(|tip| tip.generation))
-            .chain(self.intent.writes.iter().map(|write| write.generation))
-        {
-            selected_tips.insert(generation);
+        let selection = self.selected_facts()?;
+        if let Some(projection) = self.reusable_projection(&selection) {
+            let generation = self.reserved;
+            return Ok(CertifiedDeclarationPublication::Accepted(
+                AcceptedDeclarationPublication {
+                    base: self,
+                    receipt: PublicationEvidence::ReusedProjection {
+                        generation,
+                        projection,
+                    },
+                },
+            ));
         }
+        self.certify_new_join(selection)
+    }
+
+    fn certify_new_join(
+        self,
+        selection: PublicationSelection,
+    ) -> Result<CertifiedDeclarationPublication, SessionError> {
+        let mut lexical = self.surface.lexical.clone();
         let authored = self
             .intent
             .writes
@@ -823,12 +986,16 @@ impl DeclarationPublicationBase {
                     "empty declaration intent uses binding-only publication",
                 )
             })?;
-        for generation in selected_tips {
+        for identity in self
+            .current_public
+            .iter()
+            .map(|tip| tip.owner.clone())
+            .chain(self.intent.private_base.iter().map(|tip| tip.owner.clone()))
+            .chain(authored.iter().map(|certificate| module_owner(certificate)))
+            .collect::<BTreeSet<_>>()
+        {
             lexical.push(ExactLexicalNode {
-                owner: ExactModuleIdentity {
-                    unit: owner.unit.clone(),
-                    module: SessionModule::lib(generation).module_name(),
-                },
+                owner: identity,
                 imports: Vec::new(),
             });
         }
@@ -839,13 +1006,13 @@ impl DeclarationPublicationBase {
         };
         let scratch = tempfile::tempdir()?;
         let materialized = context.materialize_scratch(&scratch)?;
-        let anchor = |generation: Generation| -> Result<ModuleSnapshot, SessionError> {
-            let module = SessionModule::lib(generation).module_name();
+        let anchor = |identity: &ExactModuleIdentity| -> Result<ModuleSnapshot, SessionError> {
+            let module = identity.module.clone();
             let artifact = materialized
                 .artifacts
                 .iter()
                 .find(|artifact| {
-                    artifact.interface.unit == owner.unit && artifact.interface.module == module
+                    artifact.interface.unit == identity.unit && artifact.interface.module == module
                 })
                 .ok_or_else(|| {
                     invalid(
@@ -859,70 +1026,41 @@ impl DeclarationPublicationBase {
                 sha256: artifact.interface.sha256.clone(),
             })
         };
-        let mut expected_exports = self
-            .current_public
-            .as_ref()
-            .map(|tip| tip.exports.clone())
-            .unwrap_or_default();
-        let mut expected_instances = self
-            .current_public
-            .as_ref()
-            .map(|tip| tip.instances.clone())
-            .unwrap_or_default();
-        let mut family_closure = self
-            .current_public
-            .as_ref()
-            .map(|tip| tip.families.clone())
-            .unwrap_or_default();
         let mut writes = Vec::new();
         for write in &self.intent.writes {
-            expected_exports.retain(|export| !write.retractions.contains(&export.head));
-            for introduced in write.evidence.introduced_exports() {
-                expected_exports.retain(|export| {
-                    export.head.namespace != introduced.head.namespace
-                        || export.head.occurrence != introduced.head.occurrence
-                });
-                expected_exports.push(introduced.clone());
-            }
-            // Selection is exact and additive. A missing private head or a
-            // retracted spelling never removes a latest-public dfun/axiom.
-            expected_instances = merge_instances(
-                &self.public.path,
-                expected_instances,
-                write.evidence.instances(),
-            )?;
-            family_closure.extend_from_slice(write.evidence.family_closure());
             writes.push(DeclarationWrite {
                 generation: write.generation.0,
-                module: anchor(write.generation)?,
+                module: anchor(&module_owner(&write.evidence))?,
                 exports: write.evidence.introduced_exports().to_vec(),
                 retractions: write.retractions.clone(),
             });
         }
-        expected_exports.retain(|export| {
-            !self.intent.head_replacements.iter().any(|replacement| {
-                replacement.namespace == export.head.namespace
-                    && replacement.occurrence == export.head.occurrence
-            })
-        });
-        family_closure.sort();
-        family_closure.dedup();
-        let private_tip = self.intent.private.declaration_tip;
         let input = DeclarationJoinInput {
             expected_public_version: self.expected_public_version.clone(),
             public_module: self
                 .current_public
                 .as_ref()
-                .map(|tip| anchor(tip.generation))
+                .map(|tip| anchor(&tip.owner))
                 .transpose()?,
             private_base: self
                 .intent
                 .private_base
                 .as_ref()
-                .map(|tip| anchor(tip.generation))
+                .map(|tip| anchor(&tip.owner))
                 .transpose()?,
-            private_tip: (private_tip != Generation(0))
-                .then(|| anchor(private_tip))
+            private_tip: self
+                .intent
+                .writes
+                .last()
+                .map(|write| module_owner(&write.evidence))
+                .or_else(|| {
+                    self.intent
+                        .private_base
+                        .as_ref()
+                        .map(|tip| tip.owner.clone())
+                })
+                .as_ref()
+                .map(anchor)
                 .transpose()?,
             writes,
             reserved: ReservedJoin {
@@ -931,9 +1069,9 @@ impl DeclarationPublicationBase {
                 path: scratch.path().join("joined.hi"),
             },
             artifacts: materialized.artifacts,
-            family_closure,
-            expected_exports,
-            expected_instances,
+            family_closure: selection.families,
+            expected_exports: selection.exports,
+            expected_instances: selection.instances,
         };
         match tidepool_toolchain::declaration_join::certify_declaration_join(
             input,
@@ -944,7 +1082,7 @@ impl DeclarationPublicationBase {
             CertifiedDeclarationJoin::Accepted(receipt) => Ok(
                 CertifiedDeclarationPublication::Accepted(AcceptedDeclarationPublication {
                     base: self,
-                    receipt: Arc::new(receipt),
+                    receipt: PublicationEvidence::NewJoin(Arc::new(receipt)),
                 }),
             ),
             CertifiedDeclarationJoin::Rejected(receipt) => Ok(
@@ -964,19 +1102,23 @@ impl AcceptedDeclarationPublication {
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
         let Self { mut base, receipt } = self;
         let mut work = super::RecoveryPublicationWork::default();
-        let context = Arc::new(ExactDeclarationContext::new(
-            &[],
-            std::slice::from_ref(&receipt),
-            std::iter::once(ExactLexicalNode {
-                owner: ExactModuleIdentity {
-                    unit: receipt.reserved().unit.clone(),
-                    module: receipt.reserved().module.clone(),
-                },
-                imports: base.surface.roots.clone(),
-            })
-            .chain(base.surface.lexical.iter().cloned())
-            .collect(),
-        )?);
+        let context = if let Some(projection) = receipt.projection() {
+            projection.context().clone()
+        } else {
+            Arc::new(ExactDeclarationContext::new(
+                &[],
+                std::slice::from_ref(receipt.receipt()),
+                std::iter::once(ExactLexicalNode {
+                    owner: ExactModuleIdentity {
+                        unit: receipt.reserved().unit.clone(),
+                        module: receipt.reserved().module.clone(),
+                    },
+                    imports: base.surface.roots.clone(),
+                })
+                .chain(base.surface.lexical.iter().cloned())
+                .collect(),
+            )?)
+        };
         let binding_custody = receipt.native_binding_custody_requirements()?;
         let baseline = match &base.public.target {
             super::PublicPublicationBaseline::Durable { graph, .. } => {
@@ -1288,8 +1430,10 @@ impl SessionLib {
                     ticket.public_scope,
                     Some(&declaration.joined.context),
                 )
-                && declaration.joined.evidence.reserved().module
-                    == SessionModule::lib(declaration.generation).module_name()
+                && declaration
+                    .joined
+                    .evidence
+                    .matches_generation(declaration.generation)
         })
     }
     pub(super) fn commit_prepared_declaration(
@@ -1319,6 +1463,520 @@ mod tests {
             CertifiedDeclarationPublication::Rejected(rejected) => {
                 panic!("unexpected rejection: {:?}", rejected.receipt.outcome())
             }
+        }
+    }
+
+    fn commit_certified_source(
+        session: &mut PersistentSession,
+        scope: ScopeId,
+        source: &str,
+    ) -> Generation {
+        let receipt = session
+            .lib()
+            .declaration_receipt(&[source])
+            .unwrap()
+            .unwrap();
+        let (candidate, values) = session
+            .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
+            .unwrap();
+        let staged =
+            crate::session::validate_declaration_candidate(candidate, session.lib().include_dir())
+                .unwrap()
+                .with_visible_values(values);
+        session
+            .adopt_staged_declaration_in(staged)
+            .unwrap()
+            .generation
+    }
+
+    #[test]
+    fn paired_reused_projection_keeps_nominal_owner_and_atomic_arbitration() {
+        tidepool_testing::eval_harness::require_extract();
+        for durable in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut lib = SessionLib::open(
+                SessionId(9831),
+                root.path(),
+                ModuleEnv::standalone_default(),
+            )
+            .unwrap()
+            .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+            let owner = RecoveryPublicOwner::new(
+                &tidepool_repr::ActorPath::parse("root/reuse").unwrap(),
+                1,
+            )
+            .unwrap();
+            lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
+                .unwrap();
+            let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+            let public = session.mint_scope(ScopeId::ROOT).unwrap();
+            if durable {
+                session
+                    .bind_durable_public_scope(owner.clone(), public)
+                    .unwrap();
+            }
+            let execution = session.begin_private_execution(public).unwrap();
+            let original = commit_certified_source(
+                &mut session,
+                execution.private_scope(),
+                "answer :: Int\nanswer = 42",
+            );
+            let projection = session.lib().log.projection_at(original).unwrap().clone();
+            let intent = session
+                .freeze_execution_intent(&execution, vec![], vec![])
+                .unwrap();
+            let restage = |session: &mut PersistentSession| {
+                if durable {
+                    session
+                        .restage_execution_publication(owner.clone(), intent.clone())
+                        .unwrap()
+                } else {
+                    session
+                        .restage_ephemeral_execution_publication(intent.clone())
+                        .unwrap()
+                }
+            };
+            let ExecutionPublication::Declarations(base) = restage(&mut session) else {
+                panic!("authored publication")
+            };
+            let publication = accepted(base);
+            assert!(
+                matches!(&publication.receipt, PublicationEvidence::ReusedProjection { projection: selected, .. } if Arc::ptr_eq(selected, &projection))
+            );
+            assert_eq!(
+                publication.receipt.reserved().module,
+                projection.module_name()
+            );
+            let cancelled = PublicationDecision::new();
+            cancelled.request_cancellation();
+            assert_eq!(
+                session
+                    .publish_staged_public_manifest(publication.stage().unwrap(), &cancelled)
+                    .unwrap(),
+                PublicManifestCommit::Cancelled
+            );
+            assert_eq!(session.lib().scope_tip(public), Generation(0));
+            if durable {
+                let path = root.path().join("declarations.json");
+                let previous = std::fs::read(&path).unwrap();
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+                let ExecutionPublication::Declarations(base) = restage(&mut session) else {
+                    panic!("authored publication")
+                };
+                let decision = PublicationDecision::new();
+                assert!(matches!(
+                    session
+                        .publish_staged_public_manifest(accepted(base).stage().unwrap(), &decision)
+                        .unwrap(),
+                    PublicManifestCommit::BeforeRename { .. }
+                ));
+                assert_eq!(decision.phase(), PublicationPhase::Terminated);
+                assert_eq!(session.lib().scope_tip(public), Generation(0));
+                std::fs::remove_dir(&path).unwrap();
+                std::fs::write(&path, previous).unwrap();
+            }
+            let ExecutionPublication::Declarations(base) = restage(&mut session) else {
+                panic!("authored publication")
+            };
+            let stage = accepted(base).stage().unwrap();
+            session.lib_mut().log.reserve();
+            let decision = PublicationDecision::new();
+            assert_eq!(
+                session
+                    .publish_staged_public_manifest(stage, &decision)
+                    .unwrap(),
+                PublicManifestCommit::Stale
+            );
+            assert_eq!(decision.phase(), PublicationPhase::Running);
+            let ExecutionPublication::Declarations(base) = restage(&mut session) else {
+                panic!("authored publication")
+            };
+            let publication = accepted(base);
+            assert!(matches!(
+                publication.receipt,
+                PublicationEvidence::ReusedProjection { .. }
+            ));
+            if durable {
+                session.lib_mut().fail_recovery_durability_once = true;
+            }
+            let commit = session
+                .publish_staged_public_manifest(publication.stage().unwrap(), &decision)
+                .unwrap();
+            assert!(matches!(
+                commit,
+                PublicManifestCommit::Ephemeral
+                    | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+            ));
+            assert_eq!(decision.phase(), PublicationPhase::Published);
+            assert_eq!(
+                session.lib().scope_tip(public),
+                intent.reserved_generation()
+            );
+            assert_eq!(
+                session.lib().import_line_in(public).unwrap(),
+                format!("import {}", projection.module_name())
+            );
+            assert!(Arc::ptr_eq(
+                session
+                    .lib()
+                    .current_declaration_projection_in(public)
+                    .unwrap()
+                    .receipt(),
+                projection.receipt()
+            ));
+            session.retire_scope(execution.private_scope());
+            assert_eq!(
+                session.lib().import_line_in(public).unwrap(),
+                format!("import {}", projection.module_name())
+            );
+            if durable {
+                session.lib_mut().confirm_recovery_durability().unwrap();
+                let graph = recovery::read_v2(&root.path().join("declarations.json"), root.path())
+                    .unwrap()
+                    .unwrap()
+                    .graph;
+                let summary = graph.node(intent.reserved_generation()).unwrap();
+                assert_eq!(summary.kind, recovery::RecoveryNodeKind::Join);
+                assert_eq!(summary.parent, None);
+                assert_eq!(summary.lexical_roots[0].module, projection.module_name());
+                assert_eq!(
+                    summary.exports,
+                    projection
+                        .receipt()
+                        .exports()
+                        .iter()
+                        .map(super::super::certified_recovery_export)
+                        .collect::<Vec<_>>()
+                );
+                let mut full_work =
+                    tidepool_toolchain::recovery_artifacts::RecoveryArtifactWork::default();
+                let (losses, observations) = graph
+                    .capture_artifact_observations(root.path(), &mut full_work)
+                    .unwrap();
+                assert!(losses.is_empty());
+                assert!(full_work.decoded_bytes > 0);
+                let mut observed_work =
+                    tidepool_toolchain::recovery_artifacts::RecoveryArtifactWork::default();
+                observations
+                    .observe(root.path(), &mut observed_work)
+                    .unwrap();
+                assert!(observed_work.hash_bytes > 0);
+                assert_eq!(observed_work.decoded_bytes, 0);
+                let recovery::RecoveryArtifactClosure::Home(component) = graph
+                    .artifacts()
+                    .find(|artifact| matches!(artifact, recovery::RecoveryArtifactClosure::Home(_)))
+                    .unwrap()
+                else {
+                    unreachable!()
+                };
+                let component = &component.interface_path;
+                std::fs::write(root.path().join(component), b"corrupt").unwrap();
+                assert!(observations
+                    .observe(root.path(), &mut Default::default())
+                    .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn paired_reused_projection_restores_detached_summary_under_original_interface() {
+        tidepool_testing::eval_harness::require_extract();
+        struct RunOwner(PathBuf);
+        impl super::super::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+                Ok(root == self.0)
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let authority = Arc::new(RunOwner(root.path().canonicalize().unwrap()));
+        let open = |id| {
+            SessionLib::open(
+                SessionId(id),
+                root.path().join(format!("session{id}")),
+                ModuleEnv::standalone_default(),
+            )
+            .unwrap()
+            .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()])
+        };
+        let mut lib = open(9833);
+        lib.attach_owned_recovery_graph_v3(&path, authority.clone())
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_isolated_scope();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/reopened-reuse").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .initialize_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let execution = session.begin_private_execution(public).unwrap();
+        commit_certified_source(
+            &mut session,
+            execution.private_scope(),
+            "answer :: Int\nanswer = 1",
+        );
+        commit_certified_source(
+            &mut session,
+            execution.private_scope(),
+            "answer :: Int\nanswer = 42",
+        );
+        let intent = session
+            .freeze_execution_intent(&execution, vec![], vec![])
+            .unwrap();
+        let publication = accepted(
+            session
+                .restage_declaration_publication(owner.clone(), intent.clone())
+                .unwrap(),
+        );
+        assert!(matches!(
+            publication.receipt,
+            PublicationEvidence::ReusedProjection { .. }
+        ));
+        let module = publication.receipt.reserved().module.clone();
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    publication.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        session
+            .validate_durable_public_admission(&owner, public)
+            .unwrap();
+        let retained = session
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .retained
+            .lock()
+            .clone()
+            .unwrap();
+        assert!(retained
+            .observe(
+                &session.lib().durable_graph.as_ref().unwrap().graph,
+                &path,
+                root.path()
+            )
+            .unwrap());
+        drop(session);
+        let mut lib = open(9834);
+        lib.attach_owned_recovery_graph_v3(&path, authority)
+            .unwrap();
+        let mut reopened = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = reopened.recover_public_scope(&owner).unwrap();
+        assert_eq!(
+            reopened.lib().scope_tip(public),
+            intent.reserved_generation()
+        );
+        assert_eq!(
+            reopened.lib().import_line_in(public).unwrap(),
+            format!("import {module}")
+        );
+        let exports = reopened
+            .lib()
+            .log
+            .certified_exports_at(intent.reserved_generation())
+            .unwrap();
+        assert_eq!(
+            exports
+                .iter()
+                .filter(|export| export.head.occurrence == "answer")
+                .count(),
+            1
+        );
+        let continuation = reopened.begin_private_execution(public).unwrap();
+        commit_certified_source(
+            &mut reopened,
+            continuation.private_scope(),
+            "next :: Int\nnext = answer + 1",
+        );
+        let continuation = reopened
+            .freeze_execution_intent(&continuation, vec![], vec![])
+            .unwrap();
+        let publication = accepted(
+            reopened
+                .restage_declaration_publication(owner, continuation.clone())
+                .unwrap(),
+        );
+        assert!(matches!(
+            &publication.receipt,
+            PublicationEvidence::ReusedProjection { .. }
+        ));
+        assert_eq!(
+            reopened
+                .publish_staged_public_manifest(
+                    publication.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        assert_eq!(
+            reopened.lib().scope_tip(public),
+            continuation.reserved_generation()
+        );
+    }
+
+    #[test]
+    fn paired_rich_projection_reuses_exact_members_and_instance_graph() {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib = SessionLib::open(
+            SessionId(9835),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/rich-reuse").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let execution = session.begin_private_execution(public).unwrap();
+        let original = commit_certified_source(
+            &mut session,
+            execution.private_scope(),
+            include_str!("fixtures/paired-rich-base.hs"),
+        );
+        let projection = session.lib().log.projection_at(original).unwrap().clone();
+        let intent = session
+            .freeze_execution_intent(&execution, vec![], vec![])
+            .unwrap();
+        let base = session
+            .restage_declaration_publication(owner.clone(), intent.clone())
+            .unwrap();
+        let selection = base.selected_facts().unwrap();
+        let CertifiedDeclarationPublication::Accepted(oracle) =
+            base.certify_new_join(selection).unwrap()
+        else {
+            panic!("independent GHC join refused")
+        };
+        let publication = accepted(
+            session
+                .restage_declaration_publication(owner, intent.clone())
+                .unwrap(),
+        );
+        assert!(
+            matches!(&publication.receipt, PublicationEvidence::ReusedProjection { projection: selected, .. } if Arc::ptr_eq(selected, &projection))
+        );
+        assert_eq!(
+            canonical_exports(publication.receipt.exports()),
+            canonical_exports(oracle.receipt.exports())
+        );
+        assert_eq!(publication.receipt.instances(), oracle.receipt.instances());
+        assert_eq!(
+            publication.receipt.family_closure(),
+            oracle.receipt.family_closure()
+        );
+        assert_eq!(publication.receipt.instances().classes.len(), 1);
+        assert_eq!(publication.receipt.instances().families.len(), 1);
+        let record = publication
+            .receipt
+            .exports()
+            .iter()
+            .find(|export| export.head.occurrence == "PublicRecord")
+            .unwrap();
+        assert!(record
+            .children
+            .iter()
+            .any(|child| child.occurrence == "publicField"
+                && child.record_parent.as_deref() == Some("PublicRecord")));
+        let class = publication
+            .receipt
+            .exports()
+            .iter()
+            .find(|export| export.head.occurrence == "PublicClass")
+            .unwrap();
+        assert!(class
+            .children
+            .iter()
+            .any(|child| child.occurrence == "publicClass"));
+        assert!(class
+            .children
+            .iter()
+            .any(|child| child.occurrence == "PublicFamily"));
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    publication.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        session.retire_scope(execution.private_scope());
+        assert_eq!(
+            session.lib().import_line_in(public).unwrap(),
+            format!("import {}", projection.module_name())
+        );
+        let graph = recovery::read_v2(&path, root.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        let summary = graph.node(intent.reserved_generation()).unwrap();
+        assert_eq!(summary.instances.classes.len(), 1);
+        assert_eq!(summary.instances.selected_family_axioms.len(), 1);
+        assert_eq!(summary.lexical_roots[0].module, projection.module_name());
+        assert_eq!(summary.parent, None);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 8, ..proptest::test_runner::Config::default() })]
+        #[test]
+        fn paired_projection_history_matches_forced_ghc_join(writes in proptest::collection::vec((0u8..3, -20i16..20), 1..5), contended in proptest::bool::ANY) {
+            tidepool_testing::eval_harness::require_extract();
+            let root = tempfile::tempdir().unwrap();
+            let mut lib = SessionLib::open(SessionId(9832), root.path(), ModuleEnv::standalone_default()).unwrap()
+                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+            lib.attach_recovery_graph_v2(root.path().join("declarations.json")).unwrap();
+            let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+            let public = session.mint_scope(ScopeId::ROOT).unwrap();
+            let execution = session.begin_private_execution(public).unwrap();
+            let mut winners = BTreeMap::new();
+            for (name, value) in writes {
+                let occurrence = format!("answer{name}");
+                let generation = commit_certified_source(&mut session, execution.private_scope(), &format!("{occurrence} :: Int\n{occurrence} = {value}"));
+                winners.insert(occurrence, generation);
+            }
+            let intent = session.freeze_execution_intent(&execution, vec![], vec![]).unwrap();
+            if contended {
+                let concurrent = session.begin_private_execution(public).unwrap();
+                commit_certified_source(&mut session, concurrent.private_scope(), "concurrent :: Int\nconcurrent = 7");
+                let concurrent_intent = session.freeze_execution_intent(&concurrent, vec![], vec![]).unwrap();
+                let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(concurrent_intent).unwrap() else { panic!("concurrent declaration") };
+                let concurrent_publication = accepted(base);
+                proptest::prop_assert!(matches!(&concurrent_publication.receipt, PublicationEvidence::ReusedProjection { .. }), "concurrent winner itself is unchanged");
+                session.publish_staged_public_manifest(concurrent_publication.stage().unwrap(), &PublicationDecision::new()).unwrap();
+            }
+            let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(intent.clone()).unwrap() else { panic!("authored publication") };
+            let selection = base.selected_facts().unwrap();
+            let CertifiedDeclarationPublication::Accepted(oracle) = base.certify_new_join(selection).unwrap() else { panic!("GHC oracle refused") };
+            let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(intent.clone()).unwrap() else { panic!("authored publication") };
+            let reused = accepted(base);
+            proptest::prop_assert_eq!(matches!(&reused.receipt, PublicationEvidence::ReusedProjection { .. }), !contended, "full changed public snapshot must force a new join");
+            proptest::prop_assert_eq!(canonical_exports(reused.receipt.exports()), canonical_exports(oracle.receipt.exports()));
+            proptest::prop_assert_eq!(reused.receipt.instances(), oracle.receipt.instances());
+            proptest::prop_assert_eq!(reused.receipt.family_closure(), oracle.receipt.family_closure());
+            for (name, generation) in winners {
+                let export = reused.receipt.exports().iter().find(|export| export.head.occurrence == name).unwrap();
+                proptest::prop_assert_eq!(&export.head.module, &SessionModule::lib(generation).module_name());
+            }
+            proptest::prop_assert_eq!(session.publish_staged_public_manifest(reused.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicManifestCommit::Ephemeral);
         }
     }
 

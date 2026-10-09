@@ -340,7 +340,7 @@ enum DeclarationSlot {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct JoinedDeclaration {
     pub turn: DeclTurn,
-    pub evidence: Arc<tidepool_toolchain::declaration_join::AcceptedJoin>,
+    pub evidence: super::paired_publication::PublicationEvidence,
     pub context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     pub surface: AdmittedDeclarationSurface,
 }
@@ -463,9 +463,9 @@ impl DeclLog {
                 recovered.evidence.authored_generation() == Some(generation.0)
             }
             super::recovery::RecoveryNodeKind::Join => {
+                // A join's protected nominal root can be a reused Surface.H
+                // interface; the durable graph owns its logical generation.
                 recovered.evidence.authored_generation().is_none()
-                    && recovered.evidence.root().module
-                        == SessionModule::lib(generation).module_name()
             }
         };
         if generation.0 == 0
@@ -554,6 +554,7 @@ impl DeclLog {
     ) -> Option<&Arc<super::CertifiedDeclarationProjection>> {
         match self.turns.get(&generation)? {
             DeclarationSlot::CertifiedAuthored { prepared, .. } => Some(&prepared.projection),
+            DeclarationSlot::Joined(joined) => joined.evidence.projection(),
             _ => None,
         }
     }
@@ -672,7 +673,7 @@ impl DeclLog {
         if generation.0 == 0 {
             return false;
         }
-        if joined.evidence.reserved().module != SessionModule::lib(generation).module_name() {
+        if !joined.evidence.matches_generation(generation) {
             return false;
         }
         let turn = &joined.turn;

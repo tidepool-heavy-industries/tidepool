@@ -18,8 +18,11 @@ compilerExecutionTests :: TestTree
 compilerExecutionTests = testGroup "compiler execution"
   [ testCase "independent tasks overlap and publish completion before ordered return" overlap
   , testCase "completion-triggered work shares the admitted bound" completionWork
+  , testCase "dynamic demand incorporates ready ancestors before blocked descendants" dynamicDemand
   , testCase "cancellation joins running work and fences submission" cancellation
   , testCase "failed work cancels and joins its siblings" failedWork
+  , testCase "dynamic cancellation joins children and preserves completed facts" dynamicCancellation
+  , testCase "coordinator failure joins running sibling tasks" callbackFailure
   , testCase "reuse agrees with independent graph closure" reuseOracle
   ]
 
@@ -71,12 +74,34 @@ completionWork = within $ do
         (const (pure value))
   withCompilerExecutor (jobs 2) $ \executor -> do
     result <- runCompilerTasks executor task
-      (\value _ -> do
+      (\(value :: Int) _ -> do
         children <- runCompilerTasks executor task (\_ _ -> pure ()) [value + 10, value + 20]
         assert (children == [value + 10, value + 20]) "completion work lost deterministic order") [0, 1]
     assert (result == [0, 1]) "completion work changed the outer result"
   (remaining, peak) <- readIORef active
   assert (remaining == 0 && peak <= 2) "completion work escaped the shared execution grant"
+
+-- The second initial job completes before the child of the first can finish.
+-- A nested collector would wait for the child and strand that incorporation.
+dynamicDemand :: IO ()
+dynamicDemand = within $ do
+  ancestor <- newEmptyMVar
+  releaseChild <- newEmptyMVar
+  incorporated <- newEmptyMVar
+  bracket (start $ withCompilerExecutor (jobs 2) $ \executor ->
+    runCompilerWorklist executor
+      (\value -> case value of
+        0 -> pure value
+        1 -> observe ancestor >> pure value
+        _ -> putMVar ancestor () >> observe releaseChild >> pure value)
+      (\value _ -> case value of
+        0 -> pure [2]
+        1 -> putMVar incorporated () >> pure []
+        _ -> pure []) [0 :: Int,1]) snd $ \(result,_) -> do
+      observe incorporated
+      putMVar releaseChild ()
+      values <- result
+      assert (values == [0,1,2]) "dynamic completion lost submission order"
 
 cancellation :: IO ()
 cancellation = within $ do
@@ -121,6 +146,47 @@ failedWork = within $ do
   observe finalized
   assert (case outcome of Left (_ :: SomeException) -> True; Right _ -> False)
     "failed compiler task reported success"
+
+dynamicCancellation :: IO ()
+dynamicCancellation = within $ do
+  entered <- newEmptyMVar
+  finalized <- newEmptyMVar
+  never <- newEmptyMVar
+  done <- newEmptyMVar
+  incorporated <- newIORef []
+  thread <- forkFinally
+    (withCompilerExecutor (jobs 1) $ \executor -> runCompilerWorklist executor
+      (\value -> if value == (0 :: Int) then pure value
+        else (putMVar entered () >> readMVar never >> pure value) `finally` putMVar finalized ())
+      (\value _ -> do
+        atomicModifyIORef' incorporated (\known -> (known ++ [value],()))
+        pure (if value == 0 then [1,2] else [])) [0]) (putMVar done)
+  observe entered
+  killThread thread
+  observe finalized
+  outcome <- observe done
+  facts <- readIORef incorporated
+  assert (facts == [0]) "cancelled dynamic children changed completed ancestor facts"
+  assert (case outcome of Left (_ :: SomeException) -> True; Right _ -> False)
+    "dynamic cancellation reported successful closure"
+
+callbackFailure :: IO ()
+callbackFailure = within $ do
+  running <- newEmptyMVar
+  finalized <- newEmptyMVar
+  never <- newEmptyMVar
+  done <- newEmptyMVar
+  _ <- forkFinally
+    (withCompilerExecutor (jobs 2) $ \executor -> runCompilerWorklist executor
+      (\value -> if value == (0 :: Int) then pure value
+        else (putMVar running () >> readMVar never >> pure value) `finally` putMVar finalized ())
+      (\value _ -> if value == 0
+        then observe running >> fail "deliberate demand-owner failure"
+        else pure []) [0,1]) (putMVar done)
+  outcome <- observe done
+  observe finalized
+  assert (case outcome of Left (_ :: SomeException) -> True; Right _ -> False)
+    "coordinator failure reported successful closure"
 
 -- Enumerate every three-owner graph and validity subset. The oracle walks
 -- each root independently, instead of reusing the implementation's pruning.

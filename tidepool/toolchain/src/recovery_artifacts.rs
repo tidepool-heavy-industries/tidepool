@@ -700,6 +700,103 @@ pub fn with_recovery_artifact_verification<T, E>(
     })
 }
 
+/// Retained physical inputs of successful verification. Reuse observes their
+/// bytes afresh and never carries a filesystem validation memo between checks.
+#[derive(Clone, Debug)]
+pub struct RetainedRecoveryArtifactObservations {
+    root: PathBuf,
+    files: Arc<BTreeMap<PathBuf, RecoveryFileObservation>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecoveryFileObservation {
+    sha256: [u8; 32],
+    bytes: u64,
+    owned: bool,
+}
+
+pub fn capture_recovery_artifact_observations<T, E>(
+    root: &Path,
+    work: &mut RecoveryArtifactWork,
+    operation: impl FnOnce(&mut RecoveryArtifactVerification<'_>) -> Result<T, E>,
+) -> Result<(T, RetainedRecoveryArtifactObservations), E> {
+    with_artifact_work(work, |validation| {
+        validation.observed = Some(BTreeMap::new());
+        let value = operation(&mut RecoveryArtifactVerification { root, validation })?;
+        Ok((
+            value,
+            RetainedRecoveryArtifactObservations {
+                root: root.to_path_buf(),
+                files: Arc::new(
+                    validation
+                        .observed
+                        .take()
+                        .expect("observation capture enabled"),
+                ),
+            },
+        ))
+    })
+}
+
+impl RetainedRecoveryArtifactObservations {
+    /// Recheck owned path confinement and every file, including external
+    /// package interfaces, without decoding their unchanged certificates.
+    pub fn observe(
+        &self,
+        root: &Path,
+        work: &mut RecoveryArtifactWork,
+    ) -> Result<(), RecoveryArtifactError> {
+        if fs::canonicalize(root)? != self.root {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        for (path, expected) in self.files.iter() {
+            crate::host_work::checkpoint()?;
+            let path = if expected.owned {
+                let relative = path
+                    .strip_prefix(&self.root)
+                    .map_err(|_| RecoveryArtifactError::InvalidReference)?;
+                resolve_owned(root, relative)?
+            } else {
+                path.clone()
+            };
+            let file = File::open(&path).map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    RecoveryArtifactError::Unavailable(path.clone())
+                } else {
+                    RecoveryArtifactError::Unreadable {
+                        path: path.clone(),
+                        error,
+                    }
+                }
+            })?;
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.len() != expected.bytes {
+                return Err(RecoveryArtifactError::DigestMismatch(path));
+            }
+            let mut reader = file.take(expected.bytes + 1);
+            let mut hash = Sha256::new();
+            let mut observed = 0u64;
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                crate::host_work::checkpoint()?;
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hash.update(&buffer[..count]);
+                observed += count as u64;
+                work.read_bytes += count as u64;
+                work.hash_bytes += count as u64;
+            }
+            let digest: [u8; 32] = hash.finalize().into();
+            if observed != expected.bytes || digest != expected.sha256 {
+                return Err(RecoveryArtifactError::DigestMismatch(path));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Available only inside one `with_recovery_artifact_verification` operation.
 pub struct RecoveryArtifactVerification<'a> {
     root: &'a Path,
@@ -753,6 +850,7 @@ pub(crate) struct PackageInterfaceValidation {
     pub(crate) home_witness_validations: usize,
     execution_sources:
         BTreeMap<PathBuf, Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
+    observed: Option<BTreeMap<PathBuf, RecoveryFileObservation>>,
 }
 
 impl Default for PackageInterfaceValidation {
@@ -769,6 +867,34 @@ struct CapturedPackageInterface {
 }
 
 impl PackageInterfaceValidation {
+    fn record_observed(
+        &mut self,
+        path: &Path,
+        sha256: [u8; 32],
+        bytes: u64,
+        owned: bool,
+    ) -> Result<(), RecoveryArtifactError> {
+        let Some(files) = &mut self.observed else {
+            return Ok(());
+        };
+        if let Some(previous) = files.get_mut(path) {
+            if previous.sha256 != sha256 || previous.bytes != bytes {
+                return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
+            }
+            previous.owned |= owned;
+        } else {
+            files.insert(
+                path.to_path_buf(),
+                RecoveryFileObservation {
+                    sha256,
+                    bytes,
+                    owned,
+                },
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn with_inventory(
         inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     ) -> Self {
@@ -783,6 +909,7 @@ impl PackageInterfaceValidation {
             #[cfg(test)]
             home_witness_validations: 0,
             execution_sources: BTreeMap::new(),
+            observed: None,
         }
     }
 
@@ -878,6 +1005,7 @@ impl PackageInterfaceValidation {
         if &sha256 != expected_sha256 {
             return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
         }
+        self.record_observed(path, sha256, bytes.len() as u64, false)?;
         if bytes.len() <= retain_limit.saturating_sub(self.retained_bytes) {
             self.retained_bytes += bytes.len();
             self.captured.insert(
@@ -948,6 +1076,7 @@ fn verify_execution_source(
         if digest != reference.sha256 {
             return Err(RecoveryArtifactError::DigestMismatch(path));
         }
+        validation.record_observed(&path, digest, bytes.len() as u64, true)?;
         validation.decoded_bytes += bytes.len() as u64;
         let graph =
             crate::execution_source::CertifiedExecutionSourceGraph::recover_verified(bytes, digest)
@@ -1037,6 +1166,9 @@ fn read_certification(
             path.to_path_buf(),
         ));
     }
+    if let Some(expected) = expected_sha256 {
+        validation.record_observed(path, *expected, bytes.len() as u64, true)?;
+    }
     let (execution_source_digest, module_certificate_digest) =
         crate::certified_products::home_certification_digests_with_validation(
             &bytes, owner, validation,
@@ -1085,6 +1217,7 @@ fn read_package_imports(
         if &validation.digest(&bytes) != expected {
             return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
         }
+        validation.record_observed(path, *expected, bytes.len() as u64, true)?;
     }
     validate_package_imports_with_validation(
         &bytes,
@@ -1406,6 +1539,7 @@ fn read_checked(
     if &validation.digest(&bytes) != expected {
         return Err(RecoveryArtifactError::DigestMismatch(path.to_path_buf()));
     }
+    validation.record_observed(path, *expected, bytes.len() as u64, true)?;
     Ok(bytes)
 }
 
@@ -1801,6 +1935,7 @@ pub(crate) fn capture_module_payload(
     {
         return Err(RecoveryArtifactError::DigestMismatch(path));
     }
+    validation.record_observed(&path, *expected, bytes.len() as u64, true)?;
     Ok(bytes)
 }
 
@@ -2386,6 +2521,78 @@ mod tests {
     use super::*;
     use ciborium::value::Value;
     use tidepool_repr::execution_schema::ModuleVersion;
+
+    #[cfg(unix)]
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 24, ..proptest::test_runner::Config::default() })]
+        #[test]
+        fn retained_observation_histories_match_fresh_file_oracle(
+            history in proptest::collection::vec((0usize..3, 0u8..5), 1..16)
+        ) {
+            let run = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let iface = source.path().join("Join.hi");
+            let package = external.path().join("Package.hi");
+            fs::write(&iface, b"joined-original").unwrap();
+            fs::write(&package, b"package-original").unwrap();
+            let digest: [u8; 32] = Sha256::digest(b"joined-original").into();
+            let package_digest: [u8; 32] = Sha256::digest(b"package-original").into();
+            fs::write(package_sidecar_path(&iface), package_witness("home", "Joined", &digest,
+                vec![["package-unit".into(), "Package".into(), package.display().to_string(), hex(&package_digest)]]
+            )).unwrap();
+            let reference = materialize_joined_interface(run.path(), [1; 32], "home", "Joined", &iface, digest).unwrap();
+            let mut capture_work = RecoveryArtifactWork::default();
+            let (_, observations) = capture_recovery_artifact_observations(run.path(), &mut capture_work,
+                |verification| verification.verify_join(&reference)
+            ).unwrap();
+            let paths = [run.path().join(&reference.interface_path), run.path().join(&reference.package_imports_path), package];
+            let originals = paths.iter().map(|path| fs::read(path).unwrap()).collect::<Vec<_>>();
+            proptest::prop_assert_eq!(observations.files.len(), 3);
+            let other = tempfile::tempdir().unwrap();
+            proptest::prop_assert!(observations.observe(other.path(), &mut Default::default()).is_err());
+            for (index, operation) in history {
+                let path = &paths[index];
+                fs::remove_file(path).unwrap();
+                match operation {
+                    0 => fs::write(path, &originals[index]).unwrap(),
+                    1 => {
+                        let mut changed = originals[index].clone();
+                        changed[0] ^= 1;
+                        fs::write(path, changed).unwrap();
+                    }
+                    2 => {},
+                    3 => {
+                        let redirect = external.path().join("redirect");
+                        fs::write(&redirect, &originals[index]).unwrap();
+                        std::os::unix::fs::symlink(&redirect, path).unwrap();
+                    }
+                    4 => {
+                        let replacement = path.with_extension("replacement");
+                        fs::write(&replacement, &originals[index]).unwrap();
+                        fs::rename(replacement, path).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                // The oracle reads the exact issued bytes and path kind anew;
+                // it shares neither a digest implementation nor observation state.
+                let oracle = paths.iter().zip(&originals).enumerate().all(|(i, (path, bytes))| {
+                    fs::read(path).is_ok_and(|actual| &actual == bytes)
+                        && (i == 2 || fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.file_type().is_symlink()))
+                });
+                let mut work = RecoveryArtifactWork::default();
+                let observed = observations.observe(run.path(), &mut work);
+                proptest::prop_assert_eq!(observed.is_ok(), oracle, "operation={} file={}", operation, index);
+                proptest::prop_assert_eq!(work.decoded_bytes, 0);
+                if oracle {
+                    proptest::prop_assert_eq!(work.hash_bytes, originals.iter().map(|bytes| bytes.len() as u64).sum::<u64>());
+                }
+                if path.try_exists().unwrap() { fs::remove_file(path).unwrap(); }
+                fs::write(path, &originals[index]).unwrap();
+                observations.observe(run.path(), &mut Default::default()).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn malformed_package_witness_and_admission_limits_remain_distinct() {

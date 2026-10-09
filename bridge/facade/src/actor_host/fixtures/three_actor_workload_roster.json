@@ -1,0 +1,11 @@
+[
+  "activation",
+  "root-setup",
+  "root-fork-capture",
+  "async-yield",
+  "child-alpha-reply",
+  "child-beta-reply",
+  "parent-publication-read",
+  "explicit-child-cleanup",
+  "host-cleanup"
+]

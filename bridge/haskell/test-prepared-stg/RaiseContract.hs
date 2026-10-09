@@ -29,7 +29,11 @@ partialConsumer function = function `seq` 0
 
 -- Keep the source-level partial application reachable through an opaque consumer.
 bottomingPartial :: Int
-bottomingPartial = partialConsumer (bottomingBinary 1)
+bottomingPartial = partialConsumer partialApplication
+
+partialApplication :: Int -> Int
+partialApplication = bottomingBinary 1
+{-# NOINLINE partialApplication #-}
 {-# NOINLINE bottomingPartial #-}
 
 bottomingCalled :: Int

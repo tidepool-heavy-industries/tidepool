@@ -20,6 +20,22 @@ def _catalog_sources_impl(ctx):
         ]),
         category = "native_root_entry_source",
     )
+    builtin_entries = {}
+    for name, module, entry_name in [
+        ("workbench", "TidepoolPreparedWorkbench", "installDefaultWorkbench"),
+        ("async_workbench", "TidepoolPreparedAsyncWorkbench", "installDefaultAsyncWorkbench"),
+    ]:
+        source = ctx.actions.declare_output(module + ".hs")
+        ctx.actions.run(
+            cmd_args([
+                ctx.attrs.entry_source[RunInfo], "--module", module,
+                "--entry", "Tidepool.Agent.Contract." + entry_name,
+                "--effects", "Tidepool.Agent.Contract.BuiltinDispatcherEffects",
+                "--output", source.as_output(),
+            ]),
+            category = "native_builtin_entry_source", identifier = name,
+        )
+        builtin_entries[name] = source
     ctx.actions.run(
         cmd_args([
             ctx.attrs.python[RunInfo], ctx.attrs.qualification,
@@ -29,6 +45,8 @@ def _catalog_sources_impl(ctx):
             "--jev-sources", ctx.attrs.jev_sources,
             "--cohort", cohort,
             "--root-entry-source", entry,
+            "--workbench-entry-source", builtin_entries["workbench"],
+            "--async-workbench-entry-source", builtin_entries["async_workbench"],
             "--output", output.as_output(),
         ]),
         category = "native_catalog_sources",
@@ -53,12 +71,11 @@ def native_catalog_sources(name, cohort, **kwargs):
     _catalog_sources(name = name, components = cohort["components"], modules = cohort["modules"], **kwargs)
 
 
-def _native_products_impl(ctx, operation, output_name, category):
+def _native_products_impl(ctx, operation, output_name, category, entry_name = None):
     if not ctx.attrs.source_root or not ctx.attrs.retention_record_origin:
         fail("native products require the original retained source selection")
     output = ctx.actions.declare_output(output_name, dir = True)
-    ctx.actions.run(
-        cmd_args([
+    command = cmd_args([
             ctx.attrs.python[RunInfo], ctx.attrs.qualification, operation,
             "--snapshot", ctx.attrs.snapshot,
             "--source-root", ctx.attrs.source_root,
@@ -73,7 +90,11 @@ def _native_products_impl(ctx, operation, output_name, category):
             "--ghc-libdir", ctx.attrs.ghc_libdir,
             "--libraries", ctx.attrs.libraries,
             "--output", output.as_output(),
-        ], hidden = [ctx.attrs.runtime_tools, ctx.attrs.declared_ghc_libdir]),
+        ], hidden = [ctx.attrs.runtime_tools, ctx.attrs.declared_ghc_libdir])
+    if entry_name != None:
+        command.add("--entry-name", entry_name)
+    ctx.actions.run(
+        command,
         category = category,
     )
     return [DefaultInfo(default_output = output)]
@@ -83,6 +104,12 @@ def _native_catalog_impl(ctx):
 
 def _native_root_entry_impl(ctx):
     return _native_products_impl(ctx, "build-root-entry", "prepared-root-entry", "native_root_entry")
+
+def _native_workbench_entry_impl(ctx):
+    return _native_products_impl(ctx, "build-builtin-entry", "prepared-workbench-entry", "native_builtin_entry", "workbench")
+
+def _native_async_workbench_entry_impl(ctx):
+    return _native_products_impl(ctx, "build-builtin-entry", "prepared-async-workbench-entry", "native_builtin_entry", "async_workbench")
 
 _native_products_attrs = {
     "snapshot": attrs.source(),
@@ -105,10 +132,14 @@ _native_products_attrs = {
 
 native_catalog = rule(impl = _native_catalog_impl, attrs = _native_products_attrs)
 native_root_entry = rule(impl = _native_root_entry_impl, attrs = _native_products_attrs)
+native_workbench_entry = rule(impl = _native_workbench_entry_impl, attrs = _native_products_attrs)
+native_async_workbench_entry = rule(impl = _native_async_workbench_entry_impl, attrs = _native_products_attrs)
 
 def native_prepared_products(**kwargs):
     native_catalog(name = "native_catalog", **kwargs)
     native_root_entry(name = "native_root_entry", **kwargs)
+    native_workbench_entry(name = "native_workbench_entry", **kwargs)
+    native_async_workbench_entry(name = "native_async_workbench_entry", **kwargs)
 
 
 def native_runtime_bundle(name, catalog_backed):
@@ -133,7 +164,7 @@ def native_runtime_bundle(name, catalog_backed):
         "fixture-manifest": "//:test_fixture_manifest",
     }
     if catalog_backed:
-        bundle_sources.update({"catalog": ":native_catalog", "root-entry": ":native_root_entry"})
+        bundle_sources.update({"catalog": ":native_catalog", "root-entry": ":native_root_entry", "workbench-entry": ":native_workbench_entry", "async-workbench-entry": ":native_async_workbench_entry"})
     genrule(
         name = name,
         srcs = bundle_sources,
@@ -143,7 +174,7 @@ def native_runtime_bundle(name, catalog_backed):
             "PACKAGE_RUNTIME_TOOLS": read_root_config("nix", "exomonad_runtime_tools", ""),
             "PACKAGE_NATIVE_PROFILE": selected_native_profile(),
         },
-        bash = "set -euo pipefail\n" + ('CATALOG_ARGUMENTS=(--catalog "$PWD/$(location :native_catalog)" --root-entry "$PWD/$(location :native_root_entry)")\n' if catalog_backed else 'CATALOG_ARGUMENTS=()\n') + """
+        bash = "set -euo pipefail\n" + ('CATALOG_ARGUMENTS=(--catalog "$PWD/$(location :native_catalog)" --root-entry "$PWD/$(location :native_root_entry)" --workbench-entry "$PWD/$(location :native_workbench_entry)" --async-workbench-entry "$PWD/$(location :native_async_workbench_entry)")\n' if catalog_backed else 'CATALOG_ARGUMENTS=()\n') + """
     "$(exe toolchains//:python)" "$PWD/$(location :qualification_script)" assemble \
       --output "$PWD/$OUT" \
       --host "$PWD/$(location //bridge/facade:exomonad)" \

@@ -31,6 +31,26 @@ name `Tidepool.Actors.Internal.ExomonadDriver.rootDriver` and `RootEffects`.
 That source joins the same complete source inventory and Nix retention as the
 catalog; no build scratch path becomes a runtime source witness.
 
+The same renderer produces `TidepoolPreparedWorkbench.hs` and
+`TidepoolPreparedAsyncWorkbench.hs`. They call the two existing default policies
+specialized to the generated standard ordered actor row in
+`Tidepool.Agent.Contract`, with no notebook-driver or workspace imports.
+`//build/package:native_workbench_entry` and
+`//build/package:native_async_workbench_entry` use the same retained source,
+compiler and production-entry producer as the root entry. Qualification binds
+both complete original containers and supplies `TIDEPOOL_PREPARED_BUILTIN_ENTRIES`.
+Workspace overrides, unmatched ordered rows and explicit live policies keep
+their existing routes.
+
+Named source snapshot metadata is version 2, qualification descriptors are
+version 3, and prepared workspace selections are version 8. Rebuild, refreeze
+and reprepare with this reader; it does not infer missing named-entry provenance.
+Pointer version 2, native catalog version 4 and production-entry version 2 retain
+their existing contracts. Preserve older frozen bundles with their own readers.
+Immediate preparation/start carries only issuer-owned immutable entry/images;
+each actor still installs fresh policy state. Durable reopening authenticates
+the complete selected original through the existing loader.
+
 `NATIVE_CATALOG_COHORT` in the generated `bridge/haskell/components.bzl` owns
 the direct import roster. The snapshot's `catalog-sources.json` preserves that
 exact module-to-source selection; its `modules` entries determine direct import
@@ -221,7 +241,7 @@ and `--service-slice NAME.slice` use the runner's fresh delegated user services
 inside an already admitted user slice. Reports retain these scheduling choices.
 The browser driver and its locked npm inputs are assembled by the declared
 native bundle action and checked against its source contract. Freeze cannot
-substitute a separately supplied driver. Schema 2 descriptors require that
+substitute a separately supplied driver. Schema 3 descriptors require that
 contract; historical frozen bundles retain their own qualification program.
 
 Every runtime cohort seals `owned-resident` compilation into its descriptor,
@@ -233,6 +253,13 @@ inside its cold namespace and refuses an existing daemon. Preserve older frozen
 descriptors and their reports with their bundled qualification program; the new
 reader refuses older unsealed cohort contracts. Build and freeze a new candidate
 to qualify the resident runtime contract.
+
+The `builtin-startup` cohort runs one ignored production-path case. It prepares
+the default workspace, launches through immediate immutable readiness and then
+independent durable selection, and checks zero startup compiler requests in both
+hosts. Real HTTP admission drives first and warm notebook calls; a binding from
+the first actor must be unavailable in the second actor. Run it with `--jobs 1`
+from the rebuilt descriptor that selects both packaged installer entries.
 
 The frozen descriptor is the authority for the exact M1/M2 case rosters, counts
 and deadlines. M2 has a 600-second default watchdog; unfinished-parent survival,
