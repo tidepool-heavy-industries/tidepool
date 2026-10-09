@@ -3233,7 +3233,14 @@ impl ExactCompilationRequest {
             &source_path,
             &source,
         )
-        .ok_or_else(|| failure("fresh compilation consumed source evidence is invalid"))?;
+        .map_err(|failure| {
+            CompileError::CompilerEvidence(Box::new(
+                crate::certified_products::CertificationError::CompletedSourceEvidence {
+                    input: source_path.clone(),
+                    failure: Box::new(failure),
+                },
+            ))
+        })?;
         let interfaces = context.interface_owners();
         let mut exact_owners: BTreeSet<_> = interfaces
             .iter()

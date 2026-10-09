@@ -1106,6 +1106,11 @@ pub enum CertificationError {
     },
     #[error("compiler product evidence is no longer valid")]
     StaleEvidence,
+    #[error("completed source evidence for {} failed: {failure:?}", input.display())]
+    CompletedSourceEvidence {
+        input: PathBuf,
+        failure: Box<crate::cache::DependencyEvidenceFailure>,
+    },
     #[error("compiler evidence read {}: {failure}", path.display())]
     EvidenceRead {
         path: PathBuf,
@@ -2197,9 +2202,10 @@ fn package_validation_error(
     error: crate::recovery_artifacts::RecoveryArtifactError,
 ) -> CertificationError {
     match error {
-        error @ crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_) => {
-            CertificationError::CapturedModulePayload(error)
-        }
+        error @ (crate::recovery_artifacts::RecoveryArtifactError::InventoryAccounting(_)
+        | crate::recovery_artifacts::RecoveryArtifactError::CompletedSourceEvidence {
+            ..
+        }) => CertificationError::CapturedModulePayload(error),
         _ => CertificationError::StaleEvidence,
     }
 }
@@ -6695,7 +6701,10 @@ pub(crate) fn certify_products_with_validation(
                 fresh_input_path,
                 final_target_source,
             )
-            .ok_or(CertificationError::StaleEvidence)?,
+            .map_err(|failure| CertificationError::CompletedSourceEvidence {
+                input: fresh_input_path.to_path_buf(),
+                failure: Box::new(failure),
+            })?,
         ),
         Some(admission) => {
             admission

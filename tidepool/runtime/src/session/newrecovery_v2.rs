@@ -421,6 +421,10 @@ pub(crate) struct RecoveryError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RecoveryErrorKind {
+    SourceEvidence {
+        input: PathBuf,
+        failure: tidepool_toolchain::cache::DependencyEvidenceFailure,
+    },
     Manifest,
     Format(RecoveryRefusal),
     InventoryAccounting(tidepool_toolchain::recovery_artifacts::RecoveryAdmissionFailure),
@@ -1706,6 +1710,16 @@ fn artifact_error_loss(
     error: RecoveryArtifactError,
 ) -> Result<RecoveryArtifactLoss, RecoveryError> {
     let (component, path, kind) = match error {
+        RecoveryArtifactError::CompletedSourceEvidence { input, failure } => {
+            return Err(RecoveryError {
+                path: Some(input.clone()),
+                detail: format!("completed source evidence refused: {failure:?}"),
+                kind: RecoveryErrorKind::SourceEvidence {
+                    input,
+                    failure: *failure,
+                },
+            });
+        }
         RecoveryArtifactError::InventoryAccounting(cause) => {
             // Exhausted admission accounting says nothing about the immutable
             // artifact's validity. Abort recovery rather than tombstoning it.
@@ -2981,6 +2995,48 @@ mod tests {
             .push(reference.requirements[0].clone());
         duplicate.checksum = checksum(&duplicate).unwrap();
         assert!(RecoveryGraph::from_wire(duplicate).is_err());
+    }
+
+    #[test]
+    fn completed_source_refusal_aborts_recovery_without_tombstoning_the_original() {
+        let mut wire = fixture();
+        wire.public_surfaces[0].declaration_root = Some(Generation(1));
+        wire.seal().unwrap();
+        let graph = snapshot(&wire);
+        let input = PathBuf::from("/retained/source.hs");
+        let cause = tidepool_toolchain::cache::DependencyEvidenceFailure::Resolution {
+            index: 85,
+            reason:
+                tidepool_toolchain::cache::ResolutionWitnessFailure::NegativeCandidateUnavailable {
+                    index: 16,
+                },
+        };
+        let refusal = artifact_error_loss(
+            home_artifact(&wire),
+            RecoveryArtifactError::CompletedSourceEvidence {
+                input: input.clone(),
+                failure: Box::new(cause.clone()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            refusal.kind,
+            RecoveryErrorKind::SourceEvidence {
+                input: input.clone(),
+                failure: cause.clone()
+            }
+        );
+        assert!(
+            matches!(super::super::graph_error(Path::new("declarations.json"), refusal),
+            crate::session::SessionError::Compile(crate::CompileError::CompilerEvidence(error))
+                if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::CompletedSourceEvidence {
+                    input: actual_input, failure: actual_cause,
+                } if actual_input == &input && actual_cause.as_ref() == &cause))
+        );
+        assert!(matches!(
+            graph.projection(&owner("root"), &BTreeMap::new()).unwrap()[&identity("answer")],
+            RecoveryHead::Available { .. }
+        ));
     }
 
     #[test]

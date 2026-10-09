@@ -526,6 +526,11 @@ pub enum RecoveryAdmissionFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryArtifactError {
+    #[error("completed source evidence for {} failed: {failure:?}", input.display())]
+    CompletedSourceEvidence {
+        input: PathBuf,
+        failure: Box<crate::cache::DependencyEvidenceFailure>,
+    },
     #[error("inventory accounting: {0}")]
     InventoryAccounting(RecoveryAdmissionFailure),
     #[error("invalid recovery artifact reference")]
@@ -580,6 +585,9 @@ fn recovery_validation_error(
     use crate::certified_products::CertificationError;
     use tidepool_repr::execution_schema::ParseError;
     match error {
+        CertificationError::CompletedSourceEvidence { input, failure } => {
+            RecoveryArtifactError::CompletedSourceEvidence { input, failure }
+        }
         CertificationError::Product(cause) => match cause {
             cause @ (ParseError::ByteLimit { .. }
             | ParseError::InventoryByteLimit { .. }
@@ -2401,6 +2409,38 @@ mod tests {
                 RecoveryAdmissionFailure::Decode(ParseError::LimitExceeded(_))
             ))
         ));
+    }
+
+    #[test]
+    fn completed_source_refusal_survives_recovery_and_diagnostic_boundaries() {
+        let input = PathBuf::from("/retained/source.hs");
+        let failure = crate::cache::DependencyEvidenceFailure::Resolution {
+            index: 85,
+            reason: crate::cache::ResolutionWitnessFailure::NegativeCandidateUnavailable {
+                index: 16,
+            },
+        };
+        let recovery = recovery_validation_error(
+            crate::certified_products::CertificationError::CompletedSourceEvidence {
+                input: input.clone(),
+                failure: Box::new(failure.clone()),
+            },
+            RecoveryArtifactError::InvalidReference,
+        );
+        let error = crate::CompileError::CompilerEvidence(Box::new(
+            crate::certified_products::CertificationError::CapturedModulePayload(recovery),
+        ));
+        let classified = crate::failclass::classify_compile(&error);
+        assert_eq!(classified.class, crate::failclass::FailureClass::Infra);
+        assert_eq!(
+            classified.cause,
+            Some(crate::failclass::CompileFailureCause::CompilerEvidence {
+                failure: crate::failclass::CompilerEvidenceFailure::SourceEvidence {
+                    input,
+                    failure
+                },
+            })
+        );
     }
 
     #[test]

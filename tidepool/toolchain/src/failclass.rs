@@ -146,6 +146,10 @@ pub enum CompileFailureCause {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompilerEvidenceFailure {
+    SourceEvidence {
+        input: std::path::PathBuf,
+        failure: crate::cache::DependencyEvidenceFailure,
+    },
     Read {
         path: std::path::PathBuf,
         failure: EvidenceReadCause,
@@ -194,6 +198,18 @@ impl From<&crate::certified_products::CertificationError> for CompilerEvidenceFa
         use crate::recovery_artifacts::{RecoveryAdmissionFailure, RecoveryArtifactError};
         use tidepool_repr::execution_schema::ParseError;
         match error {
+            CertificationError::CapturedModulePayload(
+                RecoveryArtifactError::CompletedSourceEvidence { input, failure },
+            ) => Self::SourceEvidence {
+                input: input.clone(),
+                failure: (**failure).clone(),
+            },
+            CertificationError::CompletedSourceEvidence { input, failure } => {
+                Self::SourceEvidence {
+                    input: input.clone(),
+                    failure: (**failure).clone(),
+                }
+            }
             CertificationError::EvidenceRead { path, failure } => Self::Read {
                 path: path.clone(),
                 failure: match failure {
@@ -526,6 +542,41 @@ fn version_skew_message(re: &ReadError) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn completed_source_evidence_keeps_typed_refusal_in_failure_envelope() {
+        let input = PathBuf::from("/retained/source.hs");
+        let failure = crate::cache::DependencyEvidenceFailure::Resolution {
+            index: 85,
+            reason: crate::cache::ResolutionWitnessFailure::NegativeCandidateUnavailable {
+                index: 16,
+            },
+        };
+        let error = CompileError::CompilerEvidence(Box::new(
+            crate::certified_products::CertificationError::CompletedSourceEvidence {
+                input: input.clone(),
+                failure: Box::new(failure.clone()),
+            },
+        ));
+        let envelope = classify_compile(&error);
+        assert_eq!(envelope.class, FailureClass::Infra);
+        assert_eq!(
+            envelope.cause,
+            Some(CompileFailureCause::CompilerEvidence {
+                failure: CompilerEvidenceFailure::SourceEvidence { input, failure },
+            })
+        );
+        let serialized = serde_json::to_value(envelope).unwrap();
+        assert_eq!(
+            serialized["cause"]["failure"]["failure"]["Resolution"]["index"],
+            85
+        );
+        assert_eq!(
+            serialized["cause"]["failure"]["failure"]["Resolution"]["reason"]
+                ["NegativeCandidateUnavailable"]["index"],
+            16
+        );
+    }
 
     #[test]
     fn compiler_evidence_read_and_resource_causes_keep_infra_classification() {

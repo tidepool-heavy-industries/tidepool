@@ -75,6 +75,7 @@ tests = testGroup "source-boot"
   , testCase "session native body demand" sessionNativeBodyDemand
   , testCase "selected home instance edges" $ selectedHomeInstanceEdges
   , testCase "ordered resolution paths" $ resolutionPaths
+  , testCase "request resolution search order history" resolutionSearchOrderHistory
   , testCase "original package cohort" $ withEffects $ \effects -> withScratch (originalPackageCohort effects)
   , testCase "checked value type closure" $ withEffects checkedValueTypeClosure
   , testCase "progress boundary" $ withEffects progressBoundaryChecks

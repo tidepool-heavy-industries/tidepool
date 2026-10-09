@@ -7,15 +7,15 @@ preparedReplies <- forM [1..{prepared-child-count} :: Int] $ \ordinal -> do
   spawned <- spawnSubagent (FreshCtx "Execute the prepared probe") SameDir
     ((defaultSpawnOptions preparedChildSpec) { spawnLabel = Just name })
   actor <- case spawned of
-    Left failure -> error ("prepared child spawn failed: " <> show failure)
+    Left failure -> error ("prepared child spawn failed: " <> Text.pack (show failure))
     Right admitted -> pure admitted
   requested <- request @Int actor ("execute the prepared probe" :: Text.Text) defaultRequestOptions
   answer <- case requested of
-    Left failure -> error ("prepared child request failed: " <> show failure)
+    Left failure -> error ("prepared child request failed: " <> Text.pack (show failure))
     Right accepted -> pure accepted
   completed <- await (result answer)
   value <- case completed of
-    Left failure -> error ("prepared child reply failed: " <> show failure)
+    Left failure -> error ("prepared child reply failed: " <> Text.pack (show failure))
     Right resultValue -> pure resultValue
   pure value
 display (preparedReplies == replicate {prepared-child-count} (41 :: Int))
