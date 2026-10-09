@@ -74,7 +74,7 @@ import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained
 import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), pmModule, pmCoverage, pmBindings, pmSiteRejections, RecoveredModuleFailure(..)
-  , newPreparedBodyCache, prepareModule, newPreparedComponentTaskPreparer, runPreparedBodyTask
+  , newPreparedBodyCache, prepareModule, prepareRecoveredBodies, newPreparedComponentTaskPreparer, runPreparedBodyTask
   , preparedExpectedEntry )
 import Tidepool.PreparedSites (SiteRejection(..))
 

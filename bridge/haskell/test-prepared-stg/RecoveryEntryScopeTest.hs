@@ -17,16 +17,13 @@ import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
 import GHC.Stg.Syntax qualified as Stg
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(..))
-import GHC.Types.Id (idArity, idType, idTagSig_maybe, idCbvMarks_maybe, asNonWorkerLikeId, isDeadEndId, localiseId, setIdArity, setIdDmdSig, setIdType)
+import GHC.Types.Id (idArity, idTagSig_maybe, idCbvMarks_maybe, asNonWorkerLikeId, localiseId, setIdArity, setIdDmdSig, setIdType)
 import GHC.Types.Demand (nopSig)
 import GHC.Types.Name (nameOccName, nameModule_maybe, wiredInNameTyThing_maybe)
-import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.TypeEnv (emptyTypeEnv)
 import GHC.IfaceToCore (tcTopIfaceBindings)
 import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLcl)
-import GHC.Unit.Module.ModIface (mi_extra_decls)
 import GHC.Utils.Outputable (text)
-import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Types.Name.Env (lookupNameEnv)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Var (varName, isId)
@@ -40,7 +37,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (readProcess)
 import Tidepool.FatIface
-  (FatIfaceLookup(..), OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, lookupFatIfaceExact,
+  (FatIfaceLookup(..), ownerInterfaceLocation, ownerInterfaceEntries, lookupFatIfaceExact,
    lookupOwnerInterface, newFatIfaceCache, newOwnerInterfaceCache, readExactInterface)
 import Tidepool.PreparedStg
   (PreparedModule, RecoveredModuleInput(..), newPreparedBodyCache,

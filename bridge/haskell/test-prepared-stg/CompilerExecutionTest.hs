@@ -72,7 +72,7 @@ completionWork = within $ do
         (const (pure value))
   withCompilerExecutor (jobs 2) $ \executor -> do
     result <- runCompilerTasks executor task
-      (\value _ -> do
+      (\(value :: Int) _ -> do
         children <- runCompilerTasks executor task (\_ _ -> pure ()) [value + 10, value + 20]
         assert (children == [value + 10, value + 20]) "completion work lost deterministic order") [0, 1]
     assert (result == [0, 1]) "completion work changed the outer result"
