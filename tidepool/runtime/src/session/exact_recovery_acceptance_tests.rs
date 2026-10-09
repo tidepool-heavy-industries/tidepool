@@ -798,6 +798,122 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
             std::process::id()
         );
     }
+    let public_before = resident.public_visibility_snapshot_in(public).unwrap();
+    let handles_before = resident.value_handle_count();
+    let private;
+    {
+        use crate::session::turn::{compile_cell_program_admitted, consume_cell_program_item};
+        use tidepool_toolchain::checked_cell::{CheckedCellSpecification, CheckedItemKind};
+
+        // The standalone probe above covers immutable code reuse. Notebook cells
+        // must also consume the recovered selection through whole-cell admission.
+        let execution = Arc::new(resident.begin_private_execution(public).unwrap());
+        private = execution.private_scope();
+        let view = resident.compile_view_for_execution(&execution).unwrap();
+        let imports = view.turn_imports(&SourceImports::new());
+        let source = "let recoveredCellAnswer = recoveredAnswer (41 :: Int)";
+        let specification = Arc::new(CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: resident_cell_check_template(
+                effects.preamble(),
+                effects.row(),
+                &imports,
+            ),
+            turn_templates: resident_workbench_templates(
+                effects.preamble(),
+                effects.row(),
+                &imports,
+            )
+            .iter()
+            .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+            .collect(),
+            injected_modules: view.injected_module_names(),
+            reserved_declaration_modules: Vec::new(),
+        });
+        let include = view.include_paths(effects.include_paths());
+        let plan = tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include)
+            .unwrap();
+        let admission = resident
+            .admit_planned_cell_for_execution(
+                execution,
+                plan,
+                specification.clone(),
+                specification.specification_digest(),
+                [1; 32],
+                include,
+                None,
+            )
+            .unwrap();
+        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        assert_eq!(checked.items.len(), 1);
+        let [item] = program.items() else {
+            panic!("recovered cell must issue exactly one executable item");
+        };
+        let item = item.checked_item().clone();
+        assert_eq!(item.kind(), CheckedItemKind::Bind);
+        assert_eq!(item.binders(), ["recoveredCellAnswer"]);
+        let prefix = resident
+            .begin_cell_program(admission, program)
+            .unwrap()
+            .unwrap();
+        let reservation = resident.admit_checked_item(prefix.clone(), item).unwrap();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = consume_cell_program_item(reservation.clone()).unwrap()
+        else {
+            panic!("recovered cell must consume its certified native bind");
+        };
+        let [binder] = bound.as_slice() else {
+            panic!("recovered cell must retain its exact checked binder");
+        };
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: private,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let outcome = resident
+            .run_bind_with_sites(
+                &binder.name,
+                compiled.code(),
+                binder,
+                reservation.generation(),
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
+            ),
+            "recovered whole-cell bind did not complete: {outcome:?}"
+        );
+        let (id, ..) = resident.current_binding_in(private, &binder.name).unwrap();
+        assert_eq!(id, SessionVarId::from_extract(binder.var_id));
+        let custody = resident
+            .retain_binding_custody_in(private, &binder.name, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resident.render_retained_preview(&custody, 64),
+            Some("42".into())
+        );
+        assert_eq!(
+            prefix.snapshot().compiler_prefix().next_item(),
+            checked.items.len()
+        );
+        assert_eq!(
+            resident.public_visibility_snapshot_in(public).unwrap(),
+            public_before
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    }
+    resident.retire_scope(private);
+    assert_eq!(resident.value_handle_count(), handles_before);
+    assert_eq!(
+        resident.public_visibility_snapshot_in(public).unwrap(),
+        public_before
+    );
     assert_eq!(std::fs::read(&manifest).unwrap(), before);
     std::fs::write(
         &spec.result_file,
