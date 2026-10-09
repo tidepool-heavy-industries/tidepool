@@ -1072,9 +1072,8 @@ assertBottomingApplications root = do
           ("bottoming " ++ occurrence ++ " projection failed: " ++ show failure))
         Right program -> pure program
 
-    -- CorePrep eta-expands the fixture's PAP into a one-argument `sat`
-    -- closure. Restore the same worker application with one supplied argument
-    -- so projection is tested at the unsaturated call boundary.
+    -- The authored partial application gives this calibration one exact
+    -- binder. Restore its unsaturated worker application after CorePrep.
     preservePartialCall prepared = prepared
       { preparedBindings = bindings
       }
@@ -1084,14 +1083,14 @@ assertBottomingApplications root = do
                  (Stg.StgRhsClosure captures ccs update [_]
                    (Stg.StgCase _ _ _ [Stg.GenStgAlt _ _
                      (Stg.StgApp worker [first, _])]) _)), annotations)
-          | occNameString (nameOccName (varName binder)) == "sat"
+          | occNameString (nameOccName (varName binder)) == "partialApplication"
           , occNameString (nameOccName (varName worker)) == "$wbottomingBinary" =
               (Stg.StgTopLifted (Stg.StgNonRec binder
                 (Stg.StgRhsClosure captures ccs update []
                   (Stg.StgApp worker [first]) (varType binder))), annotations)
         restore (Stg.StgTopLifted (Stg.StgNonRec binder rhs), _)
-          | occNameString (nameOccName (varName binder)) == "sat" =
-              error ("unexpected prepared sat: " ++ showSDocUnsafe (ppr rhs))
+          | occNameString (nameOccName (varName binder)) == "partialApplication" =
+              error ("unexpected prepared partialApplication: " ++ showSDocUnsafe (ppr rhs))
         restore binding = binding
 
     assertPartialBottoming program = do
@@ -1106,14 +1105,14 @@ assertBottomingApplications root = do
           ++ show entry)
       let partialCalls =
             [ (callee, signatureAt program signature, arguments)
-            | (callee, signature, arguments) <- allCalls (topBody program "sat")
+            | (callee, signature, arguments) <- allCalls (topBody program "partialApplication")
             ]
       assert (any isPartialCall partialCalls)
         ("bottomingPartial did not retain a partial Call node: " ++ show partialCalls)
       where
         isConsumerCall (callee, _, arguments) =
           callee == Ref (Local (topId program "partialConsumer"))
-            && arguments == [Ref (Local (topId program "sat"))]
+            && arguments == [Ref (Local (topId program "partialApplication"))]
         isPartialCall (callee, signature, arguments) =
           callee == Ref (Local (topId program "$wbottomingBinary"))
             && length arguments == 1
