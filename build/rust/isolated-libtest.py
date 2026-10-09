@@ -13,6 +13,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -128,6 +129,7 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT',
     'TIDEPOOL_EXTRACT_DAEMON_LOG', 'TIDEPOOL_KEEP_TEST_LOGS',
     'TIDEPOOL_TEST_ARTIFACT_ROOT', 'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE',
+    'TIDEPOOL_COMPILE_CACHE_DIR',
     'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', 'TIDEPOOL_TIMING', 'TIDEPOOL_MEMO_TRACE',
     'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS',
     'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
@@ -1043,6 +1045,15 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         if artifact_root is None or not frontend:
             raise RuntimeError('owned-resident requires a declared compiler and per-case artifact root')
         args = [frontend, '--owned-daemon-run', str(artifact_root / 'compiler'), '--', *args]
+    # Candidate evidence may name a case's temporary authored sources. Sharing
+    # that mutable cache lets another case delete an acquired input mid-compile.
+    compile_cache = (artifact_root / 'compile-cache' if artifact_root is not None
+                     else Path(tempfile.mkdtemp(prefix='tidepool-libtest-cache-')))
+    if artifact_root is not None:
+        compile_cache.mkdir(mode=0o700)
+    environment = dict(os.environ) if environment is None else environment
+    environment['TIDEPOOL_COMPILE_CACHE_DIR'] = str(compile_cache)
+    record['compile_cache_root'] = str(compile_cache)
     started = time.monotonic_ns()
     record.update(command=args, started_ns=started, exit_code=None,
                   timeout_seconds=timeout,
@@ -1058,6 +1069,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     if artifact_root is not None:
         (artifact_root / 'launch-inputs.json').write_text(json.dumps(launch_inputs, indent=2) + '\n')
     def finish(passed, stdout, stderr):
+        cache_removed = False
         cleanup_complete, hosted_runtime_not_started, evidence_complete, errors = case_artifact_evidence(
             artifact_root, compiler_mode, record)
         passed = passed and cleanup_complete
@@ -1071,6 +1083,14 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             else:
                 shutil.rmtree(artifact_root)
                 record['artifacts_removed_after_success'] = True
+        if artifact_root is None and passed and not retain_artifacts:
+            shutil.rmtree(compile_cache)
+            cache_removed = True
+        cache_retained = compile_cache.is_dir() and not compile_cache.is_symlink()
+        record['compile_cache_disposition'] = ('retained' if cache_retained else
+            'removed' if cache_removed or record.get('artifacts_removed_after_success') else 'missing')
+        if artifact_root is None and cache_retained:
+            stderr += f'\ncompile cache retained at {compile_cache}'
         return passed, stdout, stderr
 
     if launch_inputs['status'] == 'UNKNOWN':
