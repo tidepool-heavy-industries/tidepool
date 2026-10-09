@@ -11349,68 +11349,109 @@ pub(crate) mod tests {
         }
     }
 
-    proptest::proptest! {
-        #[test]
-        fn authored_root_preserves_complete_interface_namespace_through_offer_retirement(
-            required_mask in 1u8..4,
-            offered_mask in 0u8..4,
-            retired_mask in 0u8..4,
-            reverse in proptest::prelude::any::<bool>(),
-        ) {
-            use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeArtifactDemand};
-            let dependencies = [
-                full_native_fixture("TypeLeft", vec![(7, vec![])], 7),
-                full_native_fixture("TypeRight", vec![(7, vec![])], 7),
-            ];
-            let requirements = dependencies.iter().enumerate()
+    #[test]
+    fn authored_root_preserves_complete_interface_namespace_through_offer_retirement() {
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeArtifactDemand};
+        let dependencies = [
+            full_native_fixture("TypeLeft", vec![(7, vec![])], 7),
+            full_native_fixture("TypeRight", vec![(7, vec![])], 7),
+        ];
+        let mut histories = 0;
+        for required_mask in 1u8..4 {
+            let requirements = dependencies
+                .iter()
+                .enumerate()
                 .filter(|(index, _)| required_mask & (1 << index) != 0)
-                .map(|(_, product)| (
-                    (product.owner().unit.clone(), product.owner().module.clone()),
-                    product.module_interface().unwrap().interface_sha256(),
-                )).collect();
-            let authored = recovered_witness_fixtures(&[fixture_finalized_product_with_requirements(
-                original_groups_fixture("AuthoredTypes", vec![(7, vec![])], 7, &BTreeMap::new()),
-                [1; 32], Some(requirements),
-            )]).remove(0).product;
-            let entries = std::iter::once(&authored).chain(dependencies.iter())
+                .map(|(_, product)| {
+                    (
+                        (product.owner().unit.clone(), product.owner().module.clone()),
+                        product.module_interface().unwrap().interface_sha256(),
+                    )
+                })
+                .collect();
+            let authored =
+                recovered_witness_fixtures(&[fixture_finalized_product_with_requirements(
+                    original_groups_fixture(
+                        "AuthoredTypes",
+                        vec![(7, vec![])],
+                        7,
+                        &BTreeMap::new(),
+                    ),
+                    [1; 32],
+                    Some(requirements),
+                )])
+                .remove(0)
+                .product;
+            let entries = std::iter::once(&authored)
+                .chain(dependencies.iter())
                 .map(|product| Arc::new(ArtifactEntry::original([1; 32], product.clone()).unwrap()))
                 .collect();
             let inventory = ArtifactInventory::default();
-            let available = inventory.admit_shared_with_demand(
-                &inventory.empty_view(), entries, NativeArtifactDemand::ScopeInterfaces,
-            ).unwrap();
-            let issue = |mask| {
+            let available = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    entries,
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let issue = |mask, reverse| {
                 let mut products = vec![authored.clone()];
-                products.extend(dependencies.iter().enumerate()
-                    .filter(|(index, _)| mask & (1u8 << index) != 0)
-                    .map(|(_, product)| product.clone()));
-                if reverse { products.reverse(); }
-                CertifiedSourceSelection::from_projected_originals(
-                    &products, &InventoryOperation::new(Default::default()),
-                ).unwrap()
-            };
-            let initial = issue(offered_mask);
-            // Withdrawal and restoration change the issued roles while all
-            // immutable artifacts remain physically available in the view.
-            for mask in [offered_mask, offered_mask & !retired_mask, 3] {
-                let selection = issue(mask);
-                let result = selection.selected_authored_original_closure(
-                    &available, "fixture", "AuthoredTypes",
+                products.extend(
+                    dependencies
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1u8 << index) != 0)
+                        .map(|(_, product)| product.clone()),
                 );
-                let expected = required_mask & !mask == 0;
-                proptest::prop_assert_eq!(result.is_ok(), expected);
-                if let Ok(closure) = result {
-                    proptest::prop_assert_eq!(closure.products(), &[authored.clone()]);
-                    let groups = closure.native_closure.selected_native_groups();
-                    proptest::prop_assert_eq!(groups.len(), 1);
-                    proptest::prop_assert_eq!(groups.iter().next().unwrap().original_ordinal, 7);
+                if reverse {
+                    products.reverse();
                 }
-                proptest::prop_assert!(available.selected_native_groups().is_empty());
-                proptest::prop_assert_eq!(initial.selected_authored_original_closure(
-                    &available, "fixture", "AuthoredTypes",
-                ).is_ok(), required_mask & !offered_mask == 0);
+                CertifiedSourceSelection::from_projected_originals(
+                    &products,
+                    &InventoryOperation::new(Default::default()),
+                )
+                .unwrap()
+            };
+
+            // The finite domain is small enough to cover every history. Share
+            // only immutable fixture artifacts; each selection remains fresh.
+            for offered_mask in 0u8..4 {
+                for retired_mask in 0u8..4 {
+                    for reverse in [false, true] {
+                        histories += 1;
+                        let initial = issue(offered_mask, reverse);
+                        for mask in [offered_mask, offered_mask & !retired_mask, 3] {
+                            let selection = issue(mask, reverse);
+                            let result = selection.selected_authored_original_closure(
+                                &available,
+                                "fixture",
+                                "AuthoredTypes",
+                            );
+                            let expected = required_mask & !mask == 0;
+                            assert_eq!(result.is_ok(), expected);
+                            if let Ok(closure) = result {
+                                assert_eq!(closure.products(), &[authored.clone()]);
+                                let groups = closure.native_closure.selected_native_groups();
+                                assert_eq!(groups.len(), 1);
+                                assert_eq!(groups.iter().next().unwrap().original_ordinal, 7);
+                            }
+                            assert!(available.selected_native_groups().is_empty());
+                            assert_eq!(
+                                initial
+                                    .selected_authored_original_closure(
+                                        &available,
+                                        "fixture",
+                                        "AuthoredTypes",
+                                    )
+                                    .is_ok(),
+                                required_mask & !offered_mask == 0,
+                            );
+                        }
+                    }
+                }
             }
         }
+        assert_eq!(histories, 3 * 4 * 4 * 2);
     }
 
     #[test]
