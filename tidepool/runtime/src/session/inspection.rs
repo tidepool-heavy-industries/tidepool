@@ -1934,6 +1934,7 @@ mod tests {
                 exact_context: None,
                 preamble: concat!(
                     "{-# LANGUAGE NoImplicitPrelude, DataKinds, TypeOperators #-}\n",
+                    "{-# LANGUAGE FlexibleContexts, TypeFamilies, ConstraintKinds #-}\n",
                     "module Expr where\n",
                     "import Prelude\n",
                     "import qualified Tidepool.Effects.Core as LookupEffects\n",
