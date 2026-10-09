@@ -14969,11 +14969,13 @@ pub(crate) mod request_tests {
     ) {
         for sibling_write in [false, true] {
             let (machines, context, source, _root) = actor_lookup_registry_fixture();
-            let workbench = Arc::new(ResidentActorWorkbench::new(
-                Arc::clone(&machines),
-                source.clone(),
-                None,
-            ));
+            let workbench =
+                ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+            let (workbench, context) = workbench
+                .admit_private_cell_for_test(context)
+                .await
+                .unwrap();
+            let workbench = Arc::new(workbench);
             let validation = if sibling_write {
                 concat!(
                     "lookupValidation <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"]) >>= \\result -> ",
@@ -14988,15 +14990,13 @@ pub(crate) mod request_tests {
                 )
             };
             let step = workbench
-                .begin_fragment_split(
+                .begin_cell_for_test(
                     context.clone(),
-                    source.clone(),
                     ParsedBlock {
                         ordinal: 1,
                         total: 1,
                         source: validation.into(),
                     },
-                    Some(generated_bind_verdict("lookupValidation")),
                 )
                 .await
                 .expect("lookup fragment compiles and suspends");
@@ -15190,17 +15190,16 @@ pub(crate) mod request_tests {
     async fn parked_actor_snapshot_answers_uncancelled_type_search_with_compiler_owner() {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let step = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source.clone(),
-                ParsedBlock {
+            .begin_cell_for_test(context.clone(), ParsedBlock {
                     ordinal: 1,
                     total: 1,
                     source: "lookupResult <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"])".into(),
-                },
-                Some(generated_binds_verdict(&["lookupResult".into()])),
-            )
+                })
             .await
             .expect("same cancellation fixture fragment parks lookup effect");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -15290,11 +15289,12 @@ pub(crate) mod request_tests {
     {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
         let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let step = workbench
-            .begin_fragment_split(
-                context.clone(),
-                source.clone(),
-                ParsedBlock {
+            .begin_cell_for_test(context.clone(), ParsedBlock {
                     ordinal: 1,
                     total: 1,
                     source: concat!(
@@ -15302,9 +15302,7 @@ pub(crate) mod request_tests {
                         "if lookupIssue result == Nothing && not (null (lookupResults result)) ",
                         "then pure True else error \"uncancelled varied lookup returned a typed failure\""
                     ).into(),
-                },
-                Some(generated_bind_verdict("lookupValidation")),
-            )
+                })
             .await
             .expect("lookup fragment compiles and suspends");
         let ResidentWorkbenchStep::Running { fragment, outcome } = step else {
@@ -15359,21 +15357,19 @@ pub(crate) mod request_tests {
     async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_compiler_owner(
     ) {
         let (machines, context, source, _root) = actor_lookup_registry_fixture();
-        let workbench = Arc::new(ResidentActorWorkbench::new(
-            Arc::clone(&machines),
-            source.clone(),
-            None,
-        ));
+        let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
+        let workbench = Arc::new(workbench);
         let trace_path = lookup_trace_path();
         let step = workbench
-            .begin_fragment_split(context.clone(),
-source.clone(),
-ParsedBlock {
+            .begin_cell_for_test(context.clone(), ParsedBlock {
                     ordinal: 1,
                     total: 1,
                     source: "lookupResult <- LookupApi.lookupRaw (LookupApi.lookupRequest [\"pollResponse\"])".into(),
-                },
-Some(generated_binds_verdict(&["lookupResult".into()])))
+                })
             .await
             .expect("lookup fragment compiles and suspends");
         let ResidentWorkbenchStep::Running { outcome, .. } = step else {
@@ -15451,15 +15447,13 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         }
 
         let recovered = workbench
-            .begin_fragment_split(
+            .begin_cell_for_test(
                 context.clone(),
-                source,
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
                     source: "lookupRecovery <- pure (31 :: Int)".into(),
                 },
-                Some(generated_bind_verdict("lookupRecovery")),
             )
             .await
             .expect("machine and compiler remain usable after cancellation");
@@ -21601,17 +21595,19 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
     ) {
         let (machines, context, source, _root) = actor_registry_fixture();
         let workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source.clone(), None);
+        let (workbench, context) = workbench
+            .admit_private_cell_for_test(context)
+            .await
+            .unwrap();
         let runner = ResidentActorRunner::new(machines, source.clone());
         let step = workbench
-            .begin_fragment_split(
+            .begin_cell_for_test(
                 context.clone(),
-                source,
                 ParsedBlock {
                     ordinal: 1,
                     total: 1,
                     source: "sleep (minutes 0) >> error \"failure after answer\"".into(),
                 },
-                None,
             )
             .await
             .expect("Haskell fragment suspends at sleep");
