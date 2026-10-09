@@ -654,6 +654,47 @@ impl HostedTestRuntime {
         self.startup_readiness_elapsed.as_nanos()
     }
 
+    pub(super) async fn assert_fresh_prepared_workspace_original(&self) {
+        let installation = self
+            .context
+            .observer
+            .installation(self.context.actor.identity())
+            .await;
+        assert!(matches!(
+            installation.acquisition.as_ref(),
+            Some(exomonad_actor::ToolsetAcquisition::FreshRunOriginal { .. })
+        ));
+        let frozen = self
+            .context
+            .config
+            .workspace_inputs
+            .as_ref()
+            .expect("the immediate launch selected its completed workspace");
+        let completed = frozen
+            .completed_entry_selections()
+            .expect("the workspace owns its completed original inventory");
+        let coverage = frozen
+            .prepared_toolset_coverage()
+            .expect("the workspace owns its prepared root coverage");
+        assert_eq!(coverage.len(), 1);
+        assert_eq!(
+            coverage[0].requested_effects,
+            exomonad_actor::ActorCapabilities::default().effect_keys()
+        );
+        let selection = installation
+            .acquisition
+            .as_ref()
+            .and_then(exomonad_actor::ToolsetAcquisition::selection)
+            .expect("the issuing acquisition retains its exact original selection");
+        let exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal { recipe, original } =
+            &selection
+        else {
+            panic!("the shipped workspace must install its prepared workspace original");
+        };
+        assert_eq!(completed.get(recipe), Some(original));
+        assert_eq!(selection, coverage[0].program);
+    }
+
     /// A barrier requiring the existing production host must fail on its own
     /// terminal result, including a successful early exit. Coordination failure
     /// arrives before teardown; the host outcome retains teardown's result.

@@ -17,15 +17,24 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 2);
     let (provider, mut requests) = hosted_script_provider();
-    let host = HostedTestRuntime::start_configured(
+    let host = HostedTestRuntime::start_prepared_configured(
         &settings,
         &provider,
         super::scaffold_admission_tests::scaffold,
     )
     .await
-    .expect("the shipped workspace starts through its production host");
+    .expect("the shipped workspace prepares and selects its original before host readiness");
+    eprintln!(
+        "selected-coding-root-startup {}",
+        serde_json::json!({
+            "preparation_elapsed_ns": host.preparation_elapsed_ns(),
+            "readiness_elapsed_ns": host.startup_readiness_elapsed_ns(),
+        })
+    );
     host.run_scenario(|host| {
         Box::pin(async move {
+            let scenario_started = std::time::Instant::now();
+            host.assert_fresh_prepared_workspace_original().await;
             host.input("Pass a workspace Task to the supplied child spec and return its typed candidate.")
                 .await
                 .unwrap();
@@ -139,6 +148,10 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_done.assert_value("selected-original-result", "True");
             root_done.finish();
+            eprintln!(
+                "selected-coding-scenario {}",
+                serde_json::json!({"elapsed_ns": scenario_started.elapsed().as_nanos(), "completed": true})
+            );
         })
     })
     .await;
