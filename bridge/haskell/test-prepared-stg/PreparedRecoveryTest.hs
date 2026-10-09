@@ -3,6 +3,7 @@
 
 module Main (main, tests) where
 
+import Test.QuickCheck qualified as QC
 import CompilerExecutionTest (compilerExecutionTests)
 import RecoveryEntryScopeTest (entryScopeTests)
 import Tidepool.PreparedStg.Internal (PreparedModule(..))
@@ -51,7 +52,8 @@ import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities, preparedTopIdentityBindings
   , prepareProjection, prepareProjectionWithReachability, projectSelected
   , projectPreparedTarget, preparedModuleReachFacts, preparedSeedUniques
-  , admitReachFacts, emptyPreparedReachability, reachedUniques
+  , admitReachFacts, emptyPreparedReachability, reachedUniques, admittedTops
+  , PreparedReachUpdate(..), updatePreparedReachability
   , preparedTargetReferences, preparedRootIdentity, resolveTextPackageUnit )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), Group(..), HeapBinding(..)
@@ -84,10 +86,67 @@ tests :: TestTree
 tests = testGroup "test-prepared-stg"
   [ compilerExecutionTests
   , entryScopeTests
+  , testCase "component histories agree with complete reachability recomputation" reachHistoryProperty
   , testCase "overlapping structural groups retain every sibling" assertOverlapMerge
   , testCase "subset lookup preserves authoritative full group" assertSubsetPreservesFullGroup
   , testCase "compiled original recovery and reachability closure" scenario
   ]
+
+-- Generated replacement histories exercise the production reach update owner.
+-- The independent oracle always scans the current adjacency from all roots.
+data ReachOperation = AdmitNode Int [Int] | ReplaceArena [(Int,[Int])] | AddRoot Int
+  deriving Show
+
+reachHistoryProperty :: IO ()
+reachHistoryProperty = do
+  result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess=160, QC.maxSize=40 }
+    (QC.forAllShrink history (QC.shrinkList shrinkOperation) $ \operations ->
+      QC.counterexample (show operations) (runHistory False operations))
+  unless (QC.isSuccess result) (fail "component reachability history differs from recomputation")
+  -- Mutation calibration: retaining a removed site's edge keeps an unrelated
+  -- top reachable. The production replacement must remove that old demand.
+  let removed = [AddRoot 0,ReplaceArena [(0,[1]),(1,[])],ReplaceArena [(0,[]),(1,[])]]
+  unless (runHistory False removed && not (runHistory True removed))
+    (fail "site-edge union mutation was not detected")
+  where
+    history = QC.listOf $ QC.frequency
+      [(4,AdmitNode <$> vertex <*> QC.listOf vertex)
+      ,(2,ReplaceArena <$> QC.listOf ((,) <$> vertex <*> QC.listOf vertex))
+      ,(2,AddRoot <$> vertex)]
+    vertex = QC.chooseInt (0,6)
+    shrinkOperation operation = case operation of
+      AdmitNode node edges -> [AdmitNode smaller remaining | (smaller,remaining) <- QC.shrink (node,edges)]
+      ReplaceArena rows -> map ReplaceArena (QC.shrink rows)
+      AddRoot root -> map AddRoot (QC.shrink root)
+    identifiers = [mkVanillaGlobal (mkSystemName (mkUnique 'r' index) (mkVarOcc ("history" ++ show index))) intTy
+      | index <- [0..6]]
+    identifier index = identifiers !! index
+    facts rows = [[(identifier node,map (varUnique . identifier) edges) | (node,edges) <- Map.toAscList rows]]
+    keySet uniques = Set.fromList [index | index <- [0..6]
+      , varUnique (identifier index) `elementOfUniqSet` uniques]
+    runHistory mutate = walk Map.empty [] emptyPreparedReachability
+      where
+        walk _ _ _ [] = True
+        walk rows roots carried (operation:remaining) =
+          let (nextRows,nextRoots,update) = case operation of
+                AdmitNode node edges -> case Map.lookup node rows of
+                  Just _ -> (rows,roots,AdmitPreparedFacts [])
+                  Nothing -> (Map.insert node edges rows,roots,AdmitPreparedFacts (facts (Map.singleton node edges)))
+                ReplaceArena incoming ->
+                  let replaced = Map.fromList incoming
+                  in (replaced,roots,if mutate then AdmitPreparedFacts (facts replaced) else ReplacePreparedFacts (facts replaced))
+                AddRoot root -> (rows,root:roots,AdmitPreparedFacts [])
+              actual = updatePreparedReachability (map (varUnique . identifier) nextRoots) update carried
+              expected = fullReach nextRows nextRoots
+          in keySet (reachedUniques actual) == expected
+              && keySet (admittedTops actual) == Map.keysSet nextRows
+              && walk nextRows nextRoots actual remaining
+    fullReach rows roots = grow Set.empty roots
+      where
+        grow seen [] = seen
+        grow seen (node:pending)
+          | node `Set.member` seen = grow seen pending
+          | otherwise = grow (Set.insert node seen) (Map.findWithDefault [] node rows ++ pending)
 
 scenario :: IO ()
 scenario = do

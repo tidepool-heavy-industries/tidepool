@@ -30,7 +30,8 @@ import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (Module, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionProjection
-  ( PreparedReachability(..), ProjectionContext(..), admitReachFacts
+  ( PreparedReachability(..), ProjectionContext(..), PreparedReachUpdate(..), updatePreparedReachability
+  , PreparedReferenceWorklist, emptyPreparedReferenceWorklist, admitPreparedReferenceUnits, discoverPreparedReferences
   , combinePreparedTargetReferences, emptyPreparedReachability
   , preparedModuleReachFacts, preparedModuleReferenceFacts, preparedSeedUniques
   , preparedTargetReferences, preparedRootIdentity, topBinders )
@@ -223,7 +224,8 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
             , recoveryVersions = Map.map (const 0) carriedGroups
             , recoveryRunning = Set.empty
             , recoveryNewUnits = home
-            , recoveryRebuild = False
+            , recoveryRebuild = not (Map.null carriedModules)
+            , recoveryReferences = emptyPreparedReferenceWorklist
             }
           let factsFor prepared = do
                 memo <- readIORef factsMemo
@@ -238,12 +240,6 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                 [(varName binder, binder)
                 | binder <- references ++ roots
                 , not (elementOfUniqSet (varUnique binder) (admittedTops reach))])
-              roundReferences reach entries =
-                let reached = reachedUniques reach
-                    kept binding =
-                      any ((`elementOfUniqSet` reached) . varUnique) (topBinders binding)
-                in combinePreparedTargetReferences context (admittedTops reach) kept
-                     [(prepared, references) | (prepared, (references, _)) <- entries]
               charge update = modifyIORef' spent update
               recordLookup found = modifyIORef' state $ \current -> case found of
                 ExactBody owner bodies ->
@@ -305,17 +301,26 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                       admittedFacts =
                         [ facts | (prepared, (_, facts)) <- entries
                         , recoveryRebuild current || preparedBodyKey prepared `Set.member` newlyAdmitted ]
-                      prior = if recoveryRebuild current then emptyPreparedReachability else recoveryReach current
-                      extended = admitReachFacts seedList admittedFacts prior
+                      update = if recoveryRebuild current then ReplacePreparedFacts admittedFacts else AdmitPreparedFacts admittedFacts
+                      extended = updatePreparedReachability seedList update (recoveryReach current)
                   _ <- evaluate (sizeUniqSet (reachedUniques extended))
                   _ <- evaluate (sizeUniqSet (admittedTops extended))
                   pure extended
                 (references, refsMs) <- timeSection $ do
-                  refs <- evaluate (includeRoots reach (roundReferences reach entries))
+                  let newlyAdmitted = Set.fromList (map preparedBodyKey (recoveryNewUnits current))
+                      additions = [(prepared,references) | (prepared,(references,_)) <- entries
+                        , recoveryRebuild current || preparedBodyKey prepared `Set.member` newlyAdmitted]
+                      prior = if recoveryRebuild current then emptyPreparedReferenceWorklist else recoveryReferences current
+                      admittedReferences = admitPreparedReferenceUnits additions prior
+                      (frontier,nextReferences) = discoverPreparedReferences context reach admittedReferences
+                  modifyIORef' state (\latest -> latest { recoveryReferences=nextReferences })
+                  refs <- evaluate (includeRoots reach frontier)
                   _ <- evaluate (length refs)
                   when checking $ do
                     let expected = includeRoots reach (preparedTargetReferences context modules)
-                    unless (Set.fromList (map (getKey . varUnique) refs) == Set.fromList (map (getKey . varUnique) expected)) $
+                    unless (all (\binder -> varName binder `Set.member` recoveryAttempted current
+                        || varName binder `Set.member` Set.fromList (map varName refs)
+                        || typePrimRep_maybe (idType binder) == Just []) expected) $
                       throwIO (userError ("recovery reachability diverged from identity selection: "
                         ++ show (length refs) ++ " vs " ++ show (length expected) ++ " references"))
                   pure refs
@@ -410,6 +415,7 @@ data RecoveryState = RecoveryState
   , recoveryRunning :: Set.Set Module
   , recoveryNewUnits :: [PreparedModule]
   , recoveryRebuild :: Bool
+  , recoveryReferences :: PreparedReferenceWorklist
   }
 
 -- | The recovered-body cache's exact group identity.  It is deliberately more
