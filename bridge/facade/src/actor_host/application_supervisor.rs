@@ -309,14 +309,12 @@ pub(super) async fn run_interactive_applications(
                         });
                     }
                 };
-                update_embedded_state(&application_owners, actor, |state| {
-                    if state.task_id == Some(task_id) {
-                        state.task_id = None;
-                    }
-                    state.live = false;
-                    state.pending_activations = None;
-                    state.cancellation = None;
-                });
+                let completion = match settle_embedded_completion(
+                    actor, task_id, outcome, &application_owners, &mut release_waiters,
+                ) {
+                    Ok(completion) => completion,
+                    Err(error) => break Some(error),
+                };
                 let lifecycle = match local_actor.terminal().get().map(|terminal| terminal.kind) {
                     Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
                         harness::server::HostActorLifecycle::Retired
@@ -332,14 +330,8 @@ pub(super) async fn run_interactive_applications(
                     });
                     schedule_embedded_notification_drain(actor, binding, &mut notifications);
                 }
-                if let Some(waiters) = release_waiters.remove(&actor) {
-                    let release = embedded_resource_release(outcome.as_ref().err());
-                    for waiter in waiters {
-                        waiter.answer(release.clone());
-                    }
-                }
-                match outcome {
-                    Ok(()) if local_actor.terminal().get().is_none() => {
+                match completion {
+                    EmbeddedTaskCompletion::Completed if local_actor.terminal().get().is_none() => {
                         if let Err(error) = apply_application_failure(
                             local_actor,
                             ExternalApplicationFailure {
@@ -350,15 +342,9 @@ pub(super) async fn run_interactive_applications(
                             break Some(error);
                         }
                     }
-                    Ok(()) => {}
-                    Err(error) => {
-                        let cleanup_failed = error.cleanup_failed();
-                        let detail = error.to_string();
-                        if cleanup_failed {
-                            update_embedded_state(&application_owners, actor, |state| {
-                                state.cleanup_failure = Some(error);
-                            });
-                        }
+                    EmbeddedTaskCompletion::Completed => {}
+                    EmbeddedTaskCompletion::ExecutionFailed(detail)
+                    | EmbeddedTaskCompletion::CleanupFailed(detail) => {
                         tracing::error!(?actor, %detail, "embedded Engine failed");
                         if local_actor.terminal().get().is_none() {
                             if let Err(error) = apply_application_failure(
@@ -1073,10 +1059,8 @@ pub(super) async fn run_interactive_applications(
     let embedded_cleanup = drain_embedded_shutdown(
         &mut embedded_tasks,
         APPLICATION_SHUTDOWN_TIMEOUT,
-        |task_id| embedded_actor_for_task(&application_owners, task_id),
-        |actor, release| {
-            answer_release_waiters(&mut release_waiters, actor, release);
-        },
+        &application_owners,
+        &mut release_waiters,
     )
     .await;
     let embedded_service_cleanup = embedded_service
@@ -1117,8 +1101,8 @@ pub(super) async fn run_interactive_applications(
     };
     let cleanup_failures = [
         earlier_embedded_cleanup,
-        resident_cleanup,
-        embedded_cleanup,
+        resident_cleanup.cleanup_failure,
+        embedded_cleanup.cleanup_failure,
         embedded_service_cleanup,
         notification_cleanup,
     ]
@@ -1130,6 +1114,15 @@ pub(super) async fn run_interactive_applications(
     } else {
         Some(cleanup_failures.join("; "))
     };
+    let driver_failures = [
+        resident_cleanup.driver_failure,
+        embedded_cleanup.driver_failure,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let failure =
+        failure.or_else(|| (!driver_failures.is_empty()).then(|| driver_failures.join("; ")));
     #[cfg(test)]
     if let Some(observer) = &test_observer {
         observer.application_shutdown(match &cleanup_failure {
@@ -1187,11 +1180,11 @@ async fn retire_interactive_application(
 
 /// Keep the original lifecycle consumer alive while actor-owned retirement
 /// obtains its exact host release receipts. Ordinary work is refused here.
-async fn drain_resident_shutdown(
+pub(super) async fn drain_resident_shutdown<L: Send + 'static>(
     lifecycle: &mut mpsc::Receiver<LocalResidentDeployment>,
     embedded_tasks: &mut JoinSet<(
         ActorRef,
-        LocalActorRef,
+        L,
         Result<(), embedded_service::EmbeddedDriverError>,
     )>,
     application_owners: &InteractiveOwners,
@@ -1201,8 +1194,9 @@ async fn drain_resident_shutdown(
     command_resources: Option<&Arc<exomonad_node::command_resources::CommandResourceClient>>,
     release_waiters: &mut HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>>,
     mut shutdown: watch::Receiver<ApplicationShutdown>,
-) -> Option<String> {
+) -> EmbeddedShutdownOutcome {
     let mut failures = Vec::new();
+    let mut driver_failures = Vec::new();
     loop {
         let forest_settled = matches!(*shutdown.borrow(), ApplicationShutdown::ForestSettled(_));
         let event = if forest_settled {
@@ -1225,10 +1219,18 @@ async fn drain_resident_shutdown(
                 result = embedded_tasks.join_next_with_id(), if !embedded_tasks.is_empty() => {
                     match result {
                         Some(Ok((task_id, (actor, _, outcome)))) => {
-                            if let Some(failure) = settle_embedded_shutdown(
+                            let settled = settle_embedded_completion(
                                 actor, task_id, outcome, application_owners, release_waiters,
-                            ) {
-                                failures.push(failure);
+                            );
+                            match settled {
+                                Ok(EmbeddedTaskCompletion::Completed) => {}
+                                Ok(EmbeddedTaskCompletion::CleanupFailed(detail)) => {
+                                    failures.push(format!("embedded Engine {actor:?}: {detail}"));
+                                }
+                                Ok(EmbeddedTaskCompletion::ExecutionFailed(detail)) => {
+                                    driver_failures.push(format!("embedded Engine {actor:?}: {detail}"));
+                                }
+                                Err(failure) => failures.push(failure),
                             }
                         }
                         Some(Err(error)) => {
@@ -1313,38 +1315,57 @@ async fn drain_resident_shutdown(
             | LocalResidentDeployment::SettlementChanged { .. } => {}
         }
     }
-    (!failures.is_empty()).then(|| failures.join("; "))
+    EmbeddedShutdownOutcome {
+        driver_failure: (!driver_failures.is_empty()).then(|| driver_failures.join("; ")),
+        cleanup_failure: (!failures.is_empty()).then(|| failures.join("; ")),
+    }
 }
 
-pub(super) fn settle_embedded_shutdown(
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum EmbeddedTaskCompletion {
+    Completed,
+    ExecutionFailed(String),
+    CleanupFailed(String),
+}
+
+/// Reconcile the exact driver's result before making resource release observable.
+/// Every join consumer uses this transition, including the final shutdown drain.
+pub(super) fn settle_embedded_completion(
     actor: ActorRef,
     task_id: tokio::task::Id,
     outcome: Result<(), embedded_service::EmbeddedDriverError>,
     application_owners: &InteractiveOwners,
     release_waiters: &mut HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>>,
-) -> Option<String> {
-    if with_embedded_state(application_owners, actor, |state| state.task_id) != Some(Some(task_id))
-    {
-        return Some(format!(
-            "embedded Engine {actor:?} joined without its exact registered task; release remains unconfirmed"
-        ));
-    }
-    let release = embedded_resource_release(outcome.as_ref().err());
-    update_embedded_state(application_owners, actor, |state| {
-        if state.task_id == Some(task_id) {
-            state.task_id = None;
+) -> Result<EmbeddedTaskCompletion, String> {
+    let completion = match &outcome {
+        Ok(()) => EmbeddedTaskCompletion::Completed,
+        Err(error) if error.cleanup_failed() => {
+            EmbeddedTaskCompletion::CleanupFailed(error.to_string())
         }
+        Err(error) => EmbeddedTaskCompletion::ExecutionFailed(error.to_string()),
+    };
+    let release = {
+        let mut owners = application_owners.lock();
+        let state = owners
+            .get_mut(&actor)
+            .map(|owner| &mut owner.embedded)
+            .filter(|state| state.task_id == Some(task_id))
+            .ok_or_else(|| {
+                format!(
+                    "embedded Engine {actor:?} joined without its exact registered task; release remains unconfirmed"
+                )
+            })?;
+        state.task_id = None;
         state.live = false;
         state.pending_activations = None;
         state.cancellation = None;
-    });
+        if let Err(error) = outcome {
+            if error.cleanup_failed() {
+                state.cleanup_failure = Some(error);
+            }
+        }
+        embedded_resource_release(state.cleanup_failure.as_ref())
+    };
     answer_release_waiters(release_waiters, actor, release);
-    let error = outcome.err()?;
-    let failure = format!("embedded Engine {actor:?}: {error}");
-    if error.cleanup_failed() {
-        update_embedded_state(application_owners, actor, |state| {
-            state.cleanup_failure = Some(error);
-        });
-    }
-    Some(failure)
+    Ok(completion)
 }
