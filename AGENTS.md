@@ -249,12 +249,21 @@ Keep detailed design references out of always-loaded instructions.
   [property testing](docs/property-testing.md); end-to-end gates complement these tests.
 - Compile every changed or directly affected target and run the smallest tests
   that prove its behavior, including meaningful refusal and cleanup controls.
-  Coordinate build/test capacity through the execution owner using actual
-  process peaks, enclosing cgroup limits and host headroom. Run independent
-  cases in parallel when that accounting supports it; CPU count alone is not
-  a safe heavy-test process count. Follow `docs/swarm-builds.md` for admitted
-  parallel execution. Preserve source-only parcels until their qualification
-  is scheduled.
+  Each worker runs these checks through the admitted repository commands;
+  ordinary builds do not require a build owner's approval. Compile affected
+  test targets early, including `cfg(test)` and integration callers of changed
+  APIs, before describing a parcel as integration-ready. Formatting, metadata
+  checks and source review do not replace compilation. Compile joined changes
+  incrementally rather than deferring the first compile to release assembly.
+- Use actual process peaks, enclosing cgroup limits and host headroom to admit
+  independent builds and tests in parallel. Coordinate concrete conflicts over
+  checkout/configuration/output ownership or insufficient resources, not every
+  command. CPU count alone is not a safe heavy-test process count. Follow
+  `docs/swarm-builds.md`; do not retain a blanket single-build policy from a
+  smaller machine. When a check must be deferred, record the observed blocker,
+  exact pending command and unqualified status, preserving source and evidence.
+  Use the smallest affected targets for feedback; reserve full bundle assembly
+  and freezing for release qualification.
 - `just test-lib PACKAGE --exact FULL_NAME --expected-count N` selects unit
   cases; `just test-target PACKAGE TARGET ...` selects an integration target.
   `just test-bin PACKAGE BINARY ...` selects binary tests. `just test-list`

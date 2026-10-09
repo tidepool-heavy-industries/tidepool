@@ -66,7 +66,28 @@ shared output path. Compiler-free focused cohorts should declare only their
 actual runtime resources; full configure still materializes its wider selected
 toolchain and is a separate setup cost.
 
-### Parallel frozen acceptance
+### Worker builds and parallel acceptance
+
+Workers run their own affected-target builds and focused tests through the
+admitted commands. There is no build-owner approval queue. Compile test targets
+as soon as a coherent change is ready, including test callers of changed APIs;
+then execute the relevant counted tests. Source-only handoffs are explicitly
+unqualified, not a default stage that waits for an entire wave to finish.
+
+Before launching expensive work, inspect active jobs, their enclosing cgroups
+and host headroom. Run independent work concurrently when measured peaks fit
+both the enclosing limits and the host reserve. Coordinate only actual conflicts:
+shared writable checkout or output state, configuration publication, overlapping
+resource demand, or a frozen acceptance run whose inputs must remain unchanged.
+Use provisioned checkouts and stable profiles to preserve Buck reuse. Do not
+bypass admission or change host limits to obtain capacity.
+
+For an edit/check loop, select the smallest affected test targets; building a
+production library alone does not compile its test callers. Avoid adding
+`native_runtime_bundle` to ordinary focused checks: it also assembles browser,
+catalog and deployment inputs. Build and freeze the complete matched bundle
+for release qualification. Record a concrete constraint when deferring a check;
+an idle coordinator or an inherited single-build convention is not a constraint.
 
 The existing system `build.slice` limits the Buck daemon and its descendants
 to 24 CPU equivalents and 40 GiB RAM. The existing user
@@ -367,10 +388,11 @@ stages call for different evidence:
 | Executed assertion or property failure | Retain the input, seed or history and matched artifact; minimize through the owning component before expanding the run |
 | Timeout, process death or incomplete cleanup | Inspect retained execution and cleanup outcomes, descendant cgroups and memory events; preserve unknown outcomes rather than reporting a test verdict |
 
-Before starting preparation or an expensive rebuild, inspect existing owned
-work and coordinate with its execution owner. Share a completed compatible
-generation; serialize large closure realization and avoid competing publication
-of checkout configuration. Preserve failed generations and live artifacts for
+Before starting preparation or an expensive rebuild, inspect existing work and
+resource headroom. Coordinate with another worker only when the operations
+conflict. Share a completed compatible generation; serialize large closure
+realization and avoid competing publication of checkout configuration.
+Preserve failed generations and live artifacts for
 their owners. Repeat a command or increase a deadline when it tests an explanation
 or follows a repaired precondition; investigate cache behavior with controlled
 inputs and owned artifacts while preserving shared caches.
