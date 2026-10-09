@@ -19385,52 +19385,28 @@ pub(crate) mod request_tests {
         );
     }
 
-    /// Mount the source binding through the legacy typed host interface used
-    /// by these request-scope alias tests. The custody is retained from the
-    /// actual source binder and consumed by the ordinary compiled-binding
-    /// mount; these tests do not model activation-input admission.
-    async fn mount_request_scope_test_input(
+    /// Publish an alias of the original binding through its checked whole cell,
+    /// retaining the value interface's issued package and type evidence.
+    async fn publish_request_scope_test_input(
         workbench: &ResidentActorWorkbench<frunk::HNil, tidepool_mcp::CapturedOutput>,
         context: crate::ActorSessionContext,
     ) -> Result<tidepool_repr::SessionVarId, ResidentActorWorkbenchError> {
         let scope = context.placement.lexical_scope;
-        let source = workbench.access.source.clone();
+        workbench
+            .publish_cell_for_test(context.clone(), "sessionInput <- pure sourceValue")
+            .await?;
 
         workbench
             .access
-            .with_machine(context.clone(), move |session, context, _| {
-                let (source_id, ..) = session
-                    .current_binding_in(scope, "sourceValue")
+            .with_machine(context, move |session, _, _| {
+                session
+                    .current_binding_in(scope, "sessionInput")
+                    .map(|binding| binding.0)
                     .ok_or_else(|| {
                         ResidentActorWorkbenchError::InputMount(
-                            "sourceValue is not visible in the request scope test".into(),
+                            "sessionInput alias was not published in the request scope".into(),
                         )
-                    })?;
-                let custody = session
-                    .retain_binding_custody_in(scope, "sourceValue", source_id)?
-                    .ok_or_else(|| {
-                        ResidentActorWorkbenchError::InputMount(
-                            "sourceValue has no retained custody".into(),
-                        )
-                    })?;
-                let (binder, compiled, generation) = compile_host_binding(
-                    session,
-                    context,
-                    &source,
-                    "sessionInput",
-                    "()",
-                    "sourceValue",
-                    SourceImports::default(),
-                    false,
-                )?;
-                session.mount_compiled_binding_in(
-                    scope,
-                    &binder,
-                    generation,
-                    &compiled.table,
-                    custody,
-                )?;
-                Ok(tidepool_repr::SessionVarId::from_extract(binder.var_id))
+                    })
             })
             .await
     }
@@ -20325,10 +20301,10 @@ pub(crate) mod request_tests {
             .await
             .expect("source value executes and publishes through its private whole cell");
         let scope = context.placement.lexical_scope;
-        let first = mount_request_scope_test_input(&workbench, context.clone())
+        let first = publish_request_scope_test_input(&workbench, context.clone())
             .await
             .expect("first request-scope alias mount");
-        let second = mount_request_scope_test_input(&workbench, context.clone())
+        let second = publish_request_scope_test_input(&workbench, context.clone())
             .await
             .expect("second alias shadows the first");
         assert_ne!(first, second);
@@ -20376,7 +20352,7 @@ pub(crate) mod request_tests {
             .await
             .expect("source value executes and publishes through its private whole cell");
         let original_scope = context.placement.lexical_scope;
-        let binding = mount_request_scope_test_input(&workbench, context.clone())
+        let binding = publish_request_scope_test_input(&workbench, context.clone())
             .await
             .unwrap();
         let before = workbench
