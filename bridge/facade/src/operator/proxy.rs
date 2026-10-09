@@ -8,7 +8,7 @@ use rustix::fs::FlockOperation;
 use serde::{Deserialize, Serialize};
 
 use super::wire::{Block, SessionInfo, SubmitRequest, SubmitResponse};
-use super::Attachment;
+use super::{Attachment, ProvisionRequest, ServiceIdentity};
 
 pub struct ProxyOptions {
     pub session: String,
@@ -143,9 +143,46 @@ fn run_root_for_session_in_roots(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProxyRecord {
+    version: u32,
+    selection: ProxySelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum ProxySelection {
+    Pending {
+        request: ProvisionRequest,
+    },
+    Ready {
+        service: ServiceIdentity,
+        session: String,
+        operation: Option<uuid::Uuid>,
+    },
+}
+
+impl ProxyRecord {
+    fn new(selection: ProxySelection) -> Self {
+        Self {
+            version: 1,
+            selection,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyProxyRecord {
     session: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StoredProxyRecord {
+    Current(ProxyRecord),
+    Legacy(LegacyProxyRecord),
 }
 
 /// What to do with a stored proxy session, given whether the caller asked for
@@ -177,68 +214,132 @@ pub fn decide(stored: StoredSession, fresh: bool) -> Decision {
     }
 }
 
-fn read_proxy_record(path: &Path) -> Option<ProxyRecord> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+fn read_proxy_record(path: &Path) -> Result<Option<StoredProxyRecord>, ProxyError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display()).into()),
+    };
+    let record = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "cannot decode {}: {error}; inspect the saved selection before provisioning",
+            path.display()
+        )
+    })?;
+    if let StoredProxyRecord::Current(ProxyRecord { version, .. }) = &record {
+        if *version != 1 {
+            return Err(format!("unsupported proxy record version {version}").into());
+        }
+    }
+    Ok(Some(record))
 }
 
 fn write_proxy_record(path: &Path, record: &ProxyRecord) -> Result<(), ProxyError> {
-    let bytes =
-        serde_json::to_vec(record).map_err(|e| format!("cannot encode proxy record: {e}"))?;
-    tidepool_atomic_write::write_best_effort(path, &bytes)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()).into())
+    let bytes = serde_json::to_vec(record)
+        .map_err(|error| format!("cannot encode proxy record: {error}"))?;
+    tidepool_atomic_write::write_durable(path, &bytes)
+        .map_err(|error| format!("cannot durably write {}: {error}; retry the saved operation, not a new provisioning request", path.display()).into())
 }
 
-/// Holds `run_root/operator/proxy.lock` exclusively until dropped. Advisory
-/// `flock` acquisition and release are cheap local-filesystem syscalls, so
-/// they run directly on the async task rather than via `spawn_blocking`.
+/// Poll nonblocking flock on workers; cancellation drops the descriptor even
+/// when it races the completion of one worker attempt.
+#[derive(Debug)]
 struct ProxyLock(std::fs::File);
 impl ProxyLock {
-    fn acquire(run_root: &Path) -> Result<Self, ProxyError> {
-        let operator_dir = run_root.join("operator");
-        std::fs::create_dir_all(&operator_dir)
-            .map_err(|e| format!("cannot create {}: {e}", operator_dir.display()))?;
-        let lock_path = operator_dir.join("proxy.lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
-        rustix::fs::flock(&file, FlockOperation::LockExclusive)
-            .map_err(|e| format!("cannot lock {}: {e}", lock_path.display()))?;
-        Ok(Self(file))
+    async fn acquire(run_root: &Path) -> Result<Self, ProxyError> {
+        let run_root = run_root.to_owned();
+        let mut file = tokio::task::spawn_blocking(move || -> Result<_, ProxyError> {
+            let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(&run_root)
+                .map_err(|error| format!("cannot open run root: {error}"))?;
+            let operator_dir = anchor
+                .create_dir_all("operator")
+                .map_err(|error| format!("cannot establish operator directory: {error}"))?;
+            let lock_path = operator_dir.join("proxy.lock");
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .map_err(|error| format!("cannot open {}: {error}", lock_path.display()).into())
+        })
+        .await
+        .map_err(|error| format!("cannot acquire proxy lock: {error}"))??;
+        loop {
+            let attempted = tokio::task::spawn_blocking(move || {
+                let acquired =
+                    match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                        Ok(()) => Ok(true),
+                        Err(error)
+                            if std::io::Error::from(error).kind()
+                                == std::io::ErrorKind::WouldBlock =>
+                        {
+                            Ok(false)
+                        }
+                        Err(error) => Err(ProxyError(format!("cannot lock proxy: {error}"))),
+                    };
+                (file, acquired)
+            })
+            .await
+            .map_err(|error| format!("cannot acquire proxy lock: {error}"))?;
+            file = attempted.0;
+            if attempted.1? {
+                return Ok(Self(file));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 }
 impl Drop for ProxyLock {
     fn drop(&mut self) {
-        // best-effort: closing the file descriptor on drop releases the flock
-        // regardless; an explicit unlock failure leaves nothing more to do.
+        // Closing the file also releases the lock after an unlock error.
         rustix::fs::flock(&self.0, FlockOperation::Unlock).ok();
     }
 }
 
-/// Provision a fresh operator workbench and record it.
-async fn provision(client: &reqwest::Client, proxy_json: &Path) -> Result<String, ProxyError> {
+/// The saved identity already exists durably before this request is sent.
+type RecordWriter = dyn Fn(&Path, &ProxyRecord) -> Result<(), ProxyError> + Sync;
+
+async fn provision(
+    client: &reqwest::Client,
+    proxy_json: &Path,
+    request: ProvisionRequest,
+    write: &RecordWriter,
+) -> Result<String, ProxyError> {
+    // A previous post-rename failure may have left the exact Pending bytes
+    // visible. Confirm their durability before crossing HTTP admission.
+    std::fs::File::open(proxy_json)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("cannot confirm saved provisioning operation: {error}"))?;
+    let parent = proxy_json.parent().ok_or("proxy record needs a parent")?;
+    tidepool_atomic_write::DirectoryAnchor::open_existing(parent)
+        .and_then(|anchor| anchor.create_dir_all(""))
+        .map_err(|error| format!("cannot confirm saved provisioning operation: {error}"))?;
     let response = client
         .post("http://localhost/host/operators")
+        .json(&request)
         .send()
         .await
-        .map_err(|e| format!("cannot provision operator workbench: {e}"))?;
+        .map_err(|error| {
+            format!("operator provisioning outcome unknown: {error}; retry the saved operation")
+        })?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("cannot provision operator workbench: {status}: {body}").into());
+        return Err(format!(
+            "cannot provision operator workbench: {status}: {body}; saved operation retained"
+        )
+        .into());
     }
-    let attachment: Attachment = response
-        .json()
-        .await
-        .map_err(|e| format!("cannot decode operator provisioning response: {e}"))?;
-    write_proxy_record(
+    let attachment: Attachment = response.json().await.map_err(|error| {
+        format!("cannot decode operator provisioning response: {error}; retry the saved operation")
+    })?;
+    write(
         proxy_json,
-        &ProxyRecord {
+        &ProxyRecord::new(ProxySelection::Ready {
+            service: request.service,
+            operation: Some(request.operation),
             session: attachment.session.clone(),
-        },
+        }),
     )?;
     Ok(attachment.session)
 }
@@ -270,7 +371,7 @@ async fn stop(client: &reqwest::Client, session: &str) -> Result<(), ProxyError>
 
 async fn session_alive(client: &reqwest::Client, session: &str) -> Result<bool, ProxyError> {
     let response = client
-        .get(format!("http://localhost/v1/sessions/{session}"))
+        .get(session_url(session, None)?)
         .send()
         .await
         .map_err(|e| format!("cannot inspect operator session {session}: {e}"))?;
@@ -282,11 +383,31 @@ async fn session_alive(client: &reqwest::Client, session: &str) -> Result<bool, 
         let body = response.text().await.unwrap_or_default();
         return Err(format!("cannot inspect operator session {session}: {status}: {body}").into());
     }
-    let _: SessionInfo = response
+    let observed: SessionInfo = response
         .json()
         .await
         .map_err(|e| format!("cannot decode operator session response: {e}"))?;
+    if observed.session != session || observed.protocol_version != super::wire::PROTOCOL_VERSION {
+        return Err(
+            "operator session observation does not match the requested session/protocol".into(),
+        );
+    }
     Ok(true)
+}
+
+fn session_url(session: &str, endpoint: Option<&str>) -> Result<reqwest::Url, ProxyError> {
+    let mut url = reqwest::Url::parse("http://localhost/v1/sessions/")
+        .map_err(|error| format!("invalid operator URL: {error}"))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "invalid operator URL")?;
+        segments.pop_if_empty().push(session);
+        if let Some(endpoint) = endpoint {
+            segments.push(endpoint);
+        }
+    }
+    Ok(url)
 }
 
 /// Ensure a live resident proxy workbench exists for this run and return its
@@ -298,10 +419,58 @@ async fn resident_operator_session(
     client: &reqwest::Client,
     fresh: bool,
 ) -> Result<String, ProxyError> {
+    resolve_proxy_selection(run_root, client, fresh, &write_proxy_record).await
+}
+
+async fn resolve_proxy_selection(
+    run_root: &Path,
+    client: &reqwest::Client,
+    fresh: bool,
+    write: &RecordWriter,
+) -> Result<String, ProxyError> {
     let proxy_json = run_root.join("operator").join("proxy.json");
-    let lock = ProxyLock::acquire(run_root)?;
-    let stored = read_proxy_record(&proxy_json).map(|r| r.session);
-    let stored = match stored {
+    let lock = ProxyLock::acquire(run_root).await?;
+    // Refuse malformed/unreadable state before even observing the network.
+    let stored = read_proxy_record(&proxy_json)?;
+    let service = super::service_identity(client).await?;
+    let session = match stored {
+        Some(StoredProxyRecord::Legacy(legacy)) => {
+            if !session_alive(client, &legacy.session).await? {
+                return Err("legacy proxy selection is not live; list current operators and explicitly reconcile the saved session before provisioning".into());
+            }
+            // This binds an observed live session to the current owner; it
+            // does not claim proof of the legacy record's historical owner.
+            write(
+                &proxy_json,
+                &ProxyRecord::new(ProxySelection::Ready {
+                    service,
+                    session: legacy.session.clone(),
+                    operation: None,
+                }),
+            )?;
+            Some(legacy.session)
+        }
+        Some(StoredProxyRecord::Current(record)) => match record.selection {
+            ProxySelection::Pending { request } => {
+                if request.service != service {
+                    return Err(service_changed());
+                }
+                Some(provision(client, &proxy_json, request, write).await?)
+            }
+            ProxySelection::Ready {
+                service: saved,
+                session,
+                ..
+            } => {
+                if saved != service {
+                    return Err(service_changed());
+                }
+                Some(session)
+            }
+        },
+        None => None,
+    };
+    let stored = match session {
         Some(session) if session_alive(client, &session).await? => StoredSession::Alive(session),
         Some(session) => StoredSession::Dead(session),
         None => StoredSession::Absent,
@@ -310,12 +479,30 @@ async fn resident_operator_session(
         Decision::Reuse(session) => Ok(session),
         Decision::StopThenProvision(session) => {
             stop(client, &session).await?;
-            provision(client, &proxy_json).await
+            begin_provision(client, &proxy_json, service, write).await
         }
-        Decision::Provision => provision(client, &proxy_json).await,
+        Decision::Provision => begin_provision(client, &proxy_json, service, write).await,
     };
     drop(lock);
     result
+}
+
+fn service_changed() -> ProxyError {
+    "operator service incarnation changed; saved selection retained. List operators and explicitly reconcile it before provisioning".into()
+}
+
+async fn begin_provision(
+    client: &reqwest::Client,
+    proxy_json: &Path,
+    service: ServiceIdentity,
+    write: &RecordWriter,
+) -> Result<String, ProxyError> {
+    let request = ProvisionRequest::new(service);
+    write(
+        proxy_json,
+        &ProxyRecord::new(ProxySelection::Pending { request }),
+    )?;
+    provision(client, proxy_json, request, write).await
 }
 
 fn read_source(file: &Path) -> Result<String, ProxyError> {
@@ -362,7 +549,7 @@ pub async fn proxy(options: ProxyOptions) -> Result<(), Box<dyn std::error::Erro
 
     if options.actors {
         let response = client
-            .get(format!("http://localhost/v1/sessions/{session}/actors"))
+            .get(session_url(&session, Some("actors"))?)
             .send()
             .await
             .map_err(|e| format!("cannot list actors for session {session}: {e}"))?;
@@ -391,7 +578,7 @@ pub async fn proxy(options: ProxyOptions) -> Result<(), Box<dyn std::error::Erro
     )]
     let source = read_source(options.file.as_deref().expect("validated above"))?;
     let sent = client
-        .post(format!("http://localhost/v1/sessions/{session}/submit"))
+        .post(session_url(&session, Some("submit"))?)
         .json(&SubmitRequest { source })
         .send()
         .await;
@@ -560,15 +747,18 @@ mod tests {
     fn proxy_json_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("proxy.json");
-        write_proxy_record(
-            &path,
-            &ProxyRecord {
-                session: "operator-1-1".into(),
+        let record = ProxyRecord::new(ProxySelection::Ready {
+            service: ServiceIdentity {
+                incarnation: uuid::Uuid::new_v4(),
             },
-        )
-        .unwrap();
-        let read = read_proxy_record(&path).unwrap();
-        assert_eq!(read.session, "operator-1-1");
+            session: "operator-1-1".into(),
+            operation: None,
+        });
+        write_proxy_record(&path, &record).unwrap();
+        let Some(StoredProxyRecord::Current(read)) = read_proxy_record(&path).unwrap() else {
+            panic!("current record");
+        };
+        assert_eq!(read, record);
     }
 
     #[test]
@@ -591,3 +781,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod recovery_tests;
