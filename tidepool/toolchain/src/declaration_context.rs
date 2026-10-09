@@ -10761,6 +10761,7 @@ mod tests {
         assert!(decoded.target_names().is_empty());
         assert!(decoded.retained_generations().is_empty());
         std::fs::write(root.join("worker-request.cbor"), request_bytes).unwrap();
+        let compiler_identity = endpoint.identity().clone();
         let run = endpoint.execute(&command).unwrap();
         std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
         std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();
@@ -10843,7 +10844,7 @@ mod tests {
         std::fs::write(&support_path, support).unwrap();
         let dependent_context =
             ExactDeclarationContext::new(&[Arc::new(changed.clone())], &[], vec![]).unwrap();
-        let producer = CanonicalProducerIdentity::from_compiler(endpoint.identity());
+        let producer = CanonicalProducerIdentity::from_compiler(&compiler_identity);
         let configured_support = changed
             .recovery_products()
             .into_iter()
@@ -10895,7 +10896,7 @@ mod tests {
         let private_request = ExactCompileContext::new(Arc::new(dependent_context.clone()))
             .prepare_compilation_with_private_input(
                 &root.join("configured-authored-scope"),
-                endpoint.identity().producer_bytes(),
+                compiler_identity.producer_bytes(),
                 None,
                 Some(private),
             )
