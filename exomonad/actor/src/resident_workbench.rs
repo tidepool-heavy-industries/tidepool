@@ -886,6 +886,8 @@ pub(crate) struct ResidentWorkbenchTools {
     /// Installer source roots belong to the installed implementation, not the
     /// actor's published declaration and value surface.
     _installation_scope: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+    /// Exact source selection retained with a prepared candidate or installation.
+    _source_original: Option<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
     code: InstalledToolCode,
     /// Exact installer row retained with its rooted dispatcher.
     pub(crate) dispatcher_effects: String,
@@ -917,7 +919,8 @@ pub(crate) struct PreparedRequestReceiver {
 
 #[derive(Clone, Copy)]
 enum ToolInstallationPurpose {
-    ToolsOnly,
+    InitialTools,
+    CandidateTools,
     SpawnApplication,
 }
 
@@ -4694,6 +4697,42 @@ where
         'a,
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
     > {
+        self.prepare_source_tools(
+            context,
+            install,
+            granted_effects,
+            ToolInstallationPurpose::InitialTools,
+        )
+    }
+
+    /// Prepare a replacement without publishing into its continuing namespace.
+    pub(crate) fn prepare_candidate_tools<'a>(
+        &'a self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<exomonad_tool::ActorEffectKey>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
+        self.prepare_source_tools(
+            context,
+            install,
+            granted_effects,
+            ToolInstallationPurpose::CandidateTools,
+        )
+    }
+
+    fn prepare_source_tools<'a>(
+        &'a self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<exomonad_tool::ActorEffectKey>,
+        purpose: ToolInstallationPurpose,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
         let span = tracing::info_span!(target: "exomonad_actor::workbench_phase", "agent_spec_prepare", actor = %context.actor, install);
         Box::pin(
             async move {
@@ -4710,7 +4749,7 @@ where
                     granted_effects,
                     ready.effects,
                     InstalledToolCode::SourcePrepared(ready.prepared),
-                    ToolInstallationPurpose::ToolsOnly,
+                    purpose,
                 )
                 .await
                 .map(|installation| installation.tools)
@@ -4737,7 +4776,7 @@ where
                 install,
                 granted_effects,
                 installer,
-                ToolInstallationPurpose::ToolsOnly,
+                ToolInstallationPurpose::InitialTools,
             )
             .await
             .map(|installation| installation.tools)
@@ -4843,6 +4882,30 @@ where
                 (None, crate::agent_spec::SpecOrigin::ExplicitLive)
             }
         };
+        let public_original = code
+            .prepared()
+            .map(|prepared| {
+                prepared
+                    .resolved
+                    .checked_module()
+                    .map(|module| {
+                        prepared
+                            .entry
+                            .compiled()
+                            .published_source_original_selection(
+                                &prepared.source_revision,
+                                &tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                                    unit: "main".into(),
+                                    module,
+                                },
+                            )
+                    })
+                    .transpose()
+            })
+            .transpose()
+            .map_err(ResidentActorWorkbenchError::Compile)?
+            .flatten();
+        let public_scope = context.placement.lexical_scope;
         let mut compile_context = context.clone();
         compile_context.haskell_effects_alias = dispatcher_effects.clone();
         let installation_scope = self
@@ -4867,7 +4930,7 @@ where
         let registration = abort_guard.registration();
         let installed_effect_support = self.access.source.installed_effect_support().to_vec();
         let handler_effect_support = self.access.handler_effect_support.clone();
-        let step = registration
+        let (step, pending_originals, source_original) = registration
             .scope(self.access.with_machine(compile_context.clone(), {
                 let prepared = code.prepared().cloned();
                 let installer = match &code {
@@ -4875,14 +4938,28 @@ where
                     InstalledToolCode::SourcePrepared(_) => None,
                 };
                 move |session, context, _| {
-                    let (outcome, warnings) = match (prepared, installer) {
+                    let (outcome, warnings, pending_originals) = match (prepared, installer) {
                         (Some(prepared), None) => {
                             session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
                             let entry =
                                 session.prepare_startup_entry(prepared.entry.compiled().code())?;
+                            let pending = match purpose {
+                                ToolInstallationPurpose::InitialTools => public_original
+                                    .as_ref()
+                                    .map(|selection| {
+                                        session.stage_published_source_originals_in(
+                                            public_scope,
+                                            Arc::clone(selection),
+                                        )
+                                    })
+                                    .transpose()?,
+                                ToolInstallationPurpose::CandidateTools
+                                | ToolInstallationPurpose::SpawnApplication => None,
+                            };
                             (
                                 session.run_startup_entry(entry),
                                 prepared.entry.compiled().warnings.warnings.clone(),
+                                pending,
                             )
                         }
                         (None, Some(installer)) => (
@@ -4894,10 +4971,11 @@ where
                                 None,
                             ),
                             Vec::new(),
+                            None,
                         ),
                         _ => unreachable!("one installation producer"),
                     };
-                    start_fragment_settlement(
+                    let step = start_fragment_settlement(
                         session,
                         context,
                         1,
@@ -4905,7 +4983,8 @@ where
                         WorkbenchDisplay::Discard,
                         warnings,
                         outcome,
-                    )
+                    )?;
+                    Ok((step, pending_originals, public_original))
                 }
             }))
             .await?;
@@ -5011,7 +5090,7 @@ where
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
                     let (settled, receiver) = match purpose {
-                        ToolInstallationPurpose::ToolsOnly => (settled, None),
+                        ToolInstallationPurpose::InitialTools | ToolInstallationPurpose::CandidateTools => (settled, None),
                         ToolInstallationPurpose::SpawnApplication => {
                             let ResidentOutcome::Suspended { hole, request, .. } = settled else {
                                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -5033,6 +5112,11 @@ where
                         }
                     };
                     require_tool_installation_completion(session, &resumption_registration, &settled)?;
+                    if let Some(pending_originals) = pending_originals {
+                        // Until this succeeds, the dispatcher and its isolated
+                        // installation scope remain local to this guarded task.
+                        session.publish_source_originals(pending_originals)?;
+                    }
                     if let Some(prepared) = code.prepared() {
                         tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
                     } else {
@@ -5043,6 +5127,7 @@ where
                             declarations,
                             dispatch: Arc::new(dispatch),
                             _installation_scope: installation_scope,
+                            _source_original: source_original,
                             code,
                             dispatcher_effects,
                             slots,
@@ -11347,6 +11432,7 @@ mod tool_dispatch_tests {
 #[cfg(test)]
 pub(crate) mod request_tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn selected_spec_import_belongs_to_installer_only() {
@@ -13657,6 +13743,18 @@ pub(crate) mod request_tests {
             &self,
             context: crate::ActorSessionContext,
         ) -> Result<(), ResidentActorWorkbenchError> {
+            self.publish_completed_cell_with_commit_for_test(
+                context,
+                tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+            )
+            .await
+        }
+
+        async fn publish_completed_cell_with_commit_for_test(
+            &self,
+            context: crate::ActorSessionContext,
+            expected: tidepool_runtime::session::PublicManifestCommit,
+        ) -> Result<(), ResidentActorWorkbenchError> {
             let execution = self
                 .private_execution
                 .as_ref()
@@ -13667,9 +13765,9 @@ pub(crate) mod request_tests {
             assert!(matches!(
                 published,
                 PrivateExecutionPublication::Manifest {
-                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                    commit,
                     ..
-                }
+                } if commit == expected
             ));
             let public_scope = execution.public_scope;
             self.access
@@ -13692,12 +13790,21 @@ pub(crate) mod request_tests {
 
         async fn admit_private_cell_for_test(
             self,
-            mut context: crate::ActorSessionContext,
+            context: crate::ActorSessionContext,
         ) -> Result<(Self, crate::ActorSessionContext), ResidentActorWorkbenchError> {
             let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
             let owner =
                 crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
                     .expect("fixture has an ephemeral public owner");
+            self.admit_private_cell_with_owner_for_test(context, owner)
+                .await
+        }
+
+        async fn admit_private_cell_with_owner_for_test(
+            self,
+            mut context: crate::ActorSessionContext,
+            owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
+        ) -> Result<(Self, crate::ActorSessionContext), ResidentActorWorkbenchError> {
             let authority =
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone());
             let private = Arc::new(
@@ -15619,6 +15726,128 @@ pub(crate) mod request_tests {
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
     }
 
+    fn assert_published_source_scope_histories(
+        selection: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
+    ) {
+        use proptest::prelude::*;
+        use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionLib};
+        let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        struct RunOwner(PathBuf);
+        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.0)
+            }
+        }
+        let durable = tempfile::tempdir().unwrap();
+        let manifest = durable.path().join("declarations.json");
+        let authority = Arc::new(RunOwner(durable.path().canonicalize().unwrap()));
+        let declaration_root = durable.path().join("session");
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(7),
+            &declaration_root,
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_owned_recovery_graph_v3(&manifest, authority.clone())
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 0);
+        let scope = session.mint_isolated_scope();
+        let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/published-bootstrap").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .initialize_durable_public_scope(owner.clone(), scope)
+            .unwrap();
+        let bootstrap = session
+            .begin_durable_public_bootstrap(owner.clone(), scope)
+            .unwrap();
+        let pending = session
+            .stage_published_source_originals_in(scope, Arc::clone(&selection))
+            .unwrap();
+        session.publish_source_originals(pending).unwrap();
+        session.publish_durable_public_bootstrap(bootstrap).unwrap();
+        let published = session.compile_view_in(scope).unwrap();
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(8),
+            &declaration_root,
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_owned_recovery_graph_v3(&manifest, authority)
+            .unwrap();
+        let mut recovered = PersistentSession::new(Some(lib), 0);
+        let scope = recovered.recover_public_scope(&owner).unwrap();
+        let view = recovered.compile_view_in(scope).unwrap();
+        assert_eq!(view.library(), None);
+        assert_eq!(
+            view.exact_declaration_context().unwrap().semantic_sha256(),
+            published
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            "native bootstrap durably carries an issued original at generation zero"
+        );
+        let mut runner = proptest::test_runner::TestRunner::default();
+        runner.run(&proptest::collection::vec(0_u8..5, 1..40), |operations| {
+            let root = tempfile::tempdir().unwrap();
+            let lib = SessionLib::open(tidepool_repr::SessionId(7), root.path(), ModuleEnv::standalone_default()).unwrap();
+            let mut session = PersistentSession::new(Some(lib), 0);
+            let scope = ScopeId::ROOT;
+            let empty = session.compile_view_in(scope).unwrap();
+            let mut epoch = 0_u64;
+            let mut pending = None;
+            let mut children = Vec::new();
+            for operation in operations {
+                match operation {
+                    0 => pending = Some((epoch,
+                        session.stage_published_source_originals_in(scope, Arc::clone(&selection)).unwrap())),
+                    1 => if let Some((admitted_epoch, token)) = pending.take() {
+                        let before = session.compile_view_in(scope).unwrap();
+                        let result = session.publish_source_originals(token);
+                        if admitted_epoch == epoch {
+                            prop_assert!(result.is_ok());
+                            epoch += 1;
+                        } else {
+                            prop_assert!(matches!(result, Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)));
+                            prop_assert_eq!(session.compile_view_in(scope).unwrap(), before);
+                        }
+                    },
+                    2 => {
+                        let token = session.stage_published_source_originals_in(scope, Arc::clone(&selection)).unwrap();
+                        session.publish_source_originals(token).unwrap();
+                        epoch += 1;
+                    },
+                    3 => {
+                        let expected = session.compile_view_in(scope).unwrap().exact_declaration_context().cloned();
+                        let child = session.mint_detached_scope(scope).unwrap();
+                        let view = session.compile_view_in(child).unwrap();
+                        prop_assert_eq!(view.exact_declaration_context(), expected.as_ref());
+                        children.push((child, view));
+                    },
+                    4 => if let Some((child, captured)) = children.pop() {
+                        prop_assert_eq!(session.compile_view_in(child).unwrap(), captured);
+                        session.retire_scope(child);
+                        prop_assert!(session.compile_view_in(child).is_none());
+                    },
+                    _ => unreachable!(),
+                }
+                let current = session.compile_view_in(scope).unwrap();
+                prop_assert_eq!(current.exact_declaration_context().is_some(), epoch != 0);
+                prop_assert_eq!(session.public_visibility_snapshot_in(scope).unwrap().epoch, epoch);
+                prop_assert!(empty.exact_declaration_context().is_none());
+                prop_assert_eq!(current.library(), None);
+                for (child, captured) in &children {
+                    prop_assert_eq!(&session.compile_view_in(*child).unwrap(), captured);
+                }
+            }
+            Ok(())
+        }).unwrap();
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), compiler_calls,
+            "generated source-publication histories reuse immutable original custody without compiler work");
+    }
+
     #[tokio::test]
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay(
     ) {
@@ -15629,7 +15858,24 @@ pub(crate) mod request_tests {
 
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
     ) {
-        let (session, context, source, _session_root) = host_mount_fixture();
+        struct RunOwner(PathBuf);
+        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.0)
+            }
+        }
+        let durable = tempfile::tempdir().unwrap();
+        let manifest = durable.path().join("declarations.json");
+        let authority = Arc::new(RunOwner(durable.path().canonicalize().unwrap()));
+        let (session, context, source, session_root) = host_mount_fixture_with_lib(|lib| {
+            lib.attach_owned_recovery_graph_v3(&manifest, authority.clone())
+                .unwrap();
+        });
+        let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
+            context.actor.incarnation.0,
+        )
+        .unwrap();
         let authored = tempfile::tempdir().unwrap();
         let quotation_input = authored.path().join("external-input");
         std::fs::write(&quotation_input, "41").unwrap();
@@ -15667,10 +15913,95 @@ pub(crate) mod request_tests {
             .unwrap();
         let warm_executions =
             std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap();
-        let first = workbench
-            .prepare_tools(context.clone(), 1, vec![])
+        let public_selection = warmed
+            .prepared
+            .entry
+            .compiled()
+            .published_source_original_selection(
+                &warmed.prepared.source_revision,
+                &tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: "QuotedAgentSpec".into(),
+                },
+            )
+            .unwrap();
+        assert_published_source_scope_histories(Arc::clone(&public_selection));
+        let warm_view = workbench
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                Ok(session
+                    .compile_view_in(context.placement.lexical_scope)
+                    .unwrap())
+            })
             .await
             .unwrap();
+        assert!(warm_view.exact_declaration_context().is_none());
+        let first = Arc::new(
+            workbench
+                .prepare_tools(context.clone(), 1, vec![])
+                .await
+                .unwrap(),
+        );
+        workbench
+            .access
+            .with_machine(context.clone(), {
+                let owner = owner.clone();
+                move |session, context, _| {
+                    session
+                        .initialize_durable_public_scope(owner, context.placement.lexical_scope)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                }
+            })
+            .await
+            .unwrap();
+        let installed_view = workbench
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                Ok(session
+                    .compile_view_in(context.placement.lexical_scope)
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        assert_ne!(
+            installed_view, warm_view,
+            "same-tip installation invalidates the warm view"
+        );
+        assert!(installed_view.exact_declaration_context().is_some());
+        assert!(
+            warm_view.exact_declaration_context().is_none(),
+            "earlier capture remains immutable"
+        );
+        let recover_context = || {
+            let mut lib = tidepool_runtime::session::SessionLib::open(
+                tidepool_repr::SessionId(8_141),
+                session_root.path(),
+                tidepool_runtime::session::ModuleEnv::standalone_default(),
+            )
+            .unwrap()
+            .with_validation_include(roots.clone());
+            lib.attach_owned_recovery_graph_v3(&manifest, authority.clone())
+                .unwrap();
+            let mut recovered = tidepool_runtime::session::PersistentSession::new(Some(lib), 0);
+            let scope = recovered.recover_public_scope(&owner).unwrap();
+            recovered.compile_view_in(scope).unwrap()
+        };
+        let generation_zero_recovered = recover_context();
+        assert_eq!(generation_zero_recovered.library(), None);
+        assert_eq!(
+            generation_zero_recovered
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            installed_view
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            "generation-zero recovery restores the issued original policy"
+        );
+
         assert!(Arc::ptr_eq(
             &warmed.prepared,
             &first.code.prepared().expect("source-prepared installation")
@@ -15701,10 +16032,75 @@ pub(crate) mod request_tests {
             proof.source_replay_eligibility(),
             tidepool_toolchain::artifacts::SourceReplayEligibility::Eligible
         );
-        let second = workbench
-            .prepare_tools(context.clone(), 2, vec![])
+        let stale_installation = workbench
+            .access
+            .with_machine(context.clone(), {
+                let selection = Arc::clone(&public_selection);
+                move |session, context, _| {
+                    session
+                        .stage_published_source_originals_in(
+                            context.placement.lexical_scope,
+                            selection,
+                        )
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                }
+            })
             .await
             .unwrap();
+        let second_bootstrap = workbench
+            .access
+            .with_machine(context.clone(), {
+                let owner = owner.clone();
+                move |session, context, _| {
+                    session
+                        .begin_durable_public_bootstrap(owner, context.placement.lexical_scope)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                }
+            })
+            .await
+            .unwrap();
+        let second = Arc::new(
+            workbench
+                .prepare_tools(context.clone(), 2, vec![])
+                .await
+                .unwrap(),
+        );
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session
+                    .publish_durable_public_bootstrap(second_bootstrap)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
+            .unwrap();
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, context, _| {
+                let before = session
+                    .compile_view_in(context.placement.lexical_scope)
+                    .unwrap();
+                assert!(matches!(
+                    session.publish_source_originals(stale_installation),
+                    Err(ResidentError::Session(
+                        tidepool_runtime::session::SessionError::StaleStagedDeclaration
+                    ))
+                ));
+                assert_eq!(
+                    session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap(),
+                    before
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+
         assert!(Arc::ptr_eq(
             &first.code.prepared().expect("source-prepared installation"),
             &second
@@ -15721,6 +16117,181 @@ pub(crate) mod request_tests {
             completed_executions
         );
         assert_eq!(first.declarations, second.declarations);
+        struct CandidateCommit(crate::CheckpointSourceLayer);
+        impl crate::StagedActorSourceReload for CandidateCommit {
+            fn source(&self) -> &crate::CheckpointSourceLayer {
+                &self.0
+            }
+            fn commit(
+                self: Box<Self>,
+                publication: &Arc<tidepool_runtime::session::PublicationDecision>,
+                on_visible: Box<dyn FnOnce() + '_>,
+            ) -> crate::SourceLayerReload {
+                let Some(claim) = publication.claim_commit() else {
+                    return crate::SourceLayerReload::Cancelled;
+                };
+                on_visible();
+                claim.published();
+                crate::SourceLayerReload::Published {
+                    previous: "original".into(),
+                    revision: "candidate".into(),
+                    changed: Vec::new(),
+                }
+            }
+        }
+        #[derive(Clone, Copy)]
+        enum CandidateOutcome {
+            Refused,
+            Cancelled,
+            Published,
+        }
+        let candidate_compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        for (index, outcome) in [
+            CandidateOutcome::Refused,
+            CandidateOutcome::Cancelled,
+            CandidateOutcome::Published,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (before, visibility, handles, custody) = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    Ok((
+                        session
+                            .compile_view_in(context.placement.lexical_scope)
+                            .unwrap(),
+                        session
+                            .public_visibility_snapshot_in(context.placement.lexical_scope)
+                            .unwrap(),
+                        session.value_handle_count(),
+                        session.outstanding_custody(),
+                    ))
+                })
+                .await
+                .unwrap();
+            let candidate = Arc::new(
+                workbench
+                    .prepare_candidate_tools(context.clone(), 3 + index as u64, vec![])
+                    .await
+                    .unwrap(),
+            );
+            let candidate_scope = candidate._installation_scope.scope();
+            assert!(
+                candidate._source_original.is_some(),
+                "the candidate retains its exact issued source selection privately"
+            );
+            assert!(Arc::ptr_eq(
+                candidate.code.prepared().unwrap(),
+                &warmed.prepared
+            ));
+            workbench
+                .access
+                .with_machine(context.clone(), {
+                    let before = before.clone();
+                    let visibility = visibility.clone();
+                    move |session, context, _| {
+                        assert_eq!(
+                            session
+                                .compile_view_in(context.placement.lexical_scope)
+                                .unwrap(),
+                            before
+                        );
+                        assert_eq!(
+                            session
+                                .public_visibility_snapshot_in(context.placement.lexical_scope)
+                                .unwrap(),
+                            visibility
+                        );
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+            let source = crate::CheckpointSourceLayer::default();
+            let old =
+                InstalledToolLease::new(context.actor, source.clone(), Some(Arc::clone(&first)));
+            let current =
+                InstalledToolLease::new(context.actor, source.clone(), Some(Arc::clone(&second)));
+            let state = InstalledToolsState::default();
+            state.publish(current.clone());
+            let decision = tidepool_runtime::session::PublicationDecision::new();
+            if matches!(outcome, CandidateOutcome::Cancelled) {
+                decision.request_cancellation();
+            }
+            let result = state.commit_spec_reload(
+                if matches!(outcome, CandidateOutcome::Refused) {
+                    &old
+                } else {
+                    &current
+                },
+                Arc::clone(&candidate),
+                Box::new(CandidateCommit(source)),
+                &decision,
+            );
+            match outcome {
+                CandidateOutcome::Refused => {
+                    assert!(matches!(result, crate::SourceLayerReload::Unavailable(_)))
+                }
+                CandidateOutcome::Cancelled => {
+                    assert!(matches!(result, crate::SourceLayerReload::Cancelled))
+                }
+                CandidateOutcome::Published => {
+                    assert!(matches!(result, crate::SourceLayerReload::Published { .. }))
+                }
+            }
+            let expected = if matches!(outcome, CandidateOutcome::Published) {
+                &candidate
+            } else {
+                &second
+            };
+            assert!(Arc::ptr_eq(&state.current_tools().unwrap(), expected));
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, context, _| {
+                    assert_eq!(
+                        session
+                            .compile_view_in(context.placement.lexical_scope)
+                            .unwrap(),
+                        before
+                    );
+                    assert_eq!(
+                        session
+                            .public_visibility_snapshot_in(context.placement.lexical_scope)
+                            .unwrap(),
+                        visibility
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            state.clear();
+            drop(candidate);
+            wait_for_explicit_installation_cleanup(
+                &workbench,
+                context.clone(),
+                handles,
+                custody,
+                Vec::new(),
+                "source candidate settlement",
+            )
+            .await;
+            workbench
+                .access
+                .with_machine(context.clone(), move |session, _, _| {
+                    assert!(session
+                        .public_visibility_snapshot_in(candidate_scope)
+                        .is_none());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            candidate_compiler_calls,
+            "candidate preparation reuses the immutable original without compiler requests"
+        );
         crate::agent_spec::preparation::tests::ready_bound_preserves_installed_lease(Arc::clone(
             &first.code.prepared().expect("source-prepared installation"),
         ))
@@ -15730,8 +16301,133 @@ pub(crate) mod request_tests {
         let original_owner = tidepool_toolchain::extract_module_name(&original_source)
             .expect("completed original source has its actual compiler owner");
 
-        // A new ordinary source request must execute the untracked quoter again.
         std::fs::write(&quotation_input, "42").unwrap();
+        let public_owner = workbench
+            .access
+            .with_machine(context.clone(), {
+                let owner = owner.clone();
+                move |session, context, _| {
+                    let descriptor =
+                        crate::ActorDescriptor::new("quoted original", context.placement)
+                            .with_actor_path(
+                                tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
+                            )
+                            .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+                    let readiness = session
+                        .durable_public_readiness(&owner, context.placement.lexical_scope)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
+                    Ok(crate::resident_actor::WorkbenchPublicOwner::issue(
+                        context,
+                        &descriptor,
+                        Some(readiness),
+                    )
+                    .unwrap())
+                }
+            })
+            .await
+            .unwrap();
+        for cell in [
+            "import qualified QuotedAgentSpec as Frozen\nlet frozenSpec = Frozen.agentSpec @'[]",
+            "preparedOriginalHistory :: Int\npreparedOriginalHistory = 41",
+            "import qualified QuotedAgentSpec as Frozen\nlet repeatedSpec = Frozen.agentSpec @'[]",
+        ] {
+            let (private, private_context) = ResidentActorWorkbench::new(
+                Arc::clone(&workbench.access.machines),
+                source.clone(),
+                None,
+            )
+            .admit_private_cell_with_owner_for_test(context.clone(), Arc::clone(&public_owner))
+            .await
+            .unwrap();
+            private
+                .execute_cell_for_test(private_context.clone(), cell)
+                .await
+                .unwrap();
+            private
+                .publish_completed_cell_with_commit_for_test(
+                    private_context,
+                    tidepool_runtime::session::PublicManifestCommit::Durable,
+                )
+                .await
+                .unwrap();
+            let current = workbench
+                .access
+                .with_machine(context.clone(), |session, context, _| {
+                    Ok(session
+                        .compile_view_in(context.placement.lexical_scope)
+                        .unwrap())
+                })
+                .await
+                .unwrap();
+            let roles = current
+                .exact_declaration_context()
+                .unwrap()
+                .compiler_input_roles();
+            assert!(roles.iter().any(|role| matches!(role,
+                tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal { .. })));
+            assert_eq!(
+                std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+                completed_executions,
+                "published imports and later declarations retain quotation41"
+            );
+        }
+        let before_failed_cell = workbench
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                Ok(session
+                    .compile_view_in(context.placement.lexical_scope)
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        let (failed, failed_context) = ResidentActorWorkbench::new(
+            Arc::clone(&workbench.access.machines),
+            source.clone(),
+            None,
+        )
+        .admit_private_cell_with_owner_for_test(context.clone(), Arc::clone(&public_owner))
+        .await
+        .unwrap();
+        assert!(failed
+            .prepare_cell(
+                failed_context,
+                "preparedOriginalFailure :: Int\npreparedOriginalFailure = True".into(),
+            )
+            .await
+            .is_err());
+        drop(failed);
+        let after_failed_cell = workbench
+            .access
+            .with_machine(context.clone(), |session, context, _| {
+                Ok(session
+                    .compile_view_in(context.placement.lexical_scope)
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        assert_eq!(after_failed_cell, before_failed_cell);
+        let later_recovered = recover_context();
+        assert!(later_recovered.library().is_some());
+        assert_eq!(
+            later_recovered
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            after_failed_cell
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            "later declaration recovery preserves the original selection"
+        );
+        assert_eq!(generation_zero_recovered.library(), None);
+        assert_eq!(
+            std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
+            completed_executions,
+        );
+        // An independent ordinary source request still executes the untracked quoter.
+
         let installation =
             crate::agent_spec::installation_expression("QuotedAgentSpec.agentSpec", &[]);
         let dispatcher_effects = format!(

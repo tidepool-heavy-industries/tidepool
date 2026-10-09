@@ -19,8 +19,8 @@ mod snapshots;
 use snapshots::{GraphEncoding, GraphRead};
 pub(crate) use snapshots::{RecoveryGraph, RecoveryGraphCandidate};
 
-const VERSION: u32 = 8;
-const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v8";
+const VERSION: u32 = 9;
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v9";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -83,6 +83,53 @@ pub(crate) struct RecoveryPublicSurface {
     /// Exact machine-local source instances at this public tip. Recovery can
     /// report their loss but cannot reconstruct their mutable CAF state.
     pub source_instances: Vec<RecoveryPublicSourceInstance>,
+    /// Exact published compiler selection, including a source-only Generation0
+    /// surface. Immutable artifact authentication precedes role reissuance.
+    pub compiler_context: RecoveryCompilerContext,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoveryCompilerContext {
+    pub artifact_refs: Vec<ArtifactId>,
+    pub native_groups: Vec<tidepool_toolchain::artifact_inventory::NativeGroupKey>,
+    pub compiler_roles: Vec<tidepool_toolchain::artifact_inventory::CompilerInputRole>,
+    pub lexical: Vec<ExactLexicalNode>,
+}
+
+impl RecoveryCompilerContext {
+    pub(crate) fn capture(
+        context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
+    ) -> Self {
+        Self {
+            artifact_refs: context
+                .artifact_view()
+                .descriptors()
+                .into_iter()
+                .map(|row| row.id)
+                .collect(),
+            native_groups: context
+                .artifact_view()
+                .selected_native_groups()
+                .into_iter()
+                .collect(),
+            compiler_roles: context.compiler_input_roles(),
+            lexical: context.lexical_graph().to_vec(),
+        }
+    }
+
+    pub(crate) fn restore(
+        &self,
+        inventory: &tidepool_toolchain::declaration_join::RecoveredArtifactInventory,
+    ) -> Result<tidepool_toolchain::declaration_join::ExactDeclarationContext, crate::CompileError>
+    {
+        inventory.context_with_published_roles(
+            &self.artifact_refs,
+            &self.native_groups,
+            &self.compiler_roles,
+            self.lexical.clone(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -624,6 +671,7 @@ pub(crate) fn stage_public_visibility_v2(
     bindings: Vec<RecoveryPublicBinding>,
     source_instances: Vec<RecoveryPublicSourceInstance>,
     initial_declaration_root: Option<Generation>,
+    compiler_context: RecoveryCompilerContext,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
     let next_epoch = expected_epoch
         .checked_add(1)
@@ -638,6 +686,7 @@ pub(crate) fn stage_public_visibility_v2(
         bindings,
         source_instances,
         initial_declaration_root,
+        compiler_context,
     )
 }
 
@@ -651,6 +700,7 @@ pub(crate) fn stage_public_visibility_at_epoch_v2(
     bindings: Vec<RecoveryPublicBinding>,
     source_instances: Vec<RecoveryPublicSourceInstance>,
     initial_declaration_root: Option<Generation>,
+    compiler_context: RecoveryCompilerContext,
 ) -> Result<StagedRecoveryManifest, RecoveryError> {
     if next_epoch <= expected_epoch {
         return Err(error("public visibility epoch must advance"));
@@ -664,6 +714,7 @@ pub(crate) fn stage_public_visibility_at_epoch_v2(
             epoch: surface.epoch,
             bindings,
             source_instances,
+            compiler_context,
         },
         None if expected_epoch == 0 => RecoveryPublicSurface {
             owner,
@@ -671,6 +722,7 @@ pub(crate) fn stage_public_visibility_at_epoch_v2(
             epoch: 0,
             bindings,
             source_instances,
+            compiler_context,
         },
         None => return Err(error("paired public surface is missing")),
     };
@@ -758,11 +810,11 @@ pub(crate) fn read_v2_bytes(
     {
         return Err(at(
             path,
-            "v8 recovery graph lacks the supported paired-public-v8 schema",
+            "v9 recovery graph lacks the supported paired-public-v9 schema",
         ));
     }
     let graph: RecoveryGraph = serde_json::from_value(value)
-        .map_err(|e| at(path, format!("invalid v8 recovery graph: {e}")))?;
+        .map_err(|e| at(path, format!("invalid v9 recovery graph: {e}")))?;
     graph.validate().map_err(|mut error| {
         error.path = Some(path.to_path_buf());
         error
@@ -1062,6 +1114,16 @@ fn normalize_artifact(artifact: &mut RecoveryArtifactClosure) {
     }
 }
 fn normalize_surface(surface: &mut RecoveryPublicSurface) {
+    surface.compiler_context.artifact_refs.sort();
+    surface.compiler_context.artifact_refs.dedup();
+    surface.compiler_context.native_groups.sort();
+    surface
+        .compiler_context
+        .lexical
+        .sort_by(|a, b| a.owner.cmp(&b.owner));
+    for lexical in &mut surface.compiler_context.lexical {
+        lexical.imports.sort();
+    }
     surface.bindings.sort_by(|a, b| a.name.cmp(&b.name));
     surface.source_instances.sort_by(|a, b| {
         (
@@ -1165,6 +1227,21 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
             || !public_owners.insert(&surface.owner)
         {
             return Err(error("invalid or duplicate public actor owner"));
+        }
+        let lexical = &surface.compiler_context.lexical;
+        let owners = lexical
+            .iter()
+            .map(|row| &row.owner)
+            .collect::<BTreeSet<_>>();
+        if owners.len() != lexical.len()
+            || lexical.iter().any(|row| {
+                row.owner.unit.is_empty()
+                    || row.owner.module.is_empty()
+                    || row.imports.iter().collect::<BTreeSet<_>>().len() != row.imports.len()
+                    || row.imports.iter().any(|import| !owners.contains(import))
+            })
+        {
+            return Err(error("invalid public source lexical selection"));
         }
         let mut binding_names = BTreeSet::new();
         for binding in &surface.bindings {
@@ -1477,10 +1554,30 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
             ));
         }
     }
-    for node in graph.nodes() {
-        let node_artifacts = node.artifact_refs.iter().copied().collect::<BTreeSet<_>>();
+    let selections = graph
+        .nodes()
+        .map(|node| {
+            (
+                Some(node),
+                &node.artifact_refs,
+                &node.native_groups,
+                &node.compiler_roles,
+                format!("recovery node {}", node.id.0),
+            )
+        })
+        .chain(graph.public_surfaces().map(|surface| {
+            (
+                None,
+                &surface.compiler_context.artifact_refs,
+                &surface.compiler_context.native_groups,
+                &surface.compiler_context.compiler_roles,
+                format!("public source surface {:?}", surface.owner),
+            )
+        }));
+    for (node, artifact_refs, selected_groups, compiler_roles, label) in selections {
+        let node_artifacts = artifact_refs.iter().copied().collect::<BTreeSet<_>>();
         let mut native_groups = BTreeSet::new();
-        for group in &node.native_groups {
+        for group in selected_groups {
             if !native_groups.insert(*group) {
                 return Err(error("duplicate recovered native group selection"));
             }
@@ -1495,15 +1592,8 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                 ));
             }
         }
-        if node
-            .artifact_refs
-            .iter()
-            .any(|key| !artifacts.contains_key(key))
-        {
-            return Err(error(format!(
-                "recovery node {} references a missing artifact",
-                node.id.0
-            )));
+        if artifact_refs.iter().any(|key| !artifacts.contains_key(key)) {
+            return Err(error(format!("{} references a missing artifact", label)));
         }
         for id in &node_artifacts {
             if let RecoveryArtifactClosure::Home(reference) = artifacts[id] {
@@ -1516,8 +1606,8 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                 .id;
                 if !node_artifacts.contains(&canonical) {
                     return Err(error(format!(
-                        "recovery node {} omits its canonical interface companion",
-                        node.id.0
+                        "{} omits its canonical interface companion",
+                        label
                     )));
                 }
             }
@@ -1541,13 +1631,13 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                 .is_some_and(|previous| previous != canonical)
             {
                 return Err(error(format!(
-                    "recovery node {} has conflicting canonical interfaces for one module owner",
-                    node.id.0
+                    "{} has conflicting canonical interfaces for one module owner",
+                    label
                 )));
             }
         }
         let mut compiler_owners = BTreeSet::new();
-        for role in &node.compiler_roles {
+        for role in compiler_roles {
             let interface = role.interface();
             let Some(interface_artifact) = artifacts.get(&interface) else {
                 return Err(error("recovered compiler role has no interface carrier"));
@@ -1578,7 +1668,7 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                 }
             }
         }
-        for dependency in &node.live_dependencies {
+        for dependency in node.into_iter().flat_map(|node| &node.live_dependencies) {
             let RecoveryLiveDependency::NativeBinding {
                 artifact_id,
                 binding,
@@ -1609,8 +1699,8 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
             for requirement in &reference.requirements {
                 let target = artifact_owners.get(requirement).ok_or_else(|| {
                     error(format!(
-                        "recovery node {} has a value interface with a missing exact module requirement",
-                        node.id.0
+                        "{} has a value interface with a missing exact module requirement",
+                        label
                     ))
                 })?;
                 if !graph.artifact_dependencies().any(|edge| {
@@ -1619,8 +1709,8 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                         && edge.dependency == ArtifactDependency::Interface
                 }) {
                     return Err(error(format!(
-                        "recovery node {} has a value interface requirement without its direct artifact edge",
-                        node.id.0
+                        "{} has a value interface requirement without its direct artifact edge",
+                        label
                     )));
                 }
             }
@@ -1629,23 +1719,29 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
             node_artifacts.contains(&edge.source) && !node_artifacts.contains(&edge.target)
         }) {
             return Err(error(format!(
-                "recovery node {} has an incomplete artifact dependency closure",
-                node.id.0
+                "{} has an incomplete artifact dependency closure",
+                label
             )));
         }
-        if matches!(&node.state, RecoveryNodeState::ExactArtifactClosure)
-            && node.artifact_refs.is_empty()
-            && !node.exports.is_empty()
-        {
+        if node.is_some_and(|node| {
+            matches!(&node.state, RecoveryNodeState::ExactArtifactClosure)
+                && artifact_refs.is_empty()
+                && !node.exports.is_empty()
+        }) {
             return Err(error(format!(
-                "recovery node {} has exports but no exact artifact closure",
-                node.id.0
+                "{} has exports but no exact artifact closure",
+                label
             )));
         }
     }
     let referenced_artifacts: BTreeSet<_> = graph
         .nodes()
         .flat_map(|node| node.artifact_refs.iter().copied())
+        .chain(
+            graph
+                .public_surfaces()
+                .flat_map(|surface| surface.compiler_context.artifact_refs.iter().copied()),
+        )
         .collect();
     let owned_modules: BTreeSet<_> = referenced_artifacts
         .iter()
@@ -1664,6 +1760,24 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
             )));
         }
     }
+    for surface in graph.public_surfaces() {
+        let selection = &surface.compiler_context;
+        let selected_owners = selection
+            .artifact_refs
+            .iter()
+            .filter_map(|id| artifacts.get(id))
+            .map(|artifact| artifact.owner())
+            .collect::<BTreeSet<_>>();
+        if selection
+            .lexical
+            .iter()
+            .any(|row| !selected_owners.contains(&row.owner))
+        {
+            return Err(error(
+                "public source lexical owner lacks its selected exact artifact",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1677,7 +1791,7 @@ fn checksum_with_encoded_bytes(graph: &impl GraphRead) -> Result<(String, u64), 
         checksum: "",
     })
     .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
-    let mut domain = b"tidepool-recovery-graph-v8\0".to_vec();
+    let mut domain = b"tidepool-recovery-graph-v9\0".to_vec();
     domain.extend_from_slice(&bytes);
     Ok((
         blake3::hash(&domain).to_hex().to_string(),
@@ -2623,6 +2737,7 @@ mod tests {
                 epoch: 0,
                 bindings: vec![],
                 source_instances: vec![],
+                compiler_context: RecoveryCompilerContext::default(),
             }],
             nodes: vec![
                 RecoveryNode {
@@ -2669,6 +2784,211 @@ mod tests {
         install_fixture_canonical_interfaces(&mut graph);
         graph.seal().unwrap();
         graph
+    }
+
+    #[test]
+    fn generation_zero_compiler_selection_roundtrips_and_history_stays_immutable() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        let later = compiled_fixture(root.path());
+        let inventory = snapshot(&later).capture_inventory(root.path()).unwrap();
+        let node = &later.nodes[0];
+        let context = inventory
+            .context_with_roles(
+                &node.artifact_refs,
+                &node.native_groups,
+                &node.compiler_roles,
+                vec![ExactLexicalNode {
+                    owner: module("main", "Lib"),
+                    imports: vec![],
+                }],
+            )
+            .unwrap();
+        let selection = RecoveryCompilerContext::capture(&context);
+        assert!(!selection.artifact_refs.is_empty());
+        assert!(!selection.native_groups.is_empty());
+        assert!(!selection.compiler_roles.is_empty());
+        let mut initial = later.clone();
+        initial.nodes.clear();
+        initial.high_water = Generation(0);
+        initial.public_surfaces[0].declaration_root = None;
+        initial.public_surfaces[0].compiler_context = selection.clone();
+        initial.seal().unwrap();
+        let captured = snapshot(&initial);
+        let staged = stage_public_visibility_v2(
+            &manifest,
+            root.path(),
+            &captured,
+            owner("root"),
+            0,
+            vec![],
+            vec![],
+            None,
+            selection.clone(),
+        )
+        .unwrap();
+        let RecoveryPublishOutcome::Durable {
+            graph: published, ..
+        } = staged.publish()
+        else {
+            panic!("Generation0 compiler selection is durable")
+        };
+        let bytes = fs::read(&manifest).unwrap();
+        let restored = read_v2_bytes(
+            &manifest,
+            root.path(),
+            &bytes,
+            RecoveryReadPurpose::Hydration,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(restored.artifact_losses.is_empty());
+        assert_eq!(restored.graph.high_water(), Generation(0));
+        let surface = restored.graph.surface(&owner("root")).unwrap();
+        assert_eq!(surface.declaration_root, None);
+        let recovered = surface
+            .compiler_context
+            .restore(restored.inventory.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(RecoveryCompilerContext::capture(&recovered), selection);
+        let mut successor = published.candidate();
+        successor.set_high_water(later.high_water).unwrap();
+        for node in later.nodes {
+            successor.insert_node(node).unwrap();
+        }
+        let mut surface = published.surface(&owner("root")).unwrap().clone();
+        surface.declaration_root = Some(Generation(2));
+        surface.epoch += 1;
+        successor.replace_surface(surface);
+        let successor = successor.seal().unwrap();
+        assert_eq!(
+            successor.surface(&owner("root")).unwrap().compiler_context,
+            selection
+        );
+        assert_eq!(captured.high_water(), Generation(0));
+        assert_eq!(captured.surface(&owner("root")).unwrap().epoch, 0);
+        assert_eq!(
+            published.surface(&owner("root")).unwrap().declaration_root,
+            None
+        );
+        assert_eq!(
+            published.surface(&owner("root")).unwrap().compiler_context,
+            selection
+        );
+    }
+
+    #[test]
+    fn generation_zero_selected_artifact_loss_refuses_hydration() {
+        for missing in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let manifest = root.path().join("declarations.json");
+            let mut wire = compiled_fixture(root.path());
+            let node = &wire.nodes[0];
+            wire.public_surfaces[0].compiler_context = RecoveryCompilerContext {
+                artifact_refs: node.artifact_refs.clone(),
+                native_groups: node.native_groups.clone(),
+                compiler_roles: node.compiler_roles.clone(),
+                lexical: vec![],
+            };
+            wire.public_surfaces[0].declaration_root = None;
+            wire.nodes.clear();
+            wire.high_water = Generation(0);
+            wire.seal().unwrap();
+            let graph = snapshot(&wire);
+            let original = match home_artifact(&wire) {
+                RecoveryArtifactClosure::Home(home) => home.product_path.clone(),
+                _ => unreachable!(),
+            };
+            let bytes = serde_json::to_vec(&graph).unwrap();
+            fs::write(&manifest, &bytes).unwrap();
+            let control = read_v2_bytes(
+                &manifest,
+                root.path(),
+                &bytes,
+                RecoveryReadPurpose::Hydration,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(control.inventory.is_some());
+            if missing {
+                fs::remove_file(root.path().join(original)).unwrap();
+            } else {
+                fs::write(root.path().join(original), b"changed selected original").unwrap();
+            }
+            let refused = read_v2_bytes(
+                &manifest,
+                root.path(),
+                &bytes,
+                RecoveryReadPurpose::Hydration,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(refused.inventory.is_none());
+            assert!(!refused.artifact_losses.is_empty());
+            assert_eq!(fs::read(&manifest).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn public_compiler_selection_refuses_unrepresented_roles_groups_and_lexical_owners() {
+        let baseline = fixture();
+        for corruption in 0..4 {
+            let mut wire = baseline.clone();
+            let selection = &mut wire.public_surfaces[0].compiler_context;
+            selection.artifact_refs = wire.nodes[0].artifact_refs.clone();
+            selection.compiler_roles = wire.nodes[0].compiler_roles.clone();
+            match corruption {
+                0 => selection.artifact_refs.push(ArtifactId([0xfe; 32])),
+                1 => selection.native_groups.push(
+                    tidepool_toolchain::artifact_inventory::NativeGroupKey {
+                        artifact: ArtifactId([0xfd; 32]),
+                        original_ordinal: 17,
+                    },
+                ),
+                2 => selection.lexical.push(ExactLexicalNode {
+                    owner: module("main", "Unselected"),
+                    imports: vec![],
+                }),
+                3 => selection
+                    .compiler_roles
+                    .push(selection.compiler_roles[0].clone()),
+                _ => unreachable!(),
+            }
+            assert!(
+                wire.seal().is_err(),
+                "invalid public selection {corruption}"
+            );
+        }
+    }
+
+    #[test]
+    fn v9_requires_public_compiler_selection_and_refuses_v8_without_rewriting() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = root.path().join("declarations.json");
+        for old_version in [false, true] {
+            let mut value = serde_json::to_value(&snapshot(&fixture())).unwrap();
+            if old_version {
+                value["version"] = serde_json::json!(8);
+                value["public_schema"] = serde_json::json!("paired-public-v8");
+            } else {
+                value["public_surfaces"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("compiler_context");
+            }
+            let bytes = serde_json::to_vec(&value).unwrap();
+            fs::write(&manifest, &bytes).unwrap();
+            let refusal = read_v2(&manifest, root.path()).err().unwrap();
+            if old_version {
+                assert_eq!(
+                    refusal.kind,
+                    RecoveryErrorKind::Format(RecoveryRefusal::UnsupportedOldFormat { version: 8 })
+                );
+            } else {
+                assert!(refusal.detail.contains("compiler_context"));
+            }
+            assert_eq!(fs::read(&manifest).unwrap(), bytes);
+        }
     }
 
     fn value_interface_from(home: &RecoveryArtifactRef, module: &str) -> RecoveryValueInterfaceRef {
@@ -3538,6 +3858,89 @@ mod tests {
         assert!(recovered_visibility.source_instances.is_empty());
         assert!(recovered.prepared().is_none());
         assert_eq!(fs::read(&join_manifest).unwrap(), join_bytes);
+
+        // Retained node authority remains available for private recovery, but
+        // an explicit empty public selection must not acquire that context.
+        let empty_manifest = root.path().join("empty-public-selection.json");
+        let mut empty_public = join_graph.clone();
+        let surface = empty_public
+            .public_surfaces
+            .iter_mut()
+            .find(|surface| surface.owner == owner("root"))
+            .unwrap();
+        assert!(surface.declaration_root.is_some());
+        assert!(!surface.compiler_context.artifact_refs.is_empty());
+        surface.compiler_context = RecoveryCompilerContext::default();
+        empty_public.seal().unwrap();
+        let empty_graph = snapshot(&empty_public);
+        empty_graph.capture_inventory(root.path()).unwrap();
+        assert!(matches!(
+            stage_v2(&empty_manifest, root.path(), empty_graph)
+                .unwrap()
+                .publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let empty_bytes = fs::read(&empty_manifest).unwrap();
+        let mut empty_lib = SessionLib::open(
+            SessionId(44),
+            root.path().join("empty-public-session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        empty_lib
+            .attach_owned_recovery_graph_v3(&empty_manifest, run_owner.clone())
+            .unwrap();
+        assert!(empty_lib.log.joined_context_at(original_join.id).is_some());
+        assert!(empty_lib
+            .recovered_public_compiler_context(&owner("root"))
+            .unwrap()
+            .is_none());
+        let mut empty_session = PersistentSession::new(Some(empty_lib), 0);
+        let scopes_before = empty_session.scope_tree().len();
+        assert!(matches!(
+            empty_session.recover_public_scope(&owner("root")),
+            Err(crate::session::SessionError::RecoveryManifest { detail, .. })
+                if detail.contains("lacks its exact public compiler selection")
+        ));
+        assert_eq!(empty_session.scope_tree().len(), scopes_before);
+        assert!(empty_session.lib().durable_public_scopes.is_empty());
+        struct UnexpectedSuccessorValidation;
+        impl crate::session::RecoverySuccessorAuthority for UnexpectedSuccessorValidation {
+            fn validate_successor(
+                &self,
+                _: &Path,
+                _: &RecoveryPublicOwner,
+                _: &RecoveryPublicOwner,
+                _: SessionId,
+                _: ScopeId,
+            ) -> std::io::Result<bool> {
+                panic!("absent public compiler selection refuses before actor authority");
+            }
+        }
+        let target = empty_session.mint_isolated_scope();
+        empty_session
+            .seal_recovery_initialization_scope(target)
+            .unwrap();
+        let before_transfer = empty_session.public_visibility_snapshot_in(target).unwrap();
+        let successor = RecoveryPublicOwner {
+            incarnation: 2,
+            ..owner("root")
+        };
+        assert!(matches!(
+            empty_session.transfer_recovered_public_owner(
+                &owner("root"), successor, target, Arc::new(UnexpectedSuccessorValidation),
+            ),
+            Err(crate::session::SessionError::RecoveryManifest { detail, .. })
+                if detail.contains("lacks its exact public compiler selection")
+        ));
+        assert_eq!(
+            empty_session.public_visibility_snapshot_in(target).unwrap(),
+            before_transfer
+        );
+        assert!(empty_session.lib().durable_public_scopes.is_empty());
+        assert_eq!(fs::read(&empty_manifest).unwrap(), empty_bytes);
+        assert_eq!(fs::read(&join_manifest).unwrap(), join_bytes);
         let mut wrong_join_generation = exact.clone();
         let RecoveryLiveDependency::NativeBinding { generation, .. } = &mut wrong_join_generation
         else {
@@ -3812,6 +4215,7 @@ mod tests {
             vec![first],
             vec![],
             None,
+            RecoveryCompilerContext::default(),
         )
         .unwrap();
         assert!(!manifest.exists(), "staging is not public authority");
@@ -3841,6 +4245,7 @@ mod tests {
             vec![next.clone()],
             vec![],
             None,
+            RecoveryCompilerContext::default(),
         )
         .unwrap();
         let replacement = match staged.publish() {
@@ -3859,6 +4264,7 @@ mod tests {
             vec![next.clone()],
             vec![],
             None,
+            RecoveryCompilerContext::default(),
         )
         .unwrap()
         .publish()
@@ -3892,6 +4298,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            RecoveryCompilerContext::default()
         )
         .is_err());
         assert_eq!(fs::read(&manifest).unwrap(), published_bytes);
@@ -3920,6 +4327,7 @@ mod tests {
             vec![binding(1)],
             vec![],
             None,
+            RecoveryCompilerContext::default(),
         )
         .unwrap()
         .publish()
@@ -3936,6 +4344,7 @@ mod tests {
             vec![binding(2)],
             vec![],
             None,
+            RecoveryCompilerContext::default(),
         )
         .unwrap()
         .publish()
@@ -3952,6 +4361,7 @@ mod tests {
             vec![binding(3)],
             vec![],
             None,
+            RecoveryCompilerContext::default()
         )
         .is_err());
         let restored = read_v2(&manifest, dir.path()).unwrap().unwrap().graph;
@@ -3987,6 +4397,7 @@ mod tests {
             epoch: 0,
             bindings: vec![],
             source_instances: vec![],
+            compiler_context: RecoveryCompilerContext::default(),
         });
         graph.seal().unwrap();
         let parent = snapshot(&graph)
@@ -4017,6 +4428,7 @@ mod tests {
             epoch: 0,
             bindings: vec![],
             source_instances: vec![],
+            compiler_context: RecoveryCompilerContext::default(),
         };
         graph.public_surfaces = vec![surface.clone(), surface];
         assert!(graph.seal().is_err());
@@ -4658,6 +5070,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             None,
+            RecoveryCompilerContext::default(),
         )
         .unwrap();
         let unsigned = serde_json::to_vec(&GraphEncoding {
@@ -4709,7 +5122,7 @@ mod tests {
         let mut unsigned = graph.clone();
         unsigned.checksum.clear();
         let bytes = serde_json::to_vec(&unsigned).unwrap();
-        let mut domain = b"tidepool-recovery-graph-v8\0".to_vec();
+        let mut domain = b"tidepool-recovery-graph-v9\0".to_vec();
         domain.extend_from_slice(&bytes);
         assert_eq!(
             checksum(&graph).unwrap(),

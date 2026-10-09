@@ -629,10 +629,10 @@ fn certify_authored_declaration_inner(
         .source_selection
         .as_ref()
         .ok_or_else(|| contract("authored certification has no issued original selection"))?
-        .selected_original_closure_excluding_module(
+        .selected_authored_original_closure(
             &compiled.artifact_view,
             &candidates[0].unit,
-            crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE,
+            &module_name,
         )
         .map_err(|error| contract(&format!("authored original closure: {error}")))?;
     let products = originals.products();

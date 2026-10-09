@@ -5408,8 +5408,9 @@ checkedRecipeOriginal admitted = do
     _ -> Left "checked recipe original lacks its admitted native declaration proof"
   pure original
 
--- Explicit authored imports demand current canonical source proof even for a captured
--- lexical owner. Generated imports and use of captured names keep that owner.
+-- Explicit authored imports demand current canonical source proof even for a
+-- captured lexical owner. An issued published root retains its completed original;
+-- reload inspection separately demands current proof for the entire original scope.
 -- Available retained requirements alone never create a source demand.
 selectCurrentSourceOriginals
   :: ExactScope -> Maybe ProgramSourceImports -> [ImportIntent] -> Maybe GeneratedScaffoldRecipe -> ModuleGraph
@@ -5421,6 +5422,10 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
       exactOwners = Map.fromList [((exactUnit artifact,exactModule artifact),artifact)
         | (artifact,_,_) <- scopeInterfaces admitted]
       lexicalOwners = Set.fromList (map fst (scopeLexical admitted))
+      reloadInspection = case scopePurpose admitted of
+        ExactReloadInspectionPurpose{} -> True
+        _ -> False
+      publishedOwners = if reloadInspection then Set.empty else scopePublishedSourceOriginals admitted
       checkedOwners = Set.fromList [(exactUnit artifact,exactModule artifact)
         | artifact <- scopeValueInterfaces admitted]
       sourceSummaries = [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph]
@@ -5438,9 +5443,12 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
             (programImportClosure admitted key)) covered
       covers RetainedGeneratedImport = False
       currentIntents = filter (not . covers) intents
-      requestedOwners = Set.fromList
+      reloadOwners = if reloadInspection then Map.keysSet (scopeSourceOriginalInterfaces admitted)
+        `Set.intersection` lexicalOwners else Set.empty
+      requestedOwners = reloadOwners `Set.union` Set.fromList
         [key | AuthoredSourceImport owner qualifier <- currentIntents
-        , Just key <- [localOwner (renameRawPkgQual (hsc_unit_env initial) owner qualifier, noLoc owner)]]
+        , Just key <- [localOwner (renameRawPkgQual (hsc_unit_env initial) owner qualifier, noLoc owner)]
+        , key `Set.notMember` publishedOwners]
       freshImports = Map.fromList
         [((unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary)),
           Set.fromList [key | imported <- ms_textual_imps summary ++ ms_srcimps summary
@@ -5466,7 +5474,7 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
         , (key `Set.notMember` lexicalOwners || key `Set.member` scopeSourceSelectedOwners admitted
           || key `Set.member` authoredOwners)
         , key `Set.notMember` checkedOwners]
-  if null hiddenImports then pure Nothing else do
+  if null hiddenImports && Set.null reloadOwners then pure Nothing else do
     closure' <- liftIO (readVerifiedExactIfaceClosureWithCheckedValues initial
       (Map.elems exactOwners) (scopeValueInterfaces admitted))
       >>= either (liftIO . fail) pure
@@ -5488,7 +5496,8 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
               (scopeExecutionNativeOwners admitted) original protected parsed sourceGraph hydrated)
               >>= either (liftIO . fail) pure
           _ -> liftIO (fail "generated scaffold target summary is missing or duplicated")
-    let roots = Set.toAscList (Set.fromList [key | (summary,imported,key) <- hiddenImports
+    let roots = Set.toAscList (reloadOwners `Set.union` Set.fromList [key | (summary,imported,key) <- hiddenImports
+          , key `Set.notMember` publishedOwners
           , key `Set.member` authoredOwners || not (permitsGeneratedScaffoldImport scaffold summary key imported)])
     case roots of
       [] -> pure Nothing

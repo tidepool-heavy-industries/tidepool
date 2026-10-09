@@ -320,6 +320,9 @@ dispatch compilerScope caches timing args = do
         ExactInspectionPurpose values _ ->
           unless (matchesInspectionAdmission args (map exactModule values))
             (throwIO CheckedPurposeMismatch)
+        ExactReloadInspectionPurpose values _ ->
+          unless (matchesInspectionAdmission args (map exactModule values))
+            (throwIO CheckedPurposeMismatch)
         ExactCellPurpose _ _ ->
           unless (requestCell args && not (requestTurn args) && not (requestClassify args)
             && null (requestInspections args) && not (isJust (requestDeclarationJoin args))

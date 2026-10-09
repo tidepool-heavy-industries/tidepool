@@ -26,6 +26,9 @@ use crate::recovery_artifacts::{
 };
 use crate::CompileError;
 
+mod published_source;
+pub use published_source::PublishedSourceOriginalSelection;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactDeclarationContext {
     producer: [u8; 32],
@@ -803,14 +806,30 @@ fn execution_scope_value_with_graph_paths(
     ])))
 }
 
+#[cfg(test)]
 fn encode_scope_manifest(
-    mut fields: Vec<Value>,
+    fields: Vec<Value>,
     execution_scope: Option<Value>,
     authorization: Option<Value>,
 ) -> Result<Vec<u8>, CompileError> {
-    fields[1] = text("10");
+    encode_scope_manifest_with_published(
+        fields,
+        execution_scope,
+        authorization,
+        Value::Array(vec![]),
+    )
+}
+
+fn encode_scope_manifest_with_published(
+    mut fields: Vec<Value>,
+    execution_scope: Option<Value>,
+    authorization: Option<Value>,
+    published: Value,
+) -> Result<Vec<u8>, CompileError> {
+    fields[1] = text("11");
     fields.push(execution_scope.unwrap_or(Value::Null));
     fields.push(authorization.unwrap_or(Value::Null));
+    fields.push(published);
     let value = Value::Array(fields);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
@@ -1096,6 +1115,27 @@ impl RecoveredArtifactInventory {
     /// Restore explicit compiler roles after all referenced immutable inventory
     /// proofs have been authenticated. Serialized roles alone grant no reuse.
     pub fn context_with_roles(
+        &self,
+        ids: &[ArtifactId],
+        groups: &[NativeGroupKey],
+        roles: &[CompilerInputRole],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<ExactDeclarationContext, CompileError> {
+        if roles
+            .iter()
+            .any(CompilerInputRole::is_published_source_original)
+        {
+            return Err(failure(
+                "published source roles require the durable publication owner",
+            ));
+        }
+        self.context_with_published_roles(ids, groups, roles, lexical)
+    }
+
+    /// The owning versioned, checksummed publication graph restores source
+    /// selection policy after authenticating immutable original custody. This
+    /// does not replay source recipes or revalidate compile-time external input.
+    pub fn context_with_published_roles(
         &self,
         ids: &[ArtifactId],
         groups: &[NativeGroupKey],
@@ -4040,7 +4080,7 @@ impl ExactDeclarationContext {
             Some((descriptors, dependencies)),
         )
         .map_err(failure)?;
-        inventory.context_with_roles(
+        inventory.context_with_published_roles(
             &inventory.entries.keys().copied().collect::<Vec<_>>(),
             native_groups,
             compiler_roles,
@@ -4086,6 +4126,18 @@ impl ExactDeclarationContext {
         joins: &[Arc<AcceptedJoin>],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
+        let retained_publications = self.published_source_original_selections()?;
+        let lexical = if retained_publications.is_empty() {
+            lexical
+        } else {
+            compose_lexical_nodes(
+                lexical.iter().chain(
+                    retained_publications
+                        .iter()
+                        .flat_map(|selection| selection.context().lexical.iter()),
+                ),
+            )?
+        };
         let selected_sources = lexical
             .iter()
             .map(|node| node.owner.clone())
@@ -5032,6 +5084,7 @@ impl ExactDeclarationContext {
 
     fn normalize(&self) -> Result<(), CompileError> {
         let metadata = self.compiler_metadata_snapshot()?;
+        self.validate_published_source_originals()?;
         if let Some(retained) = &self.template_imports {
             retained.validate(self.producer, self.artifact_view())?;
         }
@@ -5755,7 +5808,12 @@ impl ExactDeclarationContext {
                     .collect::<Result<Vec<_>, CompileError>>()?,
             ),
         ];
-        let bytes = encode_scope_manifest(fields, execution_scope, authorization)?;
+        let bytes = encode_scope_manifest_with_published(
+            fields,
+            execution_scope,
+            authorization,
+            self.published_scope_value()?,
+        )?;
         let manifest = root.join("exact-declaration-scope.cbor");
         use std::io::Write;
         let mut output = std::fs::OpenOptions::new()
@@ -7022,6 +7080,439 @@ mod tests {
         (Arc::new(context), producer)
     }
 
+    fn published_original_fixture() -> ExactDeclarationContext {
+        let (base, _) = metadata_fixture();
+        let target = identity("fixture", "PrivateSourceTarget");
+        let canonical =
+            ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+                base.producer,
+                &target.unit,
+                &target.module,
+                BTreeMap::new(),
+            ));
+        let view = base
+            .inventory
+            .inventory()
+            .admit(base.artifact_view(), vec![canonical])
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
+        ExactDeclarationContext::from_authenticated_execution(
+            base.producer,
+            &view,
+            vec![
+                ExactLexicalNode {
+                    owner: target.clone(),
+                    imports: vec![identity("fixture", "Alpha")],
+                },
+                ExactLexicalNode {
+                    owner: identity("fixture", "Alpha"),
+                    imports: vec![],
+                },
+            ],
+            target.clone(),
+            &[target, identity("fixture", "Alpha")],
+        )
+        .unwrap()
+        .with_compiler_input_projection(projection)
+        .unwrap()
+    }
+
+    #[test]
+    fn published_original_projection_keeps_checked_template_custody_in_its_parent() {
+        let owners = [identity("fixture", "Alpha"), identity("fixture", "Beta")];
+        for root_index in 0..owners.len() {
+            for template_mask in 0u8..4 {
+                let mut issued = published_original_fixture();
+                issued.lexical[0].imports = owners.to_vec();
+                issued.lexical.push(ExactLexicalNode {
+                    owner: owners[1].clone(),
+                    imports: vec![],
+                });
+                let template_owners = owners
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| template_mask & (1 << index) != 0)
+                    .map(|(_, owner)| owner.clone())
+                    .collect::<BTreeSet<_>>();
+                let template = template_owners
+                    .iter()
+                    .map(|owner| format!("import {}\n", owner.module))
+                    .collect::<String>();
+                issued.template_imports =
+                    RetainedTemplateImports::capture(&issued, &[template.clone()]).unwrap();
+                issued.normalize().unwrap();
+                let before = issued.semantic_sha256();
+                let custody = issued.inventory.descriptors();
+                let retained = issued.template_imports.clone();
+                let selection = issued
+                    .issue_published_source_original("revision", "input", &owners[root_index])
+                    .unwrap();
+                let selected = selection.context();
+                selected.normalize().unwrap();
+                assert!(selected.template_imports.is_none());
+                assert_eq!(
+                    selected.lexical_graph(),
+                    &[ExactLexicalNode {
+                        owner: owners[root_index].clone(),
+                        imports: vec![],
+                    }]
+                );
+                assert!(selected
+                    .inventory
+                    .descriptors()
+                    .iter()
+                    .all(|entry| entry.owner == owners[root_index]));
+                assert_eq!(
+                    selected
+                        .selected_template_imports(&[template.clone()])
+                        .unwrap()
+                        .roots,
+                    template_owners
+                        .intersection(&BTreeSet::from([owners[root_index].clone()]))
+                        .cloned()
+                        .collect()
+                );
+                let mut parent = issued
+                    .clone()
+                    .with_published_source_originals(&selection)
+                    .unwrap();
+                parent = parent.extend(&[], &[], vec![]).unwrap();
+                assert_eq!(parent.template_imports, retained);
+                assert_eq!(
+                    parent
+                        .selected_template_imports(&[template.clone()])
+                        .unwrap()
+                        .roots,
+                    template_owners
+                );
+                let reopened = parent.published_source_original_selections().unwrap();
+                assert_eq!(reopened.len(), 1);
+                assert_eq!(
+                    reopened[0].context().semantic_sha256(),
+                    selected.semantic_sha256()
+                );
+                if let Some(retained) = &retained {
+                    let mut changed = issued.clone();
+                    let mut invalid = retained.as_ref().clone();
+                    invalid
+                        .graph
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .interface
+                        .interface_sha256[0] ^= 1;
+                    changed.template_imports = Some(Arc::new(invalid));
+                    assert!(changed.normalize().is_err());
+                }
+                if template_mask & (1 << (1 - root_index)) != 0 {
+                    let mut missing = issued.clone();
+                    missing.inventory = selected.inventory.clone();
+                    missing.compiler_projection =
+                        issued.compiler_projection.within_view(&missing.inventory);
+                    missing.lexical = selected.lexical.clone();
+                    assert!(missing.normalize().is_err());
+                }
+                assert_eq!(issued.semantic_sha256(), before);
+                assert_eq!(issued.inventory.descriptors(), custody);
+                assert_eq!(issued.template_imports, retained);
+                issued.normalize().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn published_original_selection_refuses_unissued_root_and_custody_loss() {
+        let issued = published_original_fixture();
+        let root = identity("fixture", "Alpha");
+        assert!(
+            issued
+                .issue_published_source_original("revision", "input", &identity("fixture", "Beta"))
+                .is_err(),
+            "available but unimported native output is not public source authority"
+        );
+        let selection = issued
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        assert_eq!(
+            selection.context().lexical_graph(),
+            &[ExactLexicalNode {
+                owner: root.clone(),
+                imports: vec![]
+            }]
+        );
+        assert!(
+            selection
+                .context()
+                .artifact_view()
+                .descriptors()
+                .iter()
+                .all(|row| row.owner == root),
+            "private target and unrelated available originals are excluded"
+        );
+        let mut narrowed = selection.context().as_ref().clone();
+        let interface = narrowed
+            .compiler_input_roles()
+            .iter()
+            .find(|role| role.is_published_source_original())
+            .unwrap()
+            .interface();
+        narrowed.inventory = narrowed.inventory.select_roots(vec![interface]).unwrap();
+        narrowed.compiler_projection = narrowed
+            .compiler_projection
+            .within_view(&narrowed.inventory);
+        assert!(
+            narrowed.normalize().is_err(),
+            "missing native custody must refuse rather than downgrade policy"
+        );
+        assert!(
+            selection.context().normalize().is_ok(),
+            "a failed projection preserves its immutable owner"
+        );
+    }
+
+    #[test]
+    fn published_original_manifest_binds_native_selection_and_restored_policy() {
+        let issued = published_original_fixture();
+        let root = identity("fixture", "Alpha");
+        let selection = issued
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let request = selection
+            .context()
+            .prepare_compilation(scratch.path(), b"metadata producer")
+            .unwrap();
+        let bytes = std::fs::read(&request.manifest).unwrap();
+        let manifest: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let fields = manifest.as_array().unwrap();
+        assert_eq!(fields.len(), 10);
+        assert_eq!(fields[1], text("11"));
+        let published = fields[9].as_array().unwrap();
+        assert_eq!(published.len(), 1);
+        let row = published[0].as_array().unwrap();
+        let originals = selection.context().recovery_products();
+        assert_eq!(originals.len(), 1);
+        assert_eq!(
+            row[..4],
+            [
+                text(&root.unit),
+                text(&root.module),
+                text(hex(&originals[0].owner().skinny_iface_sha256)),
+                text(hex(&originals[0].owner().product_sha256))
+            ]
+        );
+        assert_eq!(row[4], text("revision"));
+        assert_eq!(row[5], text("input"));
+        let view = selection.context().artifact_view();
+        let inventory = RecoveredArtifactInventory {
+            producer: issued.producer,
+            entries: view
+                .entries()
+                .into_iter()
+                .map(|entry| (entry.descriptor.id, entry))
+                .collect(),
+            recorded_inventory: true,
+            interfaces: view.interface_dependencies(),
+        };
+        let ids = view
+            .descriptors()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        let groups = view
+            .selected_native_groups()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut changed = selection.context().compiler_input_roles();
+        if let CompilerInputRole::PublishedSourceOriginal {
+            source_revision, ..
+        } = &mut changed[0]
+        {
+            source_revision.push_str("-changed");
+        } else {
+            panic!("selected root must carry published policy");
+        }
+        assert!(
+            inventory
+                .context_with_published_roles(
+                    &ids,
+                    &groups,
+                    &changed,
+                    selection.context().lexical.clone()
+                )
+                .is_err(),
+            "a valid inventory cannot repair changed publication facts"
+        );
+        assert!(inventory
+            .context_with_published_roles(
+                &ids,
+                &groups,
+                &selection.context().compiler_input_roles(),
+                selection.context().lexical.clone()
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn published_original_retains_lexical_only_interfaces_without_native_offer() {
+        let mut issued = published_original_fixture();
+        let root = identity("fixture", "Alpha");
+        let lexical_only = identity("fixture", "Beta");
+        issued
+            .lexical
+            .iter_mut()
+            .find(|node| node.owner == root)
+            .unwrap()
+            .imports
+            .push(lexical_only.clone());
+        issued.lexical.push(ExactLexicalNode {
+            owner: lexical_only.clone(),
+            imports: vec![],
+        });
+        issued.normalize().unwrap();
+        let selection = issued
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let metadata = selection.context().compiler_metadata_snapshot().unwrap();
+        assert!(matches!(
+            metadata.entries[&root].payload,
+            ArtifactPayload::Original(_)
+        ));
+        assert!(
+            matches!(
+                metadata.entries[&lexical_only].payload,
+                ArtifactPayload::Canonical(_)
+            ),
+            "a lexical interface requirement does not select its available native implementation"
+        );
+        assert_eq!(selection.context().recovery_products().len(), 1);
+        assert_eq!(selection.context().lexical_graph().len(), 2);
+        assert_eq!(
+            selection
+                .context()
+                .published_source_original_selections()
+                .unwrap()[0]
+                .context()
+                .semantic_sha256(),
+            selection.context().semantic_sha256()
+        );
+    }
+
+    #[test]
+    fn published_original_refuses_same_interface_with_another_native_identity() {
+        let mut issued = published_original_fixture();
+        let root = identity("fixture", "Alpha");
+        let selection = issued
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let original = selection.context().recovery_products().remove(0);
+        let interface = original.module_interface().unwrap().clone();
+        let mut owner = original.owner().clone();
+        owner.module_version = ModuleVersion([99; 32]);
+        let certification = crate::certified_products::encode_home_certification_with_module(
+            &owner,
+            &[],
+            &BTreeMap::new(),
+            interface.requirements(),
+            Sha256::digest(interface.certificate_bytes()).into(),
+        )
+        .unwrap();
+        let mut variant = CertifiedRecoveryProduct::from_certification(
+            owner,
+            original.interface_bytes().to_vec(),
+            original.product_bytes().to_vec(),
+            original.package_imports_bytes().to_vec(),
+            certification,
+        )
+        .with_module_interface(interface)
+        .unwrap();
+        if let Some(source) = original.source_sha256() {
+            variant = variant.with_source_sha256(source);
+        }
+        let variant = crate::certified_products::tests::recovered_witness_fixtures(&[variant])
+            .remove(0)
+            .product;
+        assert_eq!(variant.module_interface(), original.module_interface());
+        assert_ne!(variant.owner(), original.owner());
+        let mut entries = issued
+            .inventory
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                entry.descriptor.owner != root
+                    || !matches!(entry.payload, ArtifactPayload::Original(_))
+            })
+            .collect::<Vec<_>>();
+        entries.push(Arc::new(
+            ArtifactEntry::original(issued.producer, variant).unwrap(),
+        ));
+        let inventory = ArtifactInventory::default();
+        issued.inventory = inventory
+            .admit_shared(&inventory.empty_view(), entries)
+            .unwrap();
+        issued.compiler_projection =
+            CompilerInputProjection::from_issued_entries(&issued.inventory.entries()).unwrap();
+        let replacement = issued
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let before = selection.context().semantic_sha256();
+        assert!(selection
+            .context()
+            .as_ref()
+            .clone()
+            .with_published_source_originals(&replacement)
+            .is_err());
+        assert_eq!(selection.context().semantic_sha256(), before);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(policy_property_config())]
+        #[test]
+        fn published_original_composition_recovery_history(
+            revision in "[a-z]{1,12}", history in proptest::collection::vec(0u8..4, 1..24),
+        ) {
+            let issued = published_original_fixture();
+            let root = identity("fixture", "Alpha");
+            let selection = issued.issue_published_source_original(&revision, "input", &root).unwrap();
+            let mut context = ExactDeclarationContext::new(&[], &[], vec![]).unwrap().with_published_source_originals(&selection).unwrap();
+            let expected = context.semantic_sha256();
+            let original = context.compiler_input_roles().iter().find_map(CompilerInputRole::original).unwrap();
+            for operation in history {
+                match operation {
+                    0 => { context = context.with_published_source_originals(&selection).unwrap(); },
+                    1 => {
+                        let view = context.artifact_view();
+                        let inventory = RecoveredArtifactInventory {
+                            producer: context.producer,
+                            entries: view.entries().into_iter().map(|entry| (entry.descriptor.id, entry)).collect(),
+                            recorded_inventory: true, interfaces: view.interface_dependencies(),
+                        };
+                        let ids = view.descriptors().into_iter().map(|row| row.id).collect::<Vec<_>>();
+                        let groups = view.selected_native_groups().into_iter().collect::<Vec<_>>();
+                        let roles = context.compiler_input_roles();
+                        proptest::prop_assert!(inventory.context_with_roles(&ids, &groups, &roles, context.lexical.clone()).is_err());
+                        context = inventory.context_with_published_roles(&ids, &groups, &roles, context.lexical.clone()).unwrap();
+                        let reopened = context.published_source_original_selections().unwrap();
+                        proptest::prop_assert_eq!(reopened.len(), 1);
+                        context = context.with_published_source_originals(&reopened[0]).unwrap();
+                    },
+                    2 => {
+                        let conflicting = issued.issue_published_source_original(&(revision.clone() + "-other"), "input", &root).unwrap();
+                        proptest::prop_assert!(context.clone().with_published_source_originals(&conflicting).is_err());
+                    },
+                    _ => {
+                        let mut altered = context.clone();
+                        altered.lexical.clear();
+                        proptest::prop_assert!(altered.normalize().is_err());
+                        context = context.extend(&[], &[], vec![]).unwrap();
+                    },
+                }
+                proptest::prop_assert_eq!(context.semantic_sha256(), expected);
+                proptest::prop_assert!(context.compiler_input_roles().iter().any(|role| role.original() == Some(original) && role.is_published_source_original()));
+            }
+        }
+    }
+
     #[test]
     fn recovery_capture_admits_embedded_canonical_and_refuses_corruption() {
         let producer = [2; 32];
@@ -7694,7 +8185,7 @@ mod tests {
         let native_descriptor = |request: &ExactCompilationRequest| {
             let bytes = std::fs::read(&request.manifest).unwrap();
             let manifest: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-            assert_eq!(manifest.as_array().unwrap()[1], text("10"));
+            assert_eq!(manifest.as_array().unwrap()[1], text("11"));
             let row = manifest.as_array().unwrap()[6]
                 .as_array()
                 .unwrap()
@@ -11667,7 +12158,7 @@ mod tests {
         ];
         let manifest = encode_scope_manifest(fields, Some(execution), None).unwrap();
         let decoded: Value = ciborium::de::from_reader(manifest.as_slice()).unwrap();
-        assert_eq!(decoded.as_array().unwrap()[1], text("10"));
+        assert_eq!(decoded.as_array().unwrap()[1], text("11"));
         std::fs::write(root.join("exact-declaration-scope.cbor"), manifest).unwrap();
         let missing = execution_scope_fixture(&entries[..1], &root)
             .unwrap()
@@ -11855,8 +12346,8 @@ mod tests {
         let bytes = std::fs::read(&request.manifest).unwrap();
         let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let fields = value.as_array().unwrap();
-        assert_eq!(fields.len(), 9);
-        assert_eq!(fields[1], text("9"));
+        assert_eq!(fields.len(), 10);
+        assert_eq!(fields[1], text("11"));
         assert_eq!(fields[8], Value::Null);
         assert_eq!(
             fields[7].as_array().unwrap()[1].as_array().unwrap().len(),

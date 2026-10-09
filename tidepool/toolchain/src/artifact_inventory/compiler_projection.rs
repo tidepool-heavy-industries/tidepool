@@ -16,22 +16,34 @@ pub enum CompilerInputRole {
         interface: ArtifactId,
         original: ArtifactId,
     },
+    PublishedSourceOriginal {
+        interface: ArtifactId,
+        original: ArtifactId,
+        source_revision: String,
+        original_input_identity: String,
+        selection_sha256: [u8; 32],
+    },
 }
 
 impl CompilerInputRole {
     pub fn interface(&self) -> ArtifactId {
         match self {
-            Self::InterfaceOnly { interface } | Self::ReusableOriginal { interface, .. } => {
-                *interface
-            }
+            Self::InterfaceOnly { interface }
+            | Self::ReusableOriginal { interface, .. }
+            | Self::PublishedSourceOriginal { interface, .. } => *interface,
         }
     }
 
     pub fn original(&self) -> Option<ArtifactId> {
         match self {
             Self::InterfaceOnly { .. } => None,
-            Self::ReusableOriginal { original, .. } => Some(*original),
+            Self::ReusableOriginal { original, .. }
+            | Self::PublishedSourceOriginal { original, .. } => Some(*original),
         }
+    }
+
+    pub fn is_published_source_original(&self) -> bool {
+        matches!(self, Self::PublishedSourceOriginal { .. })
     }
 }
 
@@ -91,6 +103,8 @@ impl CompilerInputProjection {
 
     /// Restrict already issued roles to a proved retained surface. An original
     /// absent from that surface loses its reuse offer, never its exact type role.
+    /// Published selections retain their policy so missing custody refuses at
+    /// validation instead of silently changing source-selection behavior.
     pub(crate) fn within_view(&self, view: &ArtifactView) -> Self {
         let ids = view
             .descriptors()
@@ -102,21 +116,24 @@ impl CompilerInputProjection {
                 .roles
                 .iter()
                 .filter_map(|(owner, role)| {
-                    ids.contains(&role.interface()).then(|| {
-                        let selected = match role.original() {
-                            Some(original) if ids.contains(&original) => role.clone(),
-                            _ => CompilerInputRole::InterfaceOnly {
-                                interface: role.interface(),
-                            },
-                        };
-                        (owner.clone(), selected)
-                    })
+                    (ids.contains(&role.interface()) || role.is_published_source_original()).then(
+                        || {
+                            let selected = match role.original() {
+                                _ if role.is_published_source_original() => role.clone(),
+                                Some(original) if ids.contains(&original) => role.clone(),
+                                _ => CompilerInputRole::InterfaceOnly {
+                                    interface: role.interface(),
+                                },
+                            };
+                            (owner.clone(), selected)
+                        },
+                    )
                 })
                 .collect(),
         }
     }
 
-    fn admit_role(
+    pub(crate) fn admit_role(
         &mut self,
         owner: ExactModuleIdentity,
         incoming: CompilerInputRole,
@@ -138,8 +155,15 @@ impl CompilerInputProjection {
                     owner,
                 }));
             }
+            if previous.is_published_source_original()
+                && incoming.is_published_source_original()
+                && *previous != incoming
+            {
+                return Err(failure("conflicting published source original selection"));
+            }
             match (previous.original(), incoming.original()) {
                 (None, Some(_)) => *previous = incoming,
+                _ if incoming.is_published_source_original() => *previous = incoming,
                 _ => {}
             }
         } else {
@@ -182,7 +206,8 @@ impl CompilerInputProjection {
                 .roles
                 .iter()
                 .map(|(owner, role)| {
-                    let selected = if owners.contains(owner) {
+                    let selected = if owners.contains(owner) || role.is_published_source_original()
+                    {
                         role.clone()
                     } else {
                         CompilerInputRole::InterfaceOnly {

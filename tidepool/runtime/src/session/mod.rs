@@ -24,7 +24,9 @@ mod dialect;
 mod exact_recovery_acceptance_tests;
 pub mod facade;
 mod lexical_projection;
+mod published_source;
 pub use lexical_projection::CertifiedDeclarationProjection;
+pub use published_source::PendingPublishedSourceOriginals;
 pub mod inspection;
 pub mod kernel;
 mod paired_publication;
@@ -658,6 +660,9 @@ impl PublicManifestBase {
                     bindings,
                     self.final_source_instances,
                     None,
+                    surface
+                        .map(|surface| surface.compiler_context.clone())
+                        .unwrap_or_default(),
                 )
                 .map_err(|error| SessionError::RecoveryManifest {
                     path: self.path.clone(),
@@ -824,13 +829,23 @@ pub struct SessionLib {
     /// violate the rule that a scope's lookups are visible only to itself and
     /// its descendants, never sideways or upward; the regression is pinned by
     /// `session_decl_scope_tree.rs`.
-    tips: HashMap<ScopeId, Generation>,
+    tips: HashMap<ScopeId, ScopeDeclarationState>,
     durable_graph: Option<DurableDeclarationGraph>,
     /// Actor incarnations in one session have distinct process-local lexical
     /// scopes, including inherited-context children.
     durable_public_scopes: BTreeMap<RecoveryPublicOwner, ScopeId>,
     #[cfg(test)]
     fail_recovery_durability_once: bool,
+}
+
+/// One scoped declaration baseline and its privately issued source custody.
+#[derive(Clone, Default)]
+pub(crate) struct ScopeDeclarationState {
+    pub(crate) tip: Generation,
+    pub(crate) exact_context:
+        Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    pub(crate) published_sources:
+        Vec<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
 }
 
 /// The actual native manifest confirmation state, shared by read-only owner
@@ -1081,7 +1096,7 @@ impl SessionLib {
             // ROOT starts at the empty environment. Seeding it explicitly is
             // what keeps `scope_tip`'s miss case meaning "empty" rather than
             // "whatever was pushed last anywhere" — see the field docs.
-            tips: HashMap::from([(ScopeId::ROOT, Generation(0))]),
+            tips: HashMap::from([(ScopeId::ROOT, ScopeDeclarationState::default())]),
             durable_graph: None,
             durable_public_scopes: BTreeMap::new(),
             #[cfg(test)]
@@ -1560,7 +1575,9 @@ impl SessionLib {
     /// starts empty rather than inheriting anything.
     #[must_use]
     pub fn scope_tip(&self, scope: ScopeId) -> Generation {
-        self.tips.get(&scope).copied().unwrap_or(Generation(0))
+        self.tips
+            .get(&scope)
+            .map_or(Generation(0), |state| state.tip)
     }
 
     /// Seed `scope`'s decl tip with the generation it INHERITS — its parent's
@@ -1572,7 +1589,90 @@ impl SessionLib {
     /// scope that has already pushed turns, and re-seeding a live scope would
     /// silently drop its declarations.
     pub fn seed_scope(&mut self, scope: ScopeId, inherited: Generation) {
-        self.tips.entry(scope).or_insert(inherited);
+        let context = self.log.joined_context_at(inherited);
+        self.tips
+            .entry(scope)
+            .or_insert_with(|| ScopeDeclarationState {
+                tip: inherited,
+                exact_context: context,
+                published_sources: Vec::new(),
+            });
+    }
+
+    /// Read the semantic current context, including an issued source original
+    /// published while the declaration generation was still zero.
+    pub(crate) fn current_exact_context_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>> {
+        self.tips
+            .get(&scope)
+            .and_then(|state| state.exact_context.clone())
+    }
+
+    pub(crate) fn set_published_source_context_in(
+        &mut self,
+        scope: ScopeId,
+        tip: Generation,
+        context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    ) {
+        let state = self.tips.entry(scope).or_default();
+        state.tip = tip;
+        state.exact_context = Some(context);
+    }
+
+    pub(crate) fn retain_published_source_selection_in(
+        &mut self,
+        scope: ScopeId,
+        selection: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
+    ) {
+        let sources = &mut self.tips.entry(scope).or_default().published_sources;
+        if !sources
+            .iter()
+            .any(|old| old.context() == selection.context())
+        {
+            sources.push(selection);
+        }
+    }
+
+    pub(crate) fn published_source_selections_in(
+        &self,
+        scope: ScopeId,
+    ) -> &[Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>] {
+        self.tips
+            .get(&scope)
+            .map_or(&[], |state| state.published_sources.as_slice())
+    }
+
+    pub(crate) fn source_selections_preserved(
+        &self,
+        scope: ScopeId,
+        context: Option<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+    ) -> bool {
+        let sources = self.published_source_selections_in(scope);
+        if sources.is_empty() {
+            return true;
+        }
+        let Some(context) = context else {
+            return false;
+        };
+        let roles = context.compiler_input_roles();
+        sources.iter().all(|source| source.context().compiler_input_roles().iter()
+            .filter(|role| matches!(role, tidepool_toolchain::artifact_inventory::CompilerInputRole::PublishedSourceOriginal { .. }))
+            .all(|role| roles.contains(role)))
+    }
+
+    pub(crate) fn inherit_source_context(&mut self, parent: ScopeId, child: ScopeId) {
+        if let Some(state) = self.tips.get(&parent).cloned() {
+            self.tips.insert(child, state);
+        }
+    }
+
+    pub(crate) fn set_scope_tip_in(&mut self, scope: ScopeId, tip: Generation) {
+        let context = self.log.joined_context_at(tip);
+        let state = self.tips.entry(scope).or_default();
+        state.tip = tip;
+        state.exact_context = context;
     }
 
     /// The current session-library module, or `None` before any declaration.
@@ -2030,7 +2130,7 @@ impl SessionLib {
         let sources = vec![receipt.source.replay_source(external)];
         let workbench_imports = receipt.source.prologue.workbench_imports();
 
-        let tip_before = self.tips.get(&scope).copied();
+        let tip_before = self.tips.get(&scope).cloned();
         let gen = self.push_turn_in(
             scope,
             DeclTurn {
@@ -2110,7 +2210,7 @@ impl SessionLib {
         let rendered = render::render_module_with_vals(&log, generation, &self.env, import_modules);
         DeclarationCandidateRender {
             projection_baseline: None,
-            exact_context: self.log.joined_context_at(self.scope_tip(scope)),
+            exact_context: self.current_exact_context_in(scope),
             session_id: self.id,
             root: self.root.clone(),
             extra_include: self.extra_include.clone(),
@@ -2190,7 +2290,7 @@ impl SessionLib {
             || staged.root != self.root
             || (!staged.reserved && staged.base_generation != self.log.generation())
             || staged.base_tip != self.scope_tip(staged.scope)
-            || staged.exact_context != self.log.joined_context_at(staged.base_tip)
+            || staged.exact_context != self.current_exact_context_in(staged.scope)
             || !slot_matches
             || staged.visible_values != visible_values
         {
@@ -2199,6 +2299,15 @@ impl SessionLib {
         if staged.certified_authored.as_ref().is_some_and(|prepared| {
             prepared.generation != staged.generation || prepared.parent != staged.base_tip
         }) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        if !self.source_selections_preserved(
+            staged.scope,
+            staged
+                .certified_authored
+                .as_ref()
+                .map(|prepared| prepared.projection.context()),
+        ) {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let staged_graph = if staged.reserved
@@ -2258,7 +2367,7 @@ impl SessionLib {
                     .certified_authored
                     .expect("authored evidence preflight"),
             ));
-            self.tips.insert(staged.scope, staged.generation);
+            self.set_scope_tip_in(staged.scope, staged.generation);
             staged.generation
         } else {
             self.push_turn_in(staged.scope, staged.turn.clone())?
@@ -2510,6 +2619,9 @@ impl SessionLib {
         scope: ScopeId,
         mut turn: DeclTurn,
     ) -> Result<Generation, SessionError> {
+        if !self.published_source_selections_in(scope).is_empty() {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
         let tip = self.scope_tip(scope);
         turn.parent = (tip.0 > 0).then_some(tip);
         let gen = if self.durable_graph.is_some() {
@@ -2519,7 +2631,7 @@ impl SessionLib {
         } else {
             self.log.push(turn)
         };
-        self.tips.insert(scope, gen);
+        self.set_scope_tip_in(scope, gen);
         Ok(gen)
     }
 
@@ -2528,7 +2640,7 @@ impl SessionLib {
     /// push), which may be `None` if `scope` had never been used yet. Paired
     /// with a reserved tombstone at the failed generation on every rollback
     /// path so its identity cannot be reused, and touches no other tip.
-    fn restore_tip(&mut self, scope: ScopeId, tip_before: Option<Generation>) {
+    fn restore_tip(&mut self, scope: ScopeId, tip_before: Option<ScopeDeclarationState>) {
         match tip_before {
             Some(g) => {
                 self.tips.insert(scope, g);
@@ -2633,7 +2745,7 @@ impl SessionLib {
             let staged = validate_declaration_candidate(candidate, scratch.path())?;
             return Ok(Some(staged));
         }
-        let tip_before = self.tips.get(&scope).copied();
+        let tip_before = self.tips.get(&scope).cloned();
         let gen = self.push_turn_in(
             scope,
             DeclTurn {

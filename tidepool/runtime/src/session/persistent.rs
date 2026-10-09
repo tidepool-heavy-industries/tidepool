@@ -302,6 +302,7 @@ struct CompileViewKey {
     tip: Generation,
     bindings: BindingScopeWitness,
     stubs: u64,
+    public_epoch: u64,
 }
 
 struct CachedCompileView {
@@ -1539,6 +1540,11 @@ impl PersistentSession {
                 tip: lib.scope_tip(scope),
                 bindings,
                 stubs: self.stub_revision,
+                public_epoch: self
+                    .public_visibility_epochs
+                    .get(&scope)
+                    .copied()
+                    .unwrap_or(0),
             });
         if let Some(key) = &key {
             if let Some(cached) = self
@@ -1628,7 +1634,7 @@ impl PersistentSession {
                 reachable_values,
                 shadowing,
                 staged_hiding: Vec::new(),
-                exact_context: lib.log.joined_context_at(lib.scope_tip(scope)),
+                exact_context: lib.current_exact_context_in(scope),
             }),
         }
         .canonicalize()
@@ -1982,6 +1988,7 @@ impl PersistentSession {
         if let Some(lib) = self.lib.as_mut() {
             let inherited = lib.scope_tip(parent);
             lib.seed_scope(child, inherited);
+            lib.inherit_source_context(parent, child);
         }
         self.bindings.seed_scope(&self.scopes, parent, child);
         Some(child)
@@ -1999,6 +2006,7 @@ impl PersistentSession {
         if let Some(lib) = self.lib.as_mut() {
             let inherited = lib.scope_tip(parent);
             lib.seed_scope(root, inherited);
+            lib.inherit_source_context(parent, root);
         }
         self.bindings
             .seed_detached_scope(&self.scopes, parent, root);
@@ -2045,7 +2053,10 @@ impl PersistentSession {
 
     /// Reserve map capacity and check exhaustion before an authoritative
     /// manifest rename. Finalization only updates this existing entry.
-    fn prepare_public_visibility_advance(&mut self, scope: ScopeId) -> Result<u64, SessionError> {
+    pub(super) fn prepare_public_visibility_advance(
+        &mut self,
+        scope: ScopeId,
+    ) -> Result<u64, SessionError> {
         let path = self
             .lib
             .as_ref()
@@ -2058,6 +2069,10 @@ impl PersistentSession {
                 path,
                 detail: "public visibility epoch exhausted".into(),
             })
+    }
+
+    pub(super) fn commit_public_visibility_advance(&mut self, scope: ScopeId, epoch: u64) {
+        self.public_visibility_epochs.insert(scope, epoch);
     }
 
     /// Full internal identity of the paired lexical view. Observation may
@@ -2182,15 +2197,31 @@ impl PersistentSession {
             })?;
         let generation = surface.declaration_root.unwrap_or(Generation(0));
         let epoch = surface.epoch;
-        if generation != Generation(0) && lib.log.recovered_at(generation).is_none() {
+        let recovered_context = lib.recovered_public_compiler_context(owner)?;
+        let published_sources = recovered_context
+            .as_ref()
+            .map(|context| context.published_source_original_selections())
+            .transpose()?
+            .unwrap_or_default();
+        if generation != Generation(0)
+            && (recovered_context.is_none() || lib.log.recovered_at(generation).is_none())
+        {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
-                detail: "persisted declaration root has not been hydrated".into(),
+                detail: "persisted declaration root lacks its exact public compiler selection"
+                    .into(),
             });
         }
         let scope = self.mint_isolated_scope();
         let lib = self.lib.as_mut().expect("declaration library checked");
-        lib.seed_scope(scope, generation);
+        lib.tips.insert(
+            scope,
+            super::ScopeDeclarationState {
+                tip: generation,
+                exact_context: recovered_context,
+                published_sources,
+            },
+        );
         if let Err(error) = lib.bind_durable_public_scope(owner.clone(), scope) {
             self.retire_scope(scope);
             return Err(error);
@@ -2451,6 +2482,11 @@ impl PersistentSession {
             })
             .collect::<Vec<_>>();
         let sources = self.recovery_source_instances(snapshot.source_instances.iter().cloned())?;
+        let exact_context = lib.current_exact_context_in(target);
+        let compiler_context = exact_context
+            .as_ref()
+            .map(|context| super::recovery::RecoveryCompilerContext::capture(context))
+            .unwrap_or_default();
         if let Some(surface) = state
             .graph
             .public_surfaces()
@@ -2463,6 +2499,7 @@ impl PersistentSession {
                 || surface.epoch != snapshot.epoch
                 || surface.bindings != bindings
                 || surface.source_instances != sources
+                || surface.compiler_context != compiler_context
             {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
@@ -2473,16 +2510,30 @@ impl PersistentSession {
         let mut public_scopes = lib.durable_public_scopes.clone();
         public_scopes.insert(owner.clone(), target);
         let mut tips = lib.tips.clone();
-        tips.insert(target, snapshot.declaration_tip);
+        tips.insert(
+            target,
+            super::ScopeDeclarationState {
+                tip: snapshot.declaration_tip,
+                exact_context: exact_context.clone(),
+                published_sources: lib.published_source_selections_in(target).to_vec(),
+            },
+        );
+        let (snapshot_graph, compiler_context) =
+            super::recovery_hydration::materialize_public_compiler_context(
+                &state.graph,
+                root,
+                exact_context.as_ref(),
+            )?;
         let staged = super::recovery::stage_public_visibility_v2(
             &state.path,
             root,
-            &state.graph,
+            &snapshot_graph,
             owner.clone(),
             0,
             bindings,
             sources,
             (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip),
+            compiler_context,
         )
         .map_err(|error| invalid(error.to_string()))?;
         retained.validate_owner()?;
@@ -2592,9 +2643,17 @@ impl PersistentSession {
             .surface(predecessor)
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         let generation = surface.declaration_root.unwrap_or(Generation(0));
-        if generation != Generation(0) && lib.log.recovered_at(generation).is_none() {
+        let recovered_context = lib.recovered_public_compiler_context(predecessor)?;
+        let published_sources = recovered_context
+            .as_ref()
+            .map(|context| context.published_source_original_selections())
+            .transpose()?
+            .unwrap_or_default();
+        if generation != Generation(0)
+            && (recovered_context.is_none() || lib.log.recovered_at(generation).is_none())
+        {
             return Err(invalid(
-                "successor declaration root has not been hydrated".into(),
+                "successor declaration root lacks its exact public compiler selection".into(),
             ));
         }
         let root = state
@@ -2683,7 +2742,14 @@ impl PersistentSession {
         // Preflight proved this fresh scope has exactly G0. It may already
         // have an explicit G0 entry from ordinary scope minting, so transfer
         // must set the recovered tip rather than use inheritance-only seeding.
-        lib.tips.insert(target, generation);
+        lib.tips.insert(
+            target,
+            super::ScopeDeclarationState {
+                tip: generation,
+                exact_context: recovered_context,
+                published_sources,
+            },
+        );
         lib.durable_public_scopes.insert(successor, target);
         self.public_visibility_epochs.insert(target, epoch);
         self.invalidate_execution_admissions_after_owner_transfer(admission_epoch);
@@ -2797,7 +2863,12 @@ impl PersistentSession {
                 current: state.graph.checksum().to_owned(),
             }));
         }
-        if current == bootstrap.initial {
+        let exact_context = lib.current_exact_context_in(scope);
+        let compiler_context = exact_context
+            .as_ref()
+            .map(|context| super::recovery::RecoveryCompilerContext::capture(context))
+            .unwrap_or_default();
+        if current == bootstrap.initial && compiler_context == surface.compiler_context {
             return Ok(PublicManifestCommit::Durable);
         }
         let next_epoch =
@@ -2820,16 +2891,23 @@ impl PersistentSession {
             })
             .collect();
         let sources = self.recovery_source_instances(current.source_instances.iter().cloned())?;
+        let (snapshot_graph, compiler_context) =
+            super::recovery_hydration::materialize_public_compiler_context(
+                &state.graph,
+                root,
+                exact_context.as_ref(),
+            )?;
         let staged = super::recovery::stage_public_visibility_at_epoch_v2(
             &state.path,
             root,
-            &state.graph,
+            &snapshot_graph,
             bootstrap.owner.clone(),
             surface.epoch,
             next_epoch,
             bindings,
             sources,
             tip,
+            compiler_context,
         )
         .map_err(|error| SessionError::RecoveryManifest {
             path: state.path.clone(),
@@ -2901,6 +2979,12 @@ impl PersistentSession {
             || surface.declaration_root
                 != (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip)
             || surface.epoch != snapshot.epoch
+            || surface.compiler_context
+                != lib
+                    .current_exact_context_in(target)
+                    .as_ref()
+                    .map(|context| super::recovery::RecoveryCompilerContext::capture(context))
+                    .unwrap_or_default()
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
@@ -3639,6 +3723,9 @@ impl PersistentSession {
         let mut retired = Vec::new();
         let mut source_instances = Vec::new();
         for dead in &doomed {
+            if let Some(lib) = self.lib.as_mut() {
+                lib.tips.remove(dead);
+            }
             self.compile_views.lock().remove(dead);
             let drained = self.bindings.drain_scope_with_sources(*dead);
             retired.extend(drained.bindings);
@@ -4027,7 +4114,7 @@ mod checkpoint_scope_tests {
             parent: None,
         };
         let generation = session.lib_mut().log.push(turn);
-        session.lib_mut().tips.insert(scope, generation);
+        session.lib_mut().set_scope_tip_in(scope, generation);
         let declared = session.scoped_compile_view_in(scope).unwrap();
         assert_ne!(declared.digest, rebound.digest);
         // Same session/path/tip counters cannot reuse another library's cache.
@@ -4047,7 +4134,7 @@ mod checkpoint_scope_tests {
             retracts: Vec::new(),
             parent: None,
         });
-        replacement.tips.insert(scope, generation);
+        replacement.set_scope_tip_in(scope, generation);
         *session.lib_mut() = replacement;
         let replaced = session.scoped_compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&declared, &replaced));
@@ -4317,7 +4404,7 @@ mod checkpoint_scope_tests {
             .begin_durable_public_bootstrap(owner.clone(), public)
             .unwrap();
         let original = std::fs::read(root.path().join("declarations.json")).unwrap();
-        session.lib_mut().tips.insert(public, Generation(99));
+        session.lib_mut().set_scope_tip_in(public, Generation(99));
         assert!(matches!(
             session.publish_durable_public_bootstrap(seal),
             Err(SessionError::InvalidDurablePublicAdmission {
