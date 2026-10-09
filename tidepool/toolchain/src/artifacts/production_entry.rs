@@ -223,11 +223,14 @@ fn hex_sha256(bytes: &[u8]) -> String {
 /// compiler endpoint. Source replay and module candidate caches are unavailable.
 /// The caller durably establishes the output parent before requesting publication.
 /// An existing unfinished reservation refuses another execution of that identity.
+/// The validated output is handed off only after the complete entry and its
+/// publication are durable. An unconfirmed publication must use the completed
+/// loader to recover that original, rather than execute source again.
 pub fn prepare_frozen_production_entry(
     sources: &FrozenEntrySources,
     scratch: &Path,
     output: &Path,
-) -> Result<(), CompileError> {
+) -> Result<ProductionEntryOutput, CompileError> {
     sources.revalidate()?;
     if output.exists() || !scratch.is_dir() {
         return Err(invalid(
@@ -242,7 +245,7 @@ pub fn prepare_frozen_production_entry(
         include: &include,
         fallback_module_name: "Input",
     };
-    compile_invocation_inner(
+    let output = compile_invocation_inner(
         &invocation,
         &mut |_, _, _| {},
         CompilationPolicy::RetainedEntry {
@@ -251,7 +254,9 @@ pub fn prepare_frozen_production_entry(
             sources: &ProductionEntrySources::FrozenWorkspace(sources.clone()),
         },
     )?;
-    Ok(())
+    output
+        .original_entry
+        .ok_or_else(|| invalid("fresh preparation lacks its published original entry"))
 }
 
 /// Compile a settled entry under one declared frozen native source selection.
@@ -398,7 +403,7 @@ impl EntryPreparation {
         sources: &ProductionEntrySources,
         deployment: &AdmittedCompilerDeployment,
         targets: &[&str],
-    ) -> Result<(), CompileError> {
+    ) -> Result<ProductionEntryOutput, CompileError> {
         if targets != ["__prepared"] {
             return Err(invalid(
                 "requires one original settled target and absent output",
@@ -425,7 +430,8 @@ impl EntryPreparation {
         else {
             return Err(invalid("configured compiler deployment unavailable"));
         };
-        load_selected_production_entry(&self.staging, &authority, sources)?;
+        let validated = load_selected_production_entry(&self.staging, &authority, sources)?;
+        checkpoint(EntryCheckpoint::TreeSync)?;
         sync_entry_tree(&self.staging)?;
         checkpoint(EntryCheckpoint::ReadyRename)?;
         require_absent_output(&self.output)?;
@@ -442,7 +448,8 @@ impl EntryPreparation {
                 path: self.output.clone(),
                 source,
             })?;
-        Ok(())
+        checkpoint(EntryCheckpoint::Handoff)?;
+        Ok(validated)
     }
 }
 
@@ -460,11 +467,19 @@ pub(super) enum EntryCheckpoint {
     ReservationSync,
     ReleaseSync,
     ManifestWrite,
+    TreeSync,
     ReadyRename,
     PublicationSync,
+    Handoff,
 }
 
 fn checkpoint(stage: EntryCheckpoint) -> std::io::Result<()> {
+    #[cfg(test)]
+    OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer(stage);
+        }
+    });
     #[cfg(test)]
     if FAILURE.with(|failure| {
         if failure.get().is_some_and(|(selected, _)| selected == stage) {
@@ -477,11 +492,37 @@ fn checkpoint(stage: EntryCheckpoint) -> std::io::Result<()> {
         return Err(std::io::Error::other("injected entry preparation failure"));
     }
     let _ = stage;
-    Ok(())
+    crate::host_work::checkpoint()
 }
 
 #[cfg(test)]
 thread_local! { static FAILURE: std::cell::Cell<Option<(EntryCheckpoint, bool)>> = const { std::cell::Cell::new(None) }; }
+
+#[cfg(test)]
+thread_local! {
+    static OBSERVER: std::cell::RefCell<Option<Box<dyn FnMut(EntryCheckpoint)>>> = const { std::cell::RefCell::new(None) };
+    static ENTRY_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn entry_load_count() -> usize {
+    ENTRY_LOADS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(super) fn with_checkpoint_observer<T>(
+    observer: impl FnMut(EntryCheckpoint) + 'static,
+    action: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Box<dyn FnMut(EntryCheckpoint)>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OBSERVER.with(|observer| *observer.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(OBSERVER.with(|slot| slot.replace(Some(Box::new(observer)))));
+    action()
+}
 
 #[cfg(test)]
 pub(super) fn with_failure<T>(stage: EntryCheckpoint, action: impl FnOnce() -> T) -> T {
@@ -535,6 +576,8 @@ pub fn load_selected_production_entry(
     authority: &CompilerDeploymentAuthority,
     sources: &ProductionEntrySources,
 ) -> Result<ProductionEntryOutput, CompileError> {
+    #[cfg(test)]
+    ENTRY_LOADS.with(|loads| loads.set(loads.get() + 1));
     crate::host_work::checkpoint()?;
     let bytes = crate::checked_cell::read(directory.join(MANIFEST), 16 << 20)?;
     let manifest: EntryManifest = serde_json::from_slice(&bytes).map_err(invalid)?;
@@ -645,6 +688,95 @@ fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>, CompileError> {
 #[cfg(test)]
 mod source_selection_tests {
     use super::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::FileFailurePersistence;
+
+    #[derive(Clone, Debug)]
+    enum ReservationOperation {
+        Reserve,
+        Submit,
+        Release { fail_sync: bool },
+        Abandon,
+    }
+
+    fn reservation_operation() -> impl Strategy<Value = ReservationOperation> {
+        prop_oneof![
+            Just(ReservationOperation::Reserve),
+            Just(ReservationOperation::Submit),
+            any::<bool>().prop_map(|fail_sync| ReservationOperation::Release { fail_sync }),
+            Just(ReservationOperation::Abandon),
+        ]
+    }
+
+    fn property_config() -> ProptestConfig {
+        let mut config = ProptestConfig::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 128;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        config
+    }
+
+    proptest! {
+        #![proptest_config(property_config())]
+        #[test]
+        fn reservation_histories_preserve_submitted_originals(
+            operations in prop::collection::vec(reservation_operation(), 1..48),
+        ) {
+            let root = tempfile::tempdir().unwrap();
+            let output = root.path().join("entry");
+            let staging = root.path().join("entry.preparing");
+            let mut reservation = None;
+            let mut reserved = false;
+            let mut submitted = false;
+            for operation in operations {
+                match operation {
+                    ReservationOperation::Reserve => {
+                        let result = EntryPreparation::reserve(&output);
+                        if reserved {
+                            prop_assert!(matches!(result, Err(CompileError::EntryPreparationUnfinished { .. })), "unfinished original cannot be reserved again");
+                        } else {
+                            reservation = Some(result.unwrap());
+                            reserved = true;
+                            submitted = false;
+                        }
+                    }
+                    ReservationOperation::Submit => {
+                        if let Some(owner) = reservation.as_mut() {
+                            owner.begin_execution();
+                            std::fs::write(owner.raw().join("original"), b"issued bytes").unwrap();
+                            submitted = true;
+                        }
+                    }
+                    ReservationOperation::Release { fail_sync } => {
+                        if let Some(owner) = reservation.take() {
+                            let result = if fail_sync && !submitted {
+                                with_failure(EntryCheckpoint::ReleaseSync, || owner.release_if_unsubmitted())
+                            } else {
+                                owner.release_if_unsubmitted()
+                            };
+                            if fail_sync && !submitted {
+                                prop_assert!(matches!(result, Err(CompileError::EntryReservationReleaseUnconfirmed { .. })), "failed sync cannot confirm release");
+                            } else {
+                                prop_assert!(result.is_ok());
+                            }
+                            if !submitted {
+                                reserved = false;
+                            }
+                        }
+                    }
+                    ReservationOperation::Abandon => { drop(reservation.take()); }
+                }
+                prop_assert_eq!(staging.exists(), reserved);
+                prop_assert!(!output.exists(), "reservation never issues a published handoff");
+                if submitted {
+                    prop_assert_eq!(std::fs::read(staging.join("raw/original")).unwrap(), b"issued bytes");
+                }
+            }
+        }
+    }
     use crate::toolchain::NativeSourceRole;
 
     #[test]

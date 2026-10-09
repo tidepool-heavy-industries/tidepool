@@ -3539,6 +3539,7 @@ pub fn compile_invocation(
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
     compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Runtime)
+        .map(|output| output.artifacts)
 }
 
 /// Compile fresh source against immutable declaration owners through the same
@@ -3550,6 +3551,7 @@ pub fn compile_invocation_in_context(
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
     compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Exact { context })
+        .map(|output| output.artifacts)
 }
 
 /// Compile a declaration probe in full-home-product mode, which produces
@@ -3579,6 +3581,7 @@ pub(crate) fn compile_authored_products(
             admission: authored,
         },
     )
+    .map(|output| output.artifacts)
 }
 
 /// Build an explicitly selected immutable source cohort at its final deployment
@@ -3945,11 +3948,16 @@ fn validate_declared_source_closure(
     Ok(())
 }
 
+struct CompilationOutput {
+    artifacts: CompiledArtifacts,
+    original_entry: Option<ProductionEntryOutput>,
+}
+
 fn compile_invocation_inner(
     inv: &CompileInvocation<'_>,
     mut on_stage: &mut impl FnMut(&str, Duration, u64),
     policy: CompilationPolicy<'_>,
-) -> Result<CompiledArtifacts, CompileError> {
+) -> Result<CompilationOutput, CompileError> {
     assert!(
         !inv.targets.is_empty(),
         "compile_invocation: at least one target is required"
@@ -4255,7 +4263,12 @@ fn compile_invocation_inner(
         }
     };
     let (cmd, run, inv_key, producer, candidate_set, deployment) = match attempt {
-        CompileAttempt::Cached(artifacts) => return Ok(*artifacts),
+        CompileAttempt::Cached(artifacts) => {
+            return Ok(CompilationOutput {
+                artifacts: *artifacts,
+                original_entry: None,
+            });
+        }
         CompileAttempt::Executed(executed) => executed,
     };
 
@@ -4751,7 +4764,7 @@ fn compile_invocation_inner(
             )?;
         }
     }
-    if let CompilationOutputOwner::Original(preparation) = output_owner {
+    let original_entry = if let CompilationOutputOwner::Original(preparation) = output_owner {
         match &policy {
             CompilationPolicy::RetainedEntry {
                 source_path,
@@ -4766,15 +4779,20 @@ fn compile_invocation_inner(
                         ..
                     },
                 ..
-            } => preparation.seal(source_path, sources, &deployment, inv.targets)?,
+            } => Some(preparation.seal(source_path, sources, &deployment, inv.targets)?),
             _ => {
                 return Err(CompileError::ExtractFailed(
                     "original output owner has a different compilation policy".into(),
                 ))
             }
         }
-    }
-    Ok(artifacts)
+    } else {
+        None
+    };
+    Ok(CompilationOutput {
+        artifacts,
+        original_entry,
+    })
 }
 
 /// Retain worker outputs and stderr after compilation or final sealing fails.
@@ -6974,8 +6992,10 @@ mod module_product_tests {
         let mut previous_executions = String::new();
         for (index, stage) in [
             EntryCheckpoint::ManifestWrite,
+            EntryCheckpoint::TreeSync,
             EntryCheckpoint::ReadyRename,
             EntryCheckpoint::PublicationSync,
+            EntryCheckpoint::Handoff,
         ]
         .into_iter()
         .enumerate()
@@ -6991,17 +7011,25 @@ mod module_product_tests {
                 executions.len() > previous_executions.len(),
                 "an explicit fresh preparation executes its original quotation"
             );
-            let raw = if stage == EntryCheckpoint::PublicationSync {
+            let published = matches!(
+                stage,
+                EntryCheckpoint::PublicationSync | EntryCheckpoint::Handoff
+            );
+            let raw = if published {
                 output.join("raw")
             } else {
                 unfinished.join("raw")
             };
             let original = std::fs::read(raw.join("module-products.cbor")).unwrap();
             assert!(!original.is_empty());
-            if stage == EntryCheckpoint::PublicationSync {
-                assert!(
-                    matches!(error, CompileError::EntryPublicationUnconfirmed { ref path, .. } if path == &output)
-                );
+            if published {
+                if stage == EntryCheckpoint::PublicationSync {
+                    assert!(
+                        matches!(error, CompileError::EntryPublicationUnconfirmed { ref path, .. } if path == &output)
+                    );
+                } else {
+                    assert!(matches!(error, CompileError::Io(_)));
+                }
                 assert!(!unfinished.exists());
                 let entry = load_selected_production_entry(&output, &authority, &selected).unwrap();
                 assert!(entry.products().original_compile_input.is_some());
@@ -7034,6 +7062,100 @@ mod module_product_tests {
 
     #[test]
     #[serial_test::serial]
+    fn retained_entry_late_cancellation_refuses_handoff_and_preserves_completed_original() {
+        use crate::toolchain::CompilerDeploymentConfiguration;
+        use production_entry::EntryCheckpoint;
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let source = authored.join("Input.hs");
+        std::fs::write(&source, "module Input where\n__prepared = (37 :: Int)\n").unwrap();
+        let sources = FrozenEntrySources::capture(&[authored], &source).unwrap();
+        let selected = ProductionEntrySources::FrozenWorkspace(sources.clone());
+        let CompilerDeploymentConfiguration::Configured(authority) =
+            CompilerDeploymentConfiguration::from_env().unwrap()
+        else {
+            panic!("entry cancellation test requires matched compiler authority")
+        };
+        for (index, stage) in [
+            EntryCheckpoint::TreeSync,
+            EntryCheckpoint::PublicationSync,
+            EntryCheckpoint::Handoff,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = root.path().join(format!("entry-{index}"));
+            let cancellation = CompilerTransactionCancellation::new();
+            let stop = cancellation.clone();
+            let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reached = Arc::clone(&observed);
+            let loads = production_entry::entry_load_count();
+            let outcome = production_entry::with_checkpoint_observer(
+                move |actual| {
+                    if actual == stage {
+                        reached.store(true, std::sync::atomic::Ordering::SeqCst);
+                        stop.cancel();
+                    }
+                },
+                || {
+                    with_compiler_transaction_cancellable(
+                        cancellation,
+                        |_| {},
+                        || prepare_frozen_production_entry(&sources, root.path(), &output),
+                    )
+                },
+            );
+            assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(
+                production_entry::entry_load_count() - loads,
+                1,
+                "cancellation follows complete staging validation"
+            );
+            let error = outcome.action.unwrap_err();
+            if stage == EntryCheckpoint::PublicationSync {
+                assert!(matches!(
+                    error,
+                    CompileError::EntryPublicationUnconfirmed { .. }
+                ));
+            } else {
+                assert!(matches!(error, CompileError::Io(ref error)
+                    if error.kind() == std::io::ErrorKind::Interrupted));
+            }
+            let raw = if stage == EntryCheckpoint::TreeSync {
+                assert!(!output.exists());
+                let unfinished = root.path().join(format!("entry-{index}.preparing"));
+                assert!(matches!(
+                    prepare_frozen_production_entry(&sources, root.path(), &output),
+                    Err(CompileError::EntryPreparationUnfinished { .. })
+                ));
+                unfinished.join("raw")
+            } else {
+                assert!(output.exists());
+                output.join("raw")
+            };
+            let bytes = std::fs::read(raw.join("module-products.cbor")).unwrap();
+            let spawns = tidepool_extract_cmd::extract_spawn_count();
+            let recovered = if stage == EntryCheckpoint::TreeSync {
+                raw.parent().unwrap()
+            } else {
+                output.as_path()
+            };
+            let entry = load_selected_production_entry(recovered, &authority, &selected).unwrap();
+            assert!(entry.products().original_compile_input.is_some());
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), spawns);
+            assert_eq!(
+                std::fs::read(raw.join("module-products.cbor")).unwrap(),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn retained_complete_entries_load_original_quotations_without_compiler_or_source_replay() {
         use crate::toolchain::CompilerDeploymentConfiguration;
         let root = tempfile::tempdir().unwrap();
@@ -7061,18 +7183,44 @@ mod module_product_tests {
         .unwrap();
         let sources = FrozenEntrySources::capture(&[authored.clone()], &source).unwrap();
         let output = root.path().join("entry");
-        prepare_frozen_production_entry(&sources, root.path(), &output).unwrap();
+        let before = production_entry::entry_load_count();
+        let first = prepare_frozen_production_entry(&sources, root.path(), &output).unwrap();
+        assert_eq!(
+            production_entry::entry_load_count() - before,
+            1,
+            "fresh preparation hands off its staging validation without loading again"
+        );
         let CompilerDeploymentConfiguration::Configured(authority) =
             CompilerDeploymentConfiguration::from_env().unwrap()
         else {
             panic!("native entry qualification requires configured matched compiler authority")
         };
-        let first = load_selected_production_entry(
+        let reopened = load_selected_production_entry(
             &output,
             &authority,
             &ProductionEntrySources::FrozenWorkspace(sources.clone()),
         )
         .unwrap();
+        assert_eq!(first.target_owned(), reopened.target_owned());
+        assert_eq!(first.source(), reopened.source());
+        assert_eq!(
+            first.products().artifact_view.descriptors(),
+            reopened.products().artifact_view.descriptors()
+        );
+        assert_eq!(
+            first
+                .products()
+                .original_compile_input
+                .as_ref()
+                .unwrap()
+                .original_input_identity(),
+            reopened
+                .products()
+                .original_compile_input
+                .as_ref()
+                .unwrap()
+                .original_input_identity()
+        );
         let proof = first.products().original_compile_input.as_ref().unwrap();
         assert!(proof.replay_eligible_identity().is_none());
         let compiled_executions = std::fs::read_to_string(&counter).unwrap();
