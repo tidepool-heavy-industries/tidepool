@@ -1199,7 +1199,17 @@ async fn published_command_example_preserves_failed_output_without_replay() {
                 *backend.stdout.lock() = "/workspace\nREADME.md\n".into();
                 *backend.stderr.lock() = "bash: sed: command not found\n".into();
                 backend.set_exit_code(127);
-                let failed = displayed(campaign, root.as_ref(), PublishedExample::Command.source()).await;
+                let mut running = tokio::spawn({
+                    let root = root.clone();
+                    async move { committed(root.as_ref(), PublishedExample::Command.source()).await }
+                });
+                tokio::select! {
+                    request = super::command_test_support::backend_request(campaign) => {
+                        request.supply(Ok(backend.clone()));
+                    },
+                    result = &mut running => panic!("failed command ended before backend admission: {result:?}"),
+                }
+                let failed = campaign.drive_actor_output(&store, running).await.unwrap();
                 let observed = explicit_display_output(&failed)["text"].as_str().unwrap();
                 assert!(observed.contains("127"), "failed exit code missing: {failed}");
                 for stream in ["/workspace\nREADME.md\n", "bash: sed: command not found\n"] {
