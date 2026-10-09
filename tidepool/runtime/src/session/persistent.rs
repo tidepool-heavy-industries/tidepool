@@ -2197,6 +2197,12 @@ impl PersistentSession {
             })?;
         let generation = surface.declaration_root.unwrap_or(Generation(0));
         let epoch = surface.epoch;
+        let recovered_context = lib.recovered_public_compiler_context(owner)?;
+        let published_sources = recovered_context
+            .as_ref()
+            .map(|context| context.published_source_original_selections())
+            .transpose()?
+            .unwrap_or_default();
         if generation != Generation(0) && lib.log.recovered_at(generation).is_none() {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
@@ -2205,7 +2211,14 @@ impl PersistentSession {
         }
         let scope = self.mint_isolated_scope();
         let lib = self.lib.as_mut().expect("declaration library checked");
-        lib.seed_scope(scope, generation);
+        lib.tips.insert(
+            scope,
+            super::ScopeDeclarationState {
+                tip: generation,
+                exact_context: recovered_context,
+                published_sources,
+            },
+        );
         if let Err(error) = lib.bind_durable_public_scope(owner.clone(), scope) {
             self.retire_scope(scope);
             return Err(error);
@@ -2466,6 +2479,11 @@ impl PersistentSession {
             })
             .collect::<Vec<_>>();
         let sources = self.recovery_source_instances(snapshot.source_instances.iter().cloned())?;
+        let exact_context = lib.current_exact_context_in(target);
+        let compiler_context = exact_context
+            .as_ref()
+            .map(|context| super::recovery::RecoveryCompilerContext::capture(context))
+            .unwrap_or_default();
         if let Some(surface) = state
             .graph
             .public_surfaces()
@@ -2478,6 +2496,7 @@ impl PersistentSession {
                 || surface.epoch != snapshot.epoch
                 || surface.bindings != bindings
                 || surface.source_instances != sources
+                || surface.compiler_context != compiler_context
             {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
@@ -2488,16 +2507,30 @@ impl PersistentSession {
         let mut public_scopes = lib.durable_public_scopes.clone();
         public_scopes.insert(owner.clone(), target);
         let mut tips = lib.tips.clone();
-        tips.insert(target, snapshot.declaration_tip);
+        tips.insert(
+            target,
+            super::ScopeDeclarationState {
+                tip: snapshot.declaration_tip,
+                exact_context: exact_context.clone(),
+                published_sources: lib.published_source_selections_in(target).to_vec(),
+            },
+        );
+        let (snapshot_graph, compiler_context) =
+            super::recovery_hydration::materialize_public_compiler_context(
+                &state.graph,
+                root,
+                exact_context.as_ref(),
+            )?;
         let staged = super::recovery::stage_public_visibility_v2(
             &state.path,
             root,
-            &state.graph,
+            &snapshot_graph,
             owner.clone(),
             0,
             bindings,
             sources,
             (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip),
+            compiler_context,
         )
         .map_err(|error| invalid(error.to_string()))?;
         retained.validate_owner()?;
@@ -2607,6 +2640,12 @@ impl PersistentSession {
             .surface(predecessor)
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         let generation = surface.declaration_root.unwrap_or(Generation(0));
+        let recovered_context = lib.recovered_public_compiler_context(predecessor)?;
+        let published_sources = recovered_context
+            .as_ref()
+            .map(|context| context.published_source_original_selections())
+            .transpose()?
+            .unwrap_or_default();
         if generation != Generation(0) && lib.log.recovered_at(generation).is_none() {
             return Err(invalid(
                 "successor declaration root has not been hydrated".into(),
@@ -2698,7 +2737,14 @@ impl PersistentSession {
         // Preflight proved this fresh scope has exactly G0. It may already
         // have an explicit G0 entry from ordinary scope minting, so transfer
         // must set the recovered tip rather than use inheritance-only seeding.
-        lib.tips.insert(target, generation);
+        lib.tips.insert(
+            target,
+            super::ScopeDeclarationState {
+                tip: generation,
+                exact_context: recovered_context,
+                published_sources,
+            },
+        );
         lib.durable_public_scopes.insert(successor, target);
         self.public_visibility_epochs.insert(target, epoch);
         self.invalidate_execution_admissions_after_owner_transfer(admission_epoch);
@@ -2812,7 +2858,12 @@ impl PersistentSession {
                 current: state.graph.checksum().to_owned(),
             }));
         }
-        if current == bootstrap.initial {
+        let exact_context = lib.current_exact_context_in(scope);
+        let compiler_context = exact_context
+            .as_ref()
+            .map(|context| super::recovery::RecoveryCompilerContext::capture(context))
+            .unwrap_or_default();
+        if current == bootstrap.initial && compiler_context == surface.compiler_context {
             return Ok(PublicManifestCommit::Durable);
         }
         let next_epoch =
@@ -2835,16 +2886,23 @@ impl PersistentSession {
             })
             .collect();
         let sources = self.recovery_source_instances(current.source_instances.iter().cloned())?;
+        let (snapshot_graph, compiler_context) =
+            super::recovery_hydration::materialize_public_compiler_context(
+                &state.graph,
+                root,
+                exact_context.as_ref(),
+            )?;
         let staged = super::recovery::stage_public_visibility_at_epoch_v2(
             &state.path,
             root,
-            &state.graph,
+            &snapshot_graph,
             bootstrap.owner.clone(),
             surface.epoch,
             next_epoch,
             bindings,
             sources,
             tip,
+            compiler_context,
         )
         .map_err(|error| SessionError::RecoveryManifest {
             path: state.path.clone(),

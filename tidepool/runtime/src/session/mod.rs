@@ -660,6 +660,9 @@ impl PublicManifestBase {
                     bindings,
                     self.final_source_instances,
                     None,
+                    surface
+                        .map(|surface| surface.compiler_context.clone())
+                        .unwrap_or_default(),
                 )
                 .map_err(|error| SessionError::RecoveryManifest {
                     path: self.path.clone(),

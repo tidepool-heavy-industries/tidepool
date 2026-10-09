@@ -148,6 +148,55 @@ impl SessionLib {
         Ok(matches)
     }
 
+    pub(super) fn recovered_public_compiler_context(
+        &self,
+        owner: &RecoveryPublicOwner,
+    ) -> Result<
+        Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+        SessionError,
+    > {
+        let state = self
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let surface = state
+            .graph
+            .surface(owner)
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if surface.compiler_context.artifact_refs.is_empty() {
+            return Ok(surface
+                .declaration_root
+                .and_then(|generation| self.log.joined_context_at(generation)));
+        }
+        let root = state
+            .path
+            .parent()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let retained = state
+            .owner
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        retained.validate_owner()?;
+        let bytes = std::fs::read(&state.path)?;
+        let read = recovery::read_v2_bytes(
+            &state.path,
+            root,
+            &bytes,
+            recovery::RecoveryReadPurpose::Hydration,
+        )
+        .map_err(|error| recovery::graph_error(&state.path, error))?
+        .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if read.graph.checksum() != state.graph.checksum() || !read.artifact_losses.is_empty() {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let inventory = read
+            .inventory
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let context = surface.compiler_context.restore(&inventory)?;
+        retained.validate_owner()?;
+        Ok(Some(Arc::new(context)))
+    }
+
     /// A path alone can initialize an empty graph, but cannot admit a retained
     /// public surface. Production recovery uses the configured run owner.
     pub fn attach_recovery_graph_v2(
@@ -304,7 +353,7 @@ impl SessionLib {
         }
         let mut contexts = BTreeMap::new();
         for node in graph.nodes() {
-            let context = Arc::new(inventory.context_with_roles(
+            let context = Arc::new(inventory.context_with_published_roles(
                 &node.artifact_refs,
                 &node.native_groups,
                 &node.compiler_roles,
@@ -314,6 +363,9 @@ impl SessionLib {
             contexts.insert(node.id, context);
         }
         for surface in graph.public_surfaces() {
+            // Required at Generation0 as well: surface roles can only be
+            // reissued after the complete immutable inventory was validated.
+            surface.compiler_context.restore(&inventory)?;
             let Some(generation) = surface.declaration_root else {
                 continue;
             };
@@ -583,4 +635,72 @@ fn recovered_item(export: &DeclarationExport) -> ExportItem {
                 .collect(),
         },
     }
+}
+
+/// Freeze the existing scoped compiler selection in the public manifest. The
+/// products, interfaces and dependency facts are materialized by their owners.
+pub(super) fn materialize_public_compiler_context(
+    graph: &recovery::RecoveryGraph,
+    root: &Path,
+    context: Option<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
+) -> Result<(recovery::RecoveryGraph, recovery::RecoveryCompilerContext), SessionError> {
+    let Some(context) = context else {
+        return Ok((graph.clone(), recovery::RecoveryCompilerContext::default()));
+    };
+    let invalid = |detail: String| SessionError::RecoveryManifest {
+        path: root.to_path_buf(),
+        detail,
+    };
+    let mut candidate = graph.candidate();
+    let products = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
+        root,
+        context.toolchain_identity_sha256(),
+        &context.recovery_products(),
+    )
+    .map_err(|error| invalid(error.to_string()))?;
+    let mut artifacts = products
+        .into_iter()
+        .map(recovery::RecoveryArtifactClosure::Home)
+        .collect::<Vec<_>>();
+    artifacts.extend(
+        context
+            .materialize_module_interfaces(root)
+            .map_err(|error| invalid(error.to_string()))?
+            .into_iter()
+            .map(recovery::RecoveryArtifactClosure::ModuleInterface),
+    );
+    for interface in context.joined_interfaces() {
+        artifacts.push(recovery::RecoveryArtifactClosure::Join(
+            interface
+                .materialize(root)
+                .map_err(|error| invalid(error.to_string()))?,
+        ));
+    }
+    for interface in context.value_interfaces() {
+        artifacts.push(recovery::RecoveryArtifactClosure::ValueInterface(
+            interface
+                .materialize(root)
+                .map_err(|error| invalid(error.to_string()))?,
+        ));
+    }
+    for artifact in artifacts {
+        candidate
+            .insert_artifact(artifact)
+            .map_err(|error| invalid(error.to_string()))?;
+    }
+    for (source, target, dependency) in context.artifact_view().interface_dependencies() {
+        candidate
+            .insert_interface_edge(recovery::RecoveryArtifactDependency {
+                source,
+                target,
+                dependency,
+            })
+            .map_err(|error| invalid(error.to_string()))?;
+    }
+    Ok((
+        candidate
+            .seal()
+            .map_err(|error| invalid(error.to_string()))?,
+        recovery::RecoveryCompilerContext::capture(context),
+    ))
 }

@@ -79,6 +79,7 @@ pub struct DeclarationPublicationBase {
     reserved: Generation,
     intent: Arc<FinalExecutionIntent>,
     current_public: Option<DeclarationTip>,
+    public_context: Option<Arc<ExactDeclarationContext>>,
     surface: AdmittedDeclarationSurface,
     includes: Vec<PathBuf>,
     session_root: PathBuf,
@@ -703,6 +704,9 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let current_public = tip(self.lib(), public.expected_public.declaration_tip)?;
+        let public_context = self
+            .lib()
+            .current_exact_context_in(public.expected_public.scope);
         let mut surface = current_public
             .as_ref()
             .map(|tip| tip.surface.clone())
@@ -716,6 +720,7 @@ impl PersistentSession {
             public,
             intent,
             current_public,
+            public_context,
             surface,
             includes: self.lib().extra_include.clone(),
             session_root: self.lib().root.clone(),
@@ -827,8 +832,8 @@ impl DeclarationPublicationBase {
                 imports: Vec::new(),
             });
         }
-        let context = if let Some(public) = &self.current_public {
-            (*public.context).clone().extend(&authored, &[], lexical)?
+        let context = if let Some(public) = &self.public_context {
+            (**public).clone().extend(&authored, &[], lexical)?
         } else {
             ExactDeclarationContext::new(&authored, &[], lexical)?
         };
@@ -1102,8 +1107,10 @@ impl AcceptedDeclarationPublication {
                         epoch: 0,
                         bindings: Vec::new(),
                         source_instances: Vec::new(),
+                        compiler_context: recovery::RecoveryCompilerContext::default(),
                     });
             surface.declaration_root = Some(base.reserved);
+            surface.compiler_context = recovery::RecoveryCompilerContext::capture(&context);
             candidate.replace_surface(surface);
             let (sealed, encoded_bytes) = candidate
                 .seal_with_encoded_bytes()
@@ -1277,6 +1284,10 @@ impl SessionLib {
                 && declaration.joined.turn.parent.is_none()
                 && self.scope_tip(ticket.public_scope) == ticket.expected_public.declaration_tip
                 && self.tips.contains_key(&ticket.public_scope)
+                && self.source_selections_preserved(
+                    ticket.public_scope,
+                    Some(&declaration.joined.context),
+                )
                 && declaration.joined.evidence.reserved().module
                     == SessionModule::lib(declaration.generation).module_name()
         })
@@ -1288,10 +1299,7 @@ impl SessionLib {
     ) {
         let generation = declaration.generation;
         assert!(self.log.commit_reserved(generation, declaration.joined));
-        *self
-            .tips
-            .get_mut(&scope)
-            .expect("declaration tip preflight") = generation;
+        self.set_scope_tip_in(scope, generation);
     }
 }
 #[cfg(test)]
