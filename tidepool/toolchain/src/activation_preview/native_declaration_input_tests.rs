@@ -11,9 +11,59 @@ use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use crate::recovery_artifacts::CertifiedRecoveryProduct;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion, RawModuleProduct};
 
 const PRODUCER: &[u8] = b"preview original native declaration inputs";
+// Four prefix rows, the complete eight-role matrix and four later rows.
+const MAX_HISTORY_OWNERS: usize = 16;
+
+#[derive(Clone)]
+struct DeclarationFixture {
+    canonical: Arc<ArtifactEntry>,
+    original: Arc<ArtifactEntry>,
+}
+
+impl DeclarationFixture {
+    fn new(product: CertifiedRecoveryProduct) -> Self {
+        Self {
+            canonical: Arc::new(ArtifactEntry::canonical(
+                product.module_interface().unwrap().clone(),
+            )),
+            original: Arc::new(
+                ArtifactEntry::original(
+                    CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+                    product,
+                )
+                .unwrap(),
+            ),
+        }
+    }
+}
+
+fn issued_declarations(native: bool) -> &'static [DeclarationFixture] {
+    static FIXTURES: OnceLock<[Vec<DeclarationFixture>; 2]> = OnceLock::new();
+    &FIXTURES.get_or_init(|| {
+        let fixtures = [false, true].map(|native| {
+            let products = (1..=MAX_HISTORY_OWNERS)
+                .map(|generation| declaration(generation as u64, native))
+                .collect::<Vec<_>>();
+            // Immutable evidence is issued once through the production recovery
+            // path. Every history still builds fresh custody and request roles.
+            crate::certified_products::tests::recovered_witness_fixtures(&products)
+                .into_iter()
+                .map(|original| DeclarationFixture::new(original.product))
+                .collect()
+        });
+        let products = fixtures.iter().map(Vec::len).sum::<usize>();
+        eprintln!(
+            "activation preview fixture issuance: recovery_batches={}, products={products}, canonical_entries={products}, original_entries={products}",
+            fixtures.len(),
+        );
+        fixtures
+    })[usize::from(native)]
+}
 
 fn declaration(generation: u64, native: bool) -> CertifiedRecoveryProduct {
     let module =
@@ -54,21 +104,32 @@ fn declaration(generation: u64, native: bool) -> CertifiedRecoveryProduct {
 // Each row independently varies source/native origin, native byte custody and
 // the issued compiler interface role. The lexical graph selects only Target.
 fn original_context(rows: &[(bool, bool, bool)]) -> Arc<ExactDeclarationContext> {
-    let products = rows
+    let fixtures = rows
         .iter()
         .enumerate()
-        .map(|(index, (native, _, _))| declaration(index as u64 + 1, *native))
+        .map(|(index, (native, _, _))| {
+            issued_declarations(*native)
+                .get(index)
+                .expect("history exceeds its declared fixture bound")
+                .clone()
+        })
         .collect::<Vec<_>>();
-    let issued = crate::certified_products::tests::recovered_witness_fixtures(&products)
-        .into_iter()
-        .map(|original| original.product)
-        .collect::<Vec<_>>();
-    original_context_with_products(rows, issued)
+    original_context_with_fixtures(rows, fixtures)
 }
 
 fn original_context_with_products(
     rows: &[(bool, bool, bool)],
     products: Vec<CertifiedRecoveryProduct>,
+) -> Arc<ExactDeclarationContext> {
+    original_context_with_fixtures(
+        rows,
+        products.into_iter().map(DeclarationFixture::new).collect(),
+    )
+}
+
+fn original_context_with_fixtures(
+    rows: &[(bool, bool, bool)],
+    fixtures: Vec<DeclarationFixture>,
 ) -> Arc<ExactDeclarationContext> {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let target = ExactModuleIdentity {
@@ -85,21 +146,16 @@ fn original_context_with_products(
         interface: target_entry.descriptor.id,
     }];
     let mut entries = vec![target_entry];
-    assert_eq!(rows.len(), products.len());
-    for ((_, custody, selected), product) in rows.iter().zip(products) {
-        let interface = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().unwrap().clone(),
-        ));
+    assert_eq!(rows.len(), fixtures.len());
+    for ((_, custody, selected), fixture) in rows.iter().zip(fixtures) {
         if *selected {
             roles.push(CompilerInputRole::InterfaceOnly {
-                interface: interface.descriptor.id,
+                interface: fixture.canonical.descriptor.id,
             });
         }
-        entries.push(interface);
+        entries.push(fixture.canonical);
         if *custody {
-            entries.push(Arc::new(
-                ArtifactEntry::original(producer, product).unwrap(),
-            ));
+            entries.push(fixture.original);
         }
     }
     let inventory = ArtifactInventory::default();
@@ -249,5 +305,10 @@ proptest::proptest! {
         proptest::prop_assert_eq!(offered_native_owners(&later), expected(&extended));
         drop(later);
         proptest::prop_assert_eq!(offered_native_owners(&captured), expected(&before));
+        static COMPLETED_HISTORIES: AtomicUsize = AtomicUsize::new(0);
+        let completed = COMPLETED_HISTORIES.fetch_add(1, Ordering::Relaxed) + 1;
+        if completed.is_power_of_two() {
+            eprintln!("activation preview completed history checks: {completed}");
+        }
     }
 }
