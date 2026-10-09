@@ -2094,7 +2094,7 @@ mod authored_tests {
     fn authored_declaration_in_exact_context_keeps_its_native_origin() {
         let root = tempfile::tempdir().unwrap();
         let baseline_module = SessionModule::lib(Generation(1));
-        let baseline_source = "module Tidepool.Session.Lib.G1 where\nbaseline = (40 :: Int)\n";
+        let baseline_source = "module Tidepool.Session.Lib.G1 where\nbaseline = (40 :: Int)\nalternateBaseline = (41 :: Int)\n";
         let baseline_path = root.path().join(baseline_module.relative_hs_path());
         std::fs::create_dir_all(baseline_path.parent().unwrap()).unwrap();
         std::fs::write(&baseline_path, baseline_source).unwrap();

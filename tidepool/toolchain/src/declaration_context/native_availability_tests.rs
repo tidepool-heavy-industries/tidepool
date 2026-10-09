@@ -322,7 +322,10 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .filter(|group| group.artifact == authored_root)
         .copied()
         .collect::<BTreeSet<_>>();
-    assert!(!authored_groups.is_empty());
+    assert!(
+        authored_groups.len() >= 2,
+        "the real fixture must issue independent original groups"
+    );
     assert!(matches!(
         native_context.compiler_metadata_snapshot().unwrap().entries[&identity(
             &certificate.product().owner().unit,
@@ -359,6 +362,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
     // Reuse the genuine certificate and independently remove execution
     // roots. Neither type custody nor an incomplete group selection can
     // supply the complete authored original to another compiler request.
+    let mut valid_sparse_refusals = 0;
     for omitted in std::iter::once(None).chain(authored_groups.iter().map(Some)) {
         let selected = match omitted {
             None => BTreeSet::new(),
@@ -375,6 +379,10 @@ pub(crate) fn assert_selected_authored_private_inputs(
             &selected,
         );
         let Ok(view) = view else {
+            assert!(
+                omitted.is_some(),
+                "removing every native root must retain valid type custody"
+            );
             // Removing a required dependency is refused by exact closure
             // admission before private compiler input can be constructed.
             continue;
@@ -389,5 +397,18 @@ pub(crate) fn assert_selected_authored_private_inputs(
             .roles()
             .iter()
             .all(|role| role.original() != Some(authored_root))));
+        if omitted.is_some()
+            && partial
+                .inventory
+                .selected_native_groups()
+                .iter()
+                .any(|group| group.artifact == authored_root)
+        {
+            valid_sparse_refusals += 1;
+        }
     }
+    assert!(
+        valid_sparse_refusals > 0,
+        "a valid nonempty sparse selection must reach private offer refusal"
+    );
 }
