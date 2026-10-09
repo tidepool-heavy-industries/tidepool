@@ -227,7 +227,7 @@ async fn resident_model_callback_and_hook_keep_caller_effects_and_retained_resul
                 let capability = displayed(
                     campaign,
                     endpoint.as_ref(),
-                    "display (ModelFixture.modelCapabilityKeys == [Tidepool.Effects.Core.EffectModelCall])",
+                    "display (case ModelFixture.modelCapabilityKeys of { [Tidepool.Effects.Core.EffectModelCall] -> True; _ -> False })",
                 )
                 .await;
                 assert_eq!(committed_display_text(&capability), "True");
