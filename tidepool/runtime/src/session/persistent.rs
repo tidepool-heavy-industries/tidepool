@@ -1414,7 +1414,7 @@ impl PersistentSession {
             let bound: std::collections::BTreeSet<&SymbolIdentity> =
                 retained.iter().map(|(identity, _)| identity).collect();
             let exported: Vec<(SymbolIdentity, u64)> = engine
-                .code_export_retentions()
+                .protected_code_export_retentions()
                 .filter(|(identity, _)| !bound.contains(identity))
                 .collect();
             retained.extend(exported);
@@ -5182,6 +5182,11 @@ mod checkpoint_scope_tests {
             testing, Atom, ExprFrame, GlobalId, Group, RuntimeRep, SignatureId, ValueRef,
         };
         let binder = testing::identity("Fixture", "entry");
+        let (legacy, _) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let mut legacy_session = PersistentSession::new(None, 64 * 1024);
+        legacy_session.machine = Some(legacy);
+        assert!(legacy_session.prepared_retained().is_empty());
         let (engine, _) = super::super::prepared::tests::certified_package_export_fixture([9; 32]);
         let expected = engine
             .retained_package_code_export_owner(&binder, 0, &[9; 32])

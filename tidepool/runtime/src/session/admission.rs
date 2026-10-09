@@ -2726,7 +2726,7 @@ impl PersistentSession {
             bound.insert(entry.value.identity.clone());
         }
         if let Some(engine) = self.prepared() {
-            for (identity, generation) in engine.code_export_retentions() {
+            for (identity, generation) in engine.protected_code_export_retentions() {
                 if bound.contains(&identity) {
                     continue;
                 }
