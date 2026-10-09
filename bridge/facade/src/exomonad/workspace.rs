@@ -1633,22 +1633,29 @@ mod tests {
         frozen.validate_toolset_coverage(&coverage).unwrap();
         assert_eq!(coverage_entries(&coverage).unwrap(), expected);
 
-        for mutation in 0..6 {
+        #[derive(Debug)]
+        enum MalformedCoverage {
+            RequestedEffectOrder,
+            InvalidRecipe,
+            NilOriginal,
+            DuplicateRoot,
+        }
+        for mutation in [
+            MalformedCoverage::RequestedEffectOrder,
+            MalformedCoverage::InvalidRecipe,
+            MalformedCoverage::NilOriginal,
+            MalformedCoverage::DuplicateRoot,
+        ] {
             let mut changed = coverage.clone();
             match mutation {
-                0 => changed[0].requested_effects.reverse(),
-                1 => changed[0].original = uuid::Uuid::new_v4(),
-                2 => changed[0]
-                    .effective_effects
-                    .push(exomonad_actor::ActorEffectKey::Watches),
-                3 => changed[0].recipe = "invalid".into(),
-                4 => changed[0].original = uuid::Uuid::nil(),
-                5 => changed.push(changed[0].clone()),
-                _ => unreachable!(),
+                MalformedCoverage::RequestedEffectOrder => changed[0].requested_effects.reverse(),
+                MalformedCoverage::InvalidRecipe => changed[0].recipe = "invalid".into(),
+                MalformedCoverage::NilOriginal => changed[0].original = uuid::Uuid::nil(),
+                MalformedCoverage::DuplicateRoot => changed.push(changed[0].clone()),
             }
             assert!(
                 frozen.validate_toolset_coverage(&changed).is_err(),
-                "mutation {mutation}"
+                "mutation {mutation:?}"
             );
             // Refusal leaves the primary records available for the next
             // observation; it cannot repair them or infer another original.
@@ -1656,6 +1663,18 @@ mod tests {
             frozen.validate_toolset_coverage(&coverage).unwrap();
             assert_eq!(coverage_entries(&coverage).unwrap(), expected);
         }
+
+        // Original UUIDs are primary selections. This structural validator
+        // cannot infer a prior selection or certify its native container.
+        // The CompletedOriginal acquisition consumer validates that container.
+        let mut alternate = coverage.clone();
+        alternate[0].original = uuid::Uuid::new_v4();
+        frozen.validate_toolset_coverage(&alternate).unwrap();
+        assert_eq!(
+            coverage_entries(&alternate).unwrap(),
+            [(recipe, alternate[0].original)].into_iter().collect::<BTreeMap<_, _>>()
+        );
+        assert_eq!(serde_json::to_vec(&coverage).unwrap(), admitted);
     }
 
     #[test]
@@ -1706,21 +1725,46 @@ mod tests {
             .unwrap();
         let mut changed_support = support.clone();
         changed_support.pop();
-        assert!(
-            frozen
-                .validate_prepared_toolset_recipes(&workbench, &source, &changed_support)
-                .is_err()
-        );
+        assert!(frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &changed_support)
+            .is_err());
         // Context support selects a different builtin installer even when its
         // support-filtered actor row remains unchanged.
         let mut changed_installer = support.clone();
         changed_installer.push(ToolEffectKey::ContextReadWrite);
-        assert!(
-            frozen
-                .validate_prepared_toolset_recipes(&workbench, &source, &changed_installer)
-                .is_err()
-        );
+        assert!(frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &changed_installer)
+            .is_err());
         assert_eq!(serde_json::to_vec(&frozen.preparation).unwrap(), admitted);
+        frozen
+            .validate_prepared_toolset_recipes(&workbench, &source, &support)
+            .unwrap();
+
+        // Effective effects and recipe bytes are compared with actual host
+        // support by this consumer, after structural coverage validation.
+        for mutate_effects in [false, true] {
+            let mut changed = frozen.clone();
+            let Some(WorkspacePreparation::Completed { coverage, .. }) = &mut changed.preparation
+            else {
+                panic!("completed selection fixture");
+            };
+            if mutate_effects {
+                coverage[0].effective_effects.pop();
+            } else {
+                coverage[0].recipe = if coverage[0].recipe == "a".repeat(64) {
+                    "b".repeat(64)
+                } else {
+                    "a".repeat(64)
+                };
+            }
+            changed.validate_prepared_toolset_promises().unwrap();
+            let mutated = serde_json::to_vec(&changed.preparation).unwrap();
+            assert!(changed
+                .validate_prepared_toolset_recipes(&workbench, &source, &support)
+                .is_err());
+            assert_eq!(serde_json::to_vec(&changed.preparation).unwrap(), mutated);
+            assert_eq!(serde_json::to_vec(&frozen.preparation).unwrap(), admitted);
+        }
         frozen
             .validate_prepared_toolset_recipes(&workbench, &source, &support)
             .unwrap();
