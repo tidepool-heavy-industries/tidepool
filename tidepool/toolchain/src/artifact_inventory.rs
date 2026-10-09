@@ -2034,6 +2034,9 @@ impl ArtifactView {
                             ArtifactInventoryFailure::NativeRootOutsideView { artifact: id },
                         ));
                     }
+                    if !state.payloads[&id].is_native() {
+                        return Err(failure("native root lacks an original native carrier"));
+                    }
                     (id, state.payloads[&id].native_group_ordinals.clone())
                 }
                 NativeRequirementRoot::Group {
@@ -3068,6 +3071,16 @@ mod tests {
             &[&old],
             &BTreeMap::new(),
         );
+        let ArtifactPayload::Original(root_product) = &root.payload else {
+            unreachable!()
+        };
+        let root = ArtifactEntry::original(
+            [2; 32],
+            crate::certified_products::tests::recovered_witness_fixtures(&[root_product.clone()])
+                .remove(0)
+                .product,
+        )
+        .unwrap();
         let new = ArtifactEntry::original(
             [2; 32],
             crate::certified_products::fixture_finalized_product_with_requirements(
@@ -3979,8 +3992,7 @@ mod tests {
             .unwrap();
         assert!(view
             .native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(type_id)])
-            .unwrap()
-            .is_empty());
+            .is_err());
         let selected = view
             .native_binding_requirements_from_roots(&[NativeRequirementRoot::AllGroups(
                 consumer_id,
