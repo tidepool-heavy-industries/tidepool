@@ -307,6 +307,25 @@ Preserve older frozen descriptors and their reports unchanged when introducing
 this new cohort; build and freeze the new candidate rather than editing an old
 qualification contract.
 
+The `m3-recursive` cohort selects one separate scripted-provider acceptance case:
+an actual Sol 6.1 root requests a Luna child, which requests a Luna grandchild.
+Both ancestors remain pending while the grandchild's provider response is held.
+The child and grandchild execute the root's captured native helper, and typed
+replies carry its value of 42 back to the root. The case checks exact actor
+ancestry, inherited context, distinct fork worktrees, a leaf effect-row refusal,
+and confirmed descendant and host cleanup. Provider replies alone are scripted.
+It uses the same frozen bundle, prepared catalog/root entry, owned resident
+compiler and counted runner as the other runtime cohorts, with one test process.
+It does not invoke the performance reporter. Older frozen descriptors retain
+their own readers and rosters; rebuild and freeze the candidate that adds this
+cohort.
+
+```sh
+python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+  --cohort m3-recursive --output "$M3_RECURSIVE_EVIDENCE" --jobs 1 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+```
+
 The supplementary `harness-performance` cohort selects the one ignored
 eight-phase HTTP/Engine/Store/notebook workload. The separate
 `harness-performance-three-actor` cohort selects the scripted parent/two-child

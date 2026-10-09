@@ -447,6 +447,37 @@ class NativeQualificationTests(unittest.TestCase):
         self.assertEqual(len(set(regressions['tests'])), 5)
         self.assertFalse(regressions['ignored'])
 
+    def test_recursive_m3_seals_one_case_and_uses_existing_runtime_owner(self):
+        recursive = qualification.cohorts()['m3-recursive']
+        self.assertEqual(recursive['tests'], qualification.M3_RECURSIVE_TESTS)
+        self.assertEqual(recursive['expected_count'], 1)
+        self.assertTrue(recursive['ignored'])
+        self.assertEqual(recursive['compiler_mode'], 'owned-resident')
+        self.assertEqual(recursive['max_jobs'], 1)
+        self.assertEqual(recursive['required_startup_mode'], 'prepared')
+        self.assertEqual(recursive['required_stdlib_mode'], 'catalog-backed')
+        self.assertEqual(set(recursive['required_environment']),
+                         {'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'})
+        self.assertNotIn('measurement_reporter', recursive)
+
+    def test_recursive_m3_missing_bundle_resources_refuses_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor = {
+                'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                'cohorts': qualification.cohorts(), 'stdlib_mode': 'catalog-backed',
+                'startup_mode': 'prepared', 'environment': {},
+            }
+            output = root / 'evidence'
+            with patch.object(qualification, 'verify', return_value=descriptor), \
+                 patch.object(qualification.subprocess, 'run') as execute, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(qualification.main([
+                    'run', str(root / 'qualification.json'), '--cohort', 'm3-recursive',
+                    '--output', str(output)]), 1)
+            execute.assert_not_called()
+            self.assertFalse(output.exists())
+
     def test_old_qualification_schema_requires_its_own_frozen_reader(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

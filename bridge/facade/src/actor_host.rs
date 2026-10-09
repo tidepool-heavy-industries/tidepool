@@ -91,6 +91,8 @@ mod prepared_display_tests;
 mod prepared_runtime_acceptance;
 #[cfg(test)]
 mod scripted_three_actor_performance;
+#[cfg(test)]
+mod scripted_recursive_acceptance;
 pub(crate) use overlay_resource::valid_artifact_path;
 
 mod workspace;
