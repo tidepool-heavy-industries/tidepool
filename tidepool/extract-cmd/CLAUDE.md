@@ -70,11 +70,17 @@ outer transaction and retain its workload. Workload is urgency, not artifact
 identity. Explicit classification belongs inside the actual blocking compiler
 closure rather than depending on implicit propagation across async tasks.
 
-Defaults allow two foreground jobs and four preparation jobs per request, bounded
-by aggregate effective CPU availability. `--foreground-jobs` and
-`--preparation-jobs` select positive maxima for the qualification matrix. The
-accept owner observes ancestor cgroup quotas/cpusets, ancestor memory remaining
-and host memory headroom before acceptance. Preparation cannot borrow the reserved
+The `--workers` setting controls the number of resident GHC worker processes;
+foreground job width controls module scheduling and the worker executor within
+each process. They are separate limits. Defaults allow two foreground jobs and
+four preparation jobs per request, bounded by aggregate effective CPU
+availability. `--foreground-jobs` and `--preparation-jobs` select positive
+maxima for the qualification matrix. The Exomonad `[compiler]` configuration
+can set `foreground_jobs`; omission preserves the daemon's default of two.
+Changing job width does not add worker processes, but can increase one worker's
+RSS and make its existing rotation ceiling arrive sooner. The accept owner
+observes ancestor cgroup quotas/cpusets, ancestor memory remaining and host
+memory headroom before acceptance. Preparation cannot borrow the reserved
 foreground CPU allowance or warm worker. These defaults require measured latency
 qualification; available CPU count alone does not establish a passing allocation.
 Explicit `max` and a controller file absent from an existing cgroup impose no

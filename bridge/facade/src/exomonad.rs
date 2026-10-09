@@ -291,6 +291,7 @@ fn write_fixture_config(authored: &Path, config: &ExomonadConfig) {
 struct CompilerConfig {
     workers: std::num::NonZeroUsize,
     rss_ceiling_mb: std::num::NonZeroU64,
+    foreground_jobs: Option<std::num::NonZeroUsize>,
 }
 
 impl Default for CompilerConfig {
@@ -301,6 +302,7 @@ impl Default for CompilerConfig {
                 tidepool_extract_cmd::SESSION_WORKER_RSS_CEILING_MB,
             )
             .unwrap(),
+            foreground_jobs: None,
         }
     }
 }
@@ -1424,6 +1426,7 @@ fn compiler_daemon_launch(
             run_id,
             compiler.workers.get(),
             Some(compiler.rss_ceiling_mb.get()),
+            compiler.foreground_jobs,
         )
         .into_iter()
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -3947,7 +3950,7 @@ mod tests {
             ]
         );
         let configured: ExomonadConfig = toml::from_str(
-            "[defaults]\nmodel = \"test\"\n[compiler]\nworkers = 2\nrss_ceiling_mb = 10240\n",
+            "[defaults]\nmodel = \"test\"\n[compiler]\nworkers = 2\nrss_ceiling_mb = 10240\nforeground_jobs = 8\n",
         )
         .unwrap();
         let configured_launch = compiler_daemon_launch(
@@ -3958,31 +3961,32 @@ mod tests {
             log_path,
             &configured.compiler,
         );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--workers", "2"])
-        );
-        assert!(
-            configured_launch
-                .args
-                .windows(2)
-                .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
-        );
-        for setting in ["workers = 0", "rss_ceiling_mb = 0", "unknown = 2"] {
-            assert!(
-                toml::from_str::<ExomonadConfig>(&format!(
-                    "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
-                ))
-                .is_err()
-            );
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--workers", "2"]));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
+        assert!(configured_launch
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--foreground-jobs", "8"]));
+        for setting in [
+            "workers = 0",
+            "rss_ceiling_mb = 0",
+            "foreground_jobs = 0",
+            "unknown = 2",
+        ] {
+            assert!(toml::from_str::<ExomonadConfig>(&format!(
+                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+            ))
+            .is_err());
         }
-        assert!(
-            !launch
-                .environment
-                .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
-        );
+        assert!(!launch
+            .environment
+            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
         assert_eq!(
             host_environment(socket)
                 .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)

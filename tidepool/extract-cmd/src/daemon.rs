@@ -106,6 +106,9 @@ const EARLY_REPLACEMENT_SERVED_THRESHOLD: u64 = 8;
 /// sense for the single short-lived worker that mode was designed around
 /// (see `tidepool/extract-cmd/CLAUDE.md`).
 const DEFAULT_WORKER_COUNT: usize = 3;
+/// Maximum admitted foreground jobs per compiler request unless the daemon
+/// owner selects a measured alternative.
+pub(super) const DEFAULT_FOREGROUND_JOBS: usize = 2;
 /// Measured RSS of one warm GHC worker: 6.1-6.5 GiB observed, rounded up to
 /// one named constant so the worker-count derivation below and its doc
 /// comments share the same figure. A per-worker RSS ceiling below this
@@ -1953,7 +1956,7 @@ fn serve_workers(
     let resources = ResourceAdmission::with_limits(
         worker_count,
         default_memory_budget_mb().min(crate::resources::capacity().memory_mb),
-        config.foreground_jobs.unwrap_or(2),
+        config.foreground_jobs.unwrap_or(DEFAULT_FOREGROUND_JOBS),
         config.preparation_jobs.unwrap_or(4),
     );
     std::thread::scope(|scope| -> Result<u8, FrontendError> {

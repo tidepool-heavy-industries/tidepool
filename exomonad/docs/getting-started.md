@@ -114,19 +114,30 @@ and prints the input line to add and the lock command to run. Until the pin
 resolves, a session still starts, without `J`, and the agent is told so.
 
 The resident compiler is owned by the run's Compiler tmux window. Its worker
-count and per-worker RSS rotation ceiling can be set in `.exomonad/config.toml`:
+count, per-worker RSS rotation ceiling and optional foreground job width can be
+set in `.exomonad/config.toml`:
 
 ```toml
 [compiler]
 workers = 2
 rss_ceiling_mb = 10240
+foreground_jobs = 8
 ```
 
-Both values must be positive. Omitted settings retain one worker and a 7168 MiB
-ceiling. The example is the approved swarm-01 measurement configuration; each
-worker may reach 10 GiB, and the enclosing systemd slice remains the aggregate
-memory limit. The compiler trace records daemon epoch, daemon/worker PIDs,
-queue wait, service time and worker RSS so rotation is visible in measurements.
+`workers` is the number of resident GHC worker processes; `foreground_jobs` is
+the maximum module/executor jobs and runtime capabilities granted to one
+foreground request. Raising job width does not add worker processes. Both
+settings must be positive when supplied. Omitted settings retain one worker, a
+7168 MiB rotation ceiling, and the daemon's default of two foreground jobs.
+The example's worker count and RSS ceiling are the approved swarm-01
+measurement configuration; each worker may reach 10 GiB, and the enclosing
+systemd slice remains the aggregate memory limit. Wider job grants can increase
+per-worker RSS and cause earlier rotation, so qualify job width with the target
+workload before raising it. The 8-job value illustrates a trial setting, not a
+global default. Choose the RSS ceiling separately from measured worker growth;
+do not derive it from the job count. The compiler trace records daemon epoch,
+daemon/worker PIDs, queue wait, service time and worker RSS so rotation is
+visible in measurements.
 
 An `AgentSpec` declares an agent's hosted tool record and child effect row. Each
 typed request supplies raw input and selects its reply type at the compiled

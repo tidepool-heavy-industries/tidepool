@@ -312,6 +312,7 @@ fn owned_daemon_run(args: &[OsString]) -> Result<u8, FrontendError> {
         "isolated-qualification",
         workers,
         Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+        None,
     );
     let mut command = owned_timing_command(&frontend, timing.as_deref());
     command
@@ -1279,6 +1280,7 @@ mod tests {
                 "isolated-qualification",
                 invocation.workers,
                 Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+                None,
             );
             let config = parse_daemon(&arguments[1..]).unwrap();
             assert_eq!(config.workers, Some(expected));
@@ -1311,6 +1313,7 @@ mod tests {
             "isolated-qualification",
             1,
             Some(crate::SESSION_WORKER_RSS_CEILING_MB),
+            None,
         );
         for (timing, expected) in [
             (None, "1"),
@@ -1359,11 +1362,36 @@ mod tests {
             "case",
             1,
             Some(7168),
+            None,
         );
         let configuration = parse_daemon(&arguments[1..]).unwrap();
         assert!(configuration.persistent);
         assert_eq!(configuration.workers, Some(1));
         assert_eq!(configuration.rss_ceiling_mb, Some(7168));
+    }
+
+    #[test]
+    fn persistent_daemon_command_forwards_only_an_explicit_foreground_job_limit() {
+        for (jobs, expected) in [(None, None), (std::num::NonZeroUsize::new(8), Some(8))] {
+            let arguments = crate::persistent_daemon_arguments(
+                Path::new("/tmp/owned.sock"),
+                Path::new("/tmp/compiler.jsonl"),
+                "case",
+                2,
+                Some(10 * 1024),
+                jobs,
+            );
+            let configuration = parse_daemon(&arguments[1..]).unwrap();
+            assert_eq!(configuration.foreground_jobs, expected);
+            assert_eq!(
+                configuration
+                    .foreground_jobs
+                    .unwrap_or(daemon::DEFAULT_FOREGROUND_JOBS),
+                expected.unwrap_or(daemon::DEFAULT_FOREGROUND_JOBS)
+            );
+            assert_eq!(configuration.workers, Some(2));
+            assert_eq!(configuration.rss_ceiling_mb, Some(10 * 1024));
+        }
     }
 
     #[test]
@@ -1381,6 +1409,13 @@ mod tests {
             assert_eq!(config.foreground_jobs, Some(count));
             assert_eq!(config.preparation_jobs, Some(count));
         }
+        assert!(parse_daemon(&[
+            "--socket".into(),
+            "/tmp/compiler.sock".into(),
+            "--foreground-jobs".into(),
+            "0".into()
+        ])
+        .is_err());
         assert!(parse_daemon(&[
             "--socket".into(),
             "/tmp/compiler.sock".into(),
