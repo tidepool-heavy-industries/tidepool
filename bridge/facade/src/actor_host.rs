@@ -3829,27 +3829,44 @@ fn answer_release_waiters(
     }
 }
 
-async fn drain_embedded_shutdown<A: fmt::Debug + Send + 'static, L: Send + 'static>(
-    tasks: &mut JoinSet<(A, L, Result<(), embedded_service::EmbeddedDriverError>)>,
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EmbeddedShutdownOutcome {
+    driver_failure: Option<String>,
+    cleanup_failure: Option<String>,
+}
+
+async fn drain_embedded_shutdown<L: Send + 'static>(
+    tasks: &mut JoinSet<(
+        ActorRef,
+        L,
+        Result<(), embedded_service::EmbeddedDriverError>,
+    )>,
     grace: Duration,
-    mut actor_for_task: impl FnMut(tokio::task::Id) -> Option<ActorRef>,
-    mut released: impl FnMut(A, exomonad_actor::ResourceRelease),
-) -> Option<String> {
-    let mut failure = None;
+    application_owners: &InteractiveOwners,
+    release_waiters: &mut HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>>,
+) -> EmbeddedShutdownOutcome {
+    let mut result = EmbeddedShutdownOutcome::default();
     match tokio::time::timeout(grace, async {
         while let Some(result) = tasks.join_next_with_id().await {
             match result {
-                Ok((_task_id, (actor, _local_actor, outcome))) => {
-                    let release = embedded_resource_release(outcome.as_ref().err());
-                    if let Err(error) = outcome {
-                        tracing::warn!(?actor, %error, "embedded Engine stopped with an error during host shutdown");
-                        failure.get_or_insert_with(|| format!("embedded Engine {actor:?}: {error}"));
+                Ok((task_id, (actor, _local_actor, outcome))) => {
+                    match application_supervisor::settle_embedded_completion(
+                        actor, task_id, outcome, application_owners, release_waiters,
+                    ) {
+                        Ok(application_supervisor::EmbeddedTaskCompletion::Completed) => {}
+                        Ok(application_supervisor::EmbeddedTaskCompletion::ExecutionFailed(detail)) => {
+                            tracing::warn!(?actor, %detail, "embedded Engine stopped with an error during host shutdown");
+                            result.driver_failure.get_or_insert_with(|| format!("embedded Engine {actor:?}: {detail}"));
+                        }
+                        Ok(application_supervisor::EmbeddedTaskCompletion::CleanupFailed(detail)) => {
+                            result.cleanup_failure.get_or_insert_with(|| format!("embedded Engine {actor:?}: {detail}"));
+                        }
+                        Err(error) => { result.cleanup_failure.get_or_insert(error); }
                     }
-                    released(actor, release);
                 }
                 Err(error) => {
-                    let actor = actor_for_task(error.id());
-                    failure.get_or_insert_with(|| match actor {
+                    let actor = embedded_actor_for_task(application_owners, error.id());
+                    result.cleanup_failure.get_or_insert_with(|| match actor {
                         Some(actor) => format!("embedded Engine task for {actor:?}: {error}"),
                         None => format!("unattributed embedded Engine task: {error}"),
                     });
@@ -3857,14 +3874,15 @@ async fn drain_embedded_shutdown<A: fmt::Debug + Send + 'static, L: Send + 'stat
             }
         }
     }).await {
-        Ok(()) => failure,
+        Ok(()) => result,
         Err(_) => {
             tasks.abort_all();
             let timeout = "embedded Engine cleanup timed out; abort requested, cleanup unconfirmed";
-            Some(match failure {
+            result.cleanup_failure = Some(match result.cleanup_failure {
                 Some(failure) => format!("{failure}; {timeout}"),
                 None => timeout.into(),
-            })
+            });
+            result
         }
     }
 }
