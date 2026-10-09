@@ -186,13 +186,16 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 let native_terminal = owner.terminal();
                 let exomonad_actor::HostedOperationTerminal::Settled(
                     WorkbenchCancellationOutcome::Cancelled {
-                        reply: Err(native_failure),
-                        ..
+                        execution: native_execution,
+                        reply: native_reply,
                     },
                 ) = &native_terminal
                 else {
                     panic!("full cancelled native receipt required: {native_terminal:?}");
                 };
+                let native_failure = native_reply
+                    .as_ref()
+                    .expect_err("native interruption retains its full failure receipt");
                 assert!(
                     native_failure
                         .receipts()
@@ -234,16 +237,24 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 );
                 assert!(provider.dropped.load(Ordering::SeqCst));
                 assert_eq!(scheduler.cancel(&operation).await.unwrap(), None);
-                assert_eq!(owner.terminal(), native_terminal);
-                assert_eq!(
+                for observation in [
+                    owner.terminal(),
                     campaign
                         .root_installation
                         .policy
                         .retained_operation(context)
                         .unwrap()
                         .terminal(),
-                    native_terminal
-                );
+                ] {
+                    let exomonad_actor::HostedOperationTerminal::Settled(
+                        WorkbenchCancellationOutcome::Cancelled { execution, reply },
+                    ) = observation
+                    else {
+                        panic!("inspection lost the cancelled native receipt: {observation:?}");
+                    };
+                    assert_eq!(&execution, native_execution);
+                    assert_eq!(&reply, native_reply);
+                }
                 assert_eq!(provider.dispatched.load(Ordering::SeqCst), 1);
                 assert_eq!(
                     backend.executions(),
