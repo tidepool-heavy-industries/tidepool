@@ -1835,6 +1835,7 @@ enum Admission {
     NoWorkers,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn admit_job(
     senders: &[std::sync::mpsc::SyncSender<PendingJob>],
     ordinary_busy: Option<&std::sync::Arc<AtomicBool>>,
@@ -1843,6 +1844,7 @@ fn admit_job(
     job: Job,
     connection: &mut UnixStream,
     next_admission_id: &mut AdmissionId,
+    epoch: DaemonEpoch,
 ) -> Admission {
     admit_job_observed(
         senders,
@@ -1853,6 +1855,7 @@ fn admit_job(
         connection,
         next_admission_id,
         crate::resources::capacity(),
+        epoch,
     )
 }
 
@@ -1866,6 +1869,7 @@ fn admit_job_observed(
     connection: &mut UnixStream,
     next_admission_id: &mut AdmissionId,
     capacity: crate::resources::ResourceCapacity,
+    epoch: DaemonEpoch,
 ) -> Admission {
     if let Some(reason) = resources.refusal(workload, capacity) {
         connection
@@ -1885,7 +1889,7 @@ fn admit_job_observed(
     } else {
         None
     };
-    let Some(resource_permit) = resources.acquire_with_capacity(workload, capacity) else {
+    let Some(mut resource_permit) = resources.acquire_with_capacity(workload, capacity) else {
         if let Job::Request(_, cwd, argv) = &job {
             tracing::debug!(
                 compile_request = %compile_request_correlation(cwd, argv),
@@ -1905,8 +1909,12 @@ fn admit_job_observed(
     };
     let admission_id = AdmissionId(next);
     *next_admission_id = admission_id;
+    // Queue ownership includes the issued identity: receiver drop can release
+    // an accepted permit before a worker ever observes the pending job.
+    resource_permit.identity = Some((epoch, admission_id));
     let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
-    tracing::info!(workload = ?workload, worker_slot = resource_permit.slot,
+    tracing::info!(daemon_epoch = %hex(&epoch.0), admission_id = admission_id.0,
+        workload = ?workload, worker_slot = resource_permit.slot,
         compiler_jobs = resource_permit.grant.jobs, compiler_capabilities = resource_permit.grant.capabilities,
         "compiler resources reserved");
     match senders[resource_permit.slot].try_send(PendingJob {
@@ -2014,8 +2022,7 @@ fn serve_workers(
                         break;
                     };
                     let _permit = pending.permit;
-                    let mut resource_permit = pending.resource_permit;
-                    resource_permit.identity = Some((DaemonEpoch(*epoch), pending.admission_id));
+                    let resource_permit = pending.resource_permit;
                     let workload = resource_permit.workload;
                     let grant = resource_permit.grant;
                     // The accept thread reserves the slot before writing the
@@ -2244,6 +2251,7 @@ fn serve_workers(
                         Job::Transaction(worker_connection),
                         &mut connection,
                         &mut next_admission_id,
+                        DaemonEpoch(*epoch),
                     ),
                     Admission::NoWorkers
                 ) {
@@ -2330,6 +2338,7 @@ fn serve_workers(
                     Job::Request(worker_connection, cwd, worker_argv),
                     &mut connection,
                     &mut next_admission_id,
+                    DaemonEpoch(*epoch),
                 ),
                 Admission::NoWorkers
             ) {
@@ -3819,7 +3828,8 @@ mod tests {
                     Job::Transaction(worker_connection),
                     &mut connection,
                     &mut identity,
-                    capacity
+                    capacity,
+                    DaemonEpoch([9; 32]),
                 ),
                 Admission::Continue
             ));
@@ -4309,6 +4319,79 @@ mod tests {
     impl CapturedWriter {
         fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    #[test]
+    fn queued_receiver_drop_releases_issued_capacity_with_exact_identity() {
+        for acknowledge in [true, false] {
+            let resources = ResourceAdmission::new(2, 2 * WARM_WORKER_MB);
+            let capacity = admission_capacity(8, 2 * WARM_WORKER_MB);
+            let (senders, receivers): (Vec<_>, Vec<_>) =
+                (0..2).map(|_| std::sync::mpsc::sync_channel(1)).unzip();
+            let (mut connection, peer) = UnixStream::pair().unwrap();
+            let worker_connection = connection.try_clone().unwrap();
+            let mut peer = acknowledge.then_some(peer);
+            let mut next = AdmissionId(16);
+            let trace = CapturedWriter::default();
+            let subscriber = tracing_subscriber(
+                CapturedWriter::default(),
+                CapturedWriter::default(),
+                trace.clone(),
+                tracing_subscriber::EnvFilter::new("info"),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                assert!(matches!(
+                    admit_job_observed(
+                        &senders,
+                        None,
+                        &resources,
+                        CompileWorkload::Foreground,
+                        Job::Transaction(worker_connection),
+                        &mut connection,
+                        &mut next,
+                        capacity,
+                        DaemonEpoch([9; 32]),
+                    ),
+                    Admission::Continue
+                ));
+                assert_eq!(next.0, 17);
+                if let Some(peer) = peer.as_mut() {
+                    let mut acknowledgement = [0; 9];
+                    peer.read_exact(&mut acknowledgement).unwrap();
+                    assert_eq!(acknowledgement[0], ACCEPTED);
+                    assert_eq!(&acknowledgement[1..], &17_u64.to_le_bytes());
+                }
+                assert_eq!(resources.usage.lock().unwrap().jobs, 1);
+                // No worker receives this PendingJob. Dropping its queue must
+                // release both counters and the identity issued before ACCEPTED.
+                drop(receivers);
+                let usage = resources.usage.lock().unwrap();
+                assert_eq!((usage.jobs, usage.foreground, usage.cpus), (0, 0, 0));
+                assert!(usage.slots.iter().all(|held| *held == 0));
+            });
+            let events = trace
+                .text()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            let reservations = events
+                .iter()
+                .filter(|event| event["fields"]["message"] == "compiler resources reserved")
+                .collect::<Vec<_>>();
+            let releases = events
+                .iter()
+                .filter(|event| event["fields"]["phase"] == "compiler_capacity_release")
+                .collect::<Vec<_>>();
+            assert_eq!(reservations.len(), 1);
+            assert_eq!(releases.len(), 1);
+            for event in [reservations[0], releases[0]] {
+                assert_eq!(event["fields"]["daemon_epoch"], hex(&[9; 32]));
+                assert_eq!(event["fields"]["admission_id"], 17);
+                assert_eq!(event["fields"]["worker_slot"], 0);
+                assert_eq!(event["fields"]["compiler_jobs"], 2);
+            }
+            assert!(releases[0]["fields"]["elapsed_ns"].as_u64().unwrap() > 0);
         }
     }
 
