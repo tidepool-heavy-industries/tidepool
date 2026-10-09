@@ -209,10 +209,10 @@ buildJoinedInterface hsc joined path originals exports selected familyClosure = 
                   (mkModuleSet orphanOwners)
               selectedEnv = (emptyFamInstEnv, extendFamInstEnvList emptyFamInstEnv selectedFamilies)
           let classIndex = classInstanceIndex classes
-          emitCount timing "declaration_class_pairs" (fromIntegral (length (classIndexPairs classIndex)))
-          emitCount timing "declaration_class_visible" (fromIntegral (length (classIndexVisible classIndex)))
-          consistency <- measureJoin timing "selected_consistency" forceDecision
-            (pure (validateInstancesIndexed classes classIndex selectedEnv))
+          consistency <- measureJoin timing "selected_consistency" forceDecision $ do
+            emitCount timing "declaration_class_pairs" (fromIntegral (length (classIndexPairs classIndex)))
+            emitCount timing "declaration_class_visible" (fromIntegral (length (classIndexVisible classIndex)))
+            pure (validateInstancesIndexed classes classIndex selectedEnv)
           familyConsistency <- case consistency of
             JoinRejected {} -> pure JoinAccepted
             JoinAccepted -> measureJoin timing "retained_family_consistency" forceDecision

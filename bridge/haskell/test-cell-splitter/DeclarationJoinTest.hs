@@ -1,6 +1,8 @@
 module Main (main, tests) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (unless)
+import Data.List (isInfixOf)
 import Test.QuickCheck qualified as QC
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 import DeclarationJoinCases
@@ -15,9 +17,7 @@ tests = testGroup "declaration-join"
   , testCase "indexed declarations match exhaustive bounded histories" declarationIndexHistories
   , testCase "current typed declaration request roundtrip" wireRoundTripChecks
   , testCase "original package roots" originalProductRootsProof
-  , testCase "evaluated original package roots control" $
-      originalProductRootsProofWith (\global ->
-        (Execution.globalIdentity global, Execution.globalRequiredEvaluated global))
+  , testCase "evaluated original package roots control" originalProductRootsControl
   , testCase "original interfaces fresh consumers and retained family conflicts" declarationJoinScenario
   ]
 
@@ -44,3 +44,16 @@ declarationIndexProperty = withDeclarationIndexOracle $ \classCount familyCount 
             QC.cover 20 visible "visible orphan instances" True
   result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess = 256, QC.maxSize = 18 } property
   unless (QC.isSuccess result) (fail "declaration-index history property failed")
+
+-- The evaluated-only mutant must lose the dictionary's unevaluated package
+-- worker. An unexpected exception is a failure, rather than control evidence.
+originalProductRootsControl :: IO ()
+originalProductRootsControl = do
+  result <- try (originalProductRootsProofWith (\global ->
+    (Execution.globalIdentity global, Execution.globalRequiredEvaluated global)))
+    :: IO (Either IOException ())
+  case result of
+    Left failure | "unevaluated original dictionary lost its exact package worker definition"
+        `isInfixOf` show failure -> pure ()
+    Left failure -> fail ("package roots control failed for another reason: " ++ show failure)
+    Right () -> fail "evaluated-only package roots control unexpectedly passed"
