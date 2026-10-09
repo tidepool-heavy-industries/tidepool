@@ -1640,6 +1640,11 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertEqual(verify_catalog.call_count, 1)
             self.assertEqual(verify_root.call_count, 1)
 
+            with self.assertRaises(TypeError):
+                qualification.native_environment(bundle, verified_catalog=contract['native_catalog'])
+            with self.assertRaisesRegex(ValueError, 'requires this bundle\'s verified catalog'):
+                qualification._native_environment(bundle, contract['native_catalog'])
+
             source = original / 'lib/Library.hs'
             before = source.read_bytes()
             source.write_text('changed after first verify')
