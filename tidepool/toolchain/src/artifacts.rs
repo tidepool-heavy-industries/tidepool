@@ -2295,7 +2295,7 @@ impl ModuleCandidateOffer {
             validation,
         )?
         .ok_or_else(fail)?;
-        let original_owner = admission.source.generated_source_owner()?;
+        let original_owner = admission.generated_source_owner()?;
         if original_owner.module != module_name {
             return Err(fail());
         }
