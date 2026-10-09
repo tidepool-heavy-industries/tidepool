@@ -134,6 +134,10 @@ implementation anchors use their existing independent checked-value and lexical 
 The current GHC session's Finder roots own that search order. Reused module
 summaries may keep preprocessing flags from an earlier request; their historical
 include paths do not grant current lookup authority or invalidate its sealed roots.
+Checking publishes its exact receipt at checked completion. Prepared results
+retain the typed `ExactCompilation` and current source proof; product certification
+publishes their receipt. Observe each operation through its own result and
+publication owner rather than assuming they expose identical artifacts.
 
 An explicit import in a submitted cell prologue requests current source
 selection. The original GHC parser carries its module and package qualifier
