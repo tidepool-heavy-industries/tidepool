@@ -20338,7 +20338,7 @@ pub(crate) mod request_tests {
             .expect("a second genuine alias shadows the first");
         assert_ne!(binding, current_binding);
         let borrowed_binding = if shadowed { binding } else { current_binding };
-        let (before, roots_before, public_before) = workbench
+        let (before, public_before) = workbench
             .access
             .with_machine(context.clone(), move |session, _, _| {
                 assert_eq!(
@@ -20350,7 +20350,6 @@ pub(crate) mod request_tests {
                 );
                 Ok((
                     session.value_handle_count(),
-                    session.persistent_roots_count(),
                     session
                         .public_visibility_snapshot_in(original_scope)
                         .unwrap(),
@@ -20530,13 +20529,19 @@ pub(crate) mod request_tests {
                     Some(public_before)
                 );
                 assert_eq!(session.outstanding_custody(), custody_before_resume);
+                // Installed programs retain machine roots independently of the
+                // private scope's owned value and native source-instance handles.
+                let private_roots = handles_before_resume + 1 - before;
                 assert_eq!(
                     session.retire_scope(scope).roots_released,
-                    roots_before_resume + 1 - roots_before,
+                    private_roots,
                     "retirement releases the private native support and settled reply roots"
                 );
                 assert_eq!(session.scope_binding_count(scope), 0);
-                assert_eq!(session.persistent_roots_count(), roots_before);
+                assert_eq!(
+                    session.persistent_roots_count(),
+                    roots_before_resume + 1 - private_roots
+                );
                 assert_eq!(session.value_handle_count(), before);
                 assert_eq!(
                     session
