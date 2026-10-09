@@ -97,8 +97,12 @@ no repeated immutable input reconstruction per scope generation; no repeated
 unchanged pure preparation; no aggregate assembly on every recovery expansion;
 no duplicate join for an exactly reusable projection.
 
-After joined focused checks and compiler corpus, freeze one matched bundle and
-run M1/M2/M3, catalogue, and cold/warm performance qualification. Compare 2/8/16
+After joined focused checks, freeze one matched bundle. Run M2 and M3 in parallel
+with separate owned services, workspaces and evidence directories; start with two
+M2 processes and one M3 process, subject to measured memory headroom. Independent
+corpus and performance gates need not delay that trial, but all required gates
+must pass before final release acceptance. Run M1, catalogue and cold/warm
+performance qualification from the same bundle. Compare 2/8/16
 compiler worker allowances using ready width, throughput and memory. Keep authored
 cells O0; report fast-dev and production separately. Publish source/artifact
 identities, counted evidence and durable Git acceptance annotation. Tenfold
