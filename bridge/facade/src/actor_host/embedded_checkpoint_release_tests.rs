@@ -108,6 +108,7 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             })
             .await
             .expect("actual issuer attaches through production readiness");
+            assert!(issuer.checkpoint, "root checkpoint admits the issuer");
             let issuer_id = issuer.actor.identity();
             let issuer_path = attached_actor_path(&host, issuer_id).await;
             next_hosted_script_round(&mut requests, &mut pending, &issuer_path)
@@ -123,8 +124,8 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             issuer_done.assert_committed("checkpoint-issuer-capture");
             issuer_done.finish();
             wait_for_succeeded_provider_turn(&host, issuer_id).await;
-            // Provider completion leaves the typed assignment pending. Cleanup must
-            // retain the issuer until that assignment has actually replied.
+            // Provider completion leaves the typed assignment pending. Forgetting
+            // a live issuer must refuse without retiring it or settling that request.
             next_root.call(
                 "checkpoint-pending-cleanup-refusal",
                 &tidepool_testing::fixture_source(
@@ -245,7 +246,8 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
                     .iter()
                     .filter(|installation| installation.checkpoint)
                     .count(),
-                1
+                2,
+                "the issuer and admitted observer remain; released checkpoint admits no third child"
             );
             observer_round.call(
                 "checkpoint-inherited-read",
