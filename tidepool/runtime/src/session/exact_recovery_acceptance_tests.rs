@@ -355,9 +355,10 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
 
     let private_before = session.public_visibility_snapshot_in(private).unwrap();
     let high_water = session.lib().generation();
-    assert!(session
+    let rejected = session
         .define_scoped_in(private, &["bad :: Int\nbad = True"])
-        .is_err());
+        .expect_err("ill-typed public declaration is refused during validation");
+    assert!(matches!(rejected, SessionError::ValidationFailed(_)));
     assert_eq!(session.lib().scope_tip(private), dependent);
     assert!(session.lib().generation() > high_water);
     assert_eq!(
