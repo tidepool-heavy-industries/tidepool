@@ -71,11 +71,23 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             next_hosted_script_round(&mut requests, &mut pending, &root)
                 .await
                 .call(
-                    "checkpoint-issuer-setup",
-                    &tidepool_testing::fixture_source(
-                        "bridge/facade/src/actor_host/checkpoint_issuer_setup.hs",
+                    "checkpoint-scope-setup",
+                    &format!(
+                        "{}\ndisplay True",
+                        tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/embedded_checkpoint_scope_setup.hs",
+                        ),
                     ),
                 );
+            let after_scope_setup =
+                next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            after_scope_setup.assert_value("checkpoint-scope-setup", "True");
+            after_scope_setup.call(
+                "checkpoint-issuer-setup",
+                &tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/checkpoint_issuer_setup.hs",
+                ),
+            );
             let next_root = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             next_root.assert_committed("checkpoint-issuer-setup");
             let issuer = tokio::time::timeout(Duration::from_secs(120), async {

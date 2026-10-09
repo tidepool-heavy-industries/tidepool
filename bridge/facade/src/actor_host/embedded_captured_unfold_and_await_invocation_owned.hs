@@ -2,26 +2,27 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Console, Lookup)
+import Tidepool.Effects.Core (Commands, Lookup)
 import Tidepool.Actors.Exomonad
 
 capturedValue <- pure (x :: Int)
-privateCapturedHelper :: Int -> Int
-privateCapturedHelper value = value + 1
-let capturedGetter = privateCapturedHelper capturedValue
+let capturedGetter = capturedValue + 1
 Right seed <- checkpoint "same-cell captured context"
-let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Console, Lookup, BoundWorktree]
+let workerSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree, Actor]
 Right alpha <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
-  ((defaultSpawnOptions workerSpec) { spawnLabel = Just "captured-alpha", spawnLifetime = ActorOwned })
+  ((defaultSpawnOptions workerSpec) { spawnLabel = Just "captured-alpha", spawnLifetime = InvocationOwned })
 Right beta <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
-  ((defaultSpawnOptions workerSpec) { spawnLabel = Just "captured-beta", spawnLifetime = ActorOwned })
+  ((defaultSpawnOptions workerSpec) { spawnLabel = Just "captured-beta", spawnLifetime = InvocationOwned })
 Right alphaRequest <- request @Int alpha ("read the captured getter" :: Text)
   (defaultRequestOptions { requestLabel = Just "captured-alpha" })
 Right betaRequest <- request @Int beta ("read the captured getter" :: Text)
   (defaultRequestOptions { requestLabel = Just "captured-beta" })
 R.send (storeAgents (R.client groupStore)) [alpha, beta]
-R.send (storeSeed (R.client seedStore)) seed
 replies <- watch (Just "same-cell-captured-replies")
   ((,) <$> settlement alphaRequest <*> settlement betaRequest)
-_ <- await (observed replies)
-error "M2_INTENTIONAL_PARENT_EXECUTION_FAILURE" :: Eff effects ()
+result <- await (observed replies)
+firstRelease <- releaseCheckpoint seed
+secondRelease <- releaseCheckpoint seed
+case (firstRelease, secondRelease, result) of
+  (Right (), Right (), Right (Right 42, Right 42)) -> display True
+  _ -> display False

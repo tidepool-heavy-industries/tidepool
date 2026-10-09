@@ -21,6 +21,10 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   native dependencies through exact artifact/group edges, including historical
   children, rather than flattening custody into a module map. History tests
   must carry certification through the production consumer that needs selection.
+  Retaining a complete native carrier must preserve its available exact child
+  carriers for unselected bodies. Keep that byte custody separate from source
+  roots, compiler input roles and executable group demand; later requests can
+  select another body without recreating its issuing dependency versions.
 - Pure activation previews preserve the original instance graph separately from
   native availability. Authored dictionary bodies use retained originals matching
   that capture's canonical interfaces; type custody alone cannot replace native

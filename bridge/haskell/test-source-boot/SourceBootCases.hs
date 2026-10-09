@@ -737,6 +737,14 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
   originalBytes <- BS.readFile owner
   dependencyBytes <- BS.readFile (work </> "CanonicalDependency.hs")
   withResidentPipelineSelected includes $ \compile -> do
+    -- An ordinary request admits the worker's default search roots. Its
+    -- unchanged summaries must not supply that broader search order to the
+    -- next exact request, whose source selection owns only sealed roots.
+    warm <- compile CheckedEnvironment Set.empty GeneralCompile Nothing consumer includes Nothing
+    unless (any ((/= includes) . importPaths . ms_hspp_opts)
+        [summary | ModuleNode _ summary <- mgModSummaries'
+          (hsc_mod_graph (crHscEnv warm))]) $
+      fail "ordinary-to-exact control lacks historical broader summary roots"
     _ <- check compile purpose
     receipts <- listDirectory (work </> ".exact-compilations")
     let receiptPath = work </> ".exact-compilations" </> head receipts </> "receipt.cbor"
@@ -744,6 +752,42 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     unless (Set.fromList (codecReceiptSourceSelected receiptFacts)
         == Set.fromList [("main","CanonicalSource"),("main","CanonicalDependency")]) $
       fail "canonical source receipt lost its typed transitive source-selected closure"
+    let emptyRoot = work </> "empty-search-root"
+    createDirectory emptyRoot
+    admission <- maybe (fail "current-source fixture lacks its checked purpose") pure
+      (scopeCheckedCell admitted)
+    -- Generate the nearby search-order/product-role combinations. Current
+    -- Finder selection is the oracle: the empty root supplies no provider,
+    -- and both operations must retain the same original type-only closure.
+    forM_ [[emptyRoot,work],[work,emptyRoot],[work,work]] $ \search -> do
+      let currentScope = admitted {scopePurpose=ExactCellPurpose admission search}
+          checkCurrent = do
+            previousReceipts <- listDirectory (work </> ".exact-compilations")
+            _ <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose currentScope)
+              (Just session) consumer search Nothing
+            currentReceipts <- listDirectory (work </> ".exact-compilations")
+            currentReceipt <- case filter (`notElem` previousReceipts) currentReceipts of
+              [entry] -> pure (work </> ".exact-compilations" </> entry </> "receipt.cbor")
+              _ -> fail "checking transition did not issue one exact source receipt"
+            codecReceiptSourceSelected <$> readReceiptCodecFacts work currentReceipt
+          prepareCurrent = do
+            selected <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose currentScope)
+              (Just session) consumer search Nothing
+            currentCompilation <- maybe (fail "search transition omitted exact compilation") pure
+              (preparedExactCompilation selected)
+            unless (null (scopeProducts (compilationScope currentCompilation))
+                && null (scopeExecutionGraphs (compilationScope currentCompilation))) $
+              fail "source selection granted execution custody to canonical type-only originals"
+            currentSelection <- maybe (fail "preparation transition omitted current source proof") pure
+              (compilationSourceSelection currentCompilation)
+            pure [key | (key,_,_,_) <- selectedOriginalRows currentSelection]
+      forM_ [checkCurrent,prepareCurrent] $ \selectCurrent -> do
+        _ <- compile CheckedEnvironment Set.empty GeneralCompile Nothing consumer search Nothing
+        currentOwners <- selectCurrent
+        unless (Set.fromList currentOwners
+            == Set.fromList [("main","CanonicalSource"),("main","CanonicalDependency")]) $
+          fail "search/product-role transition changed the canonical source closure"
+    _ <- check compile purpose
     -- The next authored import must consume this cell's completed original
     -- capture through the same proof used after Rust persistence.
     forM_ ["CanonicalLocalSupport.hs","CanonicalLocalConsumer.hs"] $ \name ->

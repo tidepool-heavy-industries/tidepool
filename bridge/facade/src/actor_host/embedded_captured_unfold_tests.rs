@@ -257,8 +257,11 @@ impl CapturedHostTransport {
                         HostedScenario::LocalActorStartup => {
                             "seed <- R.call (readSeed (R.client seedStore)) ()\nagents <- R.call (readAgents (R.client groupStore)) ()\ndisplay (case seed of Nothing -> null agents; _ -> False)".to_owned()
                         }
-                        HostedScenario::Captured(CapturedScenario::Success | CapturedScenario::CancelWhileParked) => {
+                        HostedScenario::Captured(CapturedScenario::Success) => {
                             tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_and_await.hs")
+                        }
+                        HostedScenario::Captured(CapturedScenario::CancelWhileParked) => {
+                            tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_and_await_invocation_owned.hs")
                         }
                         HostedScenario::Captured(CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure) => {
                             tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_shutdown_parent_join.hs")

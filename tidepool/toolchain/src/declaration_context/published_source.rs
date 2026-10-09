@@ -113,9 +113,12 @@ impl ExactDeclarationContext {
             return Err(failure("published original lacks canonical source origin"));
         }
         let compiler = self.compiler_metadata_snapshot()?;
-        for entry in metadata
-            .artifacts
-            .values()
+        // Publication selects native roots through compiler roles. Exact child
+        // carriers retain executable bytes, including historical versions,
+        // without selecting their modules in the compiler namespace.
+        for entry in closure
+            .root_entries()
+            .iter()
             .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
         {
             if compiler
@@ -399,5 +402,303 @@ impl ExactDeclarationContext {
                 })
                 .collect::<Result<Vec<_>, CompileError>>()?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact_inventory::{NativeArtifactDemand, NativeGroupKey};
+    use crate::certified_products::PendingImportOwner;
+    use tidepool_repr::execution_schema::SymbolIdentity;
+
+    #[test]
+    fn published_native_custody_does_not_require_dependency_namespace_originals() {
+        let producer = [2; 32];
+        let native = |module: &str, groups, version, requirements| {
+            Arc::new(
+                ArtifactEntry::original(
+                    producer,
+                    crate::certified_products::tests::recovered_witness_fixtures(&[
+                        crate::certified_products::fixture_finalized_product_with_requirements(
+                            crate::certified_products::tests::original_groups_fixture_with_interface(
+                                module,
+                                groups,
+                                version,
+                                &BTreeMap::new(),
+                                format!("interface-{module}").into_bytes(),
+                            ),
+                            producer,
+                            Some(requirements),
+                        ),
+                    ])
+                    .remove(0)
+                    .product,
+                )
+                .unwrap(),
+            )
+        };
+        let source = |entry: &ArtifactEntry, ordinal, occurrence: &str| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            PendingImportOwner::Source {
+                owner: product.owner().clone(),
+                original_ordinal: ordinal,
+                binder: SymbolIdentity {
+                    unit: product.owner().unit.clone(),
+                    module: product.owner().module.clone(),
+                    namespace: "value".into(),
+                    occurrence: occurrence.into(),
+                    record_parent: None,
+                },
+            }
+        };
+        let leaf = native("Leaf", vec![(7, vec![])], 1, BTreeMap::new());
+        let helper_requirements = BTreeMap::from([(
+            ("fixture".into(), "Leaf".into()),
+            leaf.descriptor.interface_sha256,
+        )]);
+        let old = native(
+            "Helper",
+            vec![(7, vec![source(&leaf, 7, "entry")])],
+            1,
+            helper_requirements.clone(),
+        );
+        let current = native(
+            "Helper",
+            vec![(7, vec![source(&leaf, 7, "entry")])],
+            2,
+            helper_requirements,
+        );
+        let root = native(
+            "Root",
+            vec![(3, vec![]), (29, vec![source(&old, 7, "entry")])],
+            1,
+            BTreeMap::from([(
+                ("fixture".into(), "Helper".into()),
+                old.descriptor.interface_sha256,
+            )]),
+        );
+        let target = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                producer,
+                "fixture",
+                "Target",
+                BTreeMap::new(),
+            ),
+        ));
+        let ArtifactPayload::Original(old_product) = &old.payload else {
+            unreachable!()
+        };
+        let helper_interface = Arc::new(ArtifactEntry::canonical(
+            old_product.module_interface().unwrap().clone(),
+        ));
+        let ArtifactPayload::Original(leaf_product) = &leaf.payload else {
+            unreachable!()
+        };
+        let leaf_interface = Arc::new(ArtifactEntry::canonical(
+            leaf_product.module_interface().unwrap().clone(),
+        ));
+        let early = NativeGroupKey {
+            artifact: root.descriptor.id,
+            original_ordinal: 3,
+        };
+        for current_original_role in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    vec![
+                        root.clone(),
+                        old.clone(),
+                        current.clone(),
+                        leaf.clone(),
+                        target.clone(),
+                    ],
+                    &BTreeSet::from([early]),
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&[
+                root.clone(),
+                if current_original_role {
+                    current.clone()
+                } else {
+                    helper_interface.clone()
+                },
+                leaf_interface.clone(),
+                target.clone(),
+            ])
+            .unwrap();
+            let issued = ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &view,
+                vec![
+                    ExactLexicalNode {
+                        owner: target.descriptor.owner.clone(),
+                        imports: vec![root.descriptor.owner.clone()],
+                    },
+                    ExactLexicalNode {
+                        owner: root.descriptor.owner.clone(),
+                        imports: vec![old.descriptor.owner.clone()],
+                    },
+                    ExactLexicalNode {
+                        owner: old.descriptor.owner.clone(),
+                        imports: vec![leaf.descriptor.owner.clone()],
+                    },
+                    ExactLexicalNode {
+                        owner: leaf.descriptor.owner.clone(),
+                        imports: vec![],
+                    },
+                ],
+                target.descriptor.owner.clone(),
+                &[
+                    target.descriptor.owner.clone(),
+                    root.descriptor.owner.clone(),
+                    old.descriptor.owner.clone(),
+                    leaf.descriptor.owner.clone(),
+                ],
+            )
+            .unwrap()
+            .with_compiler_input_projection(projection)
+            .unwrap();
+            let publication = issued
+                .issue_published_source_original("revision", "input", &root.descriptor.owner)
+                .unwrap();
+            let published = publication.context();
+            assert!(published
+                .artifact_view()
+                .artifact_ids()
+                .contains(&old.descriptor.id));
+            assert!(published
+                .artifact_view()
+                .artifact_ids()
+                .contains(&leaf.descriptor.id));
+            assert!(!published
+                .artifact_view()
+                .artifact_ids()
+                .contains(&current.descriptor.id));
+            assert_eq!(
+                published.artifact_view().selected_native_groups(),
+                BTreeSet::from([early])
+            );
+            assert!(matches!(
+                published.compiler_metadata_snapshot().unwrap().entries[&old.descriptor.owner]
+                    .payload,
+                ArtifactPayload::Canonical(_)
+            ));
+            assert!(matches!(
+                published.compiler_metadata_snapshot().unwrap().entries[&leaf.descriptor.owner]
+                    .payload,
+                ArtifactPayload::Canonical(_)
+            ));
+            let composed = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .with_published_source_originals(&publication)
+                .unwrap();
+            assert_eq!(composed.semantic_sha256(), published.semantic_sha256());
+            let reopened = published.published_source_original_selections().unwrap();
+            assert_eq!(
+                reopened[0].context().semantic_sha256(),
+                published.semantic_sha256()
+            );
+            let admitted = published
+                .artifact_view()
+                .inventory()
+                .admit_shared_with_demand(
+                    published.artifact_view(),
+                    vec![root.clone()],
+                    NativeArtifactDemand::CertifiedTargetImports(&[source(&root, 29, "entry_29")]),
+                )
+                .unwrap();
+            assert_eq!(
+                admitted.selected_native_groups(),
+                BTreeSet::from([
+                    early,
+                    NativeGroupKey {
+                        artifact: root.descriptor.id,
+                        original_ordinal: 29
+                    },
+                    NativeGroupKey {
+                        artifact: old.descriptor.id,
+                        original_ordinal: 7
+                    },
+                    NativeGroupKey {
+                        artifact: leaf.descriptor.id,
+                        original_ordinal: 7
+                    },
+                ])
+            );
+            let recovery_inventory = RecoveredArtifactInventory {
+                producer,
+                entries: published
+                    .artifact_view()
+                    .entries()
+                    .into_iter()
+                    .map(|entry| (entry.descriptor.id, entry))
+                    .collect(),
+                recorded_inventory: true,
+                interfaces: published.artifact_view().interface_dependencies(),
+            };
+            let recovered = recovery_inventory
+                .context_with_published_roles(
+                    &published.artifact_view().artifact_ids(),
+                    &published
+                        .artifact_view()
+                        .selected_native_groups()
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                    &published.compiler_input_roles(),
+                    published.lexical.clone(),
+                )
+                .unwrap();
+            assert_eq!(recovered.semantic_sha256(), published.semantic_sha256());
+            let scratch = tempfile::tempdir().unwrap();
+            let products = recovery_artifacts::materialize_certified_products(
+                scratch.path(),
+                producer,
+                &published.recovery_products(),
+            )
+            .unwrap();
+            let interfaces = published
+                .materialize_module_interfaces(scratch.path())
+                .unwrap();
+            let roles: Vec<CompilerInputRole> = serde_json::from_slice(
+                &serde_json::to_vec(&published.compiler_input_roles()).unwrap(),
+            )
+            .unwrap();
+            let durable = ExactDeclarationContext::capture_recovery_with_inventory(
+                scratch.path(),
+                &products,
+                &interfaces,
+                &[],
+                &[],
+                &published.artifact_view().descriptors(),
+                &published.artifact_view().dependencies(),
+                &[early],
+                &roles,
+                published.lexical.clone(),
+            )
+            .unwrap();
+            assert_eq!(durable.semantic_sha256(), published.semantic_sha256());
+            let mut missing = recovery_inventory;
+            missing.entries.remove(&old.descriptor.id);
+            assert!(
+                missing
+                    .context_with_published_roles(
+                        &published
+                            .artifact_view()
+                            .artifact_ids()
+                            .into_iter()
+                            .filter(|id| *id != old.descriptor.id)
+                            .collect::<Vec<_>>(),
+                        &[early],
+                        &published.compiler_input_roles(),
+                        published.lexical.clone(),
+                    )
+                    .is_err(),
+                "recovery cannot replace missing exact child custody with its canonical interface"
+            );
+        }
     }
 }
