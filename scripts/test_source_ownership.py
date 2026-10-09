@@ -35,6 +35,7 @@ TEST_ONLY_MODULES = {
         'bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs',
         'bridge/facade/src/actor_host/embedded_operation_settlement_tests.rs',
         'bridge/facade/src/actor_host/m1_cancel_performance.rs',
+        'bridge/facade/src/actor_host/m1_chat_projection_tests.rs',
         'bridge/facade/src/actor_host/m1_compiler_attribution_tests.rs',
         'bridge/facade/src/actor_host/m1_eight_actor_performance.rs',
         'bridge/facade/src/actor_host/m1_request_reload_tests.rs',
