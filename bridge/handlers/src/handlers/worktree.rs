@@ -1849,9 +1849,9 @@ mod tests {
         assert_eq!(wire.cwd, "/worktrees/wt-1");
         assert_eq!(
             wire.branch,
-            WtBranchName {
+            Some(WtBranchName {
                 raw: "tidepool/worktree/wt-1".to_string()
-            }
+            })
         );
         assert_eq!(
             wire.source_head,

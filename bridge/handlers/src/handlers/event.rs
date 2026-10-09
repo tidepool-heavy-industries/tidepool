@@ -3338,7 +3338,7 @@ mod tests {
             .put(&exomonad_worktree::WorktreeReceipt {
                 worktree_id: worktree_id.clone(),
                 cwd: cwd.clone(),
-                branch: exomonad_worktree::BranchName::from_raw("main"),
+                branch: Some(exomonad_worktree::BranchName::from_raw("main")),
                 source_head: exomonad_worktree::GitOid::from_raw("deadbeef"),
                 snapshot_ref: None,
                 origin: exomonad_worktree::WorktreeOrigin::CurrentRepository,
