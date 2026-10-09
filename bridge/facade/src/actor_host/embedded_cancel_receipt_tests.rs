@@ -165,11 +165,46 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 let failure = receipt
                     .as_ref()
                     .expect_err("native sleep interruption retains the partial failure receipt");
-                assert!(
-                    failure.message().contains("input receipts before failure"),
-                    "{failure}"
-                );
-                assert!(failure.message().contains("Committed"), "{failure}");
+                assert!(failure.message().len() <= TOOL_ERROR_MESSAGE_BYTE_BUDGET);
+                assert!(failure.message().contains("receipt output omitted"));
+                let metadata = failure.metadata().expect("bounded native failure evidence");
+                assert_eq!(metadata["originalOperation"], json!(operation));
+                assert!(metadata["items"].as_array().unwrap().iter().any(|item| {
+                    item["operations"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|operation| operation["disposition"] == "committed")
+                }));
+                // Inspect the actual native owner after projection, rather than
+                // reconstruct complete evidence from the bounded tool output.
+                let owner = campaign
+                    .root_installation
+                    .policy
+                    .retained_operation(context.clone())
+                    .expect("issued native settlement remains inspectable");
+                let native_terminal = owner.terminal();
+                let exomonad_actor::HostedOperationTerminal::Settled(
+                    WorkbenchCancellationOutcome::Cancelled {
+                        reply: Err(native_failure),
+                        ..
+                    },
+                ) = &native_terminal
+                else {
+                    panic!("full cancelled native receipt required: {native_terminal:?}");
+                };
+                assert!(native_failure
+                    .receipts()
+                    .iter()
+                    .any(|receipt| !receipt.output.is_empty()));
+                assert!(native_failure
+                    .receipts()
+                    .iter()
+                    .flat_map(|receipt| &receipt.operations)
+                    .any(|operation| {
+                        operation.disposition
+                            == tidepool_runtime::session::WorkbenchOperationDisposition::Committed
+                    }));
                 assert!(
                     !failure.message().contains("unreachable suffix"),
                     "the suffix must not execute: {failure}"
@@ -180,10 +215,10 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 let output: Value =
                     serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
                 assert_eq!(output["error"], "job cancelled");
-                assert!(output["receipt"]["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Committed"));
+                assert_eq!(
+                    output["receipt"]["failure"]["originalOperation"],
+                    json!(operation)
+                );
                 assert!(matches!(
                     TerminalOutcome::from(&settlement.output),
                     TerminalOutcome::CancelledWithReceipt(_)
@@ -195,6 +230,16 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 );
                 assert!(provider.dropped.load(Ordering::SeqCst));
                 assert_eq!(scheduler.cancel(&operation).await.unwrap(), None);
+                assert_eq!(owner.terminal(), native_terminal);
+                assert_eq!(
+                    campaign
+                        .root_installation
+                        .policy
+                        .retained_operation(context)
+                        .unwrap()
+                        .terminal(),
+                    native_terminal
+                );
                 assert_eq!(provider.dispatched.load(Ordering::SeqCst), 1);
                 assert_eq!(
                     backend.executions(),

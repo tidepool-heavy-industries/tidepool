@@ -949,11 +949,281 @@ impl EmbeddedDispatcher {
                 context_binding,
             )
             .await
-            .map_err(provider_tool_error)
+            .map_err(|error| provider_tool_error(error, Some(operation)))
     }
 }
 
-fn provider_tool_error(error: ResidentToolError) -> ProviderError {
+const TOOL_ERROR_MESSAGE_BYTE_BUDGET: usize = 8192;
+const FAILURE_INSPECTION: &str =
+    "ResidentToolEndpoint::retained_operation(exact ToolInvocationContext).terminal()";
+
+/// Stop formatting at the transport boundary without first allocating the full
+/// diagnostic. Invocation summaries deliberately never format receipt outputs.
+struct BoundedErrorMessage {
+    text: String,
+    limit: usize,
+    omitted: bool,
+}
+
+impl std::fmt::Write for BoundedErrorMessage {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let available = self.limit.saturating_sub(self.text.len());
+        if text.len() <= available {
+            self.text.push_str(text);
+            return Ok(());
+        }
+        let mut cut = available;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.text.push_str(&text[..cut]);
+        self.omitted = true;
+        Err(std::fmt::Error)
+    }
+}
+
+fn write_invocation_summary(
+    out: &mut BoundedErrorMessage,
+    failure: &exomonad_actor::KernelInvocationFailure,
+) -> std::fmt::Result {
+    use exomonad_actor::KernelInvocationFailure as Failure;
+    use std::fmt::Write;
+
+    match failure {
+        Failure::ActorExited(actor) => write!(out, "actor {actor} has exited"),
+        Failure::Cancelled { actor } => write!(out, "actor {actor} invocation was cancelled"),
+        Failure::Rejected { actor, detail, .. } => {
+            write!(out, "actor {actor} rejected the invocation: {detail}")
+        }
+        Failure::Failed { actor, detail, .. } => {
+            write!(out, "actor {actor} invocation failed: {detail}")
+        }
+        Failure::CleanupUnconfirmed { actor, detail, .. } => {
+            write!(
+                out,
+                "actor {actor} invocation cleanup remains unconfirmed: {detail}"
+            )
+        }
+        Failure::TerminalTransferFailed {
+            actor,
+            request,
+            source,
+        } => {
+            write!(
+                out,
+                "actor {actor} accepted request {request:?}, but its terminal transfer failed: "
+            )?;
+            write_invocation_summary(out, source)
+        }
+        Failure::Workbench(failure) => {
+            use tidepool_runtime::session::WorkbenchFailurePoint as Point;
+            match failure.point {
+                Point::InputUnit { index } => write!(
+                    out,
+                    "actor {} workbench input unit {} of {} failed: {}",
+                    failure.actor,
+                    index + 1,
+                    failure.total,
+                    failure.detail
+                ),
+                Point::Publication {
+                    completed_input_units,
+                } => write!(
+                    out,
+                    "actor {} workbench publication failed after {} completed input units: {}",
+                    failure.actor, completed_input_units, failure.detail
+                ),
+                Point::Finalization {
+                    completed_input_units,
+                } => write!(
+                    out,
+                    "actor {} workbench finalization failed after {} completed input units: {}",
+                    failure.actor, completed_input_units, failure.detail
+                ),
+            }
+        }
+    }
+}
+
+fn bounded_tool_error_message(
+    error: &ResidentToolError,
+    operation: Option<&OperationId>,
+) -> String {
+    use std::fmt::Write;
+
+    const OMITTED: &str = "\n[Detail or receipt output omitted from this message. Inspect the issued native settlement for originalOperation via ResidentToolEndpoint::retained_operation(exact ToolInvocationContext).terminal(). This native API reference does not establish admission, application success or release. Do not resubmit source to retrieve retained evidence.]";
+    let mut out = BoundedErrorMessage {
+        text: String::new(),
+        limit: TOOL_ERROR_MESSAGE_BYTE_BUDGET - OMITTED.len(),
+        omitted: false,
+    };
+    if let Some(operation) = operation {
+        // Bound correlation independently so an unusual identity cannot consume
+        // the failure summary. The exact identity belongs to metadata.
+        let mut identity = BoundedErrorMessage {
+            text: String::new(),
+            limit: 512,
+            omitted: false,
+        };
+        let _ = write!(identity, "{operation:?}");
+        let _ = writeln!(
+            out,
+            "Original operation: {}{}",
+            identity.text,
+            if identity.omitted {
+                " [identity abbreviated; metadata records any further omission]"
+            } else {
+                ""
+            }
+        );
+        out.omitted |= identity.omitted;
+    }
+    if let ResidentToolError::Invocation(failure) = error {
+        if let Some(publication) = failure.publication() {
+            let _ = writeln!(out, "{}", workbench_publication_context(publication));
+        }
+        let _ = write_invocation_summary(&mut out, failure);
+        out.omitted |= failure
+            .receipts()
+            .iter()
+            .any(|receipt| !receipt.output.is_empty());
+    } else {
+        let _ = write!(out, "{error}");
+    }
+    if out.omitted {
+        out.text.push_str(OMITTED);
+    }
+    out.text
+}
+
+/// Serialize only within the existing metadata budget, rather than allocate a
+/// huge receipt output and discard it afterward. ToolFailure still owns depth
+/// and final combined metadata admission.
+fn bounded_failure_metadata(value: &(impl serde::Serialize + ?Sized)) -> Option<Value> {
+    bounded_failure_metadata_with_budget(value, TOOL_ERROR_MESSAGE_BYTE_BUDGET)
+}
+
+fn bounded_failure_metadata_with_budget(
+    value: &(impl serde::Serialize + ?Sized),
+    budget: usize,
+) -> Option<Value> {
+    struct Bytes {
+        bytes: Vec<u8>,
+        budget: usize,
+    }
+    impl std::io::Write for Bytes {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.budget.saturating_sub(self.bytes.len()) {
+                return Err(std::io::Error::other(
+                    "failure metadata byte budget exceeded",
+                ));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut bytes = Bytes {
+        bytes: Vec::new(),
+        budget,
+    };
+    serde_json::to_writer(&mut bytes, value).ok()?;
+    serde_json::from_slice(&bytes.bytes).ok()
+}
+
+fn add_failure_recovery(metadata: &mut Value, operation: Option<&OperationId>) {
+    metadata["retainedEvidence"] = json!({"owner": "native hosted operation settlement", "inspection": FAILURE_INSPECTION, "modelTool": false});
+    if let Some(operation) = operation {
+        // Leave space for publication, classification, counts and the inspection
+        // reference even when the original correlation strings are unusually long.
+        if let Some(operation) = bounded_failure_metadata_with_budget(operation, 4096) {
+            metadata["originalOperation"] = operation;
+        } else {
+            metadata["originalOperationOmitted"] = json!(true);
+        }
+    }
+}
+
+fn operation_outcome_counts(invocation: Option<&exomonad_actor::KernelInvocationFailure>) -> Value {
+    use tidepool_runtime::session::WorkbenchOperationDisposition as Disposition;
+    let mut counts = [0usize; 6];
+    for operation in invocation
+        .into_iter()
+        .flat_map(|failure| failure.receipts())
+        .flat_map(|item| &item.operations)
+    {
+        counts[match operation.disposition {
+            Disposition::Prepared => 0,
+            Disposition::Read => 1,
+            Disposition::Staged => 2,
+            Disposition::Committed => 3,
+            Disposition::Rejected => 4,
+            Disposition::Unknown => 5,
+        }] += 1;
+    }
+    json!({"prepared": counts[0], "read": counts[1], "staged": counts[2], "committed": counts[3], "rejected": counts[4], "unknown": counts[5]})
+}
+
+fn reduced_publication_metadata(
+    publication: Option<&tidepool_runtime::session::WorkbenchPublicationOutcome>,
+) -> Value {
+    use tidepool_runtime::session::WorkbenchPublicationOutcome as Publication;
+    match publication {
+        None => Value::Null,
+        Some(Publication::NotPublished { reason }) => {
+            json!({"status": "notPublished", "reason": reason})
+        }
+        Some(Publication::Published { bindings }) => {
+            json!({"status": "published", "bindingsOmitted": bindings.len()})
+        }
+        Some(Publication::Rejected { detail }) => {
+            json!({"status": "rejected", "detail": exomonad_actor::bound_workbench_display(detail, 512)})
+        }
+        Some(Publication::DurabilityUnconfirmed { bindings, detail }) => {
+            json!({"status": "durabilityUnconfirmed", "bindingsOmitted": bindings.len(), "detail": exomonad_actor::bound_workbench_display(detail, 512)})
+        }
+    }
+}
+
+// Semantic tool values can be arbitrarily nested. Inspect their shape without
+// recursive serialization; leave depth for the enclosing metadata structure.
+// ToolFailure remains the final metadata admission owner.
+fn receipt_values_fit_projection(
+    receipts: &[tidepool_runtime::session::WorkbenchItemReceipt],
+) -> bool {
+    let mut visited = 0usize;
+    for value in receipts.iter().filter_map(|receipt| receipt.value.as_ref()) {
+        let mut pending = vec![(value, 1usize)];
+        while let Some((value, depth)) = pending.pop() {
+            visited += 1;
+            if depth > 4 || visited > TOOL_ERROR_MESSAGE_BYTE_BUDGET {
+                return false;
+            }
+            let children = match value {
+                Value::Array(values) => values.len(),
+                Value::Object(values) => values.len(),
+                _ => 0,
+            };
+            if children > TOOL_ERROR_MESSAGE_BYTE_BUDGET.saturating_sub(visited + pending.len()) {
+                return false;
+            }
+            match value {
+                Value::Array(values) => {
+                    pending.extend(values.iter().map(|value| (value, depth + 1)))
+                }
+                Value::Object(values) => {
+                    pending.extend(values.values().map(|value| (value, depth + 1)))
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+fn provider_tool_error(error: ResidentToolError, operation: Option<&OperationId>) -> ProviderError {
     let diagnostic = match &error {
         ResidentToolError::Invocation(failure) => failure.failure_diagnostic(),
         _ => None,
@@ -962,26 +1232,26 @@ fn provider_tool_error(error: ResidentToolError) -> ProviderError {
         ResidentToolError::Invocation(failure) => Some(failure),
         _ => None,
     };
-    let message = invocation
-        .and_then(exomonad_actor::KernelInvocationFailure::publication)
-        .map(workbench_publication_context)
-        .map_or_else(
-            || error.to_string(),
-            |context| format!("{context} {}", error),
-        );
+    let message = bounded_tool_error_message(&error, operation);
     let mut metadata = diagnostic
         .map(|diagnostic| {
-            serde_json::to_value(diagnostic)
-                .expect("failure diagnostics contain only serializable data")
+            bounded_failure_metadata(diagnostic)
+                .unwrap_or_else(|| json!({"class": diagnostic.class, "phase": diagnostic.phase, "diagnosticOmitted": true}))
         })
         .unwrap_or_else(|| json!({}));
     if let Some(invocation) = invocation {
-        metadata["publication"] = serde_json::to_value(invocation.publication()).unwrap();
-        metadata["items"] = serde_json::to_value(invocation.receipts()).unwrap();
+        metadata["publication"] = bounded_failure_metadata(&invocation.publication())
+            .unwrap_or_else(|| reduced_publication_metadata(invocation.publication()));
+        metadata["items"] = if receipt_values_fit_projection(invocation.receipts()) {
+            bounded_failure_metadata(invocation.receipts()).unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
     }
+    add_failure_recovery(&mut metadata, operation);
     let failure = if diagnostic.is_some() || invocation.is_some() {
         let full = ToolFailure::with_metadata(message.clone(), metadata.clone());
-        if full.metadata_omitted().is_none() {
+        if full.metadata_omitted().is_none() && metadata["items"].is_array() {
             full
         } else {
             // Preserve committed operation identities before reducing large output payloads.
@@ -989,50 +1259,47 @@ fn provider_tool_error(error: ResidentToolError) -> ProviderError {
                 .map(|failure| failure
                     .receipts()
                     .iter()
+                    .take(16)
                     .map(|item| json!({
                         "index": item.index, "status": item.status,
                         "terminalTransfer": item.terminal_transfer,
-                        "operations": item.operations.iter().map(|operation| json!({
-                            "id": operation.id, "effect": operation.effect,
+                        "operations": item.operations.iter().take(16).map(|operation| json!({
+                            "id": operation.id, "effect": exomonad_actor::bound_workbench_display(&operation.effect, 128),
                             "disposition": operation.disposition,
                         })).collect::<Vec<_>>(),
+                        "operationsOmitted": item.operations.len().saturating_sub(16),
                     }))
                     .collect::<Vec<_>>())
                 .unwrap_or_default());
             metadata["itemsReduced"] = json!(true);
+            metadata["applicationValuesOmitted"] = json!(true);
+            metadata["itemsOmitted"] =
+                json!(invocation.map_or(0, |failure| failure.receipts().len().saturating_sub(16)));
+            metadata["operationOutcomes"] = operation_outcome_counts(invocation);
             let reduced = ToolFailure::with_metadata(message.clone(), metadata);
             if reduced.metadata_omitted().is_none() {
                 reduced
             } else {
-                let mut publication =
-                    serde_json::to_value(invocation.and_then(|failure| failure.publication()))
-                        .unwrap();
-                if let Some(fields) = publication.as_object_mut() {
-                    if let Some(bindings) = fields.remove("bindings") {
-                        fields.insert(
-                            "bindingsOmitted".into(),
-                            json!(bindings.as_array().map_or(0, Vec::len)),
-                        );
-                    }
-                    if let Some(detail) = fields.get_mut("detail") {
-                        *detail = json!(exomonad_actor::bound_workbench_display(
-                            detail.as_str().unwrap_or_default(),
-                            512
-                        ));
-                    }
+                let publication = reduced_publication_metadata(
+                    invocation.and_then(|failure| failure.publication()),
+                );
+                let mut metadata = json!({
+                    "publication": publication,
+                    "itemsOmitted": invocation.map_or(0, |failure| failure.receipts().len()),
+                    "applicationValuesOmitted": true,
+                    "diagnosticOmitted": diagnostic.is_some(),
+                    "operationOutcomes": operation_outcome_counts(invocation),
+                });
+                if let Some(diagnostic) = diagnostic {
+                    metadata["class"] = json!(diagnostic.class);
+                    metadata["phase"] = json!(diagnostic.phase);
                 }
-                ToolFailure::with_metadata(
-                    message,
-                    json!({
-                        "publication": publication,
-                        "itemsOmitted": invocation.map_or(0, |failure| failure.receipts().len()),
-                        "diagnosticOmitted": diagnostic.is_some(),
-                    }),
-                )
+                add_failure_recovery(&mut metadata, operation);
+                ToolFailure::with_metadata(message, metadata)
             }
         }
     } else {
-        error.to_string().into()
+        ToolFailure::with_metadata(message, metadata)
     };
     ProviderError::Tool(failure)
 }
@@ -1086,7 +1353,7 @@ impl Provider for EmbeddedDispatcher {
             Ok(admitted) => admitted,
             Err(error) => {
                 return unavailable_context_completion(JobOutput::Completed(Err(
-                    provider_tool_error(error).into_tool_failure(),
+                    provider_tool_error(error, context.operation.as_ref()).into_tool_failure(),
                 )));
             }
         };
@@ -1183,7 +1450,7 @@ impl Provider for EmbeddedDispatcher {
                     ));
                 }
             }
-            native_terminal_output(result, terminal)
+            native_terminal_output(result, terminal, operation.as_ref())
         } else {
             JobOutput::Completed(result)
         };
@@ -1271,7 +1538,7 @@ impl CancellationOwner for EmbeddedDispatcher {
             Ok(WorkbenchCancellationOutcome::Cancelled { reply, .. }) => {
                 match self.snapshot.abort_operation(context).await {
                     Ok(()) => CancellationAcknowledgment::StoppedWithReceipt(
-                        workbench_reply_receipt(reply),
+                        workbench_reply_receipt(reply, Some(operation)),
                     ),
                     Err(error) => CancellationAcknowledgment::Unconfirmed(error.to_string()),
                 }
@@ -1279,7 +1546,10 @@ impl CancellationOwner for EmbeddedDispatcher {
             Ok(
                 WorkbenchCancellationOutcome::Expired { reply, .. }
                 | WorkbenchCancellationOutcome::PublicationSettled { reply, .. },
-            ) => CancellationAcknowledgment::Completed(workbench_reply_receipt(reply)),
+            ) => CancellationAcknowledgment::Completed(workbench_reply_receipt(
+                reply,
+                Some(operation),
+            )),
             Ok(outcome) => CancellationAcknowledgment::Unconfirmed(format!("{outcome:?}")),
             Err(error) => CancellationAcknowledgment::Unconfirmed(error.to_string()),
         }
@@ -1296,21 +1566,23 @@ fn unavailable_context_completion(output: JobOutput) -> ProviderCompletion {
 
 fn workbench_reply_receipt(
     reply: exomonad_actor::KernelWorkbenchReply,
+    operation: Option<&OperationId>,
 ) -> Result<Value, ToolFailure> {
     reply
         .map_err(ResidentToolError::Invocation)
         .and_then(|response| serde_json::to_value(response).map_err(ResidentToolError::Encoding))
-        .map_err(provider_tool_error)
+        .map_err(|error| provider_tool_error(error, operation))
         .map_err(ProviderError::into_tool_failure)
 }
 
 fn native_terminal_output(
     result: Result<Value, ToolFailure>,
     terminal: Result<WorkbenchCancellationOutcome, ResidentToolError>,
+    operation: Option<&OperationId>,
 ) -> JobOutput {
     match terminal {
         Ok(WorkbenchCancellationOutcome::Cancelled { reply, .. }) => {
-            JobOutput::CancelledWithReceipt(workbench_reply_receipt(reply))
+            JobOutput::CancelledWithReceipt(workbench_reply_receipt(reply, operation))
         }
         Ok(
             WorkbenchCancellationOutcome::Expired { .. }
@@ -1325,6 +1597,10 @@ fn native_terminal_output(
 #[cfg(test)]
 #[path = "embedded_cancel_receipt_tests.rs"]
 mod cancellation_receipt_tests;
+
+#[cfg(test)]
+#[path = "embedded_failure_projection_tests.rs"]
+mod failure_projection_tests;
 
 #[cfg(test)]
 mod round_control_tests {
@@ -1562,6 +1838,7 @@ mod round_control_tests {
                     diagnostic: None,
                 }),
             }),
+            None,
         );
         assert!(matches!(output, JobOutput::CancelledWithReceipt(Err(_))));
     }
@@ -1586,14 +1863,14 @@ mod round_control_tests {
         ] {
             let result = Ok(json!({"exact": "native return"}));
             assert_eq!(
-                native_terminal_output(result.clone(), Ok(terminal)),
+                native_terminal_output(result.clone(), Ok(terminal), None),
                 JobOutput::Completed(result)
             );
         }
     }
 
     #[test]
-    fn embedded_tool_failure_preserves_classification_and_original_error_text() {
+    fn embedded_tool_failure_preserves_classification_without_rendering_receipt_outputs() {
         for (output, reduced) in [
             ("private unit output".to_owned(), false),
             ("large retained command output".repeat(1024), true),
@@ -1647,9 +1924,12 @@ mod round_control_tests {
                     },
                 ),
             );
-            let original = error.to_string();
-            let failure = provider_tool_error(error).into_tool_failure();
-            assert!(failure.message().contains(&original));
+            let failure = provider_tool_error(error, None).into_tool_failure();
+            assert!(failure.message().contains("retained owner missing"));
+            assert!(!failure.message().contains("private unit output"));
+            assert!(!failure.message().contains("large retained command output"));
+            assert!(failure.message().len() <= TOOL_ERROR_MESSAGE_BYTE_BUDGET);
+            assert!(failure.message().contains("receipt output omitted"));
             let metadata = failure.metadata().unwrap();
             assert_eq!(metadata["publication"]["status"], "notPublished");
             assert_eq!(metadata["publication"]["reason"], "failed");

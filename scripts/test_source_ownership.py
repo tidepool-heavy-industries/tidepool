@@ -31,6 +31,7 @@ TEST_ONLY_MODULES = {
     }),
     'tidepool': frozenset({
         'bridge/facade/src/actor_host/embedded_agent_spec_tests.rs',
+        'bridge/facade/src/actor_host/embedded_failure_projection_tests.rs',
         'bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs',
         'bridge/facade/src/actor_host/embedded_operation_settlement_tests.rs',
         'bridge/facade/src/actor_host/m1_cancel_performance.rs',
