@@ -200,7 +200,8 @@ import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule, emitHostBindingInterface)
 import Tidepool.DeclarationJoin (HostBindingInterfaceInput(..), BindingInterfacePurpose(..)
-  , DeclarationOperation(..), encodeHostBindingInterface, readDeclarationOperation)
+  , DeclarationOperation(..), JoinRejection(..), encodeHostBindingInterface, readDeclarationOperation)
+import Tidepool.FamilyConsistency (FamilyConsistencyRejection(..))
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
@@ -5308,8 +5309,10 @@ exactLoadedMetadata = withTiming $ withScratch $ \work -> do
     family <- try (compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
       (work </> "MetadataFamilyTarget.hs") [work] Nothing) :: IO (Either SomeException CheckedEnvironmentResult)
     case family of
-      Left failure | "retained family consistency" `isInfixOf` show failure -> pure ()
-      _ -> fail "loaded metadata lost the hidden original family conflict"
+      Left failure
+        | Just (FamilyConsistencyRejection FamilyInstanceConflict _) <- fromException failure -> pure ()
+        | otherwise -> fail ("loaded metadata rejected the hidden original family conflict with an unexpected exception: " ++ show failure)
+      Right _ -> fail "loaded metadata accepted the hidden original family conflict"
     copyFile (fixture "MetadataLoadedFamilyCompatible.hs") (work </> "MetadataLoadedFamily.hs")
     recoveredFamily <- compile CheckedEnvironment Set.empty GeneralCompile (Just hiddenScope)
       (work </> "MetadataFamilyTarget.hs") [work] Nothing
