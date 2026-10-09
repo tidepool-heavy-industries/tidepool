@@ -652,6 +652,34 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(recovered.semantic_sha256(), published.semantic_sha256());
+            let scratch = tempfile::tempdir().unwrap();
+            let products = recovery_artifacts::materialize_certified_products(
+                scratch.path(),
+                producer,
+                &published.recovery_products(),
+            )
+            .unwrap();
+            let interfaces = published
+                .materialize_module_interfaces(scratch.path())
+                .unwrap();
+            let roles: Vec<CompilerInputRole> = serde_json::from_slice(
+                &serde_json::to_vec(&published.compiler_input_roles()).unwrap(),
+            )
+            .unwrap();
+            let durable = ExactDeclarationContext::capture_recovery_with_inventory(
+                scratch.path(),
+                &products,
+                &interfaces,
+                &[],
+                &[],
+                &published.artifact_view().descriptors(),
+                &published.artifact_view().dependencies(),
+                &[early],
+                &roles,
+                published.lexical.clone(),
+            )
+            .unwrap();
+            assert_eq!(durable.semantic_sha256(), published.semantic_sha256());
             let mut missing = recovery_inventory;
             missing.entries.remove(&old.descriptor.id);
             assert!(
