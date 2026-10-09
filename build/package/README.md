@@ -70,6 +70,19 @@ selection through root Buck configuration:
 record artifact is generated from configuration bytes; the mutable evidence
 path supplies only the original collector-root location.
 
+Keep these values identical for every concurrent Buck client in one checkout.
+Buck synchronizes daemon state when a client switches command-line
+configuration; a client with only the ordinary profile settings can wait for
+the retention-configured build to finish. An opt-in private JSON object can
+carry the same settings into every `scripts/buck2-run.sh` invocation by setting
+`TIDEPOOL_BUCK_CONFIG_FILE` to its path. Use the exact source root, record path
+and record JSON selected for this build. The launcher checks that the file is
+owned by the current user, mode 0600 or stricter, no larger than 64 KiB, and
+rejects conflicting command-line values. This is scoped to the command
+environment; it does not change `.buckconfig.local` or apply a server-wide
+concurrency setting. Without one shared config file, run the retention-bearing
+build and other Buck clients sequentially.
+
 `//build/package:native_catalog` rechecks all three source inventories and actual
 Nix retention before invoking the existing Buck `tidepool-module-package` with
 the original `TidepoolCatalog.hs`, `catalogSentinel`, original source root and

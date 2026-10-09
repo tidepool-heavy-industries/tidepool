@@ -20,7 +20,7 @@ class BuckRunnerTests(unittest.TestCase):
         self.addCleanup(self.storage.cleanup)
         self.root = Path(self.storage.name) / "checkout with spaces"
         (self.root / "scripts").mkdir(parents=True)
-        for script in ("buck2-run.sh", "toolchain-inputs.sh"):
+        for script in ("buck2-run.sh", "toolchain-inputs.sh", "buck2-config-args.py"):
             shutil.copyfile(SCRIPT.parent / script, self.root / "scripts" / script)
         self.git = shutil.which("git")
         self.git_command("init", "-q")
@@ -52,7 +52,7 @@ class BuckRunnerTests(unittest.TestCase):
         # Real declared utilities only serve the stub's Git/config checks.
         self.action_tools = self.action_output / "bin"
         self.action_tools.mkdir()
-        for name in ("git", "mktemp", "rm"):
+        for name in ("git", "mktemp", "rm", "python3"):
             (self.action_tools / name).symlink_to(shutil.which(name))
         self.shell_log = self.root / "dev-shell.log"
         self.buck_log = self.root / "buck.json"
@@ -164,6 +164,49 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.shell_log.exists())
         self.assertEqual(json.loads(self.buck_log.read_text())["args"], args)
+
+    def test_private_shared_configuration_is_added_for_every_buck_command(self):
+        config_file = self.root / "retained-buck-config.json"
+        config_file.write_text(json.dumps({
+            "nix.native_catalog_source_root": "/nix/store/catalog-snapshot",
+            "nix.native_catalog_retention_record": "/evidence/retained.json",
+            "nix.native_catalog_retention": '{"gc_roots": []}',
+        }))
+        config_file.chmod(0o600)
+        result = self.run_runner(
+            "build", "--local-only", "-c", "remote.enabled=false",
+            TIDEPOOL_BUCK_CONFIG_FILE=str(config_file),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(self.buck_log.read_text())["args"]
+        self.assertEqual(args[0], "build")
+        self.assertEqual(args.count("-c"), 4)
+        self.assertIn("nix.native_catalog_source_root=/nix/store/catalog-snapshot", args)
+        self.assertIn("nix.native_catalog_retention_record=/evidence/retained.json", args)
+        self.assertIn('nix.native_catalog_retention={"gc_roots": []}', args)
+
+    def test_shared_configuration_requires_matching_explicit_values(self):
+        config_file = self.root / "retained-buck-config.json"
+        config_file.write_text(json.dumps({"tidepool.profile": "fast-dev"}))
+        config_file.chmod(0o600)
+        result = self.run_runner(
+            "build", "-c", "tidepool.profile=production",
+            TIDEPOOL_BUCK_CONFIG_FILE=str(config_file),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("conflicts with command-line configuration", result.stderr)
+        self.assertFalse(self.buck_log.exists())
+
+    def test_shared_configuration_refuses_group_readable_files(self):
+        config_file = self.root / "retained-buck-config.json"
+        config_file.write_text(json.dumps({"tidepool.profile": "fast-dev"}))
+        config_file.chmod(0o640)
+        result = self.run_runner(
+            "build", TIDEPOOL_BUCK_CONFIG_FILE=str(config_file),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shared Buck configuration is invalid", result.stderr)
+        self.assertFalse(self.buck_log.exists())
 
     def test_buck_exit_status_and_signal_are_preserved(self):
         result = self.run_runner("build", BUCK_EXIT="37")

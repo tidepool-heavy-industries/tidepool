@@ -91,4 +91,15 @@ case $(owner_value selection_mode) in
   explicit) ;;
   *) refuse 'missing generation selection mode' ;;
 esac
+if [[ -n ${TIDEPOOL_BUCK_CONFIG_FILE:-} ]]; then
+  shared_config=$(mktemp)
+  trap 'rm -f -- "$shared_config"' EXIT
+  if ! python3 scripts/buck2-config-args.py "$TIDEPOOL_BUCK_CONFIG_FILE" -- "$@" > "$shared_config"; then
+    refuse 'shared Buck configuration is invalid or conflicts with command-line configuration'
+  fi
+  mapfile -d '' -t configured_args < "$shared_config"
+  rm -f -- "$shared_config"
+  trap - EXIT
+  exec "$buck_bin" "${configured_args[@]}"
+fi
 exec "$buck_bin" "$@"
