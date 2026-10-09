@@ -7056,7 +7056,9 @@ mod tests {
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
         let view = execution.view();
         let imports = view.turn_imports(&crate::session::SourceImports::new());
-        let expected_declaration = session.next_lib_module().unwrap();
+        let expected_prologue = session.next_lib_module().unwrap();
+        let expected_declaration =
+            SessionModule::lib(tidepool_repr::Generation(expected_prologue.gen().0 + 1));
         let declaration_header = format!("module {} where", expected_declaration.module_name());
         let declaration_preamble = effects
             .preamble()
@@ -7098,15 +7100,38 @@ mod tests {
             .unwrap();
         assert_eq!(
             admission.reserved_generations(),
-            &[expected_declaration.gen()]
+            &[expected_prologue.gen(), expected_declaration.gen()]
+        );
+        use crate::session::RuntimePlannedCellItemKind as ItemKind;
+        assert_eq!(
+            admission
+                .plan_reservation()
+                .unwrap()
+                .items()
+                .iter()
+                .map(|item| item.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                ItemKind::Prologue,
+                ItemKind::Declaration,
+                ItemKind::Bind,
+                ItemKind::Bind,
+                ItemKind::Expression
+            ],
         );
         let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
-        assert_eq!(checked.items.len(), 4);
-        let declaration = checked.checked_item(0).unwrap();
+        assert_eq!(checked.items.len(), 5);
+        let prologue = checked.checked_item(0).unwrap();
+        assert!(prologue
+            .planned_declaration()
+            .unwrap()
+            .lexical_exports()
+            .is_empty());
+        let declaration = checked.checked_item(1).unwrap();
         let certificate = declaration
             .planned_declaration()
             .expect("same-offer original declaration certificate");
-        let module = SessionModule::lib(admission.reserved_generations()[0]).module_name();
+        let module = SessionModule::lib(admission.reserved_generations()[1]).module_name();
         assert_eq!(certificate.product().owner().module, module);
         assert!(declaration
             .planned_declaration_source()
@@ -7124,8 +7149,8 @@ mod tests {
                 && instance.class.module == module));
         assert!(!certificate.instances().families.is_empty());
         let original_product = certificate.product().clone();
-        let replacement = checked.checked_item(1).unwrap();
-        let binding = checked.checked_item(2).unwrap();
+        let replacement = checked.checked_item(2).unwrap();
+        let binding = checked.checked_item(3).unwrap();
         assert!(
             binding.signatures()[0]
                 .names()
@@ -7134,22 +7159,30 @@ mod tests {
             "local nominal signature: {:?}",
             binding.signatures()
         );
-        let expression = checked.checked_item(3).unwrap();
+        let expression = checked.checked_item(4).unwrap();
         assert_eq!(
             expression.expression_lift().unwrap(),
             Some(tidepool_toolchain::checked_cell::CheckedExpressionLift::Pure)
         );
         let prepared_declaration = admission.prepared_declaration(&declaration).unwrap();
         let receipt = prepared_declaration.projection.receipt().clone();
-        let prefix = declaration.initial_prefix().unwrap();
+        let prologue_projection = admission.prepared_declaration(&prologue).unwrap();
+        let prefix = prologue.initial_prefix().unwrap();
         assert!(prefix
             .append_declaration_with_projection(binding.clone(), receipt.clone())
             .is_err());
         let prefix = prefix
+            .append_declaration_with_projection(
+                prologue.clone(),
+                prologue_projection.projection.receipt().clone(),
+            )
+            .unwrap();
+        let prefix = prefix
             .append_declaration_with_projection(declaration.clone(), receipt.clone())
             .unwrap();
-        assert_eq!(prefix.next_item(), 1);
-        assert_eq!(prefix.completed_declaration(0), Some(&declaration));
+        assert_eq!(prefix.next_item(), 2);
+        assert_eq!(prefix.completed_declaration(0), Some(&prologue));
+        assert_eq!(prefix.completed_declaration(1), Some(&declaration));
         assert!(prefix
             .append_declaration_with_projection(declaration.clone(), receipt)
             .is_err());
@@ -7157,8 +7190,8 @@ mod tests {
             .begin_cell_program(admission, program)
             .unwrap()
             .unwrap();
-        let reservation = session
-            .admit_checked_item(protected.clone(), declaration)
+        let prologue_reservation = session
+            .admit_checked_item(protected.clone(), prologue)
             .unwrap();
         #[derive(Clone)]
         struct QuietOutput;
@@ -7180,6 +7213,16 @@ mod tests {
                 lexical_scope: execution.private_scope(),
                 ..Default::default()
             })
+            .unwrap();
+        resident
+            .adopt_checked_declaration(prologue_reservation.clone())
+            .unwrap();
+        assert_eq!(protected.snapshot().compiler_prefix().next_item(), 1);
+        assert!(resident
+            .adopt_checked_declaration(prologue_reservation)
+            .is_err());
+        let reservation = resident
+            .admit_checked_item(protected.clone(), declaration)
             .unwrap();
         resident
             .adopt_checked_declaration(reservation.clone())
@@ -7207,7 +7250,7 @@ mod tests {
         assert!(!projection.context().lexical_graph().iter().any(
             |node| node.owner.module == SessionModule::lib(inherited_generation).module_name()
         ));
-        assert_eq!(protected.snapshot().compiler_prefix().next_item(), 1);
+        assert_eq!(protected.snapshot().compiler_prefix().next_item(), 2);
         let adopted = protected.snapshot();
         let imports = adopted
             .view()
