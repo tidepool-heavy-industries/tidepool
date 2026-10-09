@@ -332,6 +332,7 @@ impl SessionLib {
             path,
             graph,
             unconfirmed: Default::default(),
+            retained: Default::default(),
         });
         Ok(())
     }

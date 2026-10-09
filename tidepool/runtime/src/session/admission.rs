@@ -2137,6 +2137,22 @@ impl PersistentSession {
                 current: snapshot.epoch,
             }));
         }
+        if let Some(live) = state.retained.lock().clone() {
+            if live
+                .observe(
+                    &state.graph,
+                    &state.path,
+                    state.path.parent().expect("canonical manifest parent"),
+                )
+                .map_err(|error| SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail: error.to_string(),
+                })?
+            {
+                retained.validate_owner()?;
+                return Ok(snapshot);
+            }
+        }
         let bytes = std::fs::read(&state.path).map_err(|error| SessionError::RecoveryManifest {
             path: state.path.clone(),
             detail: error.to_string(),
@@ -2163,6 +2179,8 @@ impl PersistentSession {
                 current: state.graph.checksum().to_owned(),
             }));
         }
+        *state.retained.lock() = read.retain(&bytes);
+        retained.validate_owner()?;
         Ok(snapshot)
     }
 
