@@ -3,9 +3,13 @@
 The parcel defines the task. Follow this file and the nearest contributor
 rules; a narrower parcel constraint wins. Preserve unrelated work and WIP.
 Do not switch another active checkout, stash/reset edits, clear shared caches,
-or restart shared services. Coordinate one expensive build/test lane on the
-shared server. Source-only work does not grant permission to start Buck, Nix
-builds, compilers or runtime tests.
+or restart shared services. Each implementation owner runs its own affected
+builds and focused tests through the admitted repository commands. Run independent
+work concurrently when measured process peaks, enclosing cgroup limits and host
+headroom permit; coordinate actual checkout, configuration and output conflicts.
+See `docs/swarm-builds.md` for admission and provisioning. A missing output mount
+or compiler input is a concrete blocker, not a reason to make source-only handoffs
+the default.
 
 Before adding an abstraction, find its production callers and extend the
 owning mechanism. A test-only caller is not evidence for new public surface.
@@ -18,6 +22,8 @@ Review unexpected complexity as a finding, then repair it within scope.
    the defining crate. Cargo metadata and the reviewed source/module walk own
    Rust target registration; Cabal component declarations own Haskell rosters.
 2. Compile every changed/directly affected target in the admitted checkout.
+   Compile test targets and integration callers of changed APIs early, while
+   independent source review proceeds; do not wait for a central build owner.
    Linking a Rust test executable is compile-only evidence. Actual libtest
    discovery, not source regexes, decides whether a harness is an executed
    suite. Empty harnesses cannot be accepted as tests.
