@@ -12200,6 +12200,7 @@ mod tool_dispatch_tests {
 #[cfg(test)]
 pub(crate) mod request_tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn selected_spec_import_belongs_to_installer_only() {
