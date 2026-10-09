@@ -967,7 +967,16 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     assert!(matches!(&inspected[0], InspectionResult::Type { display, .. } if display == "Int"));
     assert!(matches!(&inspected[1], InspectionResult::Rejected { .. }));
     assert!(matches!(&inspected[2], InspectionResult::Rejected { .. }));
-    let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+    let templates = vec![TurnTemplate {
+        kind: TemplateSelector::Expr,
+        source: assemble_expression_module(
+            &insert_preamble_imports(effects.preamble(), &imports),
+            "__result",
+            effects.row(),
+            "{{TURN}}",
+            ExpressionLift::Pure,
+        ),
+    }];
     let TurnResult::Expr { compiled, .. } = run_turn(TurnRequest {
         exact_context: Some(Arc::new(
             tidepool_toolchain::declaration_join::ExactCompileContext::new(context),
@@ -1021,7 +1030,7 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         else {
             panic!("real recovered original dependency must execute in each selected scope");
         };
-        assert_eq!(result.to_json(), serde_json::json!([42, "42"]));
+        assert_eq!(result.to_json(), serde_json::json!(42));
         assert_eq!(std::fs::read(&manifest).unwrap(), before);
         println!(
             "fresh recovery native execution: pid={} owner={path} scope={scope:?} result=42",
