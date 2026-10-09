@@ -2108,14 +2108,25 @@ impl ArtifactView {
             .collect::<Vec<_>>();
         selected.extend(owned.iter().filter(|key| matches!(key, InventoryNodeKey::Group(group) if ids.contains(&group.artifact))).copied());
         drop(state);
-        let mut materializations = Vec::new();
-        if !selected.is_empty() {
-            self.collect_materializations(&mut materializations, &mut BTreeSet::new());
-        }
-        Ok(self
+        let mut retained = self
             .lease
             .inventory
-            .retain(selected, Vec::new(), materializations))
+            .retain(selected, Vec::new(), Vec::new());
+        let mut materializations = Vec::new();
+        if !retained.is_empty() {
+            self.collect_materializations(&mut materializations, &mut BTreeSet::new());
+            if !materializations.is_empty() {
+                let custody =
+                    crate::declaration_context::RetainedArtifactMaterialization::select_custody(
+                        &materializations,
+                        &retained.metadata_snapshot(),
+                    );
+                Arc::get_mut(&mut retained.lease)
+                    .expect("new selection lease")
+                    .materialization_parents = custody.into_iter().collect();
+            }
+        }
+        Ok(retained)
     }
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
         if Arc::ptr_eq(&self.lease, &other.lease) || other.is_empty() {

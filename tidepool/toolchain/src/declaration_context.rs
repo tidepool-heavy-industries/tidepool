@@ -639,7 +639,7 @@ fn execution_scope_value(
 fn execution_scope_value_with_graph_paths(
     entries: &[Arc<ArtifactEntry>],
     root: &Path,
-    graph_paths: &mut BTreeMap<[u8; 32], OwnedExecutionGraphFile>,
+    graph_paths: &mut BTreeMap<[u8; 32], PathBuf>,
     written_bytes: &mut u64,
 ) -> Result<Option<Value>, CompileError> {
     let originals = entries
@@ -727,7 +727,7 @@ fn execution_scope_value_with_graph_paths(
                 .filter(|(digest, _)| admitted_graphs.contains(digest))
                 .map(|(digest, graph)| {
                     let path = if let Some(file) = graph_paths.get(&digest) {
-                        file.path.clone()
+                        file.clone()
                     } else {
                         let path = root.join(format!("execution-{}.cbor", hex(&digest)));
                         let mut file = std::fs::OpenOptions::new()
@@ -736,7 +736,7 @@ fn execution_scope_value_with_graph_paths(
                             .open(&path)?;
                         file.write_all(graph.bytes())?;
                         *written_bytes += graph.bytes().len() as u64;
-                        graph_paths.insert(digest, OwnedExecutionGraphFile { path: path.clone() });
+                        graph_paths.insert(digest, path.clone());
                         path
                     };
                     Ok(Value::Array(vec![text(hex(&digest)), path_value(&path)?]))
@@ -1154,8 +1154,10 @@ pub struct MaterializedExactDeclarationContext {
 /// Private files and newly certified entries added by one immutable graph view.
 /// Parents retain inherited rows and group payloads; requests assemble borrowed
 /// selections without storing a copy of every ancestor in each descendant.
+/// A detached selection shares each row and graph file's issuing directory,
+/// independently of historical materialization metadata.
 pub(crate) struct RetainedArtifactMaterialization {
-    _directory: tempfile::TempDir,
+    _directory: Option<Arc<tempfile::TempDir>>,
     _parents: Vec<Arc<Self>>,
     rows: BTreeMap<ArtifactId, RetainedArtifactRow>,
     groups: Arc<[PendingCertifiedGroup]>,
@@ -1167,13 +1169,78 @@ pub(crate) struct RetainedArtifactMaterialization {
 
 /// Issued only when the owning materialization writes an admitted immutable
 /// graph. Its path is transported by the sealed exact scope, while the request
-/// retains this materialization and its parent directories through worker use.
+/// retains the issuing directory through worker use, including detached captures.
 #[derive(Clone)]
 struct OwnedExecutionGraphFile {
     path: PathBuf,
+    _directory: Arc<tempfile::TempDir>,
 }
 
 impl RetainedArtifactMaterialization {
+    /// Detach exactly the selected immutable facts from historical delta owners.
+    /// Each file keeps its issuing directory; neither paths nor names discover
+    /// an owner, and selection cannot add native authority.
+    pub(crate) fn select_custody(
+        owners: &[Arc<Self>],
+        metadata: &ArtifactMetadataSnapshot,
+    ) -> Option<Arc<Self>> {
+        let groups = Self::selected_group_refs(owners.iter().map(Arc::as_ref), metadata)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let selected_graphs = metadata
+            .artifacts
+            .values()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => {
+                    product.execution_source().map(|graph| graph.digest())
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut rows = BTreeMap::new();
+        let mut graph_paths = BTreeMap::new();
+        let mut visited = BTreeSet::new();
+        for owner in owners {
+            owner.visit_owners(&mut visited, &mut |owner| {
+                rows.extend(
+                    owner
+                        .rows
+                        .iter()
+                        .filter(|(id, _)| metadata.artifacts.contains_key(*id))
+                        .map(|(id, row)| (*id, row.clone())),
+                );
+                graph_paths.extend(
+                    owner
+                        .graph_paths
+                        .iter()
+                        .filter(|(digest, _)| selected_graphs.contains(*digest))
+                        .map(|(digest, file)| (*digest, file.clone())),
+                );
+            });
+        }
+        if rows.is_empty() && groups.is_empty() && graph_paths.is_empty() {
+            return None;
+        }
+        Some(Arc::new(Self {
+            _directory: None,
+            _parents: Vec::new(),
+            rows,
+            groups: groups.into(),
+            execution_scope: None,
+            graph_paths,
+            #[cfg(test)]
+            payload_work: recovery_artifacts::RecoveryArtifactWork::default(),
+        }))
+    }
+
+    #[cfg(test)]
+    fn directory(&self) -> &tempfile::TempDir {
+        self._directory
+            .as_ref()
+            .expect("writing materialization")
+            .as_ref()
+    }
     fn visit_owners<'a>(&'a self, seen: &mut BTreeSet<usize>, visit: &mut impl FnMut(&'a Self)) {
         let mut pending = vec![(self, false)];
         while let Some((owner, parents_visited)) = pending.pop() {
@@ -1268,6 +1335,7 @@ impl RetainedArtifactMaterialization {
 
 #[derive(Clone)]
 struct RetainedArtifactRow {
+    _directory: Arc<tempfile::TempDir>,
     interface: ExactIfaceArtifact,
     interface_evidence: Value,
     payload: RetainedArtifactPayload,
@@ -5153,15 +5221,18 @@ impl ExactDeclarationContext {
                         "fixture delivery cannot borrow process-local artifact owners",
                     ));
                 }
-                let directory = tempfile::Builder::new()
+                let mut directory = tempfile::Builder::new()
                     .prefix("tidepool-exact-artifacts-")
                     .tempdir_in(root)?;
-                let mut retained =
-                    self.materialize_retained_artifacts(&metadata, parents, directory)?;
+                let cleanup_on_failure = directory.path().to_path_buf();
                 // These paths already belong to the packet's scoped directory. Its
                 // owner releases them after the downstream process consumes them.
-                retained._directory.disable_cleanup(true);
-                Ok(retained)
+                directory.disable_cleanup(true);
+                let result = self.materialize_retained_artifacts(&metadata, parents, directory);
+                if result.is_err() {
+                    let _ = std::fs::remove_dir_all(cleanup_on_failure);
+                }
+                result
             })?;
         self.prepare_compilation_from_metadata(root, producer, None, inputs, &scaffold, None)
     }
@@ -5261,6 +5332,7 @@ impl ExactDeclarationContext {
         parents: Vec<Arc<RetainedArtifactMaterialization>>,
         directory: tempfile::TempDir,
     ) -> Result<RetainedArtifactMaterialization, CompileError> {
+        let directory = Arc::new(directory);
         let root = directory.path();
         let mut inherited_rows = BTreeMap::new();
         for parent in &parents {
@@ -5307,6 +5379,7 @@ impl ExactDeclarationContext {
             rows.insert(
                 entry.descriptor.id,
                 RetainedArtifactRow {
+                    _directory: Arc::clone(&directory),
                     interface: artifact.interface,
                     interface_evidence,
                     payload,
@@ -5366,7 +5439,7 @@ impl ExactDeclarationContext {
         let mut graph_paths = parents
             .iter()
             .flat_map(|parent| parent.graph_path_refs())
-            .map(|(digest, path)| (digest, path.clone()))
+            .map(|(digest, path)| (digest, path.path.clone()))
             .collect::<BTreeMap<_, _>>();
         let inherited_graphs = graph_paths.keys().copied().collect::<BTreeSet<_>>();
         let mut scope_written_bytes = 0;
@@ -5386,7 +5459,7 @@ impl ExactDeclarationContext {
             recovery_decoded_bytes = work.decoded_bytes, recovery_hash_bytes = work.hash_bytes,
             scope_written_bytes, "completed private artifact ownership");
         Ok(RetainedArtifactMaterialization {
-            _directory: directory,
+            _directory: Some(Arc::clone(&directory)),
             _parents: parents,
             rows,
             groups: groups.into(),
@@ -5394,6 +5467,15 @@ impl ExactDeclarationContext {
             graph_paths: graph_paths
                 .into_iter()
                 .filter(|(digest, _)| !inherited_graphs.contains(digest))
+                .map(|(digest, path)| {
+                    (
+                        digest,
+                        OwnedExecutionGraphFile {
+                            path,
+                            _directory: Arc::clone(&directory),
+                        },
+                    )
+                })
                 .collect(),
             #[cfg(test)]
             payload_work: work,
@@ -5935,6 +6017,7 @@ mod tests {
     use crate::artifact_inventory::ArtifactKind;
 
     include!("declaration_context/program_source_support_history.rs");
+    include!("declaration_context/materialization_capture_history.rs");
 
     #[test]
     fn lexical_composition_retains_shared_owners_idempotently() {
@@ -7238,7 +7321,7 @@ mod tests {
             .materialization
             .as_ref()
             .unwrap()
-            ._directory
+            .directory()
             .path()
             .to_path_buf();
         assert!(owned_root.starts_with(packet.path()));
@@ -7268,7 +7351,7 @@ mod tests {
         let paths = first.artifacts.clone();
         let groups = Arc::clone(&first.groups);
         let retained = first.materialization.as_ref().unwrap();
-        let owned_root = retained._directory.path().to_path_buf();
+        let owned_root = retained.directory().path().to_path_buf();
         let weak = Arc::downgrade(retained);
         let semantic = first.semantic_sha256;
         drop(first);
@@ -7352,7 +7435,7 @@ mod tests {
             .iter()
             .find(|artifact| artifact.interface.module == "Gamma")
             .unwrap();
-        assert!(gamma.interface.path.starts_with(b_owner._directory.path()));
+        assert!(gamma.interface.path.starts_with(b_owner.directory().path()));
         let third = a
             .prepare_compilation(&scratch.path().join("a2"), &producer)
             .unwrap();
@@ -7367,7 +7450,7 @@ mod tests {
             .materialization
             .as_ref()
             .unwrap()
-            ._directory
+            .directory()
             .path()
             .to_path_buf();
         drop(first);
@@ -7564,7 +7647,7 @@ mod tests {
             .prepare_compilation(&scratch.path().join("original"), &producer)
             .unwrap();
         let private_owner = original.materialization.as_ref().unwrap();
-        let private_root = private_owner._directory.path().to_path_buf();
+        let private_root = private_owner.directory().path().to_path_buf();
         let weak = Arc::downgrade(private_owner);
         let value_entry = context
             .artifact_view()
@@ -7698,7 +7781,7 @@ mod tests {
                     "ancestor row storage grows linearly"
                 );
                 let retained_files =
-                    std::fs::read_dir(retained._directory.path().join("artifacts"))
+                    std::fs::read_dir(retained.directory().path().join("artifacts"))
                         .unwrap()
                         .map(|entry| entry.unwrap().metadata().unwrap().len())
                         .sum::<u64>();
@@ -11135,9 +11218,9 @@ mod tests {
         );
         assert_eq!(child_written_bytes, 0);
         assert_eq!(std::fs::read_dir(child.path()).unwrap().count(), 0);
-        assert!(files[&graph.digest()].path.starts_with(parent.path()));
+        assert!(files[&graph.digest()].starts_with(parent.path()));
         assert_eq!(
-            std::fs::read(&files[&graph.digest()].path).unwrap(),
+            std::fs::read(&files[&graph.digest()]).unwrap(),
             graph.bytes()
         );
         println!(
