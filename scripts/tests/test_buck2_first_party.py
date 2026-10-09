@@ -689,6 +689,11 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertFalse(list(self.root.rglob(".BUCK.*.tmp")))
 
     def test_facade_buildscript_declares_embedded_sources_and_out_dir(self):
+        self.write("bridge/facade/build.rs",
+                   'mod scaffold_gitlink { include!("src/exomonad/scaffold_gitlink.rs"); }\nfn main() {}\n')
+        self.write("bridge/facade/src/exomonad/scaffold_gitlink.rs",
+                   'const DECLARED: &str = include_str!("revision.txt");\n')
+        self.write("bridge/facade/src/exomonad/revision.txt", "declared revision\n")
         metadata = json.loads(self.metadata.read_text())
         facade = next(p for p in metadata["packages"] if p["name"] == "tidepool")
         toolchain = next(p for p in metadata["packages"] if p["name"] == "tidepool-toolchain")
@@ -714,10 +719,13 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertNotIn("//tidepool/toolchain:tidepool_toolchain", library_rule.get("deps", []))
         self.assertEqual(build_rule["crate_root"], "bridge/facade/build.rs")
         self.assertEqual(groups["tidepool_build_script_sources"]["build.rs"], "bridge/facade/build.rs")
+        for path in ("src/exomonad/scaffold_gitlink.rs", "src/exomonad/revision.txt"):
+            self.assertEqual(groups["tidepool_build_script_sources"][path], "bridge/facade/" + path)
         run = self.rule("bridge/facade", "tidepool_build_script_run", "tidepool_buildscript_run")
         self.assertEqual(run["env"]["TIDEPOOL_EMBED_HASKELL"], "1")
         self.assertEqual(run["env"]["TIDEPOOL_BUILD_SOURCE_ROOT"], ".")
         inputs = self.rule("bridge/facade", "tidepool_build_source_tree", "tidepool_facade_build_inputs")
+        self.assertEqual(inputs["workspace_gitlink"], "//build/rust:workspace_gitlink")
         self.assertEqual(inputs["haskell_sources"], "//bridge/haskell:facade_embedded_sources")
         self.assertEqual(inputs["workspace_sources"], "//exomonad/examples/workspace:facade_scaffold_sources")
         self.assertEqual(sum(arguments.get("env", {}).get("OUT_DIR") ==
@@ -727,6 +735,19 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                              for _, arguments in buck.values()
                              for dependency in arguments.get("deps", []) + list(arguments.get("named_deps", {}).values())))
         self.assertIn("src/lib.rs", groups["tidepool_sources"])
+
+    def test_facade_buildscript_refuses_missing_rust_include_before_publication(self):
+        control = self.generate("--package", "tidepool")
+        self.assertEqual(control.returncode, 0, control.stderr)
+        descriptor = self.root / "build/native-workspace-gitlink.json"
+        previous = {path: path.read_bytes() for path in self.root.rglob("BUCK")}
+        previous[descriptor] = descriptor.read_bytes()
+        self.write("bridge/facade/build.rs", 'include!("missing.rs");\n')
+        refused = self.generate("--package", "tidepool")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("missing compile-time input", refused.stderr)
+        for path, contents in previous.items():
+            self.assertEqual(path.read_bytes(), contents, path)
 
     def test_facade_action_surface_keeps_nix_policy_out_of_path_resources(self):
         metadata = json.loads(self.metadata.read_text())

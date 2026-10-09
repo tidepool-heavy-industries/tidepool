@@ -11,10 +11,10 @@ use exomonad_worktree::GitCli;
 
 include!(concat!(env!("OUT_DIR"), "/scaffold_package.rs"));
 
-// Keep this in step with this repository's .exomonad/workspace gitlink.
-// Both the qualified Git bundle and DEFAULT_WORKSPACE_URL must install the
-// commit this release compiled and checked, even if the remote advances.
-pub(super) const DEFAULT_WORKSPACE_REV: &str = "6eb5d0de48e7fa309885a57fe020db54e673cac6";
+#[cfg(test)]
+mod scaffold_gitlink {
+    include!("scaffold_gitlink.rs");
+}
 
 /// The configuration `exomonad new` writes. Its modules, recipes, model aliases
 /// and prompt files match the shipped workspace; only repository-specific
@@ -601,34 +601,15 @@ mod tests {
     /// source index. Test execution does not require a Git checkout.
     #[test]
     fn default_workspace_rev_is_this_checkouts_workspace_gitlink() {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Gitlink {
-            schema: u32,
-            path: String,
-            mode: String,
-            revision: String,
-        }
-
         let descriptor = std::env::var_os("EXOMONAD_WORKSPACE_GITLINK")
             .map(std::path::PathBuf::from)
             .expect(
                 "workspace gitlink proof requires its declared EXOMONAD_WORKSPACE_GITLINK input",
             );
-        let gitlink: Gitlink = serde_json::from_slice(
-            &std::fs::read(descriptor).expect("read the declared workspace gitlink descriptor"),
-        )
-        .expect("decode the declared workspace gitlink descriptor");
-        assert_eq!(gitlink.schema, 1);
-        assert_eq!(gitlink.path, ".exomonad/workspace");
-        assert_eq!(gitlink.mode, "160000");
-        assert_eq!(gitlink.revision.len(), 40);
-        assert!(gitlink
-            .revision
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit()));
+        let revision = super::scaffold_gitlink::read_workspace_revision(&descriptor)
+            .expect("read the declared workspace gitlink descriptor");
         assert_eq!(
-            gitlink.revision, DEFAULT_WORKSPACE_REV,
+            revision, DEFAULT_WORKSPACE_REV,
             "DEFAULT_WORKSPACE_REV must match the declared .exomonad/workspace gitlink"
         );
     }

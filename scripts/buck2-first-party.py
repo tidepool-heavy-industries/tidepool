@@ -557,7 +557,7 @@ def source_inputs(package, target, features=(), test_target=False):
     if generated_paths:
         sources = {source for source in sources
                    if not source.is_relative_to(directory / "src/generated")}
-    includes = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^\"]+)"')
+    includes = re.compile(r'include(?:_(?:str|bytes))?!\s*\(\s*"([^\"]+)"')
     pending = [path for path in sources if path.suffix == ".rs"]
     external_labels = EXTERNAL_SOURCE_LABELS
     while pending:
@@ -1341,6 +1341,7 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
         rules.append('''tidepool_facade_build_inputs(
     name = "tidepool_build_source_tree",
     cargo_manifest = "Cargo.toml",
+    workspace_gitlink = "//build/rust:workspace_gitlink",
     haskell_sources = "//bridge/haskell:facade_embedded_sources",
     workspace_sources = "//exomonad/examples/workspace:facade_scaffold_sources",
 )
