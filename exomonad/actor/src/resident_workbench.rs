@@ -11571,12 +11571,9 @@ pub(crate) mod request_tests {
 
     fn lookup_trace_path() -> PathBuf {
         PathBuf::from(
-            std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_LOG")
+            std::env::var_os("TIDEPOOL_PERFORMANCE_COMPILER_TRACE")
                 .expect("focused lookup proof needs the private compiler daemon trace"),
         )
-        .parent()
-        .expect("daemon log parent")
-        .join("compiler.jsonl")
     }
 
     fn compiler_trace_events(path: &std::path::Path) -> Vec<serde_json::Value> {
