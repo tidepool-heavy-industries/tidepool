@@ -629,6 +629,24 @@ mod tests {
                     },
                 ])
             );
+            // A later exact output retains the original compiler roles while
+            // selecting a previously unused body of the published module.
+            let continued = ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &admitted,
+                published.lexical.clone(),
+                root.descriptor.owner.clone(),
+                &[root.descriptor.owner.clone()],
+            )
+            .unwrap()
+            .with_compiler_input_projection(published.compiler_projection.clone())
+            .expect("later native demand preserves the issued published selection");
+            let reopened_after_demand = continued.published_source_original_selections().unwrap();
+            assert_eq!(
+                reopened_after_demand[0].context().semantic_sha256(),
+                published.semantic_sha256(),
+                "publication keeps its original selection independently of later demand"
+            );
             let recovery_inventory = RecoveredArtifactInventory {
                 producer,
                 entries: published
