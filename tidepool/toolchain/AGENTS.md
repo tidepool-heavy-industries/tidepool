@@ -25,6 +25,9 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   carriers for unselected bodies. Keep that byte custody separate from source
   roots, compiler input roles and executable group demand; later requests can
   select another body without recreating its issuing dependency versions.
+  Published originals retain their issuer's immutable artifact/group selection
+  separately from later executable demand. Reopening and recovery validate that
+  proof against exact retained custody; a broader inventory cannot recreate it.
 - Pure activation previews preserve the original instance graph separately from
   native availability. Authored dictionary bodies use retained originals matching
   that capture's canonical interfaces; type custody alone cannot replace native
