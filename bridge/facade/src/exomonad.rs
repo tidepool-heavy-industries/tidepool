@@ -1008,34 +1008,9 @@ pub async fn prepare(options: PrepareOptions) -> Result<(), Box<dyn std::error::
         std::env::current_dir()?.join(options.directory)
     };
     let directory = std::sync::Arc::new(establish_preparation_directory(&requested)?);
-    let mut frozen = workspace::FrozenWorkspace::begin_preparation(&workspace, &directory)?;
-    if !matches!(
-        frozen.preparation,
-        Some(workspace::WorkspacePreparation::Completed { .. })
-    ) {
-        let source = std::sync::Arc::new(source::ExomonadSourceReload::new_owned(
-            frozen.clone(),
-            workspace.clone(),
-            directory.path().to_owned(),
-            frozen.runtime_actors(),
-            source::SourceRootOwner::Prepared(std::sync::Arc::clone(&directory)),
-        )?);
-        let entries = crate::actor_host::prepare_workspace_toolsets(
-            &workspace,
-            &directory,
-            frozen.clone(),
-            source,
-        )
-        .await?;
-        let revision = source::SourceLayer::new(directory.path())
-            .read_active()?
-            .ok_or("workspace preparation did not settle its original source revision")?;
-        frozen.complete_preparation(&directory, revision.identity, entries)?;
-    } else {
-        // A retry finishes partial sealing before publishing a default pointer.
-        frozen.seal_preparation(&directory)?;
-    }
-    let pointer = workspace::PreparedWorkspacePointer::for_directory(directory.path())?;
+    let prepared =
+        workspace::prepare_workspace(&workspace, std::sync::Arc::clone(&directory)).await?;
+    let pointer = prepared.pointer()?;
     exomonad_worktree::GitCli::new().ensure_exomonad_local_exclude(&workspace)?;
     tidepool_atomic_write::write_durable(
         &workspace.join(".exomonad/prepared.json"),

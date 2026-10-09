@@ -220,6 +220,65 @@ impl PreparedWorkspacePointer {
     }
 }
 
+/// A completed, sealed deployment issued by workspace preparation. Selecting it
+/// for a run still validates current inputs and retains a run-local pointer.
+pub(crate) struct PreparedWorkspaceSelection {
+    directory: std::sync::Arc<tidepool_atomic_write::DirectoryAnchor>,
+}
+
+impl PreparedWorkspaceSelection {
+    pub(crate) fn pointer(&self) -> Result<PreparedWorkspacePointer> {
+        PreparedWorkspacePointer::for_directory(self.directory.path())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_for_run(
+        &self,
+        workspace: &Path,
+        run_root: &Path,
+    ) -> Result<FrozenWorkspace> {
+        FrozenWorkspace::select_prepared(workspace, run_root, Some(self.directory.path()))
+    }
+}
+
+/// Prepare the original root toolset once, or finish sealing a completed retry.
+/// Directory establishment, process budgeting and default-pointer publication
+/// remain with the caller that owns those operations.
+pub(crate) async fn prepare_workspace(
+    workspace: &Path,
+    directory: std::sync::Arc<tidepool_atomic_write::DirectoryAnchor>,
+) -> Result<PreparedWorkspaceSelection> {
+    let mut frozen = FrozenWorkspace::begin_preparation(workspace, &directory)?;
+    if matches!(
+        frozen.preparation,
+        Some(WorkspacePreparation::Completed { .. })
+    ) {
+        // Completion is published before sealing. Retry confirms the physical
+        // deployment before any caller publishes or selects its pointer.
+        frozen.seal_preparation(&directory)?;
+    } else {
+        let source = std::sync::Arc::new(super::source::ExomonadSourceReload::new_owned(
+            frozen.clone(),
+            workspace.to_owned(),
+            directory.path().to_owned(),
+            frozen.runtime_actors(),
+            super::source::SourceRootOwner::Prepared(std::sync::Arc::clone(&directory)),
+        )?);
+        let entries = crate::actor_host::prepare_workspace_toolsets(
+            workspace,
+            &directory,
+            frozen.clone(),
+            source,
+        )
+        .await?;
+        let revision = super::source::SourceLayer::new(directory.path())
+            .read_active()?
+            .ok_or("workspace preparation did not settle its original source revision")?;
+        frozen.complete_preparation(&directory, revision.identity, entries)?;
+    }
+    Ok(PreparedWorkspaceSelection { directory })
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FrozenWorkspace {
     #[serde(default)]
@@ -638,7 +697,7 @@ impl FrozenWorkspace {
         Ok(frozen)
     }
 
-    pub(crate) fn begin_preparation(
+    fn begin_preparation(
         workspace: &Path,
         directory: &tidepool_atomic_write::DirectoryAnchor,
     ) -> Result<Self> {
@@ -658,7 +717,7 @@ impl FrozenWorkspace {
         Ok(())
     }
 
-    pub(crate) fn complete_preparation(
+    fn complete_preparation(
         &mut self,
         directory: &tidepool_atomic_write::DirectoryAnchor,
         revision: String,
@@ -686,10 +745,7 @@ impl FrozenWorkspace {
         self.seal_preparation(directory)
     }
 
-    pub(crate) fn seal_preparation(
-        &self,
-        directory: &tidepool_atomic_write::DirectoryAnchor,
-    ) -> Result<()> {
+    fn seal_preparation(&self, directory: &tidepool_atomic_write::DirectoryAnchor) -> Result<()> {
         if !matches!(
             self.preparation,
             Some(WorkspacePreparation::Completed { .. })
@@ -1708,6 +1764,19 @@ mod tests {
         retry.admit_preparation(directory.path()).unwrap();
         assert!(
             matches!(retry.preparation, Some(WorkspacePreparation::Preparing { original: selected }) if selected == original)
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),
+            before
+        );
+        let anchor =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
+        assert!(
+            retry
+                .seal_preparation(&anchor)
+                .unwrap_err()
+                .to_string()
+                .contains("only a completed")
         );
         assert_eq!(
             std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),
