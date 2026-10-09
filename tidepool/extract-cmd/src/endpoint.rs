@@ -919,7 +919,9 @@ impl CompilerEndpoint {
     )]
     pub(crate) fn bind(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
         if TRANSACTION_SCOPE.with(|scope| scope.borrow().is_some()) {
-            let identity = ensure_scoped_transaction(cmd)?;
+            let identity = bind_scoped_endpoint(cmd, |cancellation| {
+                Self::bind_unscoped_with_cancellation(cmd, cancellation)
+            })?;
             return Ok(Self {
                 identity,
                 transport: Transport::Scoped,
@@ -1281,19 +1283,21 @@ impl CompilerEndpoint {
                     }
                 }
             }
-            Transport::Scoped => TRANSACTION_SCOPE.with(|scope| {
-                let mut scope = scope.borrow_mut();
-                let transaction = scope
-                    .as_mut()
-                    .and_then(|state| state.transaction.as_mut())
-                    .ok_or_else(|| {
-                        SpawnError::indeterminate(
+            Transport::Scoped => {
+                ensure_scoped_transaction(cmd, &self.identity)?;
+                TRANSACTION_SCOPE.with(|scope| {
+                    let mut scope = scope.borrow_mut();
+                    let Some(ScopedCompiler::Active { transaction, .. }) =
+                        scope.as_mut().map(|state| &mut state.compiler)
+                    else {
+                        return Err(SpawnError::indeterminate(
                             "compiler transaction",
                             io::Error::other("compiler transaction scope ended before execution"),
-                        )
-                    })?;
-                transaction.execute(cmd).map(|run| run.output)
-            })?,
+                        ));
+                    };
+                    transaction.execute(cmd).map(|run| run.output)
+                })?
+            }
         };
         Ok(ExtractRun {
             output,
@@ -1302,10 +1306,45 @@ impl CompilerEndpoint {
     }
 }
 
+/// A daemon preflight retains identity without acquiring a worker or CPU grant.
+/// Direct identity handshakes own a child and keep their existing admission path.
+#[derive(Clone)]
+struct BoundDaemonEndpoint {
+    identity: CompilerIdentity,
+    socket: PathBuf,
+    epoch: [u8; 32],
+    program: OsString,
+}
+
+enum ScopedCompiler {
+    Unbound,
+    DaemonBound(BoundDaemonEndpoint),
+    Active {
+        transaction: CompilerTransaction,
+        program: OsString,
+    },
+    /// An uncertain BEGIN cannot be retried by a later borrowed endpoint.
+    AdmissionFailed(BoundDaemonEndpoint),
+}
+
+impl ScopedCompiler {
+    fn identity_and_program(&self) -> Option<(&CompilerIdentity, &OsStr)> {
+        match self {
+            Self::Unbound => None,
+            Self::DaemonBound(bound) | Self::AdmissionFailed(bound) => {
+                Some((&bound.identity, &bound.program))
+            }
+            Self::Active {
+                transaction,
+                program,
+            } => Some((&transaction.identity, program)),
+        }
+    }
+}
+
 struct TransactionScope {
     workload: CompileWorkload,
-    transaction: Option<CompilerTransaction>,
-    program: Option<OsString>,
+    compiler: ScopedCompiler,
     cancellation: Option<CompilerTransactionCancellation>,
     admission_close: Vec<CompilerTransactionCloseEvidence>,
 }
@@ -1314,16 +1353,28 @@ thread_local! {
     static TRANSACTION_SCOPE: RefCell<Option<TransactionScope>> = const { RefCell::new(None) };
 }
 
-fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, SpawnError> {
-    if let Some((identity, program)) = TRANSACTION_SCOPE.with(|scope| {
+fn bind_scoped_endpoint(
+    cmd: &ExtractCmd,
+    bind: impl FnOnce(Option<&CompilerTransactionCancellation>) -> Result<CompilerEndpoint, SpawnError>,
+) -> Result<CompilerIdentity, SpawnError> {
+    let existing = TRANSACTION_SCOPE.with(|scope| {
         let scope = scope.borrow();
         let state = scope.as_ref()?;
+        let (identity, program) = state.compiler.identity_and_program()?;
         Some((
-            state.transaction.as_ref()?.identity.clone(),
-            state.program.clone(),
+            identity.clone(),
+            program.to_owned(),
+            matches!(&state.compiler, ScopedCompiler::AdmissionFailed(_)),
         ))
-    }) {
-        if program.as_ref() != Some(&cmd.program) {
+    });
+    if let Some((identity, program, failed)) = existing {
+        if failed {
+            return Err(SpawnError::indeterminate(
+                &cmd.program,
+                io::Error::other("compiler transaction cannot continue after uncertain admission"),
+            ));
+        }
+        if program != cmd.program {
             return Err(SpawnError::not_submitted(
                 &cmd.program,
                 io::Error::new(
@@ -1334,31 +1385,48 @@ fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, Spawn
         }
         return Ok(identity);
     }
-    let cancellation = TRANSACTION_SCOPE.with(|scope| {
-        scope
-            .borrow()
-            .as_ref()
-            .and_then(|state| state.cancellation.clone())
-    });
+    let (workload, cancellation) = TRANSACTION_SCOPE
+        .with(|scope| {
+            scope
+                .borrow()
+                .as_ref()
+                .map(|state| (state.workload, state.cancellation.clone()))
+        })
+        .ok_or_else(|| {
+            SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::other("compiler transaction scope ended before binding"),
+            )
+        })?;
     if cancellation
         .as_ref()
         .is_some_and(CompilerTransactionCancellation::is_cancelled)
     {
-        return Err(SpawnError::indeterminate(
-            "compiler transaction",
+        return Err(SpawnError::not_submitted(
+            &cmd.program,
             io::Error::new(
                 io::ErrorKind::Interrupted,
-                "compiler transaction was cancelled",
+                "compiler transaction was cancelled before admission",
             ),
         ));
     }
-    let workload = TRANSACTION_SCOPE
-        .with(|scope| scope.borrow().as_ref().map(|state| state.workload))
-        .unwrap_or(CompileWorkload::Foreground);
-    let transaction =
-        CompilerEndpoint::bind_unscoped_with_cancellation(cmd, cancellation.as_ref())?
-            .transaction_with_cancellation(workload, cancellation)?;
-    let identity = transaction.identity.clone();
+    let endpoint = bind(cancellation.as_ref())?;
+    let identity = endpoint.identity.clone();
+    let compiler = match endpoint {
+        CompilerEndpoint {
+            identity,
+            transport: Transport::Daemon { socket, epoch },
+        } => ScopedCompiler::DaemonBound(BoundDaemonEndpoint {
+            identity,
+            socket,
+            epoch,
+            program: cmd.program.clone(),
+        }),
+        endpoint => ScopedCompiler::Active {
+            transaction: endpoint.transaction_with_cancellation(workload, cancellation)?,
+            program: cmd.program.clone(),
+        },
+    };
     TRANSACTION_SCOPE.with(|scope| -> Result<(), SpawnError> {
         let mut scope = scope.borrow_mut();
         let state = scope.as_mut().ok_or_else(|| {
@@ -1367,11 +1435,95 @@ fn ensure_scoped_transaction(cmd: &ExtractCmd) -> Result<CompilerIdentity, Spawn
                 io::Error::other("compiler transaction scope ended while binding"),
             )
         })?;
-        state.transaction = Some(transaction);
-        state.program = Some(cmd.program.clone());
+        state.compiler = compiler;
         Ok(())
     })?;
     Ok(identity)
+}
+
+fn ensure_scoped_transaction(
+    cmd: &ExtractCmd,
+    expected: &CompilerIdentity,
+) -> Result<(), SpawnError> {
+    let (bound, workload, cancellation) = TRANSACTION_SCOPE.with(|scope| {
+        let scope = scope.borrow();
+        let state = scope.as_ref().ok_or_else(|| {
+            SpawnError::indeterminate(
+                "compiler transaction",
+                io::Error::other("compiler transaction scope ended before execution"),
+            )
+        })?;
+        let Some((identity, program)) = state.compiler.identity_and_program() else {
+            return Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::other("borrowed endpoint has no bound compiler owner"),
+            ));
+        };
+        if identity != expected || program != cmd.program.as_os_str() {
+            return Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "borrowed endpoint differs from its bound compiler owner",
+                ),
+            ));
+        }
+        match &state.compiler {
+            ScopedCompiler::DaemonBound(bound) => Ok((
+                Some(bound.clone()),
+                state.workload,
+                state.cancellation.clone(),
+            )),
+            ScopedCompiler::Active { .. } => Ok((None, state.workload, state.cancellation.clone())),
+            ScopedCompiler::AdmissionFailed(_) => Err(SpawnError::indeterminate(
+                &cmd.program,
+                io::Error::other("compiler transaction cannot continue after uncertain admission"),
+            )),
+            ScopedCompiler::Unbound => unreachable!("bound identity checked"),
+        }
+    })?;
+    let Some(bound) = bound else {
+        return Ok(());
+    };
+    if cancellation
+        .as_ref()
+        .is_some_and(CompilerTransactionCancellation::is_cancelled)
+    {
+        return Err(SpawnError::not_submitted(
+            &cmd.program,
+            io::Error::new(
+                io::ErrorKind::Interrupted,
+                "compiler transaction was cancelled before admission",
+            ),
+        ));
+    }
+    // Use the authenticated socket/epoch captured before host preparation. A
+    // rejected epoch returns to the caller; it never selects a new producer.
+    let endpoint = CompilerEndpoint {
+        identity: bound.identity.clone(),
+        transport: Transport::Daemon {
+            socket: bound.socket.clone(),
+            epoch: bound.epoch,
+        },
+    };
+    match endpoint.transaction_with_cancellation(workload, cancellation) {
+        Ok(transaction) => TRANSACTION_SCOPE.with(|scope| {
+            scope.borrow_mut().as_mut().expect("owning scope").compiler = ScopedCompiler::Active {
+                transaction,
+                program: bound.program,
+            };
+            Ok(())
+        }),
+        Err(error) => {
+            if !error.definitely_unsubmitted() {
+                TRANSACTION_SCOPE.with(|scope| {
+                    scope.borrow_mut().as_mut().expect("owning scope").compiler =
+                        ScopedCompiler::AdmissionFailed(bound);
+                });
+            }
+            Err(error)
+        }
+    }
 }
 
 fn retain_earlier_close(
@@ -1409,10 +1561,14 @@ fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
     let Some(scope) = TRANSACTION_SCOPE.with(|scope| scope.borrow_mut().take()) else {
         return CompilerTransactionClose::NotStarted;
     };
-    let close = match scope.transaction {
-        Some(mut transaction) if abandoned => transaction.abandon(),
-        Some(transaction) => transaction.finish(),
-        None => {
+    let close = match scope.compiler {
+        ScopedCompiler::Active {
+            mut transaction, ..
+        } if abandoned => transaction.abandon(),
+        ScopedCompiler::Active { transaction, .. } => transaction.finish(),
+        ScopedCompiler::Unbound
+        | ScopedCompiler::DaemonBound(_)
+        | ScopedCompiler::AdmissionFailed(_) => {
             if let Some(cancellation) = scope.cancellation {
                 cancellation.disarm();
             }
@@ -1467,7 +1623,8 @@ pub fn with_compiler_transaction_cancellable<T>(
     )
 }
 
-/// Declare the workload before the first bind admits the pinned transaction.
+/// Declare the workload before execution admits the pinned daemon transaction.
+/// Binding observes its authenticated identity without reserving capacity.
 /// Invoke inside the blocking compiler task; the typed class is not propagated
 /// implicitly across async or OS-thread boundaries.
 pub fn with_compiler_transaction_for_workload<T>(
@@ -1507,8 +1664,7 @@ fn with_compiler_transaction_inner<T>(
         );
         *scope.borrow_mut() = Some(TransactionScope {
             workload,
-            transaction: None,
-            program: None,
+            compiler: ScopedCompiler::Unbound,
             cancellation,
             admission_close: Vec::new(),
         });
@@ -2029,8 +2185,12 @@ mod tests {
             let transaction = endpoint.transaction().unwrap();
             // Install the genuinely admitted transport in the same private scope
             // populated by lazy bind; this fixture never issues compiler authority.
-            TRANSACTION_SCOPE
-                .with(|scope| scope.borrow_mut().as_mut().unwrap().transaction = Some(transaction));
+            TRANSACTION_SCOPE.with(|scope| {
+                scope.borrow_mut().as_mut().unwrap().compiler = ScopedCompiler::Active {
+                    transaction,
+                    program: "fixture".into(),
+                }
+            });
             let command = ExtractCmd {
                 program: "fixture".into(),
                 bin_source: BinSource::Explicit,
@@ -2167,8 +2327,12 @@ mod tests {
             let endpoint = CompilerEndpoint::bind_launch(healthy_spec).unwrap();
             let identity = endpoint.identity.clone();
             let transaction = endpoint.transaction().unwrap();
-            TRANSACTION_SCOPE
-                .with(|scope| scope.borrow_mut().as_mut().unwrap().transaction = Some(transaction));
+            TRANSACTION_SCOPE.with(|scope| {
+                scope.borrow_mut().as_mut().unwrap().compiler = ScopedCompiler::Active {
+                    transaction,
+                    program: "fixture".into(),
+                }
+            });
             let command = ExtractCmd {
                 program: "fixture".into(),
                 bin_source: BinSource::Explicit,
@@ -2382,7 +2546,10 @@ mod tests {
                     };
                     endpoint.wait_observation_fault = true;
                     TRANSACTION_SCOPE.with(|scope| {
-                        scope.borrow_mut().as_mut().unwrap().transaction = Some(transaction)
+                        scope.borrow_mut().as_mut().unwrap().compiler = ScopedCompiler::Active {
+                            transaction,
+                            program: "fixture".into(),
+                        }
                     });
                     panic!("original action unwind");
                 },
@@ -2444,6 +2611,490 @@ mod tests {
         assert!(retirement.worker_report.is_none());
     }
 
+    #[derive(Clone, Copy)]
+    enum DaemonFixtureBehavior {
+        Normal,
+        CancelBegin,
+        CancelRequest,
+    }
+
+    #[derive(Default, Debug)]
+    struct DaemonFixtureCounts {
+        preflights: usize,
+        begins: usize,
+        admissions: usize,
+        requests: usize,
+        active: usize,
+    }
+
+    /// The peer speaks the actual preflight/transaction protocol. Its census is
+    /// independent of the client's private scope state and uses no ambient env.
+    struct DeferredDaemonFixture {
+        _directory: tempfile::TempDir,
+        socket: PathBuf,
+        epoch: Arc<Mutex<[u8; 32]>>,
+        counts: Arc<Mutex<DaemonFixtureCounts>>,
+        server: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl DeferredDaemonFixture {
+        fn new(
+            behavior: DaemonFixtureBehavior,
+            cancellation: CompilerTransactionCancellation,
+        ) -> Self {
+            use std::os::unix::net::UnixListener;
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("compiler.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let epoch = Arc::new(Mutex::new([9; 32]));
+            let counts = Arc::new(Mutex::new(DaemonFixtureCounts::default()));
+            let server_epoch = Arc::clone(&epoch);
+            let server_counts = Arc::clone(&counts);
+            let server = std::thread::spawn(move || {
+                let mut handlers = Vec::new();
+                for connection in listener.incoming() {
+                    let mut connection = connection.unwrap();
+                    connection
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    connection
+                        .set_write_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut kind = [0; 8];
+                    connection.read_exact(&mut kind).unwrap();
+                    if &kind == b"TESTSTOP" {
+                        break;
+                    }
+                    if &kind == b"TPDPF001" {
+                        server_counts.lock().unwrap().preflights += 1;
+                        connection.write_all(b"TPDPI003").unwrap();
+                        connection.write_all(&[7; 32]).unwrap();
+                        connection.write_all(&[8; 32]).unwrap();
+                        connection
+                            .write_all(&*server_epoch.lock().unwrap())
+                            .unwrap();
+                        continue;
+                    }
+                    assert_eq!(&kind, daemon::TRANSACTION);
+                    let mut requested_epoch = [0; 32];
+                    connection.read_exact(&mut requested_epoch).unwrap();
+                    let mut workload = [0];
+                    connection.read_exact(&mut workload).unwrap();
+                    assert_eq!(workload, [0]);
+                    server_counts.lock().unwrap().begins += 1;
+                    if requested_epoch != *server_epoch.lock().unwrap() {
+                        let message = b"replaced daemon epoch";
+                        connection.write_all(&[0]).unwrap();
+                        connection
+                            .write_all(&(message.len() as u32).to_le_bytes())
+                            .unwrap();
+                        connection.write_all(message).unwrap();
+                        continue;
+                    }
+                    let admission = {
+                        let mut counts = server_counts.lock().unwrap();
+                        counts.admissions += 1;
+                        counts.active += 1;
+                        counts.admissions as u64
+                    };
+                    let counts = Arc::clone(&server_counts);
+                    let cancellation = cancellation.clone();
+                    handlers.push(std::thread::spawn(move || {
+                        struct Permit(Arc<Mutex<DaemonFixtureCounts>>);
+                        impl Drop for Permit {
+                            fn drop(&mut self) {
+                                self.0.lock().unwrap().active -= 1;
+                            }
+                        }
+                        let _permit = Permit(counts.clone());
+                        if matches!(behavior, DaemonFixtureBehavior::CancelBegin) {
+                            cancellation.cancel();
+                            return;
+                        }
+                        connection.write_all(&[1]).unwrap();
+                        connection.write_all(&admission.to_le_bytes()).unwrap();
+                        loop {
+                            let mut command = [0];
+                            if connection.read_exact(&mut command).is_err() {
+                                break;
+                            }
+                            match command[0] {
+                                daemon::TRANSACTION_END => {
+                                    connection.write_all(&[1]).unwrap();
+                                    break;
+                                }
+                                daemon::TRANSACTION_REQUEST => {
+                                    let _ = daemon::read_request(&mut connection).unwrap();
+                                    let request = {
+                                        let mut counts = counts.lock().unwrap();
+                                        counts.requests += 1;
+                                        counts.requests
+                                    };
+                                    if matches!(behavior, DaemonFixtureBehavior::CancelRequest) {
+                                        cancellation.cancel();
+                                        break;
+                                    }
+                                    daemon::write_response(
+                                        &mut connection,
+                                        0,
+                                        &[request as u8],
+                                        b"",
+                                    )
+                                    .unwrap();
+                                }
+                                _ => panic!("invalid transaction command"),
+                            }
+                        }
+                    }));
+                }
+                for handler in handlers {
+                    handler.join().unwrap();
+                }
+            });
+            Self {
+                _directory: directory,
+                socket,
+                epoch,
+                counts,
+                server: Some(server),
+            }
+        }
+
+        fn command(&self) -> ExtractCmd {
+            ExtractCmd {
+                program: "fixture".into(),
+                bin_source: BinSource::Explicit,
+                request: ExtractRequest::default(),
+            }
+        }
+
+        fn bind(&self, command: &ExtractCmd) -> Result<CompilerEndpoint, SpawnError> {
+            let identity = bind_scoped_endpoint(command, |_| {
+                let binding = daemon::preflight(&self.socket).unwrap();
+                Ok(CompilerEndpoint {
+                    identity: CompilerIdentity::daemon(
+                        binding.producer,
+                        binding.consumed_worker,
+                        binding.epoch,
+                    ),
+                    transport: Transport::Daemon {
+                        socket: self.socket.clone(),
+                        epoch: binding.epoch,
+                    },
+                })
+            })?;
+            Ok(CompilerEndpoint {
+                identity,
+                transport: Transport::Scoped,
+            })
+        }
+
+        fn settle(&mut self) {
+            let Some(server) = self.server.take() else {
+                return;
+            };
+            UnixStream::connect(&self.socket)
+                .unwrap()
+                .write_all(b"TESTSTOP")
+                .unwrap();
+            server.join().unwrap();
+        }
+    }
+
+    impl Drop for DeferredDaemonFixture {
+        fn drop(&mut self) {
+            self.settle();
+        }
+    }
+
+    #[test]
+    fn scoped_daemon_host_preparation_has_no_admission_and_reuses_exact_binding() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+        let mut config = Config {
+            cases: 128,
+            ..Config::default()
+        };
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        let mut runner = TestRunner::new(config);
+        // Host reads/work can surround any physical request. Exact protocol
+        // admissions independently distinguish availability from capacity use.
+        runner
+            .run(
+                &proptest::collection::vec((0_u8..3, 0_usize..32), 0..32),
+                |history| {
+                    let cancellation = CompilerTransactionCancellation::new();
+                    let mut fixture = DeferredDaemonFixture::new(
+                        DaemonFixtureBehavior::Normal,
+                        cancellation.clone(),
+                    );
+                    let command = fixture.command();
+                    let mut requests = 0;
+                    let outcome = with_compiler_transaction_cancellable(
+                        cancellation,
+                        |_| {},
+                        || {
+                            let expected = fixture.bind(&command).unwrap().identity.clone();
+                            let history = [(0, 0), (1, 17)].into_iter().chain(history).chain([
+                                (2, 0),
+                                (1, 23),
+                                (2, 0),
+                            ]);
+                            for (operation, work) in history {
+                                let bound = fixture.bind(&command).unwrap();
+                                assert_eq!(bound.identity, expected);
+                                if operation == 2 {
+                                    requests += 1;
+                                    assert_eq!(
+                                        bound.execute(&command).unwrap().output.stdout,
+                                        [requests as u8]
+                                    );
+                                } else if operation == 1 {
+                                    // Reversible host preparation does not execute GHC.
+                                    let digest = blake3::hash(&vec![7; work]);
+                                    assert_ne!(digest.as_bytes(), &[0; 32]);
+                                }
+                                let counts = fixture.counts.lock().unwrap();
+                                assert_eq!(counts.preflights, 1);
+                                assert_eq!(counts.admissions, usize::from(requests > 0));
+                                assert_eq!(counts.active, usize::from(requests > 0));
+                                assert_eq!(counts.requests, requests);
+                                assert_eq!(counts.begins, usize::from(requests > 0),
+                            "first physical use alone admits; dependent requests remain pinned");
+                            }
+                        },
+                    );
+                    prop_assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+                    fixture.settle();
+                    prop_assert_eq!(fixture.counts.lock().unwrap().active, 0);
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn scoped_daemon_unexecuted_and_pre_admission_cancelled_bindings_have_no_permit() {
+        for cancel in [false, true] {
+            let cancellation = CompilerTransactionCancellation::new();
+            let mut fixture =
+                DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, cancellation.clone());
+            let command = fixture.command();
+            let outcome = with_compiler_transaction_cancellable(
+                cancellation.clone(),
+                |_| {},
+                || {
+                    let endpoint = fixture.bind(&command).unwrap();
+                    if cancel {
+                        cancellation.cancel();
+                        let error = endpoint.execute(&command).unwrap_err();
+                        assert!(error.definitely_unsubmitted());
+                        assert_eq!(error.source.kind(), io::ErrorKind::Interrupted);
+                    }
+                },
+            );
+            assert_eq!(outcome.close, CompilerTransactionClose::NotStarted);
+            fixture.settle();
+            let counts = fixture.counts.lock().unwrap();
+            assert_eq!(
+                (
+                    counts.preflights,
+                    counts.begins,
+                    counts.admissions,
+                    counts.requests,
+                    counts.active
+                ),
+                (1, 0, 0, 0, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_daemon_epoch_replacement_refuses_original_offer_without_rebinding() {
+        for replace_after_admission in [false, true] {
+            let cancellation = CompilerTransactionCancellation::new();
+            let mut fixture =
+                DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, cancellation.clone());
+            let command = fixture.command();
+            let outcome = with_compiler_transaction_cancellable(
+                cancellation,
+                |_| {},
+                || {
+                    let endpoint = fixture.bind(&command).unwrap();
+                    let original = endpoint.identity.clone();
+                    if replace_after_admission {
+                        endpoint.execute(&command).unwrap();
+                    }
+                    *fixture.epoch.lock().unwrap() = [10; 32];
+                    let still_original = fixture.bind(&command).unwrap();
+                    assert_eq!(still_original.identity, original);
+                    let result = still_original.execute(&command);
+                    if replace_after_admission {
+                        assert_eq!(result.unwrap().output.stdout, [2]);
+                    } else {
+                        let error = result.unwrap_err();
+                        assert!(error.permits_rebind());
+                        assert!(error.definitely_unsubmitted());
+                    }
+                },
+            );
+            assert_eq!(
+                outcome.close,
+                if replace_after_admission {
+                    CompilerTransactionClose::Clean
+                } else {
+                    CompilerTransactionClose::NotStarted
+                }
+            );
+            fixture.settle();
+            let counts = fixture.counts.lock().unwrap();
+            assert_eq!(counts.preflights, 1);
+            assert_eq!(counts.begins, 1);
+            assert_eq!(counts.admissions, usize::from(replace_after_admission));
+            assert_eq!(counts.requests, if replace_after_admission { 2 } else { 0 });
+            assert_eq!(counts.active, 0);
+        }
+    }
+
+    #[test]
+    fn scoped_daemon_cancelled_after_response_preserves_body_and_prevents_further_work() {
+        let cancellation = CompilerTransactionCancellation::new();
+        let mut fixture =
+            DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, cancellation.clone());
+        let command = fixture.command();
+        let outcome = with_compiler_transaction_cancellable(
+            cancellation.clone(),
+            |_| {},
+            || {
+                let body = fixture
+                    .bind(&command)
+                    .unwrap()
+                    .execute(&command)
+                    .unwrap()
+                    .output
+                    .stdout;
+                cancellation.cancel();
+                let error = fixture
+                    .bind(&command)
+                    .unwrap()
+                    .execute(&command)
+                    .unwrap_err();
+                assert!(!error.definitely_unsubmitted());
+                body
+            },
+        );
+        assert_eq!(outcome.action, [1]);
+        assert!(matches!(
+            outcome.close,
+            CompilerTransactionClose::Unconfirmed(_)
+        ));
+        fixture.settle();
+        let counts = fixture.counts.lock().unwrap();
+        assert_eq!(
+            (
+                counts.preflights,
+                counts.begins,
+                counts.admissions,
+                counts.requests,
+                counts.active
+            ),
+            (1, 1, 1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn scoped_daemon_borrowed_identity_and_program_cannot_replace_bound_owner() {
+        let cancellation = CompilerTransactionCancellation::new();
+        let mut fixture =
+            DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, cancellation.clone());
+        let command = fixture.command();
+        let outcome = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || {
+                let mut endpoint = fixture.bind(&command).unwrap();
+                endpoint.identity = CompilerIdentity::daemon([7; 32], [8; 32], [10; 32]);
+                assert!(endpoint
+                    .execute(&command)
+                    .unwrap_err()
+                    .definitely_unsubmitted());
+                let mut another_program = fixture.command();
+                another_program.program = "another compiler".into();
+                assert!(fixture
+                    .bind(&another_program)
+                    .unwrap_err()
+                    .definitely_unsubmitted());
+                let endpoint = fixture.bind(&command).unwrap();
+                assert!(endpoint
+                    .execute(&another_program)
+                    .unwrap_err()
+                    .definitely_unsubmitted());
+            },
+        );
+        assert_eq!(outcome.close, CompilerTransactionClose::NotStarted);
+        fixture.settle();
+        let counts = fixture.counts.lock().unwrap();
+        assert_eq!(
+            (
+                counts.preflights,
+                counts.begins,
+                counts.admissions,
+                counts.requests
+            ),
+            (1, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn scoped_daemon_cancellation_during_admission_or_request_retains_uncertainty() {
+        for behavior in [
+            DaemonFixtureBehavior::CancelBegin,
+            DaemonFixtureBehavior::CancelRequest,
+        ] {
+            let cancellation = CompilerTransactionCancellation::new();
+            let mut fixture = DeferredDaemonFixture::new(behavior, cancellation.clone());
+            let command = fixture.command();
+            let outcome = with_compiler_transaction_cancellable(
+                cancellation,
+                |_| {},
+                || {
+                    let endpoint = fixture.bind(&command).unwrap();
+                    assert!(!endpoint
+                        .execute(&command)
+                        .unwrap_err()
+                        .definitely_unsubmitted());
+                    // An uncertain admission/request cannot submit another body.
+                    if let Ok(endpoint) = fixture.bind(&command) {
+                        assert!(!endpoint.execute(&command).unwrap_err().permits_rebind());
+                    }
+                },
+            );
+            assert!(matches!(
+                outcome.close,
+                CompilerTransactionClose::Unconfirmed(_)
+            ));
+            fixture.settle();
+            let counts = fixture.counts.lock().unwrap();
+            assert_eq!(
+                (
+                    counts.preflights,
+                    counts.begins,
+                    counts.admissions,
+                    counts.active
+                ),
+                (1, 1, 1, 0)
+            );
+            assert_eq!(
+                counts.requests,
+                usize::from(matches!(behavior, DaemonFixtureBehavior::CancelRequest))
+            );
+        }
+    }
+
     #[test]
     fn scoped_endpoints_borrow_preparation_owner_without_finishing_close() {
         assert!(
@@ -2474,7 +3125,10 @@ mod tests {
                         let scope = scope.as_ref().unwrap();
                         assert_eq!(scope.workload, CompileWorkload::Preparation);
                         assert_eq!(
-                            scope.transaction.as_ref().unwrap().workload,
+                            match &scope.compiler {
+                                ScopedCompiler::Active { transaction, .. } => transaction.workload,
+                                _ => panic!("execution admits the owning transaction"),
+                            },
                             CompileWorkload::Preparation
                         );
                     });

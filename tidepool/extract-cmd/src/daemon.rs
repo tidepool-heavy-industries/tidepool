@@ -1606,6 +1606,8 @@ struct ResourcePermit {
     workload: CompileWorkload,
     grant: ExecutionGrant,
     slot: usize,
+    reserved_at: Instant,
+    identity: Option<(DaemonEpoch, AdmissionId)>,
 }
 
 impl Drop for ResourcePermit {
@@ -1620,6 +1622,24 @@ impl Drop for ResourcePermit {
                 usage.preparation -= 1;
                 usage.preparation_cpus -= self.grant.capabilities as usize;
             }
+        }
+        drop(usage);
+        if let Some((epoch, admission)) = self.identity {
+            tracing::info!(
+                daemon_epoch = %hex(&epoch.0),
+                admission_id = admission.0,
+                worker_slot = self.slot,
+                compiler_workload = match self.workload {
+                    CompileWorkload::Foreground => "foreground",
+                    CompileWorkload::Preparation => "preparation",
+                },
+                compiler_jobs = self.grant.jobs,
+                compiler_capabilities = self.grant.capabilities,
+                elapsed_ns = self.reserved_at.elapsed().as_nanos() as u64,
+                elapsed_ms = self.reserved_at.elapsed().as_millis() as u64,
+                phase = "compiler_capacity_release",
+                "compiler resources released"
+            );
         }
     }
 }
@@ -1779,6 +1799,8 @@ impl ResourceAdmission {
             workload,
             grant,
             slot,
+            reserved_at: Instant::now(),
+            identity: None,
         })
     }
 }
@@ -1992,7 +2014,8 @@ fn serve_workers(
                         break;
                     };
                     let _permit = pending.permit;
-                    let resource_permit = pending.resource_permit;
+                    let mut resource_permit = pending.resource_permit;
+                    resource_permit.identity = Some((DaemonEpoch(*epoch), pending.admission_id));
                     let workload = resource_permit.workload;
                     let grant = resource_permit.grant;
                     // The accept thread reserves the slot before writing the
@@ -4287,6 +4310,48 @@ mod tests {
         fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
         }
+    }
+
+    #[test]
+    fn capacity_release_timing_records_exact_owner_after_usage_is_released() {
+        let resources = ResourceAdmission::new(2, 2 * WARM_WORKER_MB);
+        let mut permit = resources
+            .acquire_with_capacity(
+                CompileWorkload::Foreground,
+                admission_capacity(8, 2 * WARM_WORKER_MB),
+            )
+            .unwrap();
+        permit.identity = Some((DaemonEpoch([9; 32]), AdmissionId(17)));
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("info"),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            // The service owner retains this exact permit through cleanup and
+            // rotation. Only dropping it changes the independent usage census.
+            assert_eq!(resources.usage.lock().unwrap().foreground, 1);
+            assert!(trace.text().is_empty());
+            drop(permit);
+            let usage = resources.usage.lock().unwrap();
+            assert_eq!((usage.jobs, usage.foreground, usage.cpus), (0, 0, 0));
+        });
+        let events = trace
+            .text()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+        let fields = &events[0]["fields"];
+        assert_eq!(fields["phase"], "compiler_capacity_release");
+        assert_eq!(fields["daemon_epoch"], hex(&[9; 32]));
+        assert_eq!(fields["admission_id"], 17);
+        assert_eq!(fields["worker_slot"], 0);
+        assert_eq!(fields["compiler_workload"], "foreground");
+        assert_eq!(fields["compiler_jobs"], 2);
+        assert!(fields["elapsed_ns"].as_u64().unwrap() > 0);
     }
 
     #[test]

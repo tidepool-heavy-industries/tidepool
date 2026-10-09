@@ -30,6 +30,10 @@ and is never replayed.
 Ordinary daemon mode exits when its request or RSS rotation bound is reached.
 `--persistent` keeps the daemon endpoint alive and rotates only the pinned GHC
 worker, for a long-lived owner such as one Exomonad tmux session.
+Scoped daemon binding retains its preflighted socket, boot epoch and producer
+without reserving a worker or CPU grant. The first execution admits the exact
+captured endpoint; stale epochs refuse rather than silently rebinding an already
+prepared offer. Direct identity handshakes retain their existing child owner.
 An explicit compiler transaction pins that worker across its ordered requests;
 rotation and request-local compiler cleanup occur when the transaction closes.
 An ordinary one-shot response is delivered only after the worker acknowledges
@@ -56,8 +60,11 @@ owner checks epoch/deployment fences and routes through bounded per-slot queues.
 The lowest live slot retains foreground context; preparation never occupies it.
 Foreground uses that slot first and may spill to an idle additional slot. At most
 one foreground job waits beyond occupied workers. Every accepted connection holds
-its CPU grant through transaction cleanup; failed acknowledgement, disconnect,
-worker failure and cancellation release the grant through the same owned permit.
+its CPU grant through transaction cleanup and any owned worker rotation;
+`compiler_capacity_release` records the exact admission after its permit is
+released, including failed delivery, cancellation and replacement. Failed
+acknowledgement, disconnect, worker failure and cancellation release the grant
+through the same owned permit.
 STOP and deployment changes drain accepted work before rejecting the backlog.
 
 Requests and transaction acquisition declare `CompileWorkload::Foreground` or
