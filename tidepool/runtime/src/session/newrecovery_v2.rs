@@ -3858,6 +3858,89 @@ mod tests {
         assert!(recovered_visibility.source_instances.is_empty());
         assert!(recovered.prepared().is_none());
         assert_eq!(fs::read(&join_manifest).unwrap(), join_bytes);
+
+        // Retained node authority remains available for private recovery, but
+        // an explicit empty public selection must not acquire that context.
+        let empty_manifest = root.path().join("empty-public-selection.json");
+        let mut empty_public = join_graph.clone();
+        let surface = empty_public
+            .public_surfaces
+            .iter_mut()
+            .find(|surface| surface.owner == owner("root"))
+            .unwrap();
+        assert!(surface.declaration_root.is_some());
+        assert!(!surface.compiler_context.artifact_refs.is_empty());
+        surface.compiler_context = RecoveryCompilerContext::default();
+        empty_public.seal().unwrap();
+        let empty_graph = snapshot(&empty_public);
+        empty_graph.capture_inventory(root.path()).unwrap();
+        assert!(matches!(
+            stage_v2(&empty_manifest, root.path(), empty_graph)
+                .unwrap()
+                .publish(),
+            RecoveryPublishOutcome::Durable { .. }
+        ));
+        let empty_bytes = fs::read(&empty_manifest).unwrap();
+        let mut empty_lib = SessionLib::open(
+            SessionId(44),
+            root.path().join("empty-public-session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        empty_lib
+            .attach_owned_recovery_graph_v3(&empty_manifest, run_owner.clone())
+            .unwrap();
+        assert!(empty_lib.log.joined_context_at(original_join.id).is_some());
+        assert!(empty_lib
+            .recovered_public_compiler_context(&owner("root"))
+            .unwrap()
+            .is_none());
+        let mut empty_session = PersistentSession::new(Some(empty_lib), 0);
+        let scopes_before = empty_session.scope_tree().len();
+        assert!(matches!(
+            empty_session.recover_public_scope(&owner("root")),
+            Err(crate::session::SessionError::RecoveryManifest { detail, .. })
+                if detail.contains("lacks its exact public compiler selection")
+        ));
+        assert_eq!(empty_session.scope_tree().len(), scopes_before);
+        assert!(empty_session.lib().durable_public_scopes.is_empty());
+        struct UnexpectedSuccessorValidation;
+        impl crate::session::RecoverySuccessorAuthority for UnexpectedSuccessorValidation {
+            fn validate_successor(
+                &self,
+                _: &Path,
+                _: &RecoveryPublicOwner,
+                _: &RecoveryPublicOwner,
+                _: SessionId,
+                _: ScopeId,
+            ) -> std::io::Result<bool> {
+                panic!("absent public compiler selection refuses before actor authority");
+            }
+        }
+        let target = empty_session.mint_isolated_scope();
+        empty_session
+            .seal_recovery_initialization_scope(target)
+            .unwrap();
+        let before_transfer = empty_session.public_visibility_snapshot_in(target).unwrap();
+        let successor = RecoveryPublicOwner {
+            incarnation: 2,
+            ..owner("root")
+        };
+        assert!(matches!(
+            empty_session.transfer_recovered_public_owner(
+                &owner("root"), successor, target, Arc::new(UnexpectedSuccessorValidation),
+            ),
+            Err(crate::session::SessionError::RecoveryManifest { detail, .. })
+                if detail.contains("lacks its exact public compiler selection")
+        ));
+        assert_eq!(
+            empty_session.public_visibility_snapshot_in(target).unwrap(),
+            before_transfer
+        );
+        assert!(empty_session.lib().durable_public_scopes.is_empty());
+        assert_eq!(fs::read(&empty_manifest).unwrap(), empty_bytes);
+        assert_eq!(fs::read(&join_manifest).unwrap(), join_bytes);
         let mut wrong_join_generation = exact.clone();
         let RecoveryLiveDependency::NativeBinding { generation, .. } = &mut wrong_join_generation
         else {
