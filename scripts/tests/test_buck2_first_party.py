@@ -707,6 +707,25 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             "name": "tidepool_toolchain", "pkg": toolchain["id"],
             "dep_kinds": [{"kind": "build", "target": None}],
         })
+        registry = "registry+https://github.com/rust-lang/crates.io-index"
+        third_party = self.root / "third-party/rust/Cargo.toml"
+        with third_party.open("a") as output:
+            for name, version in [("serde", "1.0.229"), ("serde_json", "1.0.151")]:
+                output.write(f'{name} = {{ version = "={version}" }}\n')
+                package_id = f"{registry}#{name}@{version}"
+                metadata["packages"].append({
+                    "id": package_id, "name": name, "version": version, "source": registry,
+                })
+                for kind in (None, "build"):
+                    facade["dependencies"].append({
+                        "name": name, "rename": None, "kind": kind, "target": None,
+                        "optional": False, "uses_default_features": True,
+                        "features": ["derive"] if name == "serde" else [], "req": f"={version}",
+                    })
+                node["deps"].append({
+                    "name": name, "pkg": package_id,
+                    "dep_kinds": [{"kind": kind, "target": None} for kind in (None, "build")],
+                })
         self.metadata.write_text(json.dumps(metadata))
         result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -717,6 +736,9 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn("//tidepool/toolchain:tidepool_toolchain", build_rule["deps"])
         library_rule = self.rule("bridge/facade", "tidepool", "tidepool_rust_library")
         self.assertNotIn("//tidepool/toolchain:tidepool_toolchain", library_rule.get("deps", []))
+        for name in ("serde", "serde_json"):
+            self.assertIn(f"//third-party/rust:{name}", build_rule["deps"])
+            self.assertIn(f"//third-party/rust:{name}", library_rule["deps"])
         self.assertEqual(build_rule["crate_root"], "bridge/facade/build.rs")
         self.assertEqual(groups["tidepool_build_script_sources"]["build.rs"], "bridge/facade/build.rs")
         for path in ("src/exomonad/scaffold_gitlink.rs", "src/exomonad/revision.txt"):
@@ -735,6 +757,15 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                              for _, arguments in buck.values()
                              for dependency in arguments.get("deps", []) + list(arguments.get("named_deps", {}).values())))
         self.assertIn("src/lib.rs", groups["tidepool_sources"])
+        previous = {path: path.read_bytes() for path in self.root.rglob("BUCK")}
+        serde_edge = next(edge for edge in node["deps"] if edge["name"] == "serde")
+        serde_edge["dep_kinds"] = [{"kind": None, "target": None}]
+        self.metadata.write_text(json.dumps(metadata))
+        refused = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("missing or ambiguous resolved dependency serde in tidepool", refused.stderr)
+        for path, contents in previous.items():
+            self.assertEqual(path.read_bytes(), contents, path)
 
     def test_facade_buildscript_refuses_missing_rust_include_before_publication(self):
         control = self.generate("--package", "tidepool")

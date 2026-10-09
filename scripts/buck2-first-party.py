@@ -284,7 +284,7 @@ def dependency_sets(package, enabled_dependencies, forwarded_features, include_d
             )
             facade_native = (
                 package["name"] == "tidepool"
-                and dependency["name"] == "tidepool-toolchain"
+                and dependency["name"] in {"tidepool-toolchain", "serde", "serde_json"}
                 and dependency["rename"] is None
                 and dependency["target"] is None
             )
