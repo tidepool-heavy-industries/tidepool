@@ -489,17 +489,18 @@ fn observe(
                 .collect::<BTreeMap<_, _>>(),
             owners
         );
-        prop_assert_eq!(
-            actual
-                .native_requirements_from_roots(
-                    &ids.iter()
-                        .copied()
-                        .map(NativeRequirementRoot::AllGroups)
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap(),
-            NativeRequirements::default()
+        let native = actual.native_requirements_from_roots(
+            &ids.iter()
+                .copied()
+                .map(NativeRequirementRoot::AllGroups)
+                .collect::<Vec<_>>(),
         );
+        // This history's carriers are all canonical interfaces. Their empty
+        // group census cannot stand in for an issued zero-group native carrier.
+        prop_assert_eq!(native.is_ok(), ids.is_empty());
+        if ids.is_empty() {
+            prop_assert_eq!(native.unwrap(), NativeRequirements::default());
+        }
         for (other_slot, other) in model.views.iter().enumerate().take(slot) {
             if let Some(other) = other {
                 let other_descriptors: BTreeMap<_, _> = model
@@ -630,9 +631,11 @@ fn run_history(
                         .map(NativeRequirementRoot::AllGroups)
                         .collect();
                     let native = actual.native_requirements_from_roots(&native_roots);
-                    prop_assert_eq!(native.is_ok(), valid);
+                    prop_assert_eq!(native.is_ok(), roots.is_empty());
                     if valid {
-                        prop_assert_eq!(native.unwrap(), NativeRequirements::default());
+                        if roots.is_empty() {
+                            prop_assert_eq!(native.unwrap(), NativeRequirements::default());
+                        }
                         coverage.selected += 1;
                         Some((
                             *to,
@@ -991,7 +994,7 @@ proptest! {
         if duplicate { roots.extend(roots.clone()); }
         // Independent truth table: every root selects all its own groups. A
         // source edge selects Helper's issued group 7, which requires this
-        // binding. Interface-only roots never demand a native binding.
+        // binding. Interface custody is retained separately from native roots.
         let demanded = root_mask & 3 != 0;
         let expected = if demanded {
             vec![NativeBindingRequirement { artifact_id: value.descriptor.id, identity: binding, generation }]
@@ -1004,9 +1007,13 @@ proptest! {
         drop(selected);
         let native_roots: Vec<_> = roots
             .iter()
+            .filter(|id| choices[..2].contains(id))
             .copied()
             .map(NativeRequirementRoot::AllGroups)
             .collect();
+        for id in roots.iter().filter(|id| choices[2..].contains(id)) {
+            prop_assert!(captured.native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(*id)]).is_err());
+        }
         let requirements = captured.native_requirements_from_roots(&native_roots).unwrap();
         prop_assert_eq!(&requirements.bindings, &expected);
         prop_assert!(requirements.packages.is_empty());
