@@ -127,6 +127,13 @@ The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork
 counter.
 
+The native owned-daemon runner publishes the PID, producer and epoch from its
+preflighted daemon to both the child measurement environment and lifecycle
+report. It refuses inherited compiler ownership coordinates. Test this handoff
+through the actual frontend as well as its projections; shell-owner evidence
+does not qualify the native owner. Artifact retention, diagnostic completeness,
+workload success and acknowledged cleanup remain independent observations.
+
 Every process edge in the extractor chain uses the crate's parent-death
 contract. Killing a caller, frontend, or daemon must reap its frontend or GHC
 worker descendants; process-tree ownership is not delegated to test scripts.
