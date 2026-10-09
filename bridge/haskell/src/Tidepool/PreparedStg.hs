@@ -634,7 +634,7 @@ preparedComponentModules selected = componentsWorkers selected : map snd (compon
 
 validatePreparedComponents :: PreparedComponents -> IO ()
 validatePreparedComponents selected = do
-  _ <- assembleComponentSelection (componentsSelection selected) (componentsWorkers selected) (componentRows selected)
+  _ <- checkComponentSelection (componentsSelection selected) (componentsWorkers selected) (componentRows selected)
   pure ()
 
 -- Compatibility callers requesting one concrete module materialize it once.
@@ -772,8 +772,22 @@ preparedTopBinders (StgTopLifted (StgRec pairs)) = map fst pairs
 -- constructor workers; the single site batch supplies the owner-local type graph.
 assembleComponentSelection :: FatIfaceSelection -> PreparedModule -> [([Int],PreparedModule)] -> IO PreparedModule
 assembleComponentSelection selection workers units = do
+  (base,prepared,siblings) <- checkComponentSelection selection workers units
   timing <- readTimingEnabled
   emitCount timing "prepared_recover_assemblies" 1
+  pure base
+    { preparedBindings = concatMap pmBindings prepared
+    , preparedOriginalTopNames = Set.unions (map pmOriginalTopNames prepared)
+    , preparedTagSigs = foldl plusNameEnv emptyNameEnv (map pmTagSigs prepared)
+    , preparedStableTopSpellings = Map.unions (map pmStableTopSpellings prepared)
+    , preparedSitedSiblings = siblings
+    , preparedExpectedEntries = preparedExpectedEntries workers
+    }
+
+checkComponentSelection :: FatIfaceSelection -> PreparedModule -> [([Int],PreparedModule)]
+  -> IO (PreparedModule,[PreparedModule],Map String Id)
+checkComponentSelection selection workers units = do
+  timing <- readTimingEnabled
   emitCount timing "prepared_recover_declaring_context_checks" (fromIntegral (1 + length units))
   let version = fatSelectionVersion selection
       owner = fatOriginalOwner version
@@ -810,14 +824,7 @@ assembleComponentSelection selection workers units = do
       && maybe False (const True) siblings && all consistentContext prepared)
     (ioError (userError "canonical fat component assembly has inconsistent or overlapping evidence"))
   let base = case siteUnits of site:_ -> site; [] -> head prepared
-  pure base
-    { preparedBindings = concatMap pmBindings prepared
-    , preparedOriginalTopNames = Set.unions (map pmOriginalTopNames prepared)
-    , preparedTagSigs = foldl plusNameEnv emptyNameEnv (map pmTagSigs prepared)
-    , preparedStableTopSpellings = Map.unions (map pmStableTopSpellings prepared)
-    , preparedSitedSiblings = fromMaybe Map.empty siblings
-    , preparedExpectedEntries = preparedExpectedEntries workers
-    }
+  pure (base,prepared,fromMaybe Map.empty siblings)
 
 -- Shared owner facts may occur in several units, but conflicting typed
 -- identities cannot be hidden by the order of component assembly.
