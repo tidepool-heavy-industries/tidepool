@@ -93,22 +93,34 @@ pub fn configured_module_package(
     > = std::sync::Mutex::new(
         crate::module_candidates::deployment::ConfiguredModulePackageOwner::new(),
     );
+    with_configured_module_package_owner(&OWNER, |owner| {
+        let Some(path) = std::env::var_os(ENV_COMPILER_MODULES) else {
+            owner.clear();
+            return Ok(None);
+        };
+        let configuration = CompilerDeploymentConfiguration::from_env()
+            .map_err(|e| ModulePackageError::CompilerConfiguration(Box::new(e)))?;
+        let CompilerDeploymentConfiguration::Configured(authority) = configuration else {
+            return Err(ModulePackageError::UnknownCompiler);
+        };
+        owner.load(&PathBuf::from(path), &authority).map(Some)
+    })
+}
+
+/// Serialize selection, environment observation, freshness and replacement
+/// within one owner operation. Returning immutable objects does not retain the
+/// lock; their consumers retain their own shared custody.
+pub(crate) fn with_configured_module_package_owner<T>(
+    owner: &std::sync::Mutex<crate::module_candidates::deployment::ConfiguredModulePackageOwner>,
+    operation: impl FnOnce(&mut crate::module_candidates::deployment::ConfiguredModulePackageOwner) -> T,
+) -> T {
     let waiting = std::time::Instant::now();
-    let mut owner = OWNER
+    let mut owner = owner
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     tracing::debug!(target: "tidepool_toolchain::module_candidates",
         phase = "configured_package_owner_wait", elapsed_ms = waiting.elapsed().as_millis() as u64);
-    let Some(path) = std::env::var_os(ENV_COMPILER_MODULES) else {
-        owner.clear();
-        return Ok(None);
-    };
-    let configuration = CompilerDeploymentConfiguration::from_env()
-        .map_err(|e| ModulePackageError::CompilerConfiguration(Box::new(e)))?;
-    let CompilerDeploymentConfiguration::Configured(authority) = configuration else {
-        return Err(ModulePackageError::UnknownCompiler);
-    };
-    owner.load(&PathBuf::from(path), &authority).map(Some)
+    operation(&mut owner)
 }
 /// Validate configured source provenance without hydrating native products.
 /// Candidate selection authenticates the complete package, retaining its

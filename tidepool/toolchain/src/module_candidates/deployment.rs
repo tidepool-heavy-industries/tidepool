@@ -1057,7 +1057,9 @@ fn require_complete_cohort<'a>(
 mod tests {
     mod product_carry;
 
-    use super::super::tests::{package_bundle, product_bytes};
+    use super::super::tests::{
+        package_bundle, package_bundle_with_sidecars, package_imports_with_roots, product_bytes,
+    };
     use super::*;
     use crate::cache::{DependencyEvidence, ModuleEvidence, ProductAvailability, SourceEvidence};
     use tidepool_repr::execution_schema::InventoryDecodeLimits;
@@ -1079,6 +1081,17 @@ mod tests {
         }
 
         fn with_modules_and_execution(names: &[&str], with_execution: bool) -> Self {
+            Self::with_modules_execution_and_packages(names, with_execution, &Default::default())
+        }
+
+        fn with_modules_execution_and_packages(
+            names: &[&str],
+            with_execution: bool,
+            package_witnesses: &std::collections::BTreeMap<
+                (String, String),
+                crate::certified_products::PackageInterfaceWitness,
+            >,
+        ) -> Self {
             let root = tempfile::tempdir().unwrap();
             let source = root.path().join("sources");
             let output = root.path().join("products");
@@ -1152,11 +1165,29 @@ mod tests {
                     .iter()
                     .map(|name| product_bytes("u", name, name.as_bytes())),
             );
-            let packages = combine_rows(
-                names
+            let packages = combine_rows(names.iter().map(|name| {
+                if package_witnesses.is_empty() {
+                    return package_bundle("u", name, name.as_bytes());
+                }
+                let roots = package_witnesses
                     .iter()
-                    .map(|name| package_bundle("u", name, name.as_bytes())),
-            );
+                    .map(|((unit, module), witness)| {
+                        ciborium::value::Value::Array(vec![
+                            ciborium::value::Value::Text(unit.clone()),
+                            ciborium::value::Value::Text(module.clone()),
+                            ciborium::value::Value::Text(
+                                witness.selected_path.to_str().unwrap().into(),
+                            ),
+                            ciborium::value::Value::Text(super::super::hex(&witness.sha256)),
+                        ])
+                    })
+                    .collect();
+                package_bundle_with_sidecars(vec![(
+                    "u".into(),
+                    (*name).into(),
+                    package_imports_with_roots("u", name, name.as_bytes(), roots),
+                )])
+            }));
             let parsed =
                 crate::certified_products::ParsedModuleProducts::decode(&bytes, &packages).unwrap();
             let selection =
@@ -1182,7 +1213,7 @@ mod tests {
                         crate::certified_products::encode_home_certification(
                             &owner,
                             &[],
-                            &std::collections::BTreeMap::new(),
+                            package_witnesses,
                         )
                         .unwrap(),
                     )
@@ -1220,7 +1251,7 @@ mod tests {
                     producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer_identity),
                     semantic_sha256: None, include: &include, source_path: &input, source: "target", evidence: &evidence,
                     exact_imports: &std::collections::BTreeMap::new(), owners: &owners, fresh_owners: &fresh,
-                    retained_sources: &std::collections::BTreeMap::new(), packages: &std::collections::BTreeMap::new(),
+                    retained_sources: &std::collections::BTreeMap::new(), packages: package_witnesses,
                 }).unwrap() else { panic!("graph"); };
                 for record in &mut prepared.records {
                     let owner = record.original_owner.owner();
