@@ -1,6 +1,6 @@
 module ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection) where
 
-import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
+import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..), PreparedEntryContext(..))
 import Control.Monad (forM_, unless)
 import Control.Monad.State.Strict (runStateT)
 import Data.List (sort)
@@ -154,7 +154,7 @@ verifyModuleEvidenceProjection = do
     , preparedAuthorityDependent = False
     , preparedSiteDependencies = Nothing
     , preparedIntrinsicNames = Set.empty
-    , preparedExpectedEntries = Map.empty
+    , preparedExpectedEntries = ProvisionalEntries Map.empty
     }
   context = ProjectionContext
     { projectionProfile = "ghc-9.12-prepared-stg"
@@ -305,7 +305,7 @@ verifyGroupSelection context prepared = do
     , preparedSiteRejections = [SiteRejection (head owners) "retained metadata"]
     , preparedAuthorityDependent = True
     , preparedIntrinsicNames = Set.fromList (map varName owners)
-    , preparedExpectedEntries = Map.fromList [(varName identifier, identifier) | identifier <- owners] }
+    , preparedExpectedEntries = ProvisionalEntries (Map.fromList [(varName identifier, identifier) | identifier <- owners]) }
 
 compareFilterOracle :: ProjectionContext -> PreparedModule -> IO ()
 compareFilterOracle context prepared = do

@@ -4,13 +4,39 @@ module Tidepool.FatIface.Internal
   ( LoadCache, newLoadCache, copyLoadCache, mergeLoadCaches, selectLoadCaches
   , evictLoadCache, lookupLoadCache, lookupCompletedLoadCache
   , privateComponents
+  , OwnerInterfaceContext(..), issueOwnerInterfaceContext
   ) where
+
+import Data.Unique (Unique, newUnique)
+import GHC.Core.TyCon (TyCon)
+import GHC.Types.Name (Name)
+import GHC.Types.Var (Id)
+import GHC.Unit.Types (Module)
+import GHC.Unit.Module.Location (ModLocation)
+import GHC.Utils.Fingerprint (Fingerprint)
 
 import Control.Concurrent.MVar
   (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, withMVar)
 import Control.Exception (SomeException, mask, throwIO, try, uninterruptibleMask_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+
+-- The issuer token follows this immutable context through cache copies and
+-- selections. Its interface identity binds the declaring entries independently
+-- of the optional executable Core version.
+data OwnerInterfaceContext = OwnerInterfaceContext
+  { ownerInterfaceIdentity :: !Unique
+  , ownerInterfaceVersion :: !(Module, Fingerprint)
+  , ownerInterfaceLocation :: ModLocation
+  , ownerInterfaceTyCons :: [TyCon]
+  , ownerInterfaceEntries :: Map.Map Name Id
+  }
+
+issueOwnerInterfaceContext :: Module -> Fingerprint -> ModLocation -> [TyCon]
+  -> Map.Map Name Id -> IO OwnerInterfaceContext
+issueOwnerInterfaceContext owner fingerprint location tycons entries = do
+  identity <- newUnique
+  pure (OwnerInterfaceContext identity (owner,fingerprint) location tycons entries)
 
 data Entry value = Cached value | Loading (MVar (Maybe value))
 data Selection value = UseCached value | AwaitLoad (MVar (Maybe value)) | StartLoad (MVar (Maybe value))

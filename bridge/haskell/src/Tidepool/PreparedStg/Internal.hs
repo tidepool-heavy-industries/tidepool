@@ -1,6 +1,6 @@
 -- | Compiler-owned prepared representation. Structural projection tests may
 -- inspect malformed IR here; this data issues no source or execution admission.
-module Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..)) where
+module Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..), PreparedEntryContext(..)) where
 
 import Data.Map.Strict (Map)
 import Data.Set (Set)
@@ -12,6 +12,7 @@ import GHC.Types.Name (Name)
 import GHC.Types.Var (Id)
 import GHC.Types.Var.Set (IdSet)
 import GHC.Unit.Types (Module)
+import Tidepool.FatIface (OwnerInterfaceContext)
 import Tidepool.EffectSchema (YieldSite)
 import Tidepool.PreparedSites (PreparedSite, SiteRejection, PreparedSiteDependencies)
 import Tidepool.TypePolicy (TypeGraph)
@@ -21,6 +22,12 @@ import Tidepool.TypePolicy (TypeGraph)
 -- explicit globals with recovery diagnostics, not fabricated home definitions.
 data PreparedCoverage = CompleteSourceModule | ExactBodySubset
   deriving (Eq, Show)
+
+-- Direct typed Core adapters may carry provisional entries. Canonical units
+-- retain their exact declaring owner; assembly never accepts provisional maps.
+data PreparedEntryContext
+  = ProvisionalEntries (Map Name Id)
+  | DeclaringEntries OwnerInterfaceContext
 
 -- | Prepared output and projection evidence for one defining module.
 data PreparedModule = PreparedModule
@@ -47,5 +54,5 @@ data PreparedModule = PreparedModule
   , preparedIntrinsicNames :: Set Name
   -- | Exact package declaring Ids, separate from provisional STG shapes.
   -- Recovery uses the latter to discover dependencies before final emission.
-  , preparedExpectedEntries :: Map Name Id
+  , preparedExpectedEntries :: PreparedEntryContext
   }
