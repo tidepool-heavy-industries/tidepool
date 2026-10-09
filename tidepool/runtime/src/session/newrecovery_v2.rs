@@ -2159,20 +2159,17 @@ mod tests {
     #[test]
     fn public_compiler_context_normalization_preserves_duplicate_refusals() {
         let mut valid = fixture();
-        valid.public_surfaces[0].compiler_context.lexical = vec![
-            ExactLexicalNode {
-                owner: module("main", "Z"),
-                imports: vec![module("other", "A"), module("main", "A")],
-            },
-            ExactLexicalNode {
-                owner: module("other", "A"),
-                imports: vec![],
-            },
-            ExactLexicalNode {
-                owner: module("main", "A"),
-                imports: vec![],
-            },
-        ];
+        let lexical_owner = home_artifact(&valid).owner();
+        let selected = &valid.nodes[0];
+        valid.public_surfaces[0].compiler_context = RecoveryCompilerContext {
+            artifact_refs: selected.artifact_refs.clone(),
+            native_groups: selected.native_groups.clone(),
+            compiler_roles: selected.compiler_roles.clone(),
+            lexical: vec![ExactLexicalNode {
+                owner: lexical_owner.clone(),
+                imports: vec![lexical_owner],
+            }],
+        };
         valid.seal().unwrap();
         for duplicate_node in [false, true] {
             let mut malformed = valid.clone();
