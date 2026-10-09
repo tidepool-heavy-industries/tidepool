@@ -126,6 +126,12 @@ def cohorts() -> dict:
             "prepared-child": {"tests": PREPARED_CHILD_TESTS, "expected_count": len(PREPARED_CHILD_TESTS),
                                "ignored": True, "timeout": 1800,
                                "compiler_mode": "owned-resident", "max_jobs": 1},
+            "builtin-startup": {
+                "tests": ["actor_host::prepared_runtime_acceptance::production_builtin_toolset_immediate_and_durable_launches_are_fresh"],
+                "expected_count": 1, "ignored": True, "timeout": 1800,
+                "compiler_mode": "owned-resident", "max_jobs": 1,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
             "harness-performance": {"tests": HARNESS_PERFORMANCE_TESTS, "expected_count": 1,
                                     "ignored": True, "timeout": 1800,
                                     "compiler_mode": "owned-resident", "max_jobs": 1,

@@ -38,7 +38,7 @@ fn identity(round: &HostedScriptRound) -> HostIdentity {
     }
 }
 
-async fn admit_http_input(host: &HostedTestRuntime) {
+pub(super) async fn admit_http_input(host: &HostedTestRuntime) {
     let origin = format!("https://{}", host.address);
     let api = format!("http://{}/api", host.address);
     let client = reqwest::Client::builder()
@@ -408,20 +408,17 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             let root_path = AgentPath("/root".into());
             let mut pending = VecDeque::new();
             let frozen = host.context.config.workspace_inputs.as_ref().unwrap();
-            let completed = frozen.completed_entry_selections().unwrap();
             let coverage = frozen.prepared_toolset_coverage().unwrap();
             assert_eq!(coverage.len(), 1);
             let installation = host.context.observer.installation(root_actor).await;
-            let Some(exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original }) =
-                installation.acquisition.as_ref()
-            else {
-                panic!("root installation must use its completed deployment original")
-            };
             assert_eq!(
-                (recipe, original),
-                (&coverage[0].recipe, &coverage[0].original)
+                installation
+                    .acquisition
+                    .as_ref()
+                    .and_then(exomonad_actor::ToolsetAcquisition::selection),
+                Some(coverage[0].program.clone()),
+                "root installs its exact prepared program"
             );
-            assert_eq!(completed.get(recipe), Some(original));
             admit_http_input(host).await;
             let mut root = next(host, &mut requests, &mut pending, &root_path).await;
             assert_eq!(root.request.model, "gpt-6.1-sol");

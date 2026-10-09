@@ -254,6 +254,13 @@ descriptors and their reports with their bundled qualification program; the new
 reader refuses older unsealed cohort contracts. Build and freeze a new candidate
 to qualify the resident runtime contract.
 
+The `builtin-startup` cohort runs one ignored production-path case. It prepares
+the default workspace, launches through immediate immutable readiness and then
+independent durable selection, and checks zero startup compiler requests in both
+hosts. Real HTTP admission drives first and warm notebook calls; a binding from
+the first actor must be unavailable in the second actor. Run it with `--jobs 1`
+from the rebuilt descriptor that selects both packaged installer entries.
+
 The frozen descriptor is the authority for the exact M1/M2 case rosters, counts
 and deadlines. M2 has a 600-second default watchdog; unfinished-parent survival,
 nominal publication join, checkpoint release and

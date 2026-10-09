@@ -81,7 +81,10 @@ pub use conversation::{ConversationFuture, ConversationReader, ConversationUnava
 // installs one has to be able to name what it yields. Actor capabilities belong
 // to this crate; a conversation's speaker is the
 // provider's, hence the alias.
-pub use agent_spec::preparation::ToolsetAcquisition;
+pub use agent_spec::preparation::{
+    BuiltinDeploymentProgram, BuiltinToolsetPolicy, ToolsetAcquisition, ToolsetProgramRecipe,
+    ToolsetProgramSelection,
+};
 pub use descriptor::{ActorDescriptor, ActorPersistencePolicy};
 pub use exomonad_model::{ConversationTurn, Role as ConversationRole, TurnItem};
 pub use exomonad_worktree::WorkspaceAccess;

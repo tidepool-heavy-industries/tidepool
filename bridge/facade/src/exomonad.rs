@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::Instrument;
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 pub(crate) const STATUS_VERSION: u32 = 5;
 const PREVIOUS_STATUS_VERSION: u32 = 4;
@@ -2386,6 +2386,7 @@ fn retain_run_executable(run_root: &Path, name: &str, source: &Path) -> std::io:
 const DEPLOYMENT_ENV_NAMES: &[&str] = &[
     "EXOMONAD_EMBEDDED_ASSET_ROOT",
     "TIDEPOOL_PREPARED_ROOT_ENTRY",
+    "TIDEPOOL_PREPARED_BUILTIN_ENTRIES",
     tidepool_toolchain::toolchain::ENV_COMPILER_DEPLOYMENT,
     tidepool_toolchain::toolchain::ENV_COMPILER_MODULES,
 ];
@@ -3880,11 +3881,16 @@ mod tests {
         let modules = tidepool_toolchain::toolchain::ENV_COMPILER_MODULES;
         let assets = "EXOMONAD_EMBEDDED_ASSET_ROOT";
         let entry = "TIDEPOOL_PREPARED_ROOT_ENTRY";
+        let builtins = "TIDEPOOL_PREPARED_BUILTIN_ENTRIES";
         for selected in [
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::from([(deployment.to_owned(), "compiler.json".to_owned())]),
             std::collections::BTreeMap::from([(modules.to_owned(), "catalog.json".to_owned())]),
             std::collections::BTreeMap::from([(entry.to_owned(), "/bundle/root-entry".to_owned())]),
+            std::collections::BTreeMap::from([(
+                builtins.to_owned(),
+                "/bundle/builtin-entries".to_owned(),
+            )]),
             std::collections::BTreeMap::from([(
                 assets.to_owned(),
                 "/nix/store/matched-web".to_owned(),
@@ -3894,12 +3900,13 @@ mod tests {
                 (modules.to_owned(), "catalog.json".to_owned()),
                 (assets.to_owned(), "/nix/store/matched-web".to_owned()),
                 (entry.to_owned(), "/bundle/root-entry".to_owned()),
+                (builtins.to_owned(), "/bundle/builtin-entries".to_owned()),
             ]),
         ] {
             let environment = pane_environment_from(|name| selected.get(name).cloned());
             assert_eq!(environment, selected);
             let unset = deployment_environment_unsets(&environment);
-            for name in [deployment, modules, assets, entry] {
+            for name in [deployment, modules, assets, entry, builtins] {
                 assert_eq!(unset.contains(name), !selected.contains_key(name));
             }
             assert!(unset.iter().all(|name| !environment.contains_key(name)));

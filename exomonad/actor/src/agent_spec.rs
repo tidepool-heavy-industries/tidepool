@@ -21,7 +21,7 @@ pub enum SpecRule {
     /// The workspace's `[haskell] spec` key, for a workspace that wants
     /// another name.
     WorkspaceSpec,
-    /// Nothing named a spec, so the empty `defaultSpec` is installed.
+    /// Nothing named a spec, so the host selects its supported notebook policy.
     BuiltinDefault,
 }
 
@@ -40,8 +40,7 @@ impl SpecRule {
 pub struct ResolvedSpec {
     pub rule: SpecRule,
     /// The qualified Haskell value the install fragment applies. `None` under
-    /// [`SpecRule::BuiltinDefault`]: the installer uses `defaultSpec`, whose
-    /// tools and slots are empty.
+    /// [`SpecRule::BuiltinDefault`]: the host selects the workbench or async policy.
     pub entry: Option<String>,
     /// The file the entry was read from, when discovery found one on disk.
     /// A configured entry point names a module, not a path, so it has none.
@@ -225,10 +224,12 @@ pub fn installation_expression(
         effects
             .iter()
             .map(|effect| match effect {
-                // These public reexports resolve to the original effect Names,
-                // while remaining in the actor facade's ordinary import scope.
-                crate::ActorEffectKey::Replies => "Tidepool.Actors.Exomonad.Replies".to_owned(),
-                crate::ActorEffectKey::Watches => "Tidepool.Actors.Exomonad.Watches".to_owned(),
+                // Name the original effect modules without importing the
+                // notebook's actor facade into a fixed installer.
+                crate::ActorEffectKey::Replies =>
+                    "Tidepool.Agent.Reply.Internal.Replies".to_owned(),
+                crate::ActorEffectKey::Watches =>
+                    "Tidepool.Agent.Watch.Internal.Watches".to_owned(),
                 effect => format!("Tidepool.Effects.Core.{}", effect.haskell_name()),
             })
             .collect::<Vec<_>>()
@@ -397,6 +398,6 @@ mod tests {
         assert_ne!(forward, reversed);
         assert!(forward
             .effect_row
-            .contains("Tidepool.Actors.Exomonad.Replies"));
+            .contains("Tidepool.Agent.Reply.Internal.Replies"));
     }
 }

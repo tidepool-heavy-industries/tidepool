@@ -539,6 +539,7 @@ pub struct ActorWorkbenchSource {
     toolset_support_manifests:
         Arc<std::sync::OnceLock<Vec<tidepool_toolchain::cache::SourceRootManifest>>>,
     toolset_preparation: Arc<crate::agent_spec::preparation::ToolsetPreparation>,
+    prepared_toolset: Option<PreparedSourceToolset>,
 }
 
 /// Immutable installer readiness. It owns source and native code, while each
@@ -556,10 +557,61 @@ pub struct SourceToolsetRecipe {
     pub requested_effects: Vec<crate::ActorEffectKey>,
     pub effective_effects: Vec<crate::ActorEffectKey>,
     pub source_revision: String,
-    pub recipe: String,
+    pub program: crate::ToolsetProgramRecipe,
+}
+
+impl std::fmt::Debug for PreparedSourceToolset {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedSourceToolset")
+            .field("acquisition", self.acquisition())
+            .field("effects", &self.effects)
+            .finish()
+    }
+}
+
+fn installer_program_recipe(
+    recipe: &crate::agent_spec::preparation::InstallerRecipe,
+) -> Result<crate::ToolsetProgramRecipe, ResidentActorWorkbenchError> {
+    match &recipe.builtin {
+        Some(program) => Ok(crate::ToolsetProgramRecipe::BuiltinDeploymentProgram(
+            program.clone(),
+        )),
+        None => crate::agent_spec::preparation::durable_recipe_key(recipe)
+            .map(crate::ToolsetProgramRecipe::WorkspaceOriginal)
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("{error:?}"))),
+    }
+}
+
+fn builtin_toolset_policy(
+    rule: crate::agent_spec::SpecRule,
+    effects: &[crate::ActorEffectKey],
+    supported: &[exomonad_tool::ToolEffectKey],
+) -> Option<crate::BuiltinToolsetPolicy> {
+    if rule != crate::agent_spec::SpecRule::BuiltinDefault
+        || effects != crate::ActorCapabilities::default().effect_keys()
+    {
+        return None;
+    }
+    Some(
+        if supported.contains(&exomonad_tool::ToolEffectKey::ContextReadWrite) {
+            crate::BuiltinToolsetPolicy::Workbench
+        } else {
+            crate::BuiltinToolsetPolicy::AsyncWorkbench
+        },
+    )
 }
 
 impl PreparedSourceToolset {
+    #[must_use]
+    pub fn selection(&self) -> Option<crate::ToolsetProgramSelection> {
+        self.prepared.acquisition.selection()
+    }
+
+    #[must_use]
+    pub fn image_registry(&self) -> Arc<tidepool_runtime::session::ImageRegistry> {
+        Arc::clone(self.prepared.entry.image_registry())
+    }
     #[must_use]
     pub fn source_revision(&self) -> &str {
         &self.prepared.source_revision
@@ -610,6 +662,23 @@ impl ActorWorkbenchSource {
         let (recipe, resolved) =
             self.installer_recipe(&source, granted_effects, supported_effects)?;
         let effects = recipe.effects.clone();
+        if let Some(ready) = &self.prepared_toolset {
+            let exact_selection = match ready.selection() {
+                Some(crate::ToolsetProgramSelection::BuiltinDeploymentProgram { .. }) => true,
+                Some(crate::ToolsetProgramSelection::WorkspaceOriginal { recipe, original }) => {
+                    matches!(source.prepared_entries(), Some(crate::SourceEntryStorage::CompletedOriginal { selections, .. })
+                        if selections.get(&recipe) == Some(&original))
+                }
+                None => false,
+            };
+            if ready.effects == effects
+                && exact_selection
+                && ready.selection().map(|selection| selection.recipe())
+                    == Some(installer_program_recipe(&recipe)?)
+            {
+                return Ok(ready.clone());
+            }
+        }
         let prepared = self
             .toolset_preparation
             .prepare(workload, recipe, resolved, source, registry)
@@ -642,13 +711,12 @@ impl ActorWorkbenchSource {
         supported_effects: &[exomonad_tool::ToolEffectKey],
     ) -> Result<SourceToolsetRecipe, ResidentActorWorkbenchError> {
         let (recipe, _) = self.installer_recipe(source, requested_effects, supported_effects)?;
-        let digest = crate::agent_spec::preparation::durable_recipe_key(&recipe)
-            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("{error:?}")))?;
+        let program = installer_program_recipe(&recipe)?;
         Ok(SourceToolsetRecipe {
             requested_effects: requested_effects.to_vec(),
             effective_effects: recipe.effects,
             source_revision: recipe.source_revision,
-            recipe: digest,
+            program,
         })
     }
 
@@ -680,6 +748,40 @@ impl ActorWorkbenchSource {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let resolved = crate::agent_spec::resolve(roots.clone(), self.spec.as_deref());
+        let builtin = if let Some(policy) =
+            builtin_toolset_policy(resolved.rule, &effects, supported_effects)
+        {
+            // Observe the current deployment selection before reusing issuer-owned
+            // readiness. This reads metadata without decoding its native images.
+            crate::agent_spec::preparation::builtin_program(policy).map_err(|error| {
+                ResidentActorWorkbenchError::ActorProtocol(format!("{error:?}"))
+            })?
+        } else {
+            None
+        };
+        if let Some(program) = builtin {
+            return Ok((
+                crate::agent_spec::preparation::InstallerRecipe {
+                    source_authority: None,
+                    source_revision: program.manifest_blake3.clone(),
+                    roots: Vec::new(),
+                    preamble: String::new(),
+                    imports: String::new(),
+                    entry: match program.policy {
+                        crate::BuiltinToolsetPolicy::Workbench => {
+                            "Tidepool.Agent.Contract.installDefaultWorkbench"
+                        }
+                        crate::BuiltinToolsetPolicy::AsyncWorkbench => {
+                            "Tidepool.Agent.Contract.installDefaultAsyncWorkbench"
+                        }
+                    }
+                    .into(),
+                    effects,
+                    builtin: Some(program),
+                },
+                resolved,
+            ));
+        }
         let source_revision = if let Some(manifests) = source.source_manifests() {
             if manifests.len() != source.include_paths().len() {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -723,7 +825,7 @@ impl ActorWorkbenchSource {
                 "Tidepool.Agent.Contract.defaultAsyncWorkbenchSpec".into()
             }
         });
-        let mut imports = self.workbench_imports.clone();
+        let mut imports = SourceImports::default();
         if let Some((module, _)) = entry.rsplit_once('.') {
             imports.extend_text(&format!("qualified {module}"));
         }
@@ -731,20 +833,17 @@ impl ActorWorkbenchSource {
         imports.extend_text("qualified Tidepool.Effects.Core");
         imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
         imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
-        if effects.iter().any(|key| {
-            matches!(
-                key,
-                crate::ActorEffectKey::Replies | crate::ActorEffectKey::Watches
-            )
-        }) {
-            imports.extend_text("qualified Tidepool.Actors.Exomonad");
-        }
         Ok((
             crate::agent_spec::preparation::InstallerRecipe {
-                source_authority: source.semantic_digest(),
+                builtin: None,
+                source_authority: Some(source.semantic_digest()),
                 source_revision,
                 roots,
-                preamble: self.preamble.to_string(),
+                preamble: format!(
+                    "{}\nmodule Expr where\nimport Prelude\nimport Control.Monad.Freer (Eff)\nimport qualified Data.Text as T\n{}",
+                    tidepool_runtime::session::EVAL_PRAGMAS,
+                    tidepool_runtime::session::PREAMBLE_IMPORT_MARKER
+                ),
                 imports: imports.template_text(),
                 entry,
                 effects,
@@ -785,7 +884,15 @@ impl ActorWorkbenchSource {
             request_evidence: None,
             request_helper_recipe: Default::default(),
             toolset_preparation: Default::default(),
+            prepared_toolset: None,
         }
+    }
+
+    /// Carry only immutable issuer-owned readiness into immediate launch.
+    #[must_use]
+    pub fn with_prepared_toolset(mut self, ready: Option<PreparedSourceToolset>) -> Self {
+        self.prepared_toolset = ready;
+        self
     }
 
     /// Deployment-owned support roots, ahead of the source owner's published
@@ -5470,7 +5577,9 @@ where
             ActivationPreviewOutcome::Rendered { text, omitted } => bounded_activation_text(
                 text, ACTIVATION_INPUT_LIMIT, omitted, "display sessionInput",
             ),
-            ActivationPreviewOutcome::Opaque => "<opaque input; use lookup for sessionInput, then select or apply the value>".into(),
+            ActivationPreviewOutcome::Opaque => {
+                "<opaque input; use lookup for sessionInput, then select or apply the value>".into()
+            }
             ActivationPreviewOutcome::Unavailable(reason) => format!(
                 "<input rendering unavailable ({reason}); use lookup for sessionInput, then select or apply the value>",
             ),
@@ -11487,14 +11596,40 @@ pub(crate) mod request_tests {
         );
         assert!(installer.contains("import qualified PrivatePolicy"));
         assert!(installer.contains("import qualified Tidepool.Agent.Contract"));
-        assert!(installer.contains("import qualified Tidepool.Actors.Exomonad"));
-        assert!(installer.contains("Tidepool.Actors.Exomonad.Replies"));
-        assert!(installer.contains("Tidepool.Actors.Exomonad.Watches"));
+        assert!(!installer.contains("import qualified Tidepool.Actors.Exomonad"));
+        assert!(installer.contains("Tidepool.Agent.Reply.Internal.Replies"));
+        assert!(installer.contains("Tidepool.Agent.Watch.Internal.Watches"));
         assert!(installer.contains("PrivatePolicy.agentSpec"));
-        assert!(installer.contains("import qualified PublicNotebook"));
+        assert!(!installer.contains("import qualified PublicNotebook"));
     }
 
     proptest::proptest! {
+        #[test]
+        fn builtin_selection_preserves_override_precedence_and_exact_row(
+            removed in 0usize..exomonad_tool::DEFAULT_ACTOR_EFFECTS.len(),
+            context_support in proptest::prelude::any::<bool>(),
+        ) {
+            use crate::agent_spec::SpecRule;
+            let standard = exomonad_tool::DEFAULT_ACTOR_EFFECTS;
+            let support = if context_support {
+                vec![exomonad_tool::ToolEffectKey::ContextReadWrite]
+            } else { Vec::new() };
+            let expected = if context_support { crate::BuiltinToolsetPolicy::Workbench }
+                else { crate::BuiltinToolsetPolicy::AsyncWorkbench };
+            proptest::prop_assert_eq!(builtin_toolset_policy(SpecRule::BuiltinDefault, standard, &support), Some(expected));
+            for rule in [SpecRule::RunModule, SpecRule::WorkspaceSpec] {
+                proptest::prop_assert_eq!(builtin_toolset_policy(rule, standard, &support), None);
+            }
+            let mut narrowed = standard.to_vec();
+            narrowed.remove(removed);
+            proptest::prop_assert_eq!(builtin_toolset_policy(SpecRule::BuiltinDefault, &narrowed, &support), None);
+            let mut reordered = standard.to_vec();
+            reordered.rotate_left(removed + 1);
+            if reordered != standard {
+                proptest::prop_assert_eq!(builtin_toolset_policy(SpecRule::BuiltinDefault, &reordered, &support), None);
+            }
+        }
+
         #[test]
         fn source_toolset_recipe_projects_public_rows_in_requested_order(
             mask in proptest::prelude::any::<u64>(),
@@ -15488,6 +15623,38 @@ pub(crate) mod request_tests {
             .replay_eligible_identity()
             .is_none());
         std::fs::write(&input, "42").unwrap();
+        let first_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
+        let before_handoff = tidepool_extract_cmd::extract_spawn_count();
+        let handoff_source = source.clone().with_prepared_toolset(Some(fresh.clone()));
+        let (recipe, original) = fresh.completed_entry_selection().unwrap();
+        let immediate = with_test_compiler_owner(handoff_source.prepare_source_toolset(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            snapshot(crate::SourceEntryStorage::CompletedOriginal {
+                directory: storage.path().to_owned(),
+                selections: [(recipe.to_owned(), original)].into_iter().collect(),
+            }),
+            &[],
+            &[],
+            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+        ))
+        .await
+        .unwrap();
+        assert!(Arc::ptr_eq(&fresh.prepared, &immediate.prepared));
+        let (immediate_session, immediate_context, _, _immediate_root) = host_mount_fixture();
+        run_native_quoted_probe(
+            immediate_session,
+            immediate_context,
+            handoff_source,
+            &immediate.prepared.entry,
+            "41",
+        )
+        .await;
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_handoff);
+        assert_eq!(
+            std::fs::read_to_string(input.with_extension("executions")).unwrap(),
+            first_executions,
+            "immediate immutable handoff must not execute the quoter again"
+        );
         let successor = with_test_compiler_owner(source.prepare_source_toolset(
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             snapshot(crate::SourceEntryStorage::FreshCompilation {
@@ -15525,6 +15692,33 @@ pub(crate) mod request_tests {
             std::fs::read_to_string(input.with_extension("executions")).unwrap(),
             completed_executions,
             "executing the successor native body must not replay its quotation"
+        );
+        let reselected = with_test_compiler_owner(
+            source
+                .clone()
+                .with_prepared_toolset(Some(fresh.clone()))
+                .prepare_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    snapshot(crate::SourceEntryStorage::CompletedOriginal {
+                        directory: storage.path().to_owned(),
+                        selections: [successor
+                            .completed_entry_selection()
+                            .map(|(recipe, original)| (recipe.to_owned(), original))
+                            .unwrap()]
+                        .into_iter()
+                        .collect(),
+                    }),
+                    &[],
+                    &[],
+                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reselected.selection(), successor.selection());
+        assert!(
+            !Arc::ptr_eq(&fresh.prepared, &reselected.prepared),
+            "same recipe cannot substitute a different selected quotation original"
         );
         // Reacquire readiness and native images independently of the old ready
         // cache. Selection is the completed artifact, not a fresh TH request.

@@ -13,12 +13,80 @@ use tracing::{instrument::WithSubscriber, Instrument};
 
 use super::ResolvedSpec;
 
+/// The two shipped policies share the generated standard actor row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinToolsetPolicy {
+    Workbench,
+    AsyncWorkbench,
+}
+
+impl BuiltinToolsetPolicy {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Workbench => "workbench",
+            Self::AsyncWorkbench => "async_workbench",
+        }
+    }
+
+    pub(crate) fn source_name(self) -> &'static str {
+        match self {
+            Self::Workbench => "TidepoolPreparedWorkbench.hs",
+            Self::AsyncWorkbench => "TidepoolPreparedAsyncWorkbench.hs",
+        }
+    }
+}
+
+/// Selection observations do not issue native custody. The existing production
+/// entry loader authenticates the complete original before readiness is issued.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuiltinDeploymentProgram {
+    pub policy: BuiltinToolsetPolicy,
+    pub manifest_blake3: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolsetProgramSelection {
+    BuiltinDeploymentProgram {
+        program: BuiltinDeploymentProgram,
+    },
+    WorkspaceOriginal {
+        recipe: String,
+        original: uuid::Uuid,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolsetProgramRecipe {
+    BuiltinDeploymentProgram(BuiltinDeploymentProgram),
+    WorkspaceOriginal(String),
+}
+
+impl ToolsetProgramSelection {
+    #[must_use]
+    pub fn recipe(&self) -> ToolsetProgramRecipe {
+        match self {
+            Self::BuiltinDeploymentProgram { program } => {
+                ToolsetProgramRecipe::BuiltinDeploymentProgram(program.clone())
+            }
+            Self::WorkspaceOriginal { recipe, .. } => {
+                ToolsetProgramRecipe::WorkspaceOriginal(recipe.clone())
+            }
+        }
+    }
+}
+
 /// The acquisition that issued immutable installer readiness. Ready-cache
 /// hits and joined waiters retain this original provenance.
 /// Reconstructing this observation grants no source or compiler authority.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolsetAcquisition {
+    BuiltinDeploymentProgram {
+        program: BuiltinDeploymentProgram,
+    },
     DeploymentOriginal {
         recipe: String,
         original: uuid::Uuid,
@@ -37,16 +105,6 @@ pub enum ToolsetAcquisition {
 }
 
 impl ToolsetAcquisition {
-    #[must_use]
-    pub fn recipe(&self) -> &str {
-        match self {
-            Self::DeploymentOriginal { recipe, .. }
-            | Self::FreshRunOriginal { recipe, .. }
-            | Self::ExistingRunOriginal { recipe, .. }
-            | Self::UnretainedCompilation { recipe } => recipe,
-        }
-    }
-
     /// Selection metadata is derived from the issuing acquisition, never an
     /// independent claim that compilation reused a deployment.
     #[must_use]
@@ -55,17 +113,35 @@ impl ToolsetAcquisition {
             Self::DeploymentOriginal { recipe, original }
             | Self::FreshRunOriginal { recipe, original }
             | Self::ExistingRunOriginal { recipe, original } => Some((recipe, *original)),
-            Self::UnretainedCompilation { .. } => None,
+            Self::BuiltinDeploymentProgram { .. } | Self::UnretainedCompilation { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn selection(&self) -> Option<ToolsetProgramSelection> {
+        match self {
+            Self::BuiltinDeploymentProgram { program } => {
+                Some(ToolsetProgramSelection::BuiltinDeploymentProgram {
+                    program: program.clone(),
+                })
+            }
+            _ => self.completed_entry_selection().map(|(recipe, original)| {
+                ToolsetProgramSelection::WorkspaceOriginal {
+                    recipe: recipe.to_owned(),
+                    original,
+                }
+            }),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub(crate) struct InstallerRecipe {
-    /// In-memory coalescing retains the exact issuer and source selection.
-    /// Durable addresses are independent of a fresh run's issuer identity.
+    pub(crate) builtin: Option<BuiltinDeploymentProgram>,
+    /// Workspace programs retain their exact issuer for in-memory coalescing.
+    /// Build-owned programs have no workspace source authority.
     #[serde(skip)]
-    pub(crate) source_authority: [u8; 32],
+    pub(crate) source_authority: Option<[u8; 32]>,
     pub(crate) source_revision: String,
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) preamble: String,
@@ -81,7 +157,7 @@ pub(crate) struct PreparedToolset {
     pub(crate) source_revision: String,
     pub(crate) acquisition: ToolsetAcquisition,
     /// Retains the published source owner for the complete installer lifetime.
-    _source: crate::CheckpointSourceLayer,
+    _source: Option<crate::CheckpointSourceLayer>,
     /// Nominal owners include producer and original canonical interface identity.
     _nominal_artifacts: Vec<tidepool_toolchain::artifact_inventory::ArtifactDescriptor>,
 }
@@ -366,7 +442,8 @@ pub(crate) mod tests {
 
     fn recipe(entry: &str) -> InstallerRecipe {
         InstallerRecipe {
-            source_authority: [0; 32],
+            builtin: None,
+            source_authority: Some([0; 32]),
             source_revision: "frozen source".into(),
             roots: Vec::new(),
             preamble: String::new(),
@@ -951,6 +1028,23 @@ fn compile_installer(
     registry: Arc<ImageRegistry>,
     acquisition: OriginalAcquisition,
 ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
+    if let Some(program) = &recipe.builtin {
+        let compiled = load_builtin_installer(program)?;
+        let nominal_artifacts = nominal_artifacts(&compiled, &recipe.effects)?;
+        let entry = PreparedSourceEntry::prepare(Arc::new(compiled), registry)
+            .map_err(|error| PreparationFailure::Native(error.to_string()))?;
+        return Ok(Arc::new(PreparedToolset {
+            entry,
+            entry_name: recipe.entry,
+            resolved,
+            source_revision: recipe.source_revision,
+            acquisition: ToolsetAcquisition::BuiltinDeploymentProgram {
+                program: program.clone(),
+            },
+            _source: None,
+            _nominal_artifacts: nominal_artifacts,
+        }));
+    }
     let installation = super::installation_expression(&recipe.entry, &recipe.effects);
     let dispatcher_effects = installation.dispatcher_effect_row();
     let templates =
@@ -988,7 +1082,7 @@ fn compile_installer(
         resolved,
         source_revision: recipe.source_revision,
         acquisition,
-        _source: source,
+        _source: Some(source),
         _nominal_artifacts: nominal_artifacts,
     }))
 }
@@ -1008,6 +1102,9 @@ fn selected_original_present(
     recipe: &InstallerRecipe,
     source: &crate::CheckpointSourceLayer,
 ) -> Result<bool, PreparationFailure> {
+    if recipe.builtin.is_some() {
+        return Ok(true);
+    }
     match source.prepared_entries() {
         Some(crate::SourceEntryStorage::CompletedOriginal { .. }) => Ok(true),
         Some(crate::SourceEntryStorage::FreshCompilation {
@@ -1021,6 +1118,69 @@ fn selected_original_present(
         ),
         None => Ok(false),
     }
+}
+
+pub(crate) fn builtin_program(
+    policy: BuiltinToolsetPolicy,
+) -> Result<Option<BuiltinDeploymentProgram>, PreparationFailure> {
+    let Some(root) = std::env::var_os("TIDEPOOL_PREPARED_BUILTIN_ENTRIES") else {
+        return Ok(None);
+    };
+    let manifest = PathBuf::from(root).join(policy.name()).join("entry.json");
+    let manifest_blake3 = blake3::hash(
+        &std::fs::read(&manifest).map_err(|error| PreparationFailure::Source(error.to_string()))?,
+    )
+    .to_hex()
+    .to_string();
+    Ok(Some(BuiltinDeploymentProgram {
+        policy,
+        manifest_blake3,
+    }))
+}
+
+fn load_builtin_installer(
+    program: &BuiltinDeploymentProgram,
+) -> Result<CompiledTurn, PreparationFailure> {
+    use tidepool_toolchain::toolchain::CompilerDeploymentConfiguration;
+    let root = std::env::var_os("TIDEPOOL_PREPARED_BUILTIN_ENTRIES").ok_or_else(|| {
+        PreparationFailure::Source("selected built-in deployment is unavailable".into())
+    })?;
+    let directory = PathBuf::from(root).join(program.policy.name());
+    let current = builtin_program(program.policy)?.ok_or_else(|| {
+        PreparationFailure::Source("selected built-in deployment is unavailable".into())
+    })?;
+    if &current != program {
+        return Err(PreparationFailure::Source(
+            "selected built-in entry changed before acquisition".into(),
+        ));
+    }
+    let CompilerDeploymentConfiguration::Configured(authority) =
+        CompilerDeploymentConfiguration::from_env()
+            .map_err(|error| PreparationFailure::Source(error.to_string()))?
+    else {
+        return Err(PreparationFailure::Source(
+            "built-in installer requires configured deployment authority".into(),
+        ));
+    };
+    let sources = tidepool_toolchain::toolchain::configured_module_source_selection()
+        .map_err(|error| PreparationFailure::Source(error.to_string()))?
+        .ok_or_else(|| {
+            PreparationFailure::Source("built-in installer requires retained native sources".into())
+        })?;
+    let loaded =
+        tidepool_toolchain::artifacts::load_production_entry(&directory, &authority, &sources)
+            .map_err(preparation_auth_failure)?;
+    if loaded.source()
+        != sources
+            .snapshot_root
+            .join(program.policy.source_name())
+            .to_string_lossy()
+    {
+        return Err(PreparationFailure::Source(
+            "built-in installer differs from its declared named source".into(),
+        ));
+    }
+    CompiledTurn::from_production_entry(&loaded).map_err(preparation_auth_failure)
 }
 
 fn entry_path_present(path: &std::path::Path) -> Result<bool, PreparationFailure> {
@@ -1214,27 +1374,39 @@ fn retained_installer(
             "source owner snapshot changed before installer acquisition".into(),
         ));
     }
-    if !completed && matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
-        prepare_frozen_production_entry(&sources, &original, &output).map_err(|error| {
-            PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error))
-        })?;
-    }
-    let CompilerDeploymentConfiguration::Configured(authority) =
-        CompilerDeploymentConfiguration::from_env().map_err(|error| source_error(&error))?
-    else {
-        return Err(PreparationFailure::Source(
-            "completed installer requires configured compiler deployment".into(),
-        ));
+    let fresh =
+        if !completed && matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
+            Some(
+                prepare_frozen_production_entry(&sources, &original, &output).map_err(|error| {
+                    PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error))
+                })?,
+            )
+        } else {
+            None
+        };
+    let loaded = match fresh {
+        Some(loaded) => loaded,
+        None => {
+            let CompilerDeploymentConfiguration::Configured(authority) =
+                CompilerDeploymentConfiguration::from_env()
+                    .map_err(|error| source_error(&error))?
+            else {
+                return Err(PreparationFailure::Source(
+                    "completed installer requires configured compiler deployment".into(),
+                ));
+            };
+            let loaded = load_selected_production_entry(
+                &output,
+                &authority,
+                &ProductionEntrySources::FrozenWorkspace(sources),
+            )
+            .map_err(preparation_auth_failure)?;
+            // Confirm a previous rename that may have preceded failed parent fsync.
+            tidepool_atomic_write::sync_parent_directory(&output)
+                .map_err(|error| source_error(&error))?;
+            loaded
+        }
     };
-    let loaded = load_selected_production_entry(
-        &output,
-        &authority,
-        &ProductionEntrySources::FrozenWorkspace(sources),
-    )
-    .map_err(preparation_auth_failure)?;
-    // A previous rename may have succeeded before parent fsync failed. This
-    // confirms publication of that exact validated original without source.
-    tidepool_atomic_write::sync_parent_directory(&output).map_err(|error| source_error(&error))?;
     let compiled =
         CompiledTurn::from_production_entry(&loaded).map_err(|error| source_error(&error))?;
     let acquisition = match storage {

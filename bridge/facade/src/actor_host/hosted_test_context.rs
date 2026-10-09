@@ -1425,6 +1425,14 @@ mod tests {
         let second_inputs = retried
             .select_for_run(repository.path(), second.path())
             .unwrap();
+        assert!(
+            first_inputs.prepared_toolset.is_some(),
+            "immediate selection carries immutable readiness"
+        );
+        assert!(
+            second_inputs.prepared_toolset.is_none(),
+            "durable reopening authenticates the original independently"
+        );
         assert_eq!(first_inputs.identity(), second_inputs.identity());
         assert_eq!(
             first_inputs.completed_entry_selections().unwrap(),

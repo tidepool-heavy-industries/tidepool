@@ -230,6 +230,132 @@ impl Drop for Progress {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires matched prepared bundle and owned resident compiler"]
+async fn production_builtin_toolset_immediate_and_durable_launches_are_fresh() {
+    use crate::exomonad::workspace::{prepare_workspace, FrozenWorkspace};
+    use harness::model::AgentPath;
+    use std::os::unix::fs::PermissionsExt;
+    struct WritableOnDrop(PathBuf);
+    impl Drop for WritableOnDrop {
+        fn drop(&mut self) {
+            fn restore(path: &Path) {
+                let Ok(metadata) = std::fs::symlink_metadata(path) else {
+                    return;
+                };
+                if metadata.file_type().is_symlink() {
+                    return;
+                }
+                let mut permissions = metadata.permissions();
+                permissions
+                    .set_mode(permissions.mode() | if metadata.is_dir() { 0o700 } else { 0o600 });
+                let _ = std::fs::set_permissions(path, permissions);
+                if metadata.is_dir() {
+                    if let Ok(entries) = std::fs::read_dir(path) {
+                        for entry in entries.flatten() {
+                            restore(&entry.path());
+                        }
+                    }
+                }
+            }
+            restore(&self.0);
+        }
+    }
+    assert!(std::env::var_os("TIDEPOOL_PREPARED_ROOT_ENTRY").is_some());
+    assert!(std::env::var_os("TIDEPOOL_PREPARED_BUILTIN_ENTRIES").is_some());
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+    crate::exomonad::write_fixture_project_config(
+        &repository.path().join(".exomonad"),
+        "test-model",
+        |project| {
+            project.launch.embedded = Some(settings.clone());
+        },
+    );
+    commit_workspace(repository.path());
+    let directory = Arc::new(
+        tidepool_atomic_write::DirectoryAnchor::open_existing(files.path())
+            .unwrap()
+            .child("prepared-defaults")
+            .unwrap(),
+    );
+    let _release = WritableOnDrop(directory.path().to_owned());
+    let observations = SetupTrace::new(files.path().join("unused-quotation-counter"));
+    tracing_subscriber::registry().with(observations.clone())
+        .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,tidepool::actor_host::startup=info"))
+        .try_init().expect("isolated cohort owns its observer");
+    let prepared = prepare_workspace(repository.path(), Arc::clone(&directory))
+        .await
+        .unwrap();
+    assert!(
+        observations.observations.lock().requests.is_empty(),
+        "packaged default preparation submits no compiler request"
+    );
+    let mut actors = HashSet::new();
+    for immediate in [true, false] {
+        let (provider, mut requests) = hosted_script_provider();
+        let before_start = observations.observations.lock().requests.len();
+        let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+            config.workspace = repository.path().to_owned();
+            let inputs = if immediate {
+                prepared
+                    .select_for_run(repository.path(), config.run_directory.path())
+                    .unwrap()
+            } else {
+                FrozenWorkspace::select_prepared(
+                    repository.path(),
+                    config.run_directory.path(),
+                    Some(directory.path()),
+                )
+                .unwrap()
+            };
+            assert_eq!(inputs.prepared_toolset.is_some(), immediate);
+            config.haskell_root = inputs.runtime_actors();
+            config.workspace_inputs = Some(inputs);
+        })
+        .await
+        .unwrap();
+        assert!(
+            actors.insert(host.context.actor.identity()),
+            "each host creates a fresh actor identity"
+        );
+        assert_eq!(
+            observations.observations.lock().requests.len(),
+            before_start,
+            "both immediate and durable startup use packaged code"
+        );
+        host.run_scenario(|host| Box::pin(async move {
+            let frozen = host.context.config.workspace_inputs.as_ref().unwrap();
+            assert!(frozen.completed_entry_selections().unwrap().is_empty(), "built-ins carry no workspace-original UUID");
+            let installation = host.context.observer.installation(host.context.actor.identity()).await;
+            assert_eq!(installation.acquisition.as_ref().and_then(exomonad_actor::ToolsetAcquisition::selection),
+                Some(frozen.prepared_toolset_coverage().unwrap()[0].program.clone()));
+            assert!(matches!(installation.acquisition,
+                Some(exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. })));
+            super::scripted_recursive_acceptance::admit_http_input(host).await;
+            let root = AgentPath("/root".into());
+            let mut pending = VecDeque::new();
+            if !immediate {
+                next_hosted_script_round(&mut requests, &mut pending, &root).await
+                    .call("fresh-state-control", "display onlyFirstHost");
+                let refused = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+                refused.assert_failure("fresh-state-control", "not in scope");
+                refused.call("first-notebook", "freshValue <- pure (41 :: Int)\ndisplay freshValue");
+            } else {
+                next_hosted_script_round(&mut requests, &mut pending, &root).await
+                    .call("first-notebook", "onlyFirstHost <- pure (41 :: Int)\nfreshValue <- pure (41 :: Int)\ndisplay freshValue");
+            }
+            let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            first.assert_value("first-notebook", "41");
+            first.call("warm-notebook", "display freshValue");
+            let warm = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            warm.assert_value("warm-notebook", "41");
+            warm.finish();
+        })).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires exclusive matched compiler daemon and prepared root entry"]
 async fn production_prepared_toolset_one_child_executes_original_native_probe() {
     prepared_children_execute_original_native_probe(1).await;
@@ -342,12 +468,13 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         let root_installation = host.context.observer.installation(host.context.actor.identity()).await;
         let root_acquisition = root_installation.acquisition.as_ref()
             .expect("the source-prepared root retains its actual acquisition");
-        let exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original } = root_acquisition else {
-            panic!("the prepared root must load its deployment original: {root_acquisition:?}");
+        let exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal { recipe, original } =
+            root_acquisition.selection().expect("prepared program selection") else {
+            panic!("the authored quoted spec must use its workspace original");
         };
-        assert_eq!(completed_entries.get(recipe), Some(original),
+        assert_eq!(completed_entries.get(&recipe), Some(&original),
             "the installed root original belongs to the completed inventory");
-        assert_eq!((recipe, original), (&root_coverage.recipe, &root_coverage.original));
+        assert_eq!(root_acquisition.selection(), Some(root_coverage.program.clone()));
         progress.root_deployment_original_verified = true;
         let prepared_executions = std::fs::read_to_string(input.with_extension("executions")).unwrap();
         assert!(!prepared_executions.is_empty(), "the original producer executed the real quoter");

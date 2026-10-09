@@ -90,9 +90,9 @@ mod prepared_display_tests;
 #[cfg(test)]
 mod prepared_runtime_acceptance;
 #[cfg(test)]
-mod scripted_three_actor_performance;
-#[cfg(test)]
 mod scripted_recursive_acceptance;
+#[cfg(test)]
+mod scripted_three_actor_performance;
 pub(crate) use overlay_resource::valid_artifact_path;
 
 mod workspace;
@@ -3241,7 +3241,10 @@ fn compile_driver(
         }
     };
     let compiled = Arc::new(compiled);
-    let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+    let registry = inputs
+        .and_then(|inputs| inputs.prepared_toolset.as_ref())
+        .map(exomonad_actor::PreparedSourceToolset::image_registry)
+        .unwrap_or_else(|| Arc::new(tidepool_runtime::session::ImageRegistry::new()));
     let prepared = Arc::new(tidepool_runtime::session::PreparedSourceEntry::prepare(
         Arc::clone(&compiled),
         registry,
@@ -3491,6 +3494,12 @@ fn host_workbench_source(
     // defines. The same answer tells the agent so in its instructions.
     let jev = config.jev_surface() == prompt_catalog::JevSurface::Installed;
     let mut workbench = ActorWorkbenchSource::new(preamble, include)
+        .with_prepared_toolset(
+            config
+                .workspace_inputs
+                .as_ref()
+                .and_then(|inputs| inputs.prepared_toolset.clone()),
+        )
         .with_toolset_support_roots(toolset_support)
         .with_installed_effect_support(host_context_support())
         .with_imports(WORKBENCH_SURFACE_MODULE)
@@ -3541,7 +3550,13 @@ pub(crate) async fn prepare_workspace_toolsets(
     directory: &tidepool_atomic_write::DirectoryAnchor,
     inputs: crate::exomonad::workspace::FrozenWorkspace,
     source: Arc<crate::exomonad::source::ExomonadSourceReload>,
-) -> Result<Vec<crate::exomonad::workspace::PreparedToolsetCoverage>, Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        Vec<crate::exomonad::workspace::PreparedToolsetCoverage>,
+        exomonad_actor::PreparedSourceToolset,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let authored = inputs.config()?;
     let requested_effects = exomonad_actor::ActorCapabilities::default()
         .effect_keys()
@@ -3647,30 +3662,26 @@ pub(crate) async fn prepare_workspace_toolsets(
     let mut compiler_owner = exomonad_actor::CompilerPreparationOwner::new();
     let outcome = compiler_owner
         .scope(async {
-            let mut selected = Vec::new();
-            {
-                let ready = workbench
-                    .prepare_source_toolset(
-                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                        frozen.clone(),
-                        &requested_effects,
-                        &supported,
-                        Arc::clone(&registry),
-                    )
-                    .await?;
-                let (recipe, original) = ready.completed_entry_selection().ok_or_else(|| {
-                    exomonad_actor::ResidentActorWorkbenchError::ActorProtocol(
-                        "source preparation produced no retained original selection".into(),
-                    )
-                })?;
-                selected.push(crate::exomonad::workspace::PreparedToolsetCoverage {
-                    requested_effects,
-                    effective_effects: ready.effects().to_vec(),
-                    recipe: recipe.to_owned(),
-                    original,
-                });
-            }
-            Ok::<_, exomonad_actor::ResidentActorWorkbenchError>(selected)
+            let ready = workbench
+                .prepare_source_toolset(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    frozen.clone(),
+                    &requested_effects,
+                    &supported,
+                    Arc::clone(&registry),
+                )
+                .await?;
+            let program = ready.selection().ok_or_else(|| {
+                exomonad_actor::ResidentActorWorkbenchError::ActorProtocol(
+                    "source preparation produced no retained original selection".into(),
+                )
+            })?;
+            let selected = vec![crate::exomonad::workspace::PreparedToolsetCoverage {
+                requested_effects,
+                effective_effects: ready.effects().to_vec(),
+                program,
+            }];
+            Ok::<_, exomonad_actor::ResidentActorWorkbenchError>((selected, ready))
         })
         .await;
     if !outcome.cleanup.observation().is_confirmed() {
@@ -3684,7 +3695,10 @@ pub(crate) async fn prepare_workspace_toolsets(
 
 struct SourcePreparationCleanupUnconfirmed {
     action: Result<
-        Vec<crate::exomonad::workspace::PreparedToolsetCoverage>,
+        (
+            Vec<crate::exomonad::workspace::PreparedToolsetCoverage>,
+            exomonad_actor::PreparedSourceToolset,
+        ),
         exomonad_actor::ResidentActorWorkbenchError,
     >,
     cleanup: exomonad_actor::CompilerPreparationCleanup,

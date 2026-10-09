@@ -255,6 +255,7 @@ async fn production_harness_three_actor_capture_phases() {
     let deployment: BTreeMap<_, _> = [
         "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT",
         "TIDEPOOL_PREPARED_ROOT_ENTRY",
+        "TIDEPOOL_PREPARED_BUILTIN_ENTRIES",
         "TIDEPOOL_COMPILER_DEPLOYMENT",
         "TIDEPOOL_COMPILER_MODULES",
         "TIDEPOOL_EXTRACT_WORKER",
@@ -305,16 +306,11 @@ async fn production_harness_three_actor_capture_phases() {
         let root = host.context.actor.identity();
         let root_name = root.to_string();
         let frozen = host.context.config.workspace_inputs.as_ref().unwrap();
-        let completed_entries = frozen.completed_entry_selections().unwrap();
-        assert!(!completed_entries.is_empty());
         let coverage = frozen.prepared_toolset_coverage().unwrap();
         assert_eq!(coverage.len(), 1, "one prepared root toolset");
         let installation = host.context.observer.installation(root).await;
-        let Some(exomonad_actor::ToolsetAcquisition::DeploymentOriginal { recipe, original }) = installation.acquisition.as_ref() else {
-            panic!("root uses its completed deployment original");
-        };
-        assert_eq!((recipe, original), (&coverage[0].recipe, &coverage[0].original));
-        assert_eq!(completed_entries.get(recipe), Some(original));
+        assert_eq!(installation.acquisition.as_ref().and_then(exomonad_actor::ToolsetAcquisition::selection),
+            Some(coverage[0].program.clone()), "root installs its exact prepared program");
         admit_http_input(host).await;
         let mut pending = VecDeque::new();
         let mut round = next_root(host, &mut requests, &mut pending).await;
