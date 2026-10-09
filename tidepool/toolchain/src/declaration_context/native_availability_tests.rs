@@ -782,7 +782,7 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
 }
 
 // The existing native-origin fixture supplies genuine certificates for narrowed
-// selections and an old dependency island beside a newer same-module issuer.
+// selections and the authenticated G2-to-G1 native dependency.
 pub(crate) fn assert_selected_authored_private_inputs(
     certificate: &Arc<CertifiedAuthoredDeclaration>,
     dependent: &CertifiedAuthoredDeclaration,
