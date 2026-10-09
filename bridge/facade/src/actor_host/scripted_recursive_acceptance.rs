@@ -261,7 +261,12 @@ async fn yield_pending(
     operation: &OperationId,
 ) {
     let request = issuing_request(host, &round);
-    round.function(call, "yield", json!({}));
+    let yield_operation = OperationId {
+        origin: round.origin(),
+        request: request.clone(),
+        call: CallId(call.into()),
+    };
+    round.function(call, "yield", json!({"until": null}));
     host.context
         .while_root_live(
             "recursive Engine yield is persisted",
@@ -271,6 +276,14 @@ async fn yield_pending(
                 loop {
                     poll.tick().await;
                     pending_claim(host, operation);
+                    let claims = host.runtime.store().claims(&yield_operation.call).unwrap();
+                    if !claims
+                        .iter()
+                        .any(|claim| claim.operation == yield_operation && claim.request == request)
+                    {
+                        continue;
+                    }
+                    pending_claim(host, &yield_operation);
                     if host
                         .runtime
                         .store()
@@ -294,12 +307,6 @@ async fn yield_pending(
         .await
         .unwrap_or_else(|error| panic!("{error}"))
         .expect("yield is recorded before a scripted descendant response is released");
-    assert!(host
-        .runtime
-        .store()
-        .claims(&CallId(call.into()))
-        .unwrap()
-        .is_empty());
 }
 
 fn issuing_request(host: &HostedTestRuntime, round: &HostedScriptRound) -> RequestId {
@@ -497,6 +504,10 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             grandchild.finish();
 
             let mut child = next(host, &mut requests, &mut pending, &child_path).await;
+            assert_eq!(
+                child.settled_output("recursive-child-yield"),
+                json!({"reason": "tool_result", "ready_results": [&child_operation]})
+            );
             child.assert_value(CHILD_CALL, "True");
             pending_claim(host, &root_operation);
             child.call("recursive-child-reply", CHILD_REPLY);
@@ -510,6 +521,10 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             child.finish();
 
             root = next(host, &mut requests, &mut pending, &root_path).await;
+            assert_eq!(
+                root.settled_output("recursive-root-yield"),
+                json!({"reason": "tool_result", "ready_results": [&root_operation]})
+            );
             root.assert_value(ROOT_CALL, "True");
             assert_eq!(root.request.model, "gpt-6.1-sol");
             root.call("recursive-cleanup", CLEANUP);
