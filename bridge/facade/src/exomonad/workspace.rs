@@ -1672,7 +1672,9 @@ mod tests {
         frozen.validate_toolset_coverage(&alternate).unwrap();
         assert_eq!(
             coverage_entries(&alternate).unwrap(),
-            [(recipe, alternate[0].original)].into_iter().collect::<BTreeMap<_, _>>()
+            [(recipe, alternate[0].original)]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>()
         );
         assert_eq!(serde_json::to_vec(&coverage).unwrap(), admitted);
     }
