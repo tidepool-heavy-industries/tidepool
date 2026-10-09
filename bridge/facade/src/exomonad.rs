@@ -3961,32 +3961,42 @@ mod tests {
             log_path,
             &configured.compiler,
         );
-        assert!(configured_launch
-            .args
-            .windows(2)
-            .any(|pair| pair == ["--workers", "2"]));
-        assert!(configured_launch
-            .args
-            .windows(2)
-            .any(|pair| pair == ["--rss-ceiling-mb", "10240"]));
-        assert!(configured_launch
-            .args
-            .windows(2)
-            .any(|pair| pair == ["--foreground-jobs", "8"]));
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--workers", "2"])
+        );
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--rss-ceiling-mb", "10240"])
+        );
+        assert!(
+            configured_launch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--foreground-jobs", "8"])
+        );
         for setting in [
             "workers = 0",
             "rss_ceiling_mb = 0",
             "foreground_jobs = 0",
             "unknown = 2",
         ] {
-            assert!(toml::from_str::<ExomonadConfig>(&format!(
-                "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
-            ))
-            .is_err());
+            assert!(
+                toml::from_str::<ExomonadConfig>(&format!(
+                    "[defaults]\nmodel = \"test\"\n[compiler]\n{setting}\n"
+                ))
+                .is_err()
+            );
         }
-        assert!(!launch
-            .environment
-            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
+        assert!(
+            !launch
+                .environment
+                .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+        );
         assert_eq!(
             host_environment(socket)
                 .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)

@@ -1372,7 +1372,10 @@ mod tests {
 
     #[test]
     fn persistent_daemon_command_forwards_only_an_explicit_foreground_job_limit() {
-        for (jobs, expected) in [(None, None), (std::num::NonZeroUsize::new(8), Some(8))] {
+        for (jobs, expected, expected_width) in [
+            (None, None, 2),
+            (std::num::NonZeroUsize::new(8), Some(8), 8),
+        ] {
             let arguments = crate::persistent_daemon_arguments(
                 Path::new("/tmp/owned.sock"),
                 Path::new("/tmp/compiler.jsonl"),
@@ -1387,7 +1390,7 @@ mod tests {
                 configuration
                     .foreground_jobs
                     .unwrap_or(daemon::DEFAULT_FOREGROUND_JOBS),
-                expected.unwrap_or(daemon::DEFAULT_FOREGROUND_JOBS)
+                expected_width
             );
             assert_eq!(configuration.workers, Some(2));
             assert_eq!(configuration.rss_ceiling_mb, Some(10 * 1024));
