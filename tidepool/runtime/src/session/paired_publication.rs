@@ -1824,6 +1824,117 @@ mod tests {
         );
     }
 
+    #[test]
+    fn paired_rich_projection_reuses_exact_members_and_instance_graph() {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("declarations.json");
+        let mut lib = SessionLib::open(
+            SessionId(9835),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+        lib.attach_recovery_graph_v2(&path).unwrap();
+        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let owner = RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/rich-reuse").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .bind_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        let execution = session.begin_private_execution(public).unwrap();
+        let original = commit_certified_source(
+            &mut session,
+            execution.private_scope(),
+            include_str!("fixtures/paired-rich-base.hs"),
+        );
+        let projection = session.lib().log.projection_at(original).unwrap().clone();
+        let intent = session
+            .freeze_execution_intent(&execution, vec![], vec![])
+            .unwrap();
+        let base = session
+            .restage_declaration_publication(owner.clone(), intent.clone())
+            .unwrap();
+        let selection = base.selected_facts().unwrap();
+        let CertifiedDeclarationPublication::Accepted(oracle) =
+            base.certify_new_join(selection).unwrap()
+        else {
+            panic!("independent GHC join refused")
+        };
+        let publication = accepted(
+            session
+                .restage_declaration_publication(owner, intent.clone())
+                .unwrap(),
+        );
+        assert!(
+            matches!(&publication.receipt, PublicationEvidence::ReusedProjection { projection: selected, .. } if Arc::ptr_eq(selected, &projection))
+        );
+        assert_eq!(
+            canonical_exports(publication.receipt.exports()),
+            canonical_exports(oracle.receipt.exports())
+        );
+        assert_eq!(publication.receipt.instances(), oracle.receipt.instances());
+        assert_eq!(
+            publication.receipt.family_closure(),
+            oracle.receipt.family_closure()
+        );
+        assert_eq!(publication.receipt.instances().classes.len(), 1);
+        assert_eq!(publication.receipt.instances().families.len(), 1);
+        let record = publication
+            .receipt
+            .exports()
+            .iter()
+            .find(|export| export.head.occurrence == "PublicRecord")
+            .unwrap();
+        assert!(record
+            .children
+            .iter()
+            .any(|child| child.occurrence == "publicField"
+                && child.record_parent.as_deref() == Some("PublicRecord")));
+        let class = publication
+            .receipt
+            .exports()
+            .iter()
+            .find(|export| export.head.occurrence == "PublicClass")
+            .unwrap();
+        assert!(class
+            .children
+            .iter()
+            .any(|child| child.occurrence == "publicClass"));
+        assert!(class
+            .children
+            .iter()
+            .any(|child| child.occurrence == "PublicFamily"));
+        assert_eq!(
+            session
+                .publish_staged_public_manifest(
+                    publication.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        session.retire_scope(execution.private_scope());
+        assert_eq!(
+            session.lib().import_line_in(public).unwrap(),
+            format!("import {}", projection.module_name())
+        );
+        let graph = recovery::read_v2(&path, root.path())
+            .unwrap()
+            .unwrap()
+            .graph;
+        let summary = graph.node(intent.reserved_generation()).unwrap();
+        assert_eq!(summary.instances.classes.len(), 1);
+        assert_eq!(summary.instances.selected_family_axioms.len(), 1);
+        assert_eq!(summary.lexical_roots[0].module, projection.module_name());
+        assert_eq!(summary.parent, None);
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config { cases: 8, ..proptest::test_runner::Config::default() })]
         #[test]
