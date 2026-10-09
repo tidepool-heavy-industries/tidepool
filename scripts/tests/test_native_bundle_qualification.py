@@ -536,9 +536,10 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertFalse(any('ambient-endpoint' in value for value in delegated))
                 tests = root / 'evidence/tests'
                 tests.mkdir()
-                qualification.write_json(tests / 'case.json', {
-                    'test': qualification.PREPARED_CHILD_TESTS[0], 'passed': True,
-                    'execution': {'executed_test_count': 1, 'exit_code': 0}})
+                for index, test in enumerate(qualification.PREPARED_CHILD_TESTS):
+                    qualification.write_json(tests / f'case-{index}.json', {
+                        'test': test, 'passed': True,
+                        'execution': {'executed_test_count': 1, 'exit_code': 0}})
                 return subprocess.CompletedProcess(command, 0)
 
             with patch.object(qualification, 'verify', return_value=descriptor), \
@@ -552,7 +553,7 @@ class NativeQualificationTests(unittest.TestCase):
                     '--output', str(root / 'evidence'), '--delegated-service']), 0)
 
     def test_prepared_child_cohort_selects_frozen_native_case_and_refuses_incomplete_execution(self):
-        outcomes = [('complete', 1, True, 0), ('empty', 0, True, 1),
+        outcomes = [('complete', 1, True, 0), ('missing-default', 1, True, 1), ('empty', 0, True, 1),
                     ('unknown', None, True, 1), ('failed', 1, False, 1)]
         for label, count, passed, expected in outcomes:
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
@@ -570,9 +571,13 @@ class NativeQualificationTests(unittest.TestCase):
                 commands = []
                 def execute(command, **kwargs):
                     commands.append(command)
-                    qualification.write_json(output / 'tests/case.json', {
-                        'test': qualification.PREPARED_CHILD_TESTS[0], 'passed': passed,
-                        'execution': {'executed_test_count': count, 'exit_code': 0 if passed else 101}})
+                    selected = qualification.PREPARED_CHILD_TESTS
+                    if label == 'missing-default':
+                        selected = selected[:1]
+                    for index, test in enumerate(selected):
+                        qualification.write_json(output / f'tests/case-{index}.json', {
+                            'test': test, 'passed': passed,
+                            'execution': {'executed_test_count': count, 'exit_code': 0 if passed else 101}})
                     return subprocess.CompletedProcess(command, 0)
                 with patch.object(qualification, 'verify', return_value=descriptor), \
                      patch.object(qualification.subprocess, 'run', side_effect=execute):
@@ -581,11 +586,12 @@ class NativeQualificationTests(unittest.TestCase):
                 self.assertEqual(code, expected)
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(report['completed'], expected == 0)
-                self.assertEqual(report['expected_count'], 1)
+                self.assertEqual(report['expected_count'], len(qualification.PREPARED_CHILD_TESTS))
                 command = commands[0]
                 self.assertEqual(command[2], '/frozen/libtest')
                 self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
-                self.assertEqual(command[command.index('--expected-count') + 1], '1')
+                self.assertEqual(command[command.index('--expected-count') + 1],
+                                 str(len(qualification.PREPARED_CHILD_TESTS)))
                 self.assertEqual(command[command.index('--timeout') + 1], '1800')
                 self.assertIn('--ignored', command)
                 self.assertEqual([command[index + 1] for index, value in enumerate(command)

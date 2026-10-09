@@ -265,12 +265,15 @@ python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
 
-This cohort seals one exact ignored test and selects an isolated owned-resident
+This cohort seals two exact ignored tests and selects an isolated owned-resident
 compiler. It refuses a different compiler mode or parallel test execution. One
-executed passing test means that twenty sequentially admitted children completed
+case proves that twenty sequentially admitted children completed
 their actual native replies and the parent verified twenty typed answers; it is
-not a claim of twenty concurrent children. The scenario requires twenty unique
-actors and installation scopes. The root's typed `DeploymentOriginal` acquisition
+not a claim of twenty concurrent children. The other case prepares the shipped
+default workspace, resolves native lookup signatures, imports its actual
+`AgentSpec`, and verifies a captured-context child's reply from a retained parent
+binding. Both cases must execute and pass. The twenty-child scenario requires
+twenty unique actors and installation scopes. The root's typed `DeploymentOriginal` acquisition
 must match the frozen workspace's completed inventory. Children reuse one actual
 supplied spec, have explicit live installation origin without a source-prepared
 acquisition receipt, and return typed answers of 41 through its native probe.
