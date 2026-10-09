@@ -645,10 +645,10 @@ fn hex(digest: &[u8; 32]) -> String {
     })
 }
 
-const PACKAGE_IMPORTS_LIMIT: u64 = 4 * 1024 * 1024;
+pub(crate) const PACKAGE_IMPORTS_LIMIT: u64 = 4 * 1024 * 1024;
 const PACKAGE_IMPORT_ROOT_LIMIT: usize = 16_384;
-const PACKAGE_INTERFACE_LIMIT: u64 = 32 * 1024 * 1024;
-const CERTIFICATION_LIMIT: u64 = 32 * 1024 * 1024;
+pub(crate) const PACKAGE_INTERFACE_LIMIT: u64 = 32 * 1024 * 1024;
+pub(crate) const CERTIFICATION_LIMIT: u64 = 32 * 1024 * 1024;
 
 // Captures belong to one validation stage, never to a later filesystem check.
 // Limit retained bytes without rejecting an otherwise valid large closure:

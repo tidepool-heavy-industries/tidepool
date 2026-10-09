@@ -148,8 +148,13 @@ qualification's actual Nix registration, NAR and GC-root checks. Earlier catalog
 are rejected and must be regenerated through the matched producer.
 
 `configured_module_source_selection` shares catalog schema, compiler authority,
-source manifest and alias validation without hydrating native products. Candidate
-admission loads the full package and validates every proof and the complete cohort.
+source manifest and alias validation without hydrating native products. The
+configured package owner retains only its current exact catalog path and complete
+compiler authority selection. Initial loading validates every proof and the
+complete cohort; reuse reauthenticates catalog, native artifacts, canonical
+companions and source observations, sharing the admitted decoded products.
+Candidate acquisition still validates its current source/import witnesses and
+exact context. Read-only bundle permissions do not replace content checks.
 Actual Nix registration, NAR, retention and final bundle qualification remain the
 qualification owner’s independent checks.
 

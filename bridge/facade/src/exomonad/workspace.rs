@@ -335,7 +335,7 @@ impl FrozenWorkspace {
         }
         let deployment = tidepool_toolchain::toolchain::configured_module_package()?
             .as_ref()
-            .map(DeploymentSources::from_package);
+            .map(|package| DeploymentSources::from_package(package));
         Self::load_with_deployment(workspace, run_root, deployment)
     }
 
@@ -650,7 +650,7 @@ impl FrozenWorkspace {
         let selection = pointer.read_selection()?;
         let deployment = tidepool_toolchain::toolchain::configured_module_package()?
             .as_ref()
-            .map(DeploymentSources::from_package);
+            .map(|package| DeploymentSources::from_package(package));
         let frozen = Self::load_with_deployment_selection(
             workspace,
             &pointer.directory,

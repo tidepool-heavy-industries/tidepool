@@ -325,7 +325,66 @@ pub struct DeploymentModulePackage {
     artifact_root: PathBuf,
     catalog_identity: String,
     source_identity: String,
-    records: Vec<DecodedDeploymentRecord>,
+    records: Vec<Arc<DecodedDeploymentRecord>>,
+}
+
+/// One current configured selection; replacement never accumulates packages.
+/// Failed loads and freshness checks cannot publish a new owner.
+#[derive(Default)]
+pub(crate) struct ConfiguredModulePackageOwner {
+    current: Option<(
+        PathBuf,
+        CompilerDeploymentAuthority,
+        Arc<DeploymentModulePackage>,
+    )>,
+}
+
+impl ConfiguredModulePackageOwner {
+    pub(crate) const fn new() -> Self {
+        Self { current: None }
+    }
+    pub(crate) fn clear(&mut self) {
+        self.current = None;
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        path: &Path,
+        authority: &CompilerDeploymentAuthority,
+    ) -> Result<Arc<DeploymentModulePackage>, ModulePackageError> {
+        self.load_under(path, authority, RootPolicy::NixStore)
+    }
+
+    fn load_under(
+        &mut self,
+        path: &Path,
+        authority: &CompilerDeploymentAuthority,
+        policy: RootPolicy,
+    ) -> Result<Arc<DeploymentModulePackage>, ModulePackageError> {
+        let started = std::time::Instant::now();
+        if let Some((selected, configured, package)) = &self.current {
+            if selected == path && configured == authority {
+                let (files, bytes) = package.revalidate(path, policy)?;
+                tracing::info!(target: "tidepool_toolchain::module_candidates",
+                    phase = "configured_package", reused = true,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    hydrated_modules = 0, retained_modules = package.records.len(),
+                    reauthenticated_artifact_files = files, reauthenticated_artifact_bytes = bytes,
+                    revalidated_source_proofs = package.records.len(),
+                    revalidated_package_imports = package.records.len());
+                return Ok(Arc::clone(package));
+            }
+        }
+        let package = Arc::new(DeploymentModulePackage::load_under(
+            path, authority, policy,
+        )?);
+        tracing::info!(target: "tidepool_toolchain::module_candidates",
+            phase = "configured_package", reused = false,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            hydrated_modules = package.records.len(), retained_modules = package.records.len());
+        self.current = Some((path.to_owned(), authority.clone(), Arc::clone(&package)));
+        Ok(package)
+    }
 }
 
 /// The loader owns both the original bytes and their single decoded product.
@@ -334,7 +393,7 @@ pub struct DeploymentModulePackage {
 #[cfg_attr(test, derive(Clone))]
 pub(super) struct DecodedDeploymentRecord {
     record: Record,
-    product: tidepool_repr::execution_schema::RawModuleProduct,
+    product: Arc<tidepool_repr::execution_schema::RawModuleProduct>,
 }
 
 impl DecodedDeploymentRecord {
@@ -348,15 +407,18 @@ impl DecodedDeploymentRecord {
         )
         .map_err(|error| decode_error(error, "original module products"))?
         .ok_or(ModulePackageError::Format("original module owner"))?;
-        Ok(Self { record, product })
+        Ok(Self {
+            record,
+            product: Arc::new(product),
+        })
     }
 
     pub(super) fn record(&self) -> &Record {
         &self.record
     }
 
-    pub(super) fn into_parts(self) -> (Record, tidepool_repr::execution_schema::RawModuleProduct) {
-        (self.record, self.product)
+    pub(super) fn product(&self) -> &Arc<tidepool_repr::execution_schema::RawModuleProduct> {
+        &self.product
     }
 }
 
@@ -368,6 +430,118 @@ impl std::ops::Deref for DecodedDeploymentRecord {
 }
 
 impl DeploymentModulePackage {
+    /// Retained decoded objects do not make a mutable package path immutable.
+    /// Reauthenticate physical bytes before reusing semantic admission, including
+    /// canonical companions that are not listed as native module files.
+    fn revalidate(
+        &self,
+        path: &Path,
+        policy: RootPolicy,
+    ) -> Result<(u64, u64), ModulePackageError> {
+        let inventory = Arc::new(InventoryOperation::new(Default::default()));
+        if absolute(path).as_ref() != Some(&self.artifact_root.join("catalog.json"))
+            || absolute(&self.artifact_root).as_ref() != Some(&self.artifact_root)
+        {
+            return Err(ModulePackageError::RootMoved);
+        }
+        let catalog = read(path, inventory.limits().max_bytes, &inventory)?;
+        if sha(&catalog) != self.catalog_identity {
+            return Err(ModulePackageError::ArtifactChanged(path.to_owned()));
+        }
+        self.catalog.source_selection.validate_under(policy)?;
+        let mut files = 1;
+        let mut bytes = catalog.len() as u64;
+        for (reference, limit) in self
+            .catalog
+            .execution_graphs
+            .iter()
+            .map(|reference| (reference, crate::execution_source::GRAPH_BYTES_LIMIT))
+            .chain(self.catalog.modules.iter().flat_map(|module| {
+                [
+                    (&module.owner, RECORD_LIMIT),
+                    (&module.products, inventory.limits().max_module_bytes),
+                    (&module.interface, RECORD_LIMIT),
+                    (&module.packages, RECORD_LIMIT),
+                    (&module.evidence, RECORD_LIMIT),
+                    (&module.certification, RECORD_LIMIT),
+                ]
+            }))
+        {
+            let observed = self.read_ref(reference, limit, &inventory)?;
+            files += 1;
+            bytes += observed.len() as u64;
+        }
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+            Arc::clone(&inventory),
+        );
+        for module in &self.catalog.modules {
+            let reference = &module.module_interface;
+            let companions = [
+                (
+                    &reference.interface.interface_path,
+                    reference.interface.skinny_iface_sha256,
+                    None,
+                    crate::recovery_artifacts::PACKAGE_INTERFACE_LIMIT,
+                ),
+                (
+                    &reference.interface.package_imports_path,
+                    reference.interface.package_imports_sha256,
+                    None,
+                    crate::recovery_artifacts::PACKAGE_IMPORTS_LIMIT,
+                ),
+                (
+                    &reference.certificate_path,
+                    reference.certificate_sha256,
+                    None,
+                    crate::recovery_artifacts::CERTIFICATION_LIMIT,
+                ),
+            ];
+            for (relative, digest, length, limit) in
+                companions
+                    .into_iter()
+                    .chain(reference.core.iter().map(|core| {
+                        (
+                            &core.path,
+                            core.sha256,
+                            Some(core.bytes),
+                            crate::recovery_artifacts::PACKAGE_INTERFACE_LIMIT,
+                        )
+                    }))
+            {
+                let path = self.artifact_root.join(relative);
+                if absolute(&path).as_ref() != Some(&path) {
+                    return Err(ModulePackageError::RootMoved);
+                }
+                let observed = crate::recovery_artifacts::capture_module_payload(
+                    &self.artifact_root,
+                    relative,
+                    &digest,
+                    length,
+                    limit,
+                    &mut validation,
+                )
+                .map_err(canonical_error)?;
+                files += 1;
+                bytes += observed.len() as u64;
+            }
+        }
+        for record in &self.records {
+            if !record.evidence.valid(&record.target_source) {
+                return Err(ModulePackageError::OpenCohort);
+            }
+            crate::recovery_artifacts::validate_package_imports_with_validation(
+                &record.package_imports,
+                &record.unit,
+                &record.module,
+                &record.original_owner.skinny_iface_sha256,
+                &self.artifact_root,
+                &mut validation,
+            )
+            .map_err(canonical_error)?;
+        }
+        Ok((files, bytes))
+    }
+
     pub fn source_selection(&self) -> &NativeCatalogSourceSelection {
         &self.catalog.source_selection
     }
@@ -535,8 +709,8 @@ impl DeploymentModulePackage {
             .collect())
     }
 
-    pub(super) fn into_candidates(
-        self,
+    pub(super) fn candidates(
+        &self,
         producer: &[u8],
     ) -> Result<Vec<(CandidateRecord, super::CandidateOrigin)>, ModulePackageError> {
         if producer != self.catalog.producer_identity {
@@ -544,14 +718,14 @@ impl DeploymentModulePackage {
         }
         Ok(self
             .records
-            .into_iter()
-            .zip(self.catalog.modules)
+            .iter()
+            .zip(&self.catalog.modules)
             .map(|(record, files)| {
                 (
-                    CandidateRecord::Deployment(record),
+                    CandidateRecord::Deployment(Arc::clone(record)),
                     super::CandidateOrigin::Deployment {
-                        interface: self.artifact_root.join(files.interface.path),
-                        packages: self.artifact_root.join(files.packages.path),
+                        interface: self.artifact_root.join(&files.interface.path),
+                        packages: self.artifact_root.join(&files.packages.path),
                     },
                 )
             })
@@ -562,7 +736,7 @@ impl DeploymentModulePackage {
         &self,
         producer: &[u8],
         inventory: Arc<InventoryOperation>,
-    ) -> Result<Vec<DecodedDeploymentRecord>, ModulePackageError> {
+    ) -> Result<Vec<Arc<DecodedDeploymentRecord>>, ModulePackageError> {
         if producer != self.catalog.producer_identity {
             return Err(ModulePackageError::CompilerMismatch);
         }
@@ -787,16 +961,16 @@ impl DeploymentModulePackage {
                 &mut validation,
             )
             .map_err(canonical_error)?;
-            records.push(decoded);
+            records.push(Arc::new(decoded));
         }
         for record in &records {
             require_complete_cohort(
-                records.iter().map(DecodedDeploymentRecord::record),
+                records.iter().map(|record| record.record()),
                 &record.record().evidence,
             )?;
         }
         validate_closed(
-            records.iter().map(DecodedDeploymentRecord::record),
+            records.iter().map(|record| record.record()),
             &self.catalog.source_selection,
         )?;
         Ok(records)
@@ -1272,7 +1446,7 @@ mod tests {
             &[3; 32],
             &current,
             scratch.path(),
-            package.into_candidates(&[3; 32]).unwrap(),
+            package.candidates(&[3; 32]).unwrap(),
             None,
         )
         .unwrap();
@@ -1440,7 +1614,7 @@ mod tests {
             after[0].original_owner.owner()
         );
 
-        let candidates = relocated.into_candidates(&[3; 32]).unwrap();
+        let candidates = relocated.candidates(&[3; 32]).unwrap();
         let super::super::CandidateOrigin::Deployment {
             interface,
             packages,

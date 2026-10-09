@@ -264,8 +264,29 @@ fn group_inventory(group: &ProjectedGroup) -> Value {
 /// stays with the decoder; later certification borrows this immutable pairing.
 #[derive(Debug)]
 pub(crate) struct CandidateProduct {
-    bytes: Vec<u8>,
-    decoded: RawModuleProduct,
+    bytes: CandidateProductBytes,
+    decoded: Arc<RawModuleProduct>,
+}
+
+#[derive(Debug)]
+enum CandidateProductBytes {
+    Owned(Vec<u8>),
+    Deployment(Arc<deployment::DecodedDeploymentRecord>),
+}
+
+impl CandidateProductBytes {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Deployment(record) => &record.products,
+        }
+    }
+    fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Deployment(record) => record.products.clone(),
+        }
+    }
 }
 
 impl CandidateProduct {
@@ -297,15 +318,18 @@ impl CandidateProduct {
     pub(crate) fn decode(bytes: Vec<u8>) -> Option<Self> {
         let requirements = crate::prepared_artifact::production_requirements().ok()?;
         let decoded = Self::decode_product(&bytes, &requirements)?;
-        Some(Self { bytes, decoded })
+        Some(Self {
+            bytes: CandidateProductBytes::Owned(bytes),
+            decoded: Arc::new(decoded),
+        })
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<u8>, RawModuleProduct) {
-        (self.bytes, self.decoded)
+    pub(crate) fn into_parts(self) -> (Vec<u8>, Arc<RawModuleProduct>) {
+        (self.bytes.into_vec(), self.decoded)
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_slice()
     }
     pub(crate) fn decoded(&self) -> &RawModuleProduct {
         &self.decoded
@@ -466,12 +490,43 @@ struct Record {
 /// Ordinary durable records still decode at candidate acquisition.
 enum CandidateRecord {
     Encoded(Record),
-    Deployment(deployment::DecodedDeploymentRecord),
+    Deployment(Arc<deployment::DecodedDeploymentRecord>),
+}
+
+impl std::ops::Deref for CandidateRecord {
+    type Target = Record;
+    fn deref(&self) -> &Record {
+        self.record()
+    }
+}
+
+impl CandidateRecord {
+    fn product(&mut self, decoded: Arc<RawModuleProduct>) -> CandidateProduct {
+        let bytes = match self {
+            Self::Encoded(record) => {
+                CandidateProductBytes::Owned(std::mem::take(&mut record.data.products))
+            }
+            Self::Deployment(record) => CandidateProductBytes::Deployment(Arc::clone(record)),
+        };
+        CandidateProduct { bytes, decoded }
+    }
+    fn certification_bytes(&mut self) -> Vec<u8> {
+        match self {
+            Self::Encoded(record) => std::mem::take(&mut record.data.original_certification),
+            Self::Deployment(record) => record.original_certification.clone(),
+        }
+    }
+    fn package_bytes(&mut self) -> Vec<u8> {
+        match self {
+            Self::Encoded(record) => std::mem::take(&mut record.data.package_imports),
+            Self::Deployment(record) => record.package_imports.clone(),
+        }
+    }
 }
 
 enum CandidateProductInput {
     Encoded,
-    Decoded(RawModuleProduct),
+    Decoded(Arc<RawModuleProduct>),
 }
 
 impl From<Record> for CandidateRecord {
@@ -488,14 +543,14 @@ impl CandidateRecord {
         }
     }
 
-    fn into_parts(self) -> (Record, CandidateProductInput) {
-        match self {
-            Self::Encoded(record) => (record, CandidateProductInput::Encoded),
+    fn into_parts(self) -> (Self, CandidateProductInput) {
+        let product = match &self {
+            Self::Encoded(_) => CandidateProductInput::Encoded,
             Self::Deployment(record) => {
-                let (record, product) = record.into_parts();
-                (record, CandidateProductInput::Decoded(product))
+                CandidateProductInput::Decoded(Arc::clone(record.product()))
             }
-        }
+        };
+        (self, product)
     }
 }
 
@@ -516,23 +571,23 @@ impl std::ops::DerefMut for Record {
 /// Candidate selection has authenticated both canonical and native products.
 /// A selected record cannot lose its canonical interface after admission.
 struct ValidatedRecord {
-    data: RecordData,
-    evidence: shared_evidence::SharedEvidence,
+    record: CandidateRecord,
     canonical: crate::certified_products::CertifiedModuleInterface,
     execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
 }
 
 impl std::ops::Deref for ValidatedRecord {
-    type Target = RecordData;
+    type Target = Record;
     fn deref(&self) -> &Self::Target {
-        &self.data
+        &self.record
     }
 }
 
 impl ValidatedRecord {
     fn admit(
-        record: Record,
+        record: CandidateRecord,
         canonical: crate::certified_products::CertifiedModuleInterface,
+        execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
     ) -> Option<Self> {
         let unavailable = match record.module_interface.as_ref() {
             None => Some(CandidateInterfaceUnavailable::MissingCanonicalReference),
@@ -548,10 +603,9 @@ impl ValidatedRecord {
             return None;
         }
         Some(Self {
-            data: record.data,
-            evidence: record.evidence,
+            record,
             canonical,
-            execution_source: record.execution_source,
+            execution_source,
         })
     }
 }
@@ -1881,7 +1935,7 @@ fn select_configured_inner(
     let package = crate::toolchain::configured_module_package()?;
     let has_package = package.is_some();
     let mut records = match package {
-        Some(package) => package.into_candidates(endpoint_identity)?,
+        Some(package) => package.candidates(endpoint_identity)?,
         None => Vec::new(),
     };
     let deployed: std::collections::BTreeSet<_> = records
@@ -1940,7 +1994,8 @@ fn select_records_inner<R: Into<CandidateRecord>>(
     let mut graph_bytes = 0usize;
     let mut selection_omissions = CacheOfferDiagnostics::default();
     for (record, origin) in records {
-        let (mut record, product_input) = record.into().into_parts();
+        let (record, product_input) = record.into().into_parts();
+        let mut execution_source = record.execution_source.clone();
         if record.tag != "TPMCAN"
             || record.version != RECORD_VERSION
             || record.endpoint != endpoint_identity
@@ -2005,6 +2060,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                     &requirements,
                     &package_validation.inventory,
                 )
+                .map(|product| product.map(Arc::new))
             }
             CandidateProductInput::Decoded(product) => Ok(Some(product)),
         };
@@ -2108,7 +2164,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             continue;
         }
         if let Some(digest) = record.execution_source_sha256 {
-            let graph = if let Some(graph) = record.execution_source.take() {
+            let graph = if let Some(graph) = execution_source.take() {
                 graph
             } else if let Some(graph) = recovered_graphs.get(&digest) {
                 Arc::clone(graph)
@@ -2280,7 +2336,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                 continue;
             }
             recovered_graphs.insert(digest, Arc::clone(&graph));
-            record.execution_source = Some(graph);
+            execution_source = Some(graph);
         } else if record.execution_source.is_some() {
             if omit_or_refuse_candidate(
                 &origin,
@@ -2361,7 +2417,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             continue;
         }
         let owner_key = (record.unit.clone(), record.module.clone());
-        let Some(record) = ValidatedRecord::admit(record, canonical) else {
+        let Some(record) = ValidatedRecord::admit(record, canonical, execution_source) else {
             if omit_or_refuse_candidate(
                 &origin,
                 &mut selection_omissions,
@@ -2477,13 +2533,8 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                 crate::certified_products::certify_candidate_original_with_validation(
                     crate::certified_products::OriginalNativeCandidate {
                         owner: record.original_owner.owner(),
-                        product: CandidateProduct {
-                            bytes: std::mem::take(&mut record.data.products),
-                            decoded: product,
-                        },
-                        certification_bytes: std::mem::take(
-                            &mut record.data.original_certification,
-                        ),
+                        product: record.record.product(product),
+                        certification_bytes: record.record.certification_bytes(),
                         module_interface: record.canonical,
                         execution_source: record.execution_source,
                     },
@@ -2551,17 +2602,14 @@ fn select_records_inner<R: Into<CandidateRecord>>(
         let core_reference = canonical_reference.core.as_ref()?;
         let bundle = CandidateBundle {
             owner: owner.clone(),
-            product: CandidateProduct {
-                bytes: std::mem::take(&mut record.data.products),
-                decoded: product,
-            },
+            product: record.record.product(product),
             source: record.source.clone(),
             source_sha256: record.source_sha256.clone(),
             iface_path: iface_path.clone(),
             iface_sha256: sha(&record.interface),
             package_imports_path: package_imports_path.clone(),
             package_imports_sha256: sha(&record.package_imports),
-            package_imports_bytes: std::mem::take(&mut record.data.package_imports),
+            package_imports_bytes: record.record.package_bytes(),
             evidence: record.evidence.clone(),
             target_source: record.target_source.clone(),
             origin,
@@ -2872,7 +2920,7 @@ fn generation_dependent(product: &RawModuleProduct) -> bool {
 type ValidatedCandidate = (
     ValidatedRecord,
     CandidateOrigin,
-    RawModuleProduct,
+    Arc<RawModuleProduct>,
     crate::recovery_artifacts::ValidatedPackageImports,
 );
 
@@ -3778,7 +3826,12 @@ pub(crate) mod tests {
         let canonical = record.module_interface_proof.as_ref().unwrap().clone();
         let reference = record.module_interface.as_ref().unwrap();
         let core = reference.core.as_ref().unwrap();
-        assert!(ValidatedRecord::admit(record.clone(), canonical.clone()).is_some());
+        assert!(ValidatedRecord::admit(
+            CandidateRecord::Encoded(record.clone()),
+            canonical.clone(),
+            record.execution_source.clone()
+        )
+        .is_some());
         let absent = Record {
             data: RecordData {
                 module_interface: None,
@@ -3786,7 +3839,10 @@ pub(crate) mod tests {
             },
             ..record.clone()
         };
-        assert!(ValidatedRecord::admit(absent, canonical.clone()).is_none());
+        assert!(
+            ValidatedRecord::admit(CandidateRecord::Encoded(absent), canonical.clone(), None)
+                .is_none()
+        );
         let mismatches = [
             RecoveryModuleInterfaceRef {
                 interface: RecoveryJoinRef {
@@ -3854,10 +3910,20 @@ pub(crate) mod tests {
                 },
                 ..record.clone()
             };
-            assert!(ValidatedRecord::admit(inconsistent, canonical.clone()).is_none());
+            assert!(ValidatedRecord::admit(
+                CandidateRecord::Encoded(inconsistent),
+                canonical.clone(),
+                None
+            )
+            .is_none());
         }
         let other = candidate_fixture(root.path(), "Other");
-        assert!(ValidatedRecord::admit(record, other.module_interface_proof.unwrap(),).is_none());
+        assert!(ValidatedRecord::admit(
+            CandidateRecord::Encoded(record),
+            other.module_interface_proof.unwrap(),
+            None
+        )
+        .is_none());
     }
 
     #[test]

@@ -5828,7 +5828,8 @@ pub(crate) fn certify_candidate_original_with_validation(
     let imports = authenticate_original_imports(&raw, &witness, validation)?;
     let groups = raw
         .groups
-        .into_iter()
+        .iter()
+        .cloned()
         .zip(imports)
         .map(|(group, imports)| AuthenticatedOriginalGroup {
             owner: owner.clone(),
