@@ -16,6 +16,11 @@ build *targets:
 test-lib package *args:
     python3 scripts/native-workflow.py --profile {{quote(native_profile)}} test-lib "$@"
 
+# Retain activation compiler traces in a caller-owned, invocation-specific directory.
+[positional-arguments]
+activation-input-perf-trace output_dir:
+    swarm-build env TIDEPOOL_KEEP_TEST_LOGS=1 TIDEPOOL_TIMING=1 python3 scripts/native-workflow.py --profile {{quote(native_profile)}} test-lib tidepool-runtime --exact session::resident::activation_input_tests::activation_preview_keeps_original_display_with_retained_prefix_and_refuses_explicit_heap_inputs --exact session::resident::activation_input_tests::shared_request_site_composes_but_demands_unique_original_preview_context --exact session::resident::activation_input_tests::activation_function_input_preserves_value_across_repeated_checked_mounts --expected-count 3 --jobs 1 --timeout 600 --delegated-service --service-slice tidepool-completion-build.slice --output-dir {{quote(output_dir)}} --retain-artifacts --compiler-mode owned-resident
+
 [positional-arguments]
 test-target package target *args:
     python3 scripts/native-workflow.py --profile {{quote(native_profile)}} test-target "$@"
