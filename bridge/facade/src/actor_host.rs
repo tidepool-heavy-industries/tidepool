@@ -3833,8 +3833,8 @@ async fn drain_embedded_shutdown<L: Send + 'static>(
 ) -> EmbeddedShutdownOutcome {
     let mut result = EmbeddedShutdownOutcome::default();
     match tokio::time::timeout(grace, async {
-        while let Some(result) = tasks.join_next_with_id().await {
-            match result {
+        while let Some(joined) = tasks.join_next_with_id().await {
+            match joined {
                 Ok((task_id, (actor, _local_actor, outcome))) => {
                     match application_supervisor::settle_embedded_completion(
                         actor, task_id, outcome, application_owners, release_waiters,
