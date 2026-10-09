@@ -826,7 +826,15 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
                 &imports,
             )
             .iter()
-            .map(|template| (template.kind.wire_name().into(), template.source.clone()))
+            .map(|template| {
+                let kind = match template.kind {
+                    TemplateSelector::Decl => "decl",
+                    TemplateSelector::Bind => "bind",
+                    TemplateSelector::BindDiscard => "binddiscard",
+                    TemplateSelector::Expr => "expr",
+                };
+                (kind.into(), template.source.clone())
+            })
             .collect(),
             injected_modules: view.injected_module_names(),
             reserved_declaration_modules: Vec::new(),
