@@ -40,8 +40,9 @@ import Tidepool.FatIface
   , lookupFatIfaceComponents )
 import Tidepool.PreparedStg
   ( PreparedBodyCache, PreparedModule, pmModule, pmBindings, RecoveredModuleFailure(..)
-  , newPreparedComponentTaskPreparer, runPreparedBodyTask )
-import Tidepool.CompilerExecution (CompilerExecutor, runCompilerTasks)
+  , PreparedComponents, newPreparedComponentUnitsPreparer, runPreparedComponentTask
+  , preparedComponentModules, preparedComponentDelta, validatePreparedComponents )
+import Tidepool.CompilerExecution (CompilerExecutor, runCompilerWorklist)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedBuiltins (deferredFunction, wiredInErrorKind)
 import Tidepool.Timing (emitDetailPhase, emitCount, readTimingEnabled, timeSection)
@@ -80,6 +81,8 @@ instance Show RecoveryFailure where
 -- their global declarations, allowing corpus admission to report what remains.
 data RecoveredClosure = RecoveredClosure
   { closureModules :: [PreparedModule]
+  , closureHomeModules :: [PreparedModule]
+  , closureComponentSelections :: [PreparedComponents]
   , closureFailures :: [RecoveryFailure]
   -- | Per-segment evidence of reuse from the request's immutable body-set
   -- memo. Reachability and accounting are never shared between targets.
@@ -186,12 +189,17 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
   let factsOf prepared =
         (preparedModuleReferenceFacts baseContext prepared, preparedModuleReachFacts baseContext prepared)
       homeFacts = [(prepared, factsOf prepared) | prepared <- home]
-      runJobs :: (input -> IO output) -> (input -> output -> IO ()) -> [input] -> IO [output]
+      runJobs :: (input -> IO output) -> (input -> output -> IO [input]) -> [input] -> IO [output]
       runJobs action completed inputs = case executor of
-        Just shared -> runCompilerTasks shared action completed inputs
-        Nothing -> mapM (\input -> action input >>= \output -> completed input output >> pure output) inputs
+        Just shared -> runCompilerWorklist shared action completed inputs
+        Nothing -> let loop [] outputs = pure (reverse outputs)
+                       loop (input:pending) outputs = do
+                         output <- action input
+                         additions <- completed input output
+                         loop (pending ++ additions) (output:outputs)
+                    in loop inputs []
   factsMemo <- newIORef Map.empty
-  acquireBodies <- newPreparedComponentTaskPreparer env ownerCache bodyCache
+  acquireBodies <- newPreparedComponentUnitsPreparer env ownerCache bodyCache
   pure $ \entry -> do
     let homeOwners = Set.fromList (map pmModule home)
         run roots carriedAttempts carriedGroups carriedModules carriedFailures carriedOwners carriedReach = do
@@ -213,6 +221,9 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
             , recoveryReach = carriedReach
             , recoveryDirty = Set.empty
             , recoveryVersions = Map.map (const 0) carriedGroups
+            , recoveryRunning = Set.empty
+            , recoveryNewUnits = home
+            , recoveryRebuild = False
             }
           let factsFor prepared = do
                 memo <- readIORef factsMemo
@@ -266,7 +277,7 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                 selected <- lookupFatIfaceComponents env cache owner
                   (concatMap (map varName . binders) (Map.findWithDefault [] owner (recoveryGroups current)))
                 task <- case selected of
-                  FatIfaceComponents components -> acquireBodies components
+                  FatIfaceComponents components -> acquireBodies (Map.lookup owner (recoveryPrepared current)) components
                   FatIfaceComponentsMissing reason -> pure (Left
                     (RecoveredModulePreparationFailure owner
                       ("original body set disappeared: " ++ show reason)))
@@ -282,18 +293,20 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                   entries <- mapM (\prepared -> do
                     (facts, hit) <- factsFor prepared
                     when hit (modifyIORef' factHits (+ 1))
-                    pure (prepared, facts)) (Map.elems (recoveryPrepared current))
+                    pure (prepared, facts)) (concatMap preparedComponentModules (Map.elems (recoveryPrepared current)))
                   mapM_ (\(_, (references, reach)) -> do
                     _ <- evaluate (sum (map length (Map.elems references)))
                     evaluate (sum (map (length . snd) reach))) entries
                   pure entries
                 let entries = homeFacts ++ recovered
-                    modules = home ++ Map.elems (recoveryPrepared current)
+                    modules = home ++ concatMap preparedComponentModules (Map.elems (recoveryPrepared current))
                 (reach, reachMs) <- timeSection $ do
-                  let admittedFacts =
+                  let newlyAdmitted = Set.fromList (map preparedBodyKey (recoveryNewUnits current))
+                      admittedFacts =
                         [ facts | (prepared, (_, facts)) <- entries
-                        , pmModule prepared `Set.member` recoveryAdmitted current ]
-                      extended = admitReachFacts seedList admittedFacts (recoveryReach current)
+                        , recoveryRebuild current || preparedBodyKey prepared `Set.member` newlyAdmitted ]
+                      prior = if recoveryRebuild current then emptyPreparedReachability else recoveryReach current
+                      extended = admitReachFacts seedList admittedFacts prior
                   _ <- evaluate (sizeUniqSet (reachedUniques extended))
                   _ <- evaluate (sizeUniqSet (admittedTops extended))
                   pure extended
@@ -311,6 +324,8 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                 modifyIORef' state (\latest -> latest
                   { recoveryReach = reach
                   , recoveryAdmitted = Set.empty
+                  , recoveryNewUnits = []
+                  , recoveryRebuild = False
                   , recoveryAttempted = Set.union (recoveryAttempted latest) (Set.fromList (map varName pending))
                   })
                 charge (\cost -> cost
@@ -326,27 +341,40 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                   maybe (pure ()) recordLookup found) pending
                 charge (\cost -> cost { spentLookup = spentLookup cost + lookupMs })
                 selected <- readIORef state
-                let dirty = Set.toAscList (recoveryDirty selected)
+                let dirty = Set.toAscList (recoveryDirty selected `Set.difference` recoveryRunning selected)
                 jobs <- mapM (acquireOwner selected) dirty
-                modifyIORef' state (\latest -> latest { recoveryDirty = Set.empty })
+                modifyIORef' state (\latest -> latest
+                  { recoveryDirty = recoveryDirty latest `Set.difference` Set.fromList dirty
+                  , recoveryRunning = recoveryRunning latest `Set.union` Set.fromList dirty })
+                emitCount timing "prepared_recover_ready_width" (fromIntegral (length jobs))
                 charge (\cost -> cost { spentPreparations = spentPreparations cost + fromIntegral (length jobs) })
-                _ <- runJobs
-                  (\(_, _, task) -> timeSection (either (pure . Left) runPreparedBodyTask task))
-                  (\(owner, version, _) (outcome, prepareMs) -> do
-                    charge (\cost -> cost { spentPrepare = spentPrepare cost + prepareMs })
-                    latest <- readIORef state
-                    when (Map.lookup owner (recoveryVersions latest) == Just version) $ do
-                      modifyIORef' state $ \settled -> case outcome of
-                        Right prepared -> settled
-                          { recoveryPrepared = Map.insert owner prepared (recoveryPrepared settled)
-                          , recoveryFailures = filter (not . preparationFailureFor owner) (recoveryFailures settled)
-                          , recoveryAdmitted = Set.insert owner (recoveryAdmitted settled)
-                          }
-                        Left failure -> settled
-                          { recoveryFailures = recoveryFailures settled ++ [DefiningPreparationFailure failure] }
-                      expand) jobs
-                pure ()
-          expand
+                pure jobs
+              complete (owner, version, _) (outcome, prepareMs) = do
+                charge (\cost -> cost { spentPrepare = spentPrepare cost + prepareMs })
+                latest <- readIORef state
+                -- One owner has one active selection. Pure results remain valid
+                -- when demand grows while it runs; another selection follows.
+                modifyIORef' state $ \settled -> case outcome of
+                  Right prepared ->
+                    let (replaced,delta) = preparedComponentDelta (Map.lookup owner (recoveryPrepared settled)) prepared
+                    in settled
+                      { recoveryPrepared = Map.insert owner prepared (recoveryPrepared settled)
+                      , recoveryFailures = filter (not . preparationFailureFor owner) (recoveryFailures settled)
+                      , recoveryAdmitted = Set.insert owner (recoveryAdmitted settled)
+                      , recoveryNewUnits = recoveryNewUnits settled ++ delta
+                      , recoveryRebuild = recoveryRebuild settled || replaced
+                      , recoveryRunning = Set.delete owner (recoveryRunning settled)
+                      , recoveryDirty = if Map.lookup owner (recoveryVersions latest) /= Just version
+                          then Set.insert owner (recoveryDirty settled) else recoveryDirty settled
+                      }
+                  Left failure -> settled
+                    { recoveryFailures = recoveryFailures settled ++ [DefiningPreparationFailure failure]
+                    , recoveryRunning = Set.delete owner (recoveryRunning settled) }
+                expand
+          initialJobs <- expand
+          _ <- runJobs
+            (\(_,_,task) -> timeSection (either (pure . Left) runPreparedComponentTask task))
+            complete initialJobs
           settled <- readIORef state
           Spent factsTotal reachTotal refsTotal lookupTotal prepareTotal rounds preparations <- readIORef spent
           emitDetailPhase timing "prepared_recover" "prepared_recover_facts" factsTotal
@@ -356,9 +384,11 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
           emitDetailPhase timing "prepared_recover" "prepared_recover_prepare_service" prepareTotal
           emitCount timing "prepared_recover_rounds" rounds
           emitCount timing "prepared_recover_module_preparations" preparations
+          mapM_ validatePreparedComponents (Map.elems (recoveryPrepared settled))
           hits <- readIORef factHits
           pure (PreparedRecovery
-            (RecoveredClosure (home ++ Map.elems (recoveryPrepared settled))
+            (RecoveredClosure (home ++ concatMap preparedComponentModules (Map.elems (recoveryPrepared settled)))
+              home (Map.elems (recoveryPrepared settled))
               (recoveryFailures settled) hits (recoveryReach settled))
             (\extra -> run (Map.elems (Map.fromList
                 [(preparedRootIdentity root, root) | root <- roots ++ extra]))
@@ -371,12 +401,15 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
 data RecoveryState = RecoveryState
   { recoveryAttempted :: Set.Set Name
   , recoveryGroups :: Map.Map Module [CoreBind]
-  , recoveryPrepared :: Map.Map Module PreparedModule
+  , recoveryPrepared :: Map.Map Module PreparedComponents
   , recoveryFailures :: [RecoveryFailure]
   , recoveryAdmitted :: Set.Set Module
   , recoveryReach :: PreparedReachability
   , recoveryDirty :: Set.Set Module
   , recoveryVersions :: Map.Map Module Int
+  , recoveryRunning :: Set.Set Module
+  , recoveryNewUnits :: [PreparedModule]
+  , recoveryRebuild :: Bool
   }
 
 -- | The recovered-body cache's exact group identity.  It is deliberately more

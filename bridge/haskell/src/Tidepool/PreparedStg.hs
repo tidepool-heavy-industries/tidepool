@@ -17,6 +17,8 @@ module Tidepool.PreparedStg
   , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching
   , PreparedBodyReuse(..), newPreparedOriginalModuleTaskPreparer
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
+  , PreparedComponents, PreparedComponentTask, newPreparedComponentUnitsPreparer
+  , runPreparedComponentTask, preparedComponentModules, preparedComponentVersion, preparedComponentDelta, validatePreparedComponents
   , newPreparedComponentTaskPreparer
   ) where
 
@@ -541,14 +543,71 @@ runPreparedBodyTask (PreparedBodyTask action) = action
 -- units survive subset growth; the shared per-key loader coalesces overlapping
 -- growth and releases waiters on failure or cancellation. Live defining and
 -- site context work is acquired before the returned task runs.
+-- Canonical selection remains a component-backed view throughout recovery.
+-- No aggregate entry map or prepared binding list is reconstructed on growth.
+data PreparedComponents = PreparedComponents
+  { componentsSelection :: FatIfaceSelection
+  , componentsContext :: OwnerInterfaceContext
+  , componentsWorkers :: PreparedModule
+  , componentsPure :: Map Int ([Int],PreparedModule)
+  , componentsSiteRoster :: [Int]
+  , componentsSite :: Maybe PreparedModule
+  }
+
+newtype PreparedComponentTask = PreparedComponentTask
+  (IO (Either RecoveredModuleFailure PreparedComponents))
+
+runPreparedComponentTask :: PreparedComponentTask -> IO (Either RecoveredModuleFailure PreparedComponents)
+runPreparedComponentTask (PreparedComponentTask action) = action
+
+preparedComponentVersion :: PreparedComponents -> FatOriginalVersion
+preparedComponentVersion = fatSelectionVersion . componentsSelection
+
+componentRows :: PreparedComponents -> [([Int],PreparedModule)]
+componentRows selected = sortOn (minimum . fst) (Map.elems (componentsPure selected)
+  ++ maybe [] (\site -> [(componentsSiteRoster selected,site)]) (componentsSite selected))
+
+preparedComponentModules :: PreparedComponents -> [PreparedModule]
+preparedComponentModules selected = componentsWorkers selected : map snd (componentRows selected)
+
+-- Pure units and constructor workers survive growth. A changed site roster
+-- replaces its entire owner-local arena and requires fresh target reachability.
+preparedComponentDelta :: Maybe PreparedComponents -> PreparedComponents -> (Bool,[PreparedModule])
+preparedComponentDelta previous next = case previous of
+  Just old | preparedComponentVersion old == preparedComponentVersion next
+    && sameOwnerInterfaceContext (componentsContext old) (componentsContext next) ->
+      let newPure = Map.elems (Map.difference (componentsPure next) (componentsPure old))
+          siteChanged = componentsSiteRoster old /= componentsSiteRoster next
+          sites = if siteChanged then maybe [] pure (componentsSite next) else []
+      in (siteChanged,map snd newPure ++ sites)
+  _ -> (isJust (componentsSite next),preparedComponentModules next)
+
+validatePreparedComponents :: PreparedComponents -> IO ()
+validatePreparedComponents selected = do
+  _ <- assembleComponentSelection (componentsSelection selected) (componentsWorkers selected) (componentRows selected)
+  pure ()
+
+-- Compatibility callers requesting one concrete module materialize it once.
+-- Recovery consumes the component view instead.
 newPreparedComponentTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
   -> IO (FatIfaceSelection -> IO (Either RecoveredModuleFailure PreparedBodyTask))
 newPreparedComponentTaskPreparer env owners stable = do
+  acquire <- newPreparedComponentUnitsPreparer env owners stable
+  pure $ \selection -> do
+    acquired <- acquire Nothing selection
+    pure $ fmap (\task -> PreparedBodyTask $ do
+      outcome <- runPreparedComponentTask task
+      traverse (\selected -> assembleComponentSelection (componentsSelection selected)
+        (componentsWorkers selected) (componentRows selected)) outcome) acquired
+
+newPreparedComponentUnitsPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
+  -> IO (Maybe PreparedComponents -> FatIfaceSelection -> IO (Either RecoveredModuleFailure PreparedComponentTask))
+newPreparedComponentUnitsPreparer env owners stable = do
   disabled <- bodyReuseDisabled
   environment <- resolvePreparedSiteEnvironment env
   acquireSiteBatch <- newPreparedBodyTaskPreparerWithWorkers OmitConstructorWorkers environment env owners stable
   timing <- readTimingEnabled
-  pure $ \selection -> do
+  pure $ \previous selection -> do
     let version = fatSelectionVersion selection
         owner = fatOriginalOwner version
         components = sortOn fatComponentOrdinal (fatSelectionComponents selection)
@@ -567,7 +626,13 @@ newPreparedComponentTaskPreparer env owners stable = do
         let pureUnit component = intrinsicFree (censusPreparedIntrinsics
               (ownerInterfaceTyCons context) (IntMap.elems (fatComponentBindings component)))
             (plain, siteBearing) = partition pureUnit components
-        acquired <- forM plain $ \component -> do
+        let previousPure = case previous of
+              Just old | preparedComponentVersion old == version
+                && sameOwnerInterfaceContext context (componentsContext old) -> componentsPure old
+              _ -> Map.empty
+            existing component = if disabled then Nothing else
+              Map.lookup (fatComponentOrdinal component) previousPure
+        acquired <- forM [component | component <- plain, not (isJust (existing component))] $ \component -> do
           let key = (version,Shared.ownerInterfaceIdentity context,OriginalComponent (fatComponentOrdinal component))
           completed <- Shared.lookupCompletedLoadCache bucket key
           task <- case completed of
@@ -578,22 +643,33 @@ newPreparedComponentTaskPreparer env owners stable = do
         -- Site graphs have owner-local indexes. Until their owning type policy
         -- supplies checked rebasing, all selected site units form one typed
         -- batch; pure-unit reuse remains independent of that batch's growth.
-        siteTask <- if null siteBearing then pure (Right Nothing) else
+        let siteRoster = concatMap fatComponentOrdinals siteBearing
+            previousSite = case previous of
+              Just old | not disabled && sameOwnerInterfaceContext context (componentsContext old)
+                && componentsSiteRoster old == siteRoster -> componentsSite old
+              _ -> Nothing
+        siteTask <- if null siteBearing || isJust previousSite then pure (Right Nothing) else
           fmap (fmap Just) (acquireSiteBatch (Just version) owner (IntMap.elems (IntMap.unions
             (map fatComponentBindings siteBearing))))
         -- CorePrep injects every defining constructor worker independently of
         -- the original body subset. Give that implicit arena one version-bound
         -- cache key and one place in assembly, including for site-bearing units.
-        workerTask <- case disabled of
-          False -> Shared.lookupCompletedLoadCache bucket (version,Shared.ownerInterfaceIdentity context,ConstructorWorkers) >>= \case
-            Just completed -> pure (Right (PreparedModuleTask (pure completed)))
-            Nothing -> acquireRecoveredWithSiteContext (Just environment) env owner context []
-          True -> acquireRecoveredWithSiteContext (Just environment) env owner context []
+        let previousWorkers = case previous of
+              Just old | not disabled && preparedComponentVersion old == version
+                && sameOwnerInterfaceContext context (componentsContext old) -> Just (componentsWorkers old)
+              _ -> Nothing
+        workerTask <- case previousWorkers of
+          Just completed -> pure (Right (PreparedModuleTask (pure completed)))
+          Nothing -> case disabled of
+            False -> Shared.lookupCompletedLoadCache bucket (version,Shared.ownerInterfaceIdentity context,ConstructorWorkers) >>= \case
+              Just completed -> pure (Right (PreparedModuleTask (pure completed)))
+              Nothing -> acquireRecoveredWithSiteContext (Just environment) env owner context []
+            True -> acquireRecoveredWithSiteContext (Just environment) env owner context []
         case (sequence [fmap ((,) pair) task | (pair,task) <- acquired], siteTask, workerTask) of
           (Left failure, _, _) -> pure (Left failure)
           (_, Left failure, _) -> pure (Left failure)
           (_, _, Left failure) -> pure (Left failure)
-          (Right tasks, Right site, Right workers) -> pure (Right (PreparedBodyTask $ do
+          (Right tasks, Right site, Right workers) -> pure (Right (PreparedComponentTask $ do
             outcome <- trySynchronous $ do
               pureResults <- forM tasks $ \((component,key,normalHitDisabled),task) -> do
                 let lower = do
@@ -614,7 +690,15 @@ newPreparedComponentTaskPreparer env owners stable = do
                   pure [(concatMap fatComponentOrdinals siteBearing,result)]
               workerResult <- if disabled then runPreparedModuleTask workers else
                 Shared.lookupLoadCache bucket (version,Shared.ownerInterfaceIdentity context,ConstructorWorkers) (runPreparedModuleTask workers)
-              assembled <- assembleComponentSelection selection workerResult (pureResults ++ siteResult)
+              let pureMap = Map.union (Map.fromList [(minimum roster,(roster,item)) | (roster,item) <- pureResults])
+                    (Map.fromList [(fatComponentOrdinal component, old) | component <- plain
+                      , Just old <- [existing component]])
+                  siteOutput = case siteResult of
+                    (_,item):_ -> Just item
+                    [] -> previousSite
+                  assembled = PreparedComponents selection context workerResult pureMap siteRoster siteOutput
+              emitCount timing "prepared_recover_component_admissions" (fromIntegral (length pureResults))
+              emitCount timing "prepared_recover_site_replacements" (if null siteResult then 0 else 1)
               emitCount timing "prepared_recover_component_demanded_groups"
                 (fromIntegral (fatSelectionDemandedGroupCount selection))
               emitCount timing "prepared_recover_component_prepared_groups"

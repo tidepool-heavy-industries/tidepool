@@ -21,6 +21,7 @@ module Tidepool.ExecutionProjection
   , PreparedProjection
   , prepareProjection
   , prepareProjectionWithReachability
+  , prepareComponentProjectionWithReachability
   , projectSelected
   , projectSelectedWithHostBindings
   , PreparedCandidate, projectSelectedCandidateWithHostBindings
@@ -116,10 +117,12 @@ import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (varId)
+import Tidepool.FatIface (fatOriginalOwner)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
   , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmStableTopSpellings, pmOriginalTopNames
-  , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry )
+  , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry
+  , PreparedComponents, preparedComponentModules, preparedComponentVersion )
 import Tidepool.PreparedSites (SiteRejection(..))
 import Tidepool.PreparedSites (PreparedSite(..), requestReplyIndex)
 import Tidepool.EffectSchema qualified as Effect
@@ -967,6 +970,18 @@ prepareProjectionWithReachability context modules reach =
     isReachable (binding, _) = any
       ((`elementOfUniqSet` reachedUniques reach) . varUnique)
       (topBinders binding)
+
+-- Component-backed package owners retain their one declaring context and one
+-- site arena. Projection walks their units directly, in canonical owner/group
+-- order; no growing prepared module aggregate is required.
+prepareComponentProjectionWithReachability :: ProjectionContext -> [PreparedModule]
+  -> [PreparedComponents] -> PreparedReachability -> Either ProjectionError PreparedProjection
+prepareComponentProjectionWithReachability context home components reach
+  | length owners /= Set.size (Set.fromList owners) =
+      Left (InvalidPreparedRepresentation "component projection repeats a defining owner")
+  | otherwise = prepareProjectionWithReachability context
+      (home ++ concatMap preparedComponentModules components) reach
+  where owners = map (fatOriginalOwner . preparedComponentVersion) components
 
 finishProjection :: ProjectionContext -> [PreparedModule] -> VarEnv SymbolIdentity
   -> [PreparedModule] -> Either ProjectionError PreparedProjection

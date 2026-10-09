@@ -18,6 +18,7 @@ compilerExecutionTests :: TestTree
 compilerExecutionTests = testGroup "compiler execution"
   [ testCase "independent tasks overlap and publish completion before ordered return" overlap
   , testCase "completion-triggered work shares the admitted bound" completionWork
+  , testCase "dynamic demand incorporates ready ancestors before blocked descendants" dynamicDemand
   , testCase "cancellation joins running work and fences submission" cancellation
   , testCase "failed work cancels and joins its siblings" failedWork
   , testCase "reuse agrees with independent graph closure" reuseOracle
@@ -77,6 +78,28 @@ completionWork = within $ do
     assert (result == [0, 1]) "completion work changed the outer result"
   (remaining, peak) <- readIORef active
   assert (remaining == 0 && peak <= 2) "completion work escaped the shared execution grant"
+
+-- The second initial job completes before the child of the first can finish.
+-- A nested collector would wait for the child and strand that incorporation.
+dynamicDemand :: IO ()
+dynamicDemand = within $ do
+  ancestor <- newEmptyMVar
+  releaseChild <- newEmptyMVar
+  incorporated <- newEmptyMVar
+  bracket (start $ withCompilerExecutor (jobs 2) $ \executor ->
+    runCompilerWorklist executor
+      (\value -> case value of
+        0 -> pure value
+        1 -> observe ancestor >> pure value
+        _ -> putMVar ancestor () >> observe releaseChild >> pure value)
+      (\value _ -> case value of
+        0 -> pure [2]
+        1 -> putMVar incorporated () >> pure []
+        _ -> pure []) [0 :: Int,1]) snd $ \(result,_) -> do
+      observe incorporated
+      putMVar releaseChild ()
+      values <- result
+      assert (values == [0,1,2]) "dynamic completion lost submission order"
 
 cancellation :: IO ()
 cancellation = within $ do

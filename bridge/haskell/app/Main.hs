@@ -82,7 +82,7 @@ import Tidepool.CompilerProducts
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
 import Tidepool.HostBindingAuthority
   ( HostBindingRepresentation, hostBindingRepresentationJsonAuthority )
 import Tidepool.ExecutionSchema
@@ -715,8 +715,8 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
                 { projectionAuxiliaryRoots = projectionAuxiliaryRoots context ++ roots }
           requirePreparedRecoveryPublication target recovered
           selected <- timePhase timing "prepared_project" $
-            project (prepareProjectionWithReachability finalContext
-              (closureModules recovered) (closureReachability recovered))
+            project (prepareComponentProjectionWithReachability finalContext
+              (closureHomeModules recovered) (closureComponentSelections recovered) (closureReachability recovered))
           candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
           project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders
             (candidateGlobals candidate))
