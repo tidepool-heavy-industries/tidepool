@@ -2399,7 +2399,7 @@ impl CertifiedSourceSelection {
         &self,
         view: &crate::artifact_inventory::ArtifactView,
     ) -> CertResult<SelectedOriginalClosure> {
-        self.selected_original_closure_inner(view, None)
+        self.selected_original_closure_inner(view, None, None)
     }
 
     /// Certify the complete newly authored original. Inherited compiler offers
@@ -2410,22 +2410,10 @@ impl CertifiedSourceSelection {
         unit: &str,
         module: &str,
     ) -> CertResult<SelectedOriginalClosure> {
-        let key = (unit.to_owned(), module.to_owned());
-        let selected = self
-            .visible_modules()
-            .find(|(owner, _)| *owner == &key)
-            .map(|(_, selected)| selected)
-            .filter(|selected| selected.native().is_some())
-            .ok_or(CertificationError::Mismatch(
-                "authored original has no issued native selection",
-            ))?;
-        Self {
-            modules: Arc::new(BTreeMap::from([(key, selected.clone())])),
-            produced_types: self.produced_types.clone(),
-        }
-        .selected_original_closure_inner(
+        self.selected_original_closure_inner(
             view,
             Some((unit, crate::artifacts::AUTHORED_PRODUCT_PROBE_MODULE)),
+            Some((unit, module)),
         )
     }
 
@@ -2437,18 +2425,36 @@ impl CertifiedSourceSelection {
         unit: &str,
         module: &str,
     ) -> CertResult<SelectedOriginalClosure> {
-        self.selected_original_closure_inner(view, Some((unit, module)))
+        self.selected_original_closure_inner(view, Some((unit, module)), None)
     }
 
     fn selected_original_closure_inner(
         &self,
         view: &crate::artifact_inventory::ArtifactView,
         excluded: Option<(&str, &str)>,
+        authored_root: Option<(&str, &str)>,
     ) -> CertResult<SelectedOriginalClosure> {
         let projection = self.compiler_projection(view)?;
         let mut selected = projection
             .entries_from_metadata(&view.metadata_snapshot())
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        if let Some((unit, module)) = authored_root {
+            // Interface dependencies belong to the complete issued namespace.
+            // Choosing the executable root must follow its validation.
+            if !selected.iter().any(|(owner, entry)| {
+                owner.unit == unit
+                    && owner.module == module
+                    && matches!(
+                        &entry.payload,
+                        crate::artifact_inventory::ArtifactPayload::Original(_)
+                    )
+            }) {
+                return Err(CertificationError::Mismatch(
+                    "authored original has no issued native selection",
+                ));
+            }
+            selected.retain(|owner, _| owner.unit == unit && owner.module == module);
+        }
         if let Some((unit, module)) = excluded {
             selected.retain(|owner, _| owner.unit != unit || owner.module != module);
         }
@@ -11227,24 +11233,43 @@ pub(crate) mod tests {
                 original_ordinal: ordinal,
                 binder: testing::identity("Schema", &format!("entry_{ordinal}")),
             };
-            let authored = full_native_fixture(
-                "Authored",
-                vec![
-                    (
-                        7,
+            let authored =
+                recovered_witness_fixtures(&[fixture_finalized_product_with_requirements(
+                    original_groups_fixture(
+                        "Authored",
                         vec![
-                            source(195),
-                            PendingImportOwner::Source {
-                                owner: fresh.owner().clone(),
-                                original_ordinal: 5,
-                                binder: testing::identity("FreshDependency", "entry_5"),
-                            },
+                            (
+                                7,
+                                vec![
+                                    source(195),
+                                    PendingImportOwner::Source {
+                                        owner: fresh.owner().clone(),
+                                        original_ordinal: 5,
+                                        binder: testing::identity("FreshDependency", "entry_5"),
+                                    },
+                                ],
+                            ),
+                            (11, vec![source(later_group)]),
                         ],
+                        7,
+                        &BTreeMap::new(),
                     ),
-                    (11, vec![source(later_group)]),
-                ],
-                7,
-            );
+                    [1; 32],
+                    Some(
+                        [&schema, &fresh]
+                            .into_iter()
+                            .map(|product| {
+                                (
+                                    (product.owner().unit.clone(), product.owner().module.clone()),
+                                    product.module_interface().unwrap().interface_sha256(),
+                                )
+                            })
+                            .collect(),
+                    ),
+                )])
+                .remove(0)
+                .product;
+            assert_eq!(authored.module_interface().unwrap().requirements().len(), 2);
             let products = [authored.clone(), schema.clone(), fresh.clone()];
             let mut entries = products
                 .iter()
@@ -11321,6 +11346,70 @@ pub(crate) mod tests {
                     &entry.payload, crate::artifact_inventory::ArtifactPayload::Original(product)
                     if product.same_durable_artifact(&fresh)
                 )));
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn authored_root_preserves_complete_interface_namespace_through_offer_retirement(
+            required_mask in 1u8..4,
+            offered_mask in 0u8..4,
+            retired_mask in 0u8..4,
+            reverse in proptest::prelude::any::<bool>(),
+        ) {
+            use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, NativeArtifactDemand};
+            let dependencies = [
+                full_native_fixture("TypeLeft", vec![(7, vec![])], 7),
+                full_native_fixture("TypeRight", vec![(7, vec![])], 7),
+            ];
+            let requirements = dependencies.iter().enumerate()
+                .filter(|(index, _)| required_mask & (1 << index) != 0)
+                .map(|(_, product)| (
+                    (product.owner().unit.clone(), product.owner().module.clone()),
+                    product.module_interface().unwrap().interface_sha256(),
+                )).collect();
+            let authored = recovered_witness_fixtures(&[fixture_finalized_product_with_requirements(
+                original_groups_fixture("AuthoredTypes", vec![(7, vec![])], 7, &BTreeMap::new()),
+                [1; 32], Some(requirements),
+            )]).remove(0).product;
+            let entries = std::iter::once(&authored).chain(dependencies.iter())
+                .map(|product| Arc::new(ArtifactEntry::original([1; 32], product.clone()).unwrap()))
+                .collect();
+            let inventory = ArtifactInventory::default();
+            let available = inventory.admit_shared_with_demand(
+                &inventory.empty_view(), entries, NativeArtifactDemand::ScopeInterfaces,
+            ).unwrap();
+            let issue = |mask| {
+                let mut products = vec![authored.clone()];
+                products.extend(dependencies.iter().enumerate()
+                    .filter(|(index, _)| mask & (1u8 << index) != 0)
+                    .map(|(_, product)| product.clone()));
+                if reverse { products.reverse(); }
+                CertifiedSourceSelection::from_projected_originals(
+                    &products, &InventoryOperation::new(Default::default()),
+                ).unwrap()
+            };
+            let initial = issue(offered_mask);
+            // Withdrawal and restoration change the issued roles while all
+            // immutable artifacts remain physically available in the view.
+            for mask in [offered_mask, offered_mask & !retired_mask, 3] {
+                let selection = issue(mask);
+                let result = selection.selected_authored_original_closure(
+                    &available, "fixture", "AuthoredTypes",
+                );
+                let expected = required_mask & !mask == 0;
+                proptest::prop_assert_eq!(result.is_ok(), expected);
+                if let Ok(closure) = result {
+                    proptest::prop_assert_eq!(closure.products(), &[authored.clone()]);
+                    let groups = closure.native_closure.selected_native_groups();
+                    proptest::prop_assert_eq!(groups.len(), 1);
+                    proptest::prop_assert_eq!(groups.iter().next().unwrap().original_ordinal, 7);
+                }
+                proptest::prop_assert!(available.selected_native_groups().is_empty());
+                proptest::prop_assert_eq!(initial.selected_authored_original_closure(
+                    &available, "fixture", "AuthoredTypes",
+                ).is_ok(), required_mask & !offered_mask == 0);
+            }
         }
     }
 
