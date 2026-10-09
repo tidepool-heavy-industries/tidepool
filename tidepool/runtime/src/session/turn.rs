@@ -2799,16 +2799,29 @@ fn compile_cell_program_admitted_inner(
     if let CellProgramAudit::PublicationRefusal(cache) = audit {
         audit_compiler_publication_refusal(&offer, scratch.path(), cache);
     }
-    let program = offer.admit_cell_program(scratch.path()).map_err(|error| {
-        offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
-    })?;
+    let result = offer.admit_cell_program(scratch.path());
     #[cfg(test)]
     if let CellProgramAudit::PublicationRefusal(cache) = audit {
-        assert!(
-            count_candidate_records(cache) > 0,
-            "valid follow-up must publish ordinary support suggestions"
+        let outcome = match &result {
+            Ok(_) => "admitted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        let count = observe_candidate_publication(
+            cache,
+            scratch.path(),
+            CandidatePublicationStage::Valid,
+            &outcome,
         );
+        if result.is_ok() {
+            assert!(
+                count > 0,
+                "valid follow-up must publish ordinary support suggestions"
+            );
+        }
     }
+    let program = result.map_err(|error| {
+        offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
+    })?;
     #[cfg(test)]
     if let CellProgramAudit::NativeEmissionOwnersAbsent(old_owners) = audit {
         audit_current_native_emission(&program, scratch.path(), old_owners);
@@ -3040,32 +3053,139 @@ fn decode_cell_program_turn(
 }
 
 #[cfg(test)]
-fn count_candidate_records(directory: &Path) -> usize {
+enum CandidatePublicationStage {
+    Before,
+    Mutated,
+    Valid,
+}
+
+#[cfg(test)]
+fn observe_candidate_publication(
+    cache: &Path,
+    compiler_root: &Path,
+    stage: CandidatePublicationStage,
+    outcome: &str,
+) -> usize {
+    use sha2::{Digest, Sha256};
     use std::io::Read;
-    std::fs::read_dir(directory)
+    let stage = match stage {
+        CandidatePublicationStage::Before => "before-mutation",
+        CandidatePublicationStage::Mutated => "after-mutated-admission",
+        CandidatePublicationStage::Valid => "after-valid-admission",
+    };
+    // This fixture observes the candidate owner's namespace and record format.
+    // The parent compile cache also holds legitimate mutable compiler products.
+    let namespace = cache.join("module-candidates-v12");
+    let mut pending = match std::fs::symlink_metadata(&namespace) {
+        Ok(_) => vec![(namespace.clone(), 0)],
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("candidate namespace census failed: {error}"),
+    };
+    let evidence = compiler_root.join("publication-control").join(stage);
+    let mut records = Vec::new();
+    let mut entries = 0;
+    let mut record_bytes = 0_u64;
+    while let Some((path, depth)) = pending.pop() {
+        entries += 1;
+        assert!(
+            entries <= 4096 && depth <= 16,
+            "candidate census is incomplete"
+        );
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        assert!(
+            !metadata.is_symlink(),
+            "candidate census must not follow symlinks"
+        );
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(&path).unwrap() {
+                pending.push((entry.unwrap().path(), depth + 1));
+            }
+            continue;
+        }
+        assert!(
+            metadata.is_file(),
+            "candidate census contains a special file"
+        );
+        if metadata.len() < 8 {
+            continue;
+        }
+        let mut file = std::fs::File::open(&path).unwrap();
+        let mut prefix = [0; 8];
+        file.read_exact(&mut prefix).unwrap();
+        if &prefix != b"TPCRE10\n" {
+            continue;
+        }
+        record_bytes += metadata.len();
+        assert!(
+            metadata.len() <= 32 << 20 && record_bytes <= 128 << 20,
+            "candidate record census exceeds its byte bound"
+        );
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        bytes.extend_from_slice(&prefix);
+        file.take(metadata.len() - 8 + 1)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(
+            bytes.len() as u64,
+            metadata.len(),
+            "candidate record changed during census"
+        );
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let retained = evidence.join(format!("{digest}.cbor"));
+        std::fs::create_dir_all(&evidence).unwrap();
+        std::fs::write(&retained, &bytes).unwrap();
+        records.push(serde_json::json!({
+            "path": path.strip_prefix(cache).unwrap(),
+            "bytes": bytes.len(), "sha256": digest, "retained_path": retained,
+        }));
+    }
+    records.sort_by_key(|record| record["path"].as_str().unwrap().to_owned());
+    let mut cache_entries = std::fs::read_dir(cache)
         .unwrap()
         .map(|entry| {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                count_candidate_records(&path)
-            } else {
-                let mut prefix = [0; 8];
-                usize::from(
-                    std::fs::File::open(path)
-                        .unwrap()
-                        .read_exact(&mut prefix)
-                        .is_ok()
-                        && &prefix == b"TPCRE10\n",
-                )
-            }
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            let name = entry.file_name();
+            serde_json::json!({
+                "name": name.to_str().expect("cache entry name is not UTF-8"),
+                "directory": kind.is_dir(), "symlink": kind.is_symlink(),
+            })
         })
-        .sum()
+        .collect::<Vec<_>>();
+    cache_entries.sort_by_key(|entry| entry["name"].as_str().unwrap().to_owned());
+    let turn = std::fs::read(compiler_root.join("item-0/turn.cbor")).unwrap();
+    assert!(
+        turn.len() <= 32 << 20,
+        "turn evidence exceeds its byte bound"
+    );
+    let count = records.len();
+    std::fs::create_dir_all(&evidence).unwrap();
+    std::fs::write(evidence.join("turn.cbor"), &turn).unwrap();
+    std::fs::write(
+        evidence.join("census.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "stage": stage, "outcome": outcome, "cache_root": cache,
+            "compiler_root": compiler_root, "cache_entries": cache_entries,
+            "candidate_namespace": namespace, "records": records,
+            "turn_sha256": format!("{:x}", Sha256::digest(&turn)),
+            "extract_spawns": tidepool_extract_cmd::extract_spawn_count(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    count
 }
 
 #[cfg(test)]
 fn audit_compiler_publication_refusal(offer: &ModuleCandidateOffer, root: &Path, cache: &Path) {
-    assert!(
-        std::fs::read_dir(cache).unwrap().next().is_none(),
+    assert_eq!(
+        observe_candidate_publication(
+            cache,
+            root,
+            CandidatePublicationStage::Before,
+            "not attempted"
+        ),
+        0,
         "publication refusal requires an empty candidate store"
     );
     assert!(!offer.has_candidates());
@@ -3092,16 +3212,26 @@ fn audit_compiler_publication_refusal(offer: &ModuleCandidateOffer, root: &Path,
     payload[0] = CborValue::Array(vec![CborValue::Text("foreign_bound_name".into())]);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&turn, &mut bytes).unwrap();
-    std::fs::write(&path, bytes).unwrap();
+    assert_ne!(
+        bytes, original,
+        "boundNames control did not alter the producer output"
+    );
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
     let before = tidepool_extract_cmd::extract_spawn_count();
-    let error = offer
-        .admit_cell_program(root)
-        .expect_err("wrong boundNames must refuse the final checked item seal");
+    let result = offer.admit_cell_program(root);
+    let outcome = match &result {
+        Ok(_) => "admitted".to_owned(),
+        Err(error) => error.to_string(),
+    };
+    let count =
+        observe_candidate_publication(cache, root, CandidatePublicationStage::Mutated, &outcome);
+    let error = result.expect_err("wrong boundNames must refuse the final checked item seal");
     assert!(error
         .to_string()
         .contains("compiled bind has another authored verdict or wrapper"));
-    assert!(
-        std::fs::read_dir(cache).unwrap().next().is_none(),
+    assert_eq!(
+        count, 0,
         "refused native item must leave the candidate store empty"
     );
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
