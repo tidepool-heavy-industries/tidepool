@@ -132,6 +132,30 @@ impl SealedOriginalCompileInput {
         Ok(self.original_execution.clone())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn published_source_original_selection(
+        &self,
+        prepared: &PreparedProgram,
+        groups: &[PendingCertifiedGroup],
+        target_owners: &[PendingImportOwner],
+        package_interfaces: &CertifiedTargetPackageInterfaces,
+        table: &DataConTable,
+        yield_sites: &[YieldSite],
+        revision: &str,
+        public_root: &crate::declaration_join::ExactModuleIdentity,
+    ) -> Result<Arc<crate::declaration_context::PublishedSourceOriginalSelection>, CompileError>
+    {
+        self.original_execution_context(
+            prepared,
+            groups,
+            target_owners,
+            package_interfaces,
+            table,
+            yield_sites,
+        )?
+        .issue_published_source_original(revision, &self.identity, public_root)
+    }
+
     pub fn matches_bundle(
         &self,
         prepared: &PreparedProgram,
@@ -679,6 +703,7 @@ pub(crate) fn seal(
     table: DataConTable,
     sites: Vec<YieldSite>,
     artifacts: &crate::artifact_inventory::ArtifactView,
+    compiler_projection: &crate::artifact_inventory::CompilerInputProjection,
 ) -> Result<Option<SealedOriginalCompileInput>, CompileError> {
     // Original completed source output can retain compile-time execution.
     // Mutable resident Val/Lib interfaces belong to their exact context owner.
@@ -756,7 +781,8 @@ pub(crate) fn seal(
                 lexical,
                 original_target.clone(),
                 &required_instance_owners,
-            )?,
+            )?
+            .with_compiler_input_projection(compiler_projection.clone())?,
         ),
         target: prepared.clone(),
         groups: groups.clone(),
@@ -842,6 +868,7 @@ mod tests {
             DataConTable::new(),
             vec![],
             &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
+            &crate::artifact_inventory::CompilerInputProjection::default(),
         )
         .unwrap()
         .expect("ordinary compiler issuer admits complete fixture inputs")

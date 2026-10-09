@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub use crate::compile_input::{SealedOriginalCompileInput, SourceReplayEligibility};
+pub use crate::declaration_context::PublishedSourceOriginalSelection;
 pub use crate::turn_observations::{decode_turn_nominal_heads, decode_turn_yield_sites};
 use serde::Deserialize;
 use tempfile::TempDir;
@@ -547,6 +548,7 @@ enum NativeCheckedOffer {
 // the invocation builder can perform its ordinary lossy CLI conversion.
 pub(crate) enum CheckedPurpose {
     Inspection,
+    ReloadInspection,
     Cell,
     Item,
     ActivationPreview,
@@ -558,6 +560,7 @@ impl CheckedPurpose {
     pub(crate) const fn wire_tag(self) -> &'static str {
         match self {
             Self::Inspection => "inspection1",
+            Self::ReloadInspection => "reload-inspection1",
             Self::Cell => "cell-check4",
             Self::Item => "checked-item5",
             Self::ActivationPreview => "host-activation-preview3",
@@ -640,12 +643,21 @@ pub(crate) fn encode_cell_authorization(
     Ok(authorization)
 }
 
-fn encode_inspection_authorization(owners: &BTreeSet<String>, baseline: Value) -> Value {
+fn encode_inspection_authorization_for(
+    purpose: CheckedPurpose,
+    owners: &BTreeSet<String>,
+    baseline: Value,
+) -> Value {
     Value::Array(vec![
-        Value::Text(CheckedPurpose::Inspection.wire_tag().into()),
+        Value::Text(purpose.wire_tag().into()),
         Value::Array(owners.iter().cloned().map(Value::Text).collect()),
         baseline,
     ])
+}
+
+#[cfg(test)]
+fn encode_inspection_authorization(owners: &BTreeSet<String>, baseline: Value) -> Value {
+    encode_inspection_authorization_for(CheckedPurpose::Inspection, owners, baseline)
 }
 
 #[cfg(test)]
@@ -996,6 +1008,47 @@ impl ModuleCandidateOffer {
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
+        Self::select_inspection_for(
+            CheckedPurpose::Inspection,
+            producer,
+            include,
+            scratch,
+            context,
+            values,
+            retained,
+        )
+    }
+
+    /// Reload compares candidate source for every original in the retained
+    /// namespace, independently of whether the inspection query uses it.
+    pub fn select_reload_inspection(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+    ) -> Result<Self, CompileError> {
+        Self::select_inspection_for(
+            CheckedPurpose::ReloadInspection,
+            producer,
+            include,
+            scratch,
+            context,
+            values,
+            retained,
+        )
+    }
+
+    fn select_inspection_for(
+        purpose: CheckedPurpose,
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+    ) -> Result<Self, CompileError> {
         let owners = values
             .iter()
             .map(|(owner, _)| owner.module_name())
@@ -1008,7 +1061,7 @@ impl ModuleCandidateOffer {
         let inputs = crate::checked_cell::CheckedValueInputs::capture_checked(values, retained)?;
         let context = checked_value_context(context, &inputs)?;
         let authorization = checked_search_authorization(
-            encode_inspection_authorization(&owners, inputs.baseline_authorization()),
+            encode_inspection_authorization_for(purpose, &owners, inputs.baseline_authorization()),
             include,
         )?;
         let selected =
@@ -3105,6 +3158,10 @@ fn seal_turn_outputs_with_validation(
                         table.clone(),
                         sites.to_vec(),
                         &artifact_view,
+                        &certified
+                            .source_selection
+                            .compiler_projection(&artifact_view)
+                            .map_err(compiler_evidence_failure)?,
                     )
                 })
                 .transpose()?

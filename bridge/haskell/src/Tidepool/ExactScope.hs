@@ -103,6 +103,7 @@ data ExactScope = ExactScope
   -- Request-local source proof roots are revalidated by subsequent stages;
   -- they are never serialized as baseline lexical authority.
   , scopeSourceSelectedOwners :: Set.Set (String,String)
+  , scopePublishedSourceOriginals :: Set.Set (String,String)
   } deriving (Eq, Show)
 
 -- One checked purpose owns its admission and ordered search inputs. Native
@@ -112,6 +113,7 @@ data ExactScopePurpose
   | ExactCellPurpose CheckedCellAdmission [FilePath]
   | ExactItemPurpose CheckedItemAdmission [FilePath]
   | ExactInspectionPurpose [ExactIfaceArtifact] [FilePath]
+  | ExactReloadInspectionPurpose [ExactIfaceArtifact] [FilePath]
   | ExactActivationPreviewPurpose ActivationPreviewAdmission [FilePath]
   deriving (Eq, Show)
 
@@ -163,6 +165,7 @@ scopeIncludePaths scope = case scopePurpose scope of
   ExactCellPurpose _ paths -> Just paths
   ExactItemPurpose _ paths -> Just paths
   ExactInspectionPurpose _ paths -> Just paths
+  ExactReloadInspectionPurpose _ paths -> Just paths
   ExactActivationPreviewPurpose _ paths -> Just paths
 
 -- Canonical proof belongs to its exact interface row. Core is a separate
@@ -754,6 +757,7 @@ scopeValueInterfaces scope = case scopePurpose scope of
   ExactCellPurpose admission _ -> checkedValueInterfaces admission
   ExactItemPurpose admission _ -> itemValueInterfaces admission
   ExactInspectionPurpose values _ -> values
+  ExactReloadInspectionPurpose values _ -> values
   ExactActivationPreviewPurpose admission _ -> [previewInputInterface admission]
 
 -- The exact scope separates the bounded metadata envelope from the independently
@@ -771,7 +775,7 @@ readExactScope path = do
           | BL.null remaining -> pure result
           | otherwise -> fail "exact scope has trailing bytes"
       graphs <- readExecutionSourceGraphs (RetainedScopeGraphFiles path) [] descriptors
-      let OfferedScope producer semantic rows lexical products references purpose types = offered
+      let OfferedScope producer semantic rows lexical products references purpose types published = offered
       evidence <- validateInterfaceEvidence producer rows interfaceEvidence
       census <- admitOriginalCensus producer evidence nativeDescriptors
       roots <- extendAdmittedPackageImports emptyAdmittedPackageImports rows >>= either fail pure
@@ -779,8 +783,11 @@ readExactScope path = do
           inputs = AdmittedScopeInputs order admitted roots census
           sha = digest bytes
           scope = ExactScope path sha producer semantic inputs lexical products graphs references
-            purpose types Set.empty
+            purpose types Set.empty (Set.fromList published)
       validateInputClosure producer inputs products
+      forM_ published $ \owner -> case Map.lookup owner evidence of
+        Just (ModuleInterfaceEvidence proof) | isSourceOriginal (canonicalOrigin proof) -> pure ()
+        _ -> fail "published original lacks its canonical source owner"
       validatePreviewOriginalTarget scope evidence
       validateExecutionSources scope graphs
       when timing $ do
@@ -1275,6 +1282,7 @@ reserveCompilationDirectory parent transaction = attempt (0 :: Int)
 data OfferedScope = OfferedScope String String [(ExactIfaceArtifact,FilePath,String)]
   [((String,String),[(String,String)])] [ExactProduct] [ExecutionSourceRef]
   ExactScopePurpose (Maybe (RequestHelperRecipe,RequestTypeSignatures))
+  [(String,String)]
 
 decodeScope :: Decoder s (OfferedScope, [(String, FilePath)], [((String,String),ParsedInterfaceEvidence)],
   [(ExactProduct,(FilePath,String))])
@@ -1282,7 +1290,7 @@ decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE" && version == "10" && count == 9)
+  unless (magic == "TPEXACTSCOPE" && version == "11" && count == 10)
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -1387,8 +1395,23 @@ decodeScope = do
     admission <- maybe (pure NoCheckedPurpose)
       (uncurry decodePurpose) purpose
     pure (requestTypes, admission)
+  published <- bounded 4096 $ do
+    array 7
+    root <- owner
+    interfaceSha <- digestField
+    productSha <- digestField
+    _revision <- nonempty
+    _inputIdentity <- nonempty
+    _selectionSha <- digestField
+    unless (root `elem` selected && any (\originalProduct ->
+      (originalUnit originalProduct,originalModule originalProduct) == root
+        && originalIfaceSha256 originalProduct == interfaceSha
+        && originalProductSha256 originalProduct == productSha) products)
+      (fail "published source selection differs from exact original custody")
+    pure root
+  unique "published source roots" published
   pure (OfferedScope producer semantic interfaces lexical products executionOwners
-    checkedPurpose requestTypes, descriptors, interfaceEvidence, nativeProducts)
+    checkedPurpose requestTypes published, descriptors, interfaceEvidence, nativeProducts)
   where
     decodePurpose authCount purpose = case purpose of
       "host-activation-preview3" -> do
@@ -1438,6 +1461,14 @@ decodeScope = do
         validateInterfaces injected values
         paths <- includePaths
         pure (ExactInspectionPurpose values paths)
+      "reload-inspection1" -> do
+        unless (authCount == 4) (fail "invalid reload inspection admission")
+        injected <- bounded 4096 nonempty
+        values <- valueInterfaces
+        unique "reload inspection injected modules" injected
+        validateInterfaces injected values
+        paths <- includePaths
+        pure (ExactReloadInspectionPurpose values paths)
       "cell-check4" -> do
         unless (authCount == 10) (fail "invalid cell-check admission")
         admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField

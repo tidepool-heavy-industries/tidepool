@@ -741,8 +741,20 @@ pub(crate) fn certify_same_offer_planned_declaration(
             "planned original sealed product has a different declaration origin",
         ));
     }
+    let mut published_baseline = match baseline {
+        Some(context) => context.as_ref().clone(),
+        None => ExactDeclarationContext::new(&[], &[], vec![])?,
+    };
+    for selection in admission
+        .request
+        .context()
+        .published_source_original_selections()?
+    {
+        published_baseline = published_baseline.with_published_source_originals(&selection)?;
+    }
+    let published_baseline = Arc::new(published_baseline);
     let artifact_context = authored_interface_context(
-        baseline,
+        Some(&published_baseline),
         sealed_artifacts,
         products.iter().map(|product| ExactModuleIdentity {
             unit: product.owner().unit.clone(),
@@ -750,7 +762,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
         }),
         &source_admission.home_imports()?,
     )?;
-    let (_scratch, artifacts, original_imports, source_lexical_imports, joined_interfaces) =
+    let (_scratch, artifacts, original_imports, mut source_lexical_imports, joined_interfaces) =
         admit_authored_artifact_closure(
             originals,
             &original_owner,
@@ -761,6 +773,26 @@ pub(crate) fn certify_same_offer_planned_declaration(
             admission.request.program_source_lexical(),
             includes,
         )?;
+    let mut published_lexical = BTreeMap::new();
+    for node in source_lexical_imports.iter().chain(
+        artifact_context
+            .published_source_original_selections()?
+            .iter()
+            .flat_map(|selection| selection.context().lexical_graph()),
+    ) {
+        if published_lexical
+            .insert(node.owner.clone(), node.imports.clone())
+            .is_some_and(|previous| previous != node.imports)
+        {
+            return Err(contract(
+                "published original lexical closure conflicts with authored source",
+            ));
+        }
+    }
+    source_lexical_imports = published_lexical
+        .into_iter()
+        .map(|(owner, imports)| ExactLexicalNode { owner, imports })
+        .collect();
     let interfaces = artifacts
         .iter()
         .map(|artifact| ExactInterfaceOwner {
