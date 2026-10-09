@@ -1505,6 +1505,10 @@ rust_filegroup(
         "src/actor_host/fixtures/child_attachment_valid_request.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_valid_request.hs",
         "src/actor_host/fixtures/context_acceptance_idle_request.hs": "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_request.hs",
         "src/actor_host/fixtures/context_acceptance_idle_spawn.hs": "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_spawn.hs",
+        "src/actor_host/fixtures/deferred_reply_await.hs": "bridge/facade/src/actor_host/fixtures/deferred_reply_await.hs",
+        "src/actor_host/fixtures/deferred_reply_late.hs": "bridge/facade/src/actor_host/fixtures/deferred_reply_late.hs",
+        "src/actor_host/fixtures/deferred_reply_sibling.hs": "bridge/facade/src/actor_host/fixtures/deferred_reply_sibling.hs",
+        "src/actor_host/fixtures/deferred_reply_spawn.hs": "bridge/facade/src/actor_host/fixtures/deferred_reply_spawn.hs",
         "src/actor_host/fixtures/harness_usecase_async.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_async.hs",
         "src/actor_host/fixtures/harness_usecase_publish.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_publish.hs",
         "src/actor_host/fixtures/m3_recursive_child.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
@@ -2596,6 +2600,10 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/child_attachment_valid_request.hs": "src/actor_host/fixtures/child_attachment_valid_request.hs",
         "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_request.hs": "src/actor_host/fixtures/context_acceptance_idle_request.hs",
         "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_spawn.hs": "src/actor_host/fixtures/context_acceptance_idle_spawn.hs",
+        "bridge/facade/src/actor_host/fixtures/deferred_reply_await.hs": "src/actor_host/fixtures/deferred_reply_await.hs",
+        "bridge/facade/src/actor_host/fixtures/deferred_reply_late.hs": "src/actor_host/fixtures/deferred_reply_late.hs",
+        "bridge/facade/src/actor_host/fixtures/deferred_reply_sibling.hs": "src/actor_host/fixtures/deferred_reply_sibling.hs",
+        "bridge/facade/src/actor_host/fixtures/deferred_reply_spawn.hs": "src/actor_host/fixtures/deferred_reply_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/harness_usecase_async.hs": "src/actor_host/fixtures/harness_usecase_async.hs",
         "bridge/facade/src/actor_host/fixtures/harness_usecase_publish.hs": "src/actor_host/fixtures/harness_usecase_publish.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs": "src/actor_host/fixtures/m3_recursive_child.hs",
@@ -3306,6 +3314,34 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f6e746578745f616363657074616e63655f73657475702e6873",
     src = "src/actor_host/fixtures/context_acceptance_setup.hs",
     out = "context_acceptance_setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f64656665727265645f7265706c795f61776169742e6873",
+    src = "src/actor_host/fixtures/deferred_reply_await.hs",
+    out = "deferred_reply_await.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f64656665727265645f7265706c795f6c6174652e6873",
+    src = "src/actor_host/fixtures/deferred_reply_late.hs",
+    out = "deferred_reply_late.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f64656665727265645f7265706c795f7369626c696e672e6873",
+    src = "src/actor_host/fixtures/deferred_reply_sibling.hs",
+    out = "deferred_reply_sibling.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f64656665727265645f7265706c795f737061776e2e6873",
+    src = "src/actor_host/fixtures/deferred_reply_spawn.hs",
+    out = "deferred_reply_spawn.hs",
     visibility = ["PUBLIC"],
 )
 

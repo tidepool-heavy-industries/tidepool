@@ -7,6 +7,7 @@ use super::test_campaign::{
     COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use std::sync::Arc;
+use std::time::Duration;
 
 struct HeldSuppliedCall {
     request: String,
@@ -459,6 +460,150 @@ async fn supplied_spec_request_queued_in_spawn_cell_reaches_installed_receiver()
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_done.assert_value("supplied-observe-immediate-result", "True");
             root_done.finish();
+        })
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the native hosted provider and compiler acceptance resources"]
+async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 4);
+    let (provider, mut requests) = hosted_script_provider();
+    let (entered, mut admitted) = tokio::sync::mpsc::unbounded_channel();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, move |config| {
+        config.jev = Some(Arc::new(SuppliedCallGate(entered)));
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.input("Reply while a notebook task remains parked.")
+                .await
+                .unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = std::collections::VecDeque::new();
+            next_hosted_script_round(&mut requests, &mut pending, &root)
+                .await
+                .call(
+                    "deferred-spawn",
+                    include_str!("fixtures/deferred_reply_spawn.hs"),
+                );
+            let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_after.assert_value("deferred-spawn", "True");
+            let child_node = host
+                .context
+                .forest
+                .inspect_host_graph()
+                .into_iter()
+                .find(|node| node.label == "deferred-reply-child")
+                .unwrap();
+            let child = child_path(&host.context, child_node.actor);
+            next_hosted_script_round(&mut requests, &mut pending, &child)
+                .await
+                .async_call(
+                    "deferred-sibling",
+                    include_str!("fixtures/deferred_reply_sibling.hs"),
+                );
+            let held = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, admitted.recv())
+                .await
+                .expect("actual notebook reaches Jev gate")
+                .unwrap();
+            assert_eq!(held.request, "deferred-reply-sibling");
+            next_hosted_script_round(&mut requests, &mut pending, &child).await.async_call(
+                "deferred-late-cell", include_str!("fixtures/deferred_reply_late.hs"));
+            let late = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, admitted.recv())
+                .await.expect("second actual notebook is admitted before reply").unwrap();
+            assert_eq!(late.request, "deferred-reply-late");
+            root_after.call(
+                "deferred-parent-await",
+                include_str!("fixtures/deferred_reply_await.hs"),
+            );
+            tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                loop {
+                    let parent = host.context.forest.inspect_host_graph().into_iter()
+                        .find(|node| node.actor == host.context.actor.identity()).unwrap();
+                    if matches!(parent.workbench, exomonad_actor::ActorWorkbenchPosture::AwaitingEffect { ref effect, .. }
+                        if effect == "awaitWatch") {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }).await.expect("parent parks on its typed child watch before reply");
+            next_hosted_script_round(&mut requests, &mut pending, &child)
+                .await
+                .async_call("deferred-child-reply", "respond (\"first accepted failure\" :: Text)");
+            let child_after = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                let mut waits = 0;
+                loop {
+                    let round = next_hosted_script_round(&mut requests, &mut pending, &child).await;
+                    if round.request.input.iter().any(|item|
+                        item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == "deferred-child-reply") {
+                        break round;
+                    }
+                    round.function(&format!("deferred-reply-yield-{waits}"), "yield", serde_json::json!({"until":1}));
+                    waits += 1;
+                }
+            }).await.expect("actual async respond settles while other notebooks remain parked");
+            let reply = child_after.settled_output("deferred-child-reply");
+            assert_eq!(reply["status"], "replied", "{reply}");
+            assert_eq!(
+                reply["items"][0]["terminalTransfer"], "replyAccepted",
+                "{reply}"
+            );
+            let node = host.context.forest.inspect_host_graph().into_iter()
+                .find(|node| node.actor == child_node.actor).unwrap();
+            assert!(!node.active_requests.is_empty(), "accepted reply still owns its continuation");
+            // A second reply is a later invocation, not replacement authority
+            // for the accepted value. It waits behind the owned continuation.
+            child_after.async_call("deferred-second-reply", "respond (\"later success\" :: Text)");
+            let child_final = next_hosted_script_round(&mut requests, &mut pending, &child).await;
+            child_final.finish();
+            held.release.send(()).unwrap();
+            late.release.send(()).unwrap();
+            // Late asynchronous outputs start another provider round even
+            // after final prose. Consume their actual receipts before finishing
+            // that round; provider prose carries no request settlement authority.
+            let late_outputs = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                let mut waits = 0;
+                loop {
+                    let round = next_hosted_script_round(&mut requests, &mut pending, &child).await;
+                    if ["deferred-sibling", "deferred-late-cell", "deferred-second-reply"].iter().all(|call|
+                        round.request.input.iter().any(|item| item.0["type"] == "custom_tool_call_output"
+                            && item.0["call_id"] == *call)) {
+                        break round;
+                    }
+                    round.function(&format!("deferred-late-yield-{waits}"), "yield", serde_json::json!({"until":1}));
+                    waits += 1;
+                }
+            }).await.expect("all late actual notebook outputs reach the provider");
+            late_outputs.assert_committed("deferred-sibling");
+            late_outputs.assert_committed("deferred-late-cell");
+            assert_eq!(late_outputs.settled_output("deferred-second-reply")["status"], "rejected");
+            late_outputs.finish();
+            let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            root_done.assert_value("deferred-parent-await", "True");
+            root_done.finish();
+            tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    let node = host
+                        .context
+                        .forest
+                        .inspect_host_graph()
+                        .into_iter()
+                        .find(|node| node.actor == child_node.actor)
+                        .unwrap();
+                    if node.provider_turn.is_some_and(|turn| {
+                        turn.state == exomonad_model::ProviderTurnState::Succeeded
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("provider finishes after both actual late calls settle");
         })
     })
     .await;
