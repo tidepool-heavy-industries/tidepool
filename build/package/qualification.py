@@ -920,7 +920,7 @@ def verify_workspace_bundle(bundle: Path, record: dict, git: Path) -> None:
         subprocess.run([str(git), "-C", str(repository), "fsck", "--no-dangling"], check=True,
                        stdout=subprocess.DEVNULL)
 
-def native_environment(root: Path) -> dict:
+def native_environment(root: Path, *, verified_catalog: dict | None = None) -> dict:
     tools = native_runtime_tools(root / "share/exomonad/runtime-tools")
     ghc = (root / "share/exomonad/ghc-libdir.txt").read_text().strip()
     environment = {
@@ -941,8 +941,11 @@ def native_environment(root: Path) -> dict:
 
     contract = json.loads((root / "share/exomonad/native-build-contract.json").read_text())
     if contract["stdlib_mode"] == "catalog-backed":
-        selection = verify_native_catalog(root, tools)["source_selection"]
-        verify_native_root_entry(root, contract["native_catalog"])
+        catalog = verified_catalog
+        if catalog is None:
+            catalog = verify_native_catalog(root, tools)
+            verify_native_root_entry(root, contract["native_catalog"])
+        selection = catalog["source_selection"]
         environment["TIDEPOOL_COMPILER_MODULES"] = str(root / "share/exomonad/catalog/catalog.json")
         environment["TIDEPOOL_PREPARED_ROOT_ENTRY"] = str(root / "share/exomonad/root-entry")
         environment["TIDEPOOL_PRELUDE_DIR"] = str(Path(selection["snapshot_root"]) / "lib")
@@ -1219,10 +1222,11 @@ def verify(path: Path) -> dict:
             raise ValueError(f"declared Nix selection changed: {path}")
     tools = native_runtime_tools(Path(descriptor["external_inputs"]["runtime_tools"]["path"]))
     expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}
+    verified_catalog = None
     if descriptor["stdlib_mode"] == "catalog-backed":
-        selection = verify_native_catalog(root, tools)["source_selection"]
+        verified_catalog = verify_native_catalog(root, tools)
         verify_native_root_entry(root, contract["native_catalog"])
-        expected_roots.add(str(Path(selection["snapshot_root"])))
+        expected_roots.add(str(Path(verified_catalog["source_selection"]["snapshot_root"])))
     for item in descriptor["elf_runtime"].values():
         if item["linkage"] == "dynamic":
             expected_roots.add(item["loader_store_path"])
@@ -1239,7 +1243,7 @@ def verify(path: Path) -> dict:
         if Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"]):
             raise ValueError("deployment Nix GC root was removed or changed")
     verify_registered_gc_roots(tools, descriptor["gc_roots"])
-    expected_environment = native_environment(root)
+    expected_environment = native_environment(root, verified_catalog=verified_catalog)
     expected_environment.update(
         TIDEPOOL_BROWSER_NODE=descriptor["external_inputs"]["TIDEPOOL_BROWSER_NODE"]["path"],
         TIDEPOOL_BROWSER_DRIVER=str(root / "share/exomonad/browser-driver/driver.mjs"),

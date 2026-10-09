@@ -1541,6 +1541,114 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertEqual(qualification.verify_native_catalog(bundle, tools), contract['native_catalog'])
             self.assertEqual(catalog.read_bytes(), before)
 
+    def test_verify_reuses_catalog_validation_and_a_later_verify_detects_source_drift(self):
+        original, tools, record, _, retained_nar = self.retained_fixture()
+        bundle, contract, _ = self.catalog_fixture(original, tools, record)
+        shared = bundle / 'share/exomonad'
+        contract.update(
+            profile='production', feature_profile='embedded-native',
+            source_inputs={'fixture': '1' * 64},
+            source_inputs_sha256=qualification.digest_inventory({'fixture': '1' * 64}),
+            artifacts={}, browser_driver={},
+        )
+        qualification.write_json(shared / 'native-build-contract.json', contract)
+        workspace = {'schema': 1, 'path': '.exomonad/workspace', 'mode': '160000',
+                     'revision': 'c' * 40}
+        qualification.write_json(shared / 'workspace-gitlink.json', workspace)
+        (shared / 'workspace.bundle').write_bytes(b'fixture workspace bundle')
+        ghc = tools / 'ghc-libdir'
+        ghc.mkdir()
+        browser_node = tools / 'bin/browser-node'
+        browser_node.write_text('fixture node executable')
+        playwright = self.root / 'playwright-browsers'
+        playwright.mkdir()
+        external_inputs = {
+            'TIDEPOOL_GHC_LIBDIR': ghc,
+            'TIDEPOOL_BROWSER_NODE': browser_node,
+            'PLAYWRIGHT_BROWSERS_PATH': playwright,
+            'runtime_tools': tools,
+        }
+        external = {
+            name: {'path': str(path), 'store_path': str(path.resolve())}
+            for name, path in external_inputs.items()
+        }
+
+        def metadata(_tools, selected):
+            roots = sorted(str(Path(path).resolve()) for path in selected)
+            if roots == [str(original.resolve())]:
+                return retained_nar
+            return {'roots': roots, 'closure': roots,
+                    'nar_hashes': {path: 'sha256:' + qualification.hashlib.sha256(
+                        path.encode()).hexdigest() for path in roots}}
+
+        descriptor = {
+            'schema': qualification.QUALIFICATION_SCHEMA,
+            'kind': 'native-runtime-qualification', 'bundle_root': str(bundle),
+            'stdlib_mode': 'catalog-backed', 'feature_profile': 'embedded-native',
+            'profile': 'production', 'startup_mode': contract['startup_mode'],
+            'source_inputs': contract['source_inputs'],
+            'source_inputs_sha256': contract['source_inputs_sha256'],
+            'artifacts': contract['artifacts'], 'browser_driver': contract['browser_driver'],
+            'native_catalog': contract['native_catalog'],
+            'native_root_entry': contract['native_root_entry'],
+            'generated_root_source': contract['generated_root_source'],
+            'programs': qualification.programs(bundle), 'cohorts': qualification.cohorts(),
+            'test_fixtures': {}, 'workspace_gitlink': workspace,
+            'external_inputs': external, 'elf_runtime': {},
+            'nix_closure': {}, 'gc_roots': [],
+        }
+        selected_roots = [item['store_path'] for item in external.values()]
+        selected_roots.append(str(original.resolve()))
+        descriptor['nix_closure'] = metadata(tools, selected_roots)
+        gc_root_directory = shared / 'gc-roots'
+        gc_root_directory.mkdir()
+        for selected in sorted(set(selected_roots)):
+            path = gc_root_directory / qualification.hashlib.sha256(selected.encode()).hexdigest()
+            path.symlink_to(selected)
+            descriptor['gc_roots'].append({'path': str(path), 'store_path': selected})
+        with patch.object(qualification, 'nix_path', side_effect=lambda path: Path(path).resolve()), \
+             patch.object(qualification, 'store_root', side_effect=lambda path: Path(path).resolve()), \
+             patch.object(qualification, 'nix_metadata', side_effect=metadata), \
+             patch.object(qualification, 'verify_registered_gc_roots'), \
+             patch.object(qualification.subprocess, 'run'):
+            environment = qualification.native_environment(bundle)
+        environment.update(
+            TIDEPOOL_BROWSER_NODE=str(browser_node),
+            TIDEPOOL_BROWSER_DRIVER=str(bundle / qualification.BROWSER_DRIVER_ROOT / 'driver.mjs'),
+            PLAYWRIGHT_BROWSERS_PATH=str(playwright),
+        )
+        descriptor['environment'] = environment
+        descriptor_path = shared / qualification.DESCRIPTOR.split('/')[-1]
+        qualification.write_json(descriptor_path, descriptor)
+
+        with patch.object(qualification, 'nix_path', side_effect=lambda path: Path(path).resolve()), \
+             patch.object(qualification, 'store_root', side_effect=lambda path: Path(path).resolve()), \
+             patch.object(qualification, 'nix_metadata', side_effect=metadata), \
+             patch.object(qualification, 'native_runtime_tools', return_value=tools), \
+             patch.object(qualification, 'verify_frozen_inventory', return_value={}), \
+             patch.object(qualification, 'verify_frozen_test_fixtures'), \
+             patch.object(qualification, 'verify_fixture_source_contract'), \
+             patch.object(qualification, 'verify_artifact_contract'), \
+             patch.object(qualification, 'verify_registered_gc_roots'), \
+             patch.object(qualification, 'loader_evidence', return_value={}), \
+             patch.object(qualification.subprocess, 'run'), \
+             patch.object(qualification, 'verify_native_catalog',
+                          wraps=qualification.verify_native_catalog) as verify_catalog, \
+             patch.object(qualification, 'verify_native_root_entry',
+                          wraps=qualification.verify_native_root_entry) as verify_root:
+            self.assertEqual(qualification.verify(descriptor_path), descriptor)
+            self.assertEqual(verify_catalog.call_count, 1)
+            self.assertEqual(verify_root.call_count, 1)
+
+            source = original / 'lib/Library.hs'
+            before = source.read_bytes()
+            source.write_text('changed after first verify')
+            with self.assertRaisesRegex(ValueError, 'retained catalog sources differ'):
+                qualification.verify(descriptor_path)
+            self.assertEqual(verify_catalog.call_count, 2)
+            self.assertEqual(verify_root.call_count, 1)
+            source.write_bytes(before)
+
     def test_root_entry_requires_schema_two_typed_source_selection(self):
         original, tools, record, _, _ = self.retained_fixture()
         bundle, _, _ = self.catalog_fixture(original, tools, record)
