@@ -7892,10 +7892,23 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert!(
-            compile_cell_program_admitted(hidden_admission).is_err(),
+        assert_eq!(
+            hidden_admission
+                .plan_reservation()
+                .unwrap()
+                .items()
+                .iter()
+                .map(|item| item.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                crate::session::RuntimePlannedCellItemKind::Prologue,
+                crate::session::RuntimePlannedCellItemKind::Bind
+            ]
+        );
+        let refusal = compile_cell_program_admitted(hidden_admission).err().expect(
             "private original code availability must not authorize an authored import of its hidden owner"
         );
+        eprintln!("whole-cell hidden original import refusal: {refusal:?}");
         session.retire_scope(hidden_scope);
         assert_eq!(
             session.public_visibility_snapshot_in(public).unwrap(),
