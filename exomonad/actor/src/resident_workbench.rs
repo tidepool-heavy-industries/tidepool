@@ -497,6 +497,50 @@ mod failure_diagnostic_tests {
     }
 
     #[test]
+    fn parser_failure_routes_source_only_and_preserves_non_source_classes() {
+        use tidepool_toolchain::diag::{DiagnosticSeverity, ExtractDiag};
+        let diagnostic = ExtractDiag {
+            span: None,
+            severity: DiagnosticSeverity::Error,
+            message: "parse error λ".into(),
+        };
+        let source = cell_check_error(
+            CompileError::Diagnostics(vec![diagnostic.clone()]).into(),
+            ":}",
+        );
+        let ResidentActorWorkbenchError::CellCheck(source) = source else {
+            panic!("authored parse failure must use source-aware rejection")
+        };
+        assert!(
+            source.items.is_none(),
+            "a parser failure has no accepted source plan"
+        );
+        let CompileError::Diagnostics(retained) = source.error else {
+            panic!("source diagnostic lost")
+        };
+        assert_eq!(retained[0].message, diagnostic.message);
+        for error in [
+            CompileError::MissingOutput(PathBuf::from("missing-output")),
+            CompileError::Io(std::io::Error::other("controlled IO failure")),
+            CompileError::WorkerFailure(vec![diagnostic.clone()]),
+            CompileError::InputRejected(vec![diagnostic]),
+            CompileError::ExtractFailed("controlled contract failure".into()),
+            CompileError::MalformedDiagnostics("controlled wire failure".into()),
+        ] {
+            let expected = classify_compile(&error);
+            let mapped = cell_check_error(error.into(), ":}");
+            assert!(matches!(
+                mapped,
+                ResidentActorWorkbenchError::CompileInfrastructure(_)
+            ));
+            let actual = mapped.failure_diagnostic().expect("classified failure");
+            assert_eq!(actual.class, expected.class);
+            assert_eq!(actual.phase, expected.phase);
+            assert_eq!(actual.cause, expected.cause);
+        }
+    }
+
+    #[test]
     fn preflight_infrastructure_failure_keeps_compiler_class_and_cause() {
         let failure =
             CompileError::MissingOutput(std::path::PathBuf::from("missing-output")).into();
@@ -753,9 +797,8 @@ impl ActorWorkbenchSource {
         {
             // Observe the current deployment selection before reusing issuer-owned
             // readiness. This reads metadata without decoding its native images.
-            crate::agent_spec::preparation::builtin_program(policy).map_err(|error| {
-                ResidentActorWorkbenchError::ActorProtocol(format!("{error:?}"))
-            })?
+            crate::agent_spec::preparation::builtin_program(policy)
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(format!("{error:?}")))?
         } else {
             None
         };
@@ -6001,7 +6044,9 @@ where
                     Arc::new(parser_specification.cell.clone()),
                     &parser_specification.include,
                 )
-                .map_err(ResidentActorWorkbenchError::Compile)
+                .map_err(|error| {
+                    cell_check_error(error.into(), &parser_specification.cell.cell_source)
+                })
             })
         }))
         .await

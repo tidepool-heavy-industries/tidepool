@@ -3887,3 +3887,72 @@ async fn explicit_display_respects_shared_budget_and_handles_survive_cell_failur
     assert_eq!(tidepool_extract_cmd::extract_spawn_count(), 0);
 })).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hosted_parser_rejection_preserves_authored_diagnostics_without_publication() {
+    use super::hosted_test_context::HostedTestRuntime;
+    use super::test_campaign::{
+        hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    };
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let host = HostedTestRuntime::start(&settings, &provider)
+        .await
+        .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.input("Exercise authored diagnostics through the installed notebook.")
+                .await
+                .unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = std::collections::VecDeque::new();
+            let mut round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            for (call, source, line) in [
+                ("raw-parse", ":}", 1),
+                (
+                    "respond-parse",
+                    "parserMustNotPublish <- pure (7 :: Int)\nrespond (",
+                    2,
+                ),
+                ("missing-name", "parserMustNotPublish", 1),
+            ] {
+                round.call(call, source);
+                round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+                let output = round.settled_output(call);
+                assert_eq!(output["status"], "rejected", "{output}");
+                let items = output["items"]
+                    .as_array()
+                    .expect("source rejection has receipts");
+                assert!(!items.is_empty(), "{output}");
+                let diagnostics = items
+                    .iter()
+                    .flat_map(|item| item["diagnostics"].as_array().into_iter().flatten())
+                    .collect::<Vec<_>>();
+                assert!(
+                    diagnostics.iter().any(|diagnostic| {
+                        diagnostic["message"].as_str().is_some_and(|text| {
+                            !text.trim().is_empty()
+                                && (call != "missing-name" || text.contains("parserMustNotPublish"))
+                        }) && diagnostic["location"]["kind"] == "authored"
+                            && diagnostic["location"]["label"] == "<cell>"
+                            && diagnostic["location"]["startLine"] == line
+                    }),
+                    "{output}"
+                );
+                assert!(
+                    items.iter().all(|item| item["installedBindings"]
+                        .as_array()
+                        .is_none_or(Vec::is_empty)
+                        && item["operations"].as_array().is_none_or(Vec::is_empty)),
+                    "{output}"
+                );
+            }
+            round.call("after-rejection", "display ((1 :: Int) + 1)");
+            let done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            done.assert_value("after-rejection", "2");
+            done.finish();
+        })
+    })
+    .await;
+}

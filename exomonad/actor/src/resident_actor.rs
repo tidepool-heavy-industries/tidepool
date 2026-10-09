@@ -15732,6 +15732,100 @@ mod tests {
     }
 
     #[test]
+    fn preparation_infrastructure_and_cancellation_do_not_become_source_rejections() {
+        let expected =
+            tidepool_toolchain::classify_compile(&tidepool_runtime::CompileError::MissingOutput(
+                std::path::PathBuf::from("controlled-missing-output"),
+            ));
+        for error in [
+            ResidentActorWorkbenchError::CompileInfrastructure(expected.clone()),
+            ResidentActorWorkbenchError::InvocationCancelled,
+        ] {
+            let mut request = tidepool_runtime::session::WorkbenchRequest::from_cell_input(":}");
+            let mut cursor = super::WorkbenchCursor::default();
+            let failure = super::install_cell_preparation(&mut request, &mut cursor, Err(error))
+                .expect_err("non-source failure must retain its failure boundary");
+            assert!(failure.receipts.is_empty());
+            assert!(failure.publication.is_none());
+            assert!(request.items.is_empty());
+            assert_eq!(request.cell_source(), Some(":}"));
+            assert!(!cursor.preparation_done);
+            assert!(cursor.prepared_cell.is_none());
+            match failure.source {
+                ResidentActorWorkbenchError::CompileInfrastructure(diagnostic) => {
+                    assert_eq!(diagnostic, expected)
+                }
+                ResidentActorWorkbenchError::InvocationCancelled => {}
+                _ => panic!("non-source failure changed kind"),
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(96))]
+        #[test]
+        fn source_rejection_without_plan_preserves_diagnostics_and_output_budget(
+            plan in 0u8..3,
+            location in 0u8..3,
+            diagnostic_count in 0usize..4,
+            repetitions in 0usize..35000,
+        ) {
+            use proptest::prelude::*;
+            use tidepool_toolchain::diag::{DiagSpan, DiagnosticLocation, DiagnosticSeverity, ExtractDiag};
+            let message = format!("parse witness\n{}\nlast witness", "λ🙂\n".repeat(repetitions));
+            let diagnostics = (0..diagnostic_count).map(|_| ExtractDiag {
+                span: (location != 0).then(|| DiagSpan {
+                    file: if location == 1 { "<cell>" } else { "Library.hs" }.into(),
+                    start_line: 2, start_col: 3, end_line: 2, end_col: 4,
+                }),
+                severity: DiagnosticSeverity::Error,
+                message: message.clone(),
+            }).collect::<Vec<_>>();
+            let items = match plan {
+                0 => None,
+                1 => Some(Vec::new()),
+                _ => Some(vec![CellAnalysisItem {
+                    span: CellSourceSpan { start_line: 1, start_column: 1, end_line: 2, end_column: 5 },
+                    source: "-- λ\n:}".into(), prologue_only: false,
+                    verdict: TurnClassification { kind: TurnKind::Expr, binders: Vec::new(), items: Vec::new() },
+                    source_items: Vec::new(),
+                }]),
+            };
+            let response = super::cell_check_rejection(tidepool_runtime::session::CellCheckFailure {
+                error: tidepool_runtime::CompileError::Diagnostics(diagnostics), items,
+            }, "-- λ\n:}");
+            prop_assert_eq!(response.status, WorkbenchRunStatus::Rejected);
+            prop_assert_eq!(response.items.len(), 1);
+            prop_assert_eq!(response.next_index, 0);
+            let receipt = &response.items[0];
+            prop_assert_eq!(receipt.diagnostics.len(), diagnostic_count);
+            prop_assert!(receipt.output.len() <= 65536);
+            prop_assert!(receipt.installed_bindings.is_empty());
+            prop_assert!(receipt.operations.is_empty());
+            for diagnostic in &receipt.diagnostics {
+                prop_assert!(diagnostic.message.contains("parse witness"));
+                prop_assert!(diagnostic.message.contains("last witness"));
+                match (&diagnostic.location, location) {
+                    (DiagnosticLocation::Unlocated, 0) => {},
+                    (DiagnosticLocation::Authored { label, start_line, start_col, .. }, 1) => {
+                        prop_assert_eq!(label, "<cell>"); prop_assert_eq!(*start_line, 2); prop_assert_eq!(*start_col, 3);
+                    },
+                    (DiagnosticLocation::Foreign { file, start_line, .. }, 2) => {
+                        prop_assert_eq!(file, "Library.hs"); prop_assert_eq!(*start_line, 2);
+                    },
+                    _ => prop_assert!(false, "diagnostic source identity changed"),
+                }
+            }
+            if diagnostic_count != 0 {
+                prop_assert_eq!(receipt.status, WorkbenchItemStatus::Rejected);
+                prop_assert_eq!(receipt.failure_layer, Some(WorkbenchFailureLayer::Compile));
+                prop_assert!(receipt.output.contains("parse witness"));
+                prop_assert!(receipt.output.contains("last witness"));
+            }
+        }
+    }
+
+    #[test]
     fn rejected_workbench_response_marks_the_unexecuted_suffix() {
         let item = |kind, line| {
             let span = CellSourceSpan {
