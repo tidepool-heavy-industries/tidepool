@@ -13,6 +13,19 @@ contract. Cargo and Nix pins, host code, browser schemas and assets advance
 together. The frozen qualification owner verifies their exact identities;
 an older checkpoint's Harness pin is not a separate release requirement.
 
+Keep milestone claims distinct, with the exact bundle descriptor and executed
+evidence attached to each:
+
+| Milestone | Acceptance |
+|---|---|
+| M1 | Embedded sequential host and browser operation through the production runtime. |
+| M2 | Concurrent private execution, atomic publication, retained captures and worker lifecycle through the production host. Harness-backed correctness is already part of this gate. |
+| M3 | Integrated harness acceptance: scripted recursive worker tree, complete harness timing evidence, and a live Sol 6.1/Luna browser and TUI trial. |
+
+M3 preparation can run alongside M2 qualification. A component test pass or an
+earlier bundle's milestone does not qualify a later bundle. The full repository
+migration remains a separate completion obligation.
+
 ## Ownership rules
 
 - Structural tests construct current typed data. They do not issue compiler
@@ -189,7 +202,8 @@ without introducing another compiler, fixture registry or test runner.
    reaches the reply conflict above without a stack abort. Retain that startup
    regression. This does not establish captured-child or full M2 acceptance.
 
-The delivery owner alone builds, freezes and runs the candidate. Fixture
+The qualification owner freezes and runs the matched candidate; component
+owners compile their affected targets early in provisioned checkouts. Fixture
 construction/ownership, semantic scenarios, and reply identity are separate
 source parcels with explicit shared interfaces; do not fork owners over the
 same fixture file. Buck provenance, newer Harness integration and remaining
@@ -277,8 +291,9 @@ The Rust graph owner publishes the shared typed API and validation scaffold
 before wire/runtime consumer implementation. The Haskell producer and graph
 owner agree scopes, edge roles, layout facts and wire tags together. Separate
 owners then implement the wire/fixture cutover and runtime/codegen consumption.
-Root reviews the full data flow and deletion obligations; delivery owns the
-single admitted build lane, actual metadata regeneration and acceptance.
+Root reviews the full data flow and deletion obligations; qualification owns
+the matched release contract. Owners coordinate concrete output conflicts and
+admitted build capacity, actual metadata regeneration and acceptance.
 
 Required controls exercise the production boundary that previously failed:
 
@@ -439,6 +454,39 @@ browser asset identities together. The final M1/M2 gates must use those bundle
 components; package `--help` or a catalog-only smoke cannot substitute for them.
 A configured toolchain flake may provide compilers, but must not silently select
 a different project revision's runtime products.
+
+## M3 integrated harness gate
+
+Reuse the matched M1/M2 host, Store, Engine, compiler, source catalog and browser
+assets. Script only provider responses in the deterministic cases. No fake
+resident execution, second supervisor or alternate compiler route is accepted.
+Select cases through the existing frozen qualification descriptor, which owns
+their exact names, nonzero counts, compiler mode and deadlines.
+
+1. Run the `m3-recursive` cohort through real Sol 6.1 root, Luna child and Luna
+   grandchild actor paths. Provider barriers prove that the parent and child
+   remain pending while descendants perform native work and return typed
+   replies. Check inherited helper results, creator/context/workspace identity,
+   provenance and confirmed cleanup.
+2. Run `harness-performance` and `harness-performance-three-actor` from that
+   descriptor. Require their behavioral passes and complete measurement reports:
+   attributed startup, phase coverage, physical compiler requests and service,
+   queue observations, host-side work, exact source/profile identity and cleanup.
+   Report measured costs separately from correctness; missing attribution is
+   incomplete evidence, not a zero cost or a performance win.
+3. Deploy the qualified bundle behind Tailscale and drive a fresh live Sol 6.1
+   root with Luna children and a grandchild. Build the TUI in a new task directory,
+   retaining actual model identities, tool receipts, typed replies and commits.
+   Verify root and worker chat, streaming updates, direct worker input, tree
+   navigation and reconnect through the browser. The user exercises the TUI in
+   their terminal; no additional automated PTY gate is required.
+
+Record M3 separately from M2 in the retained delivery evidence and durable Git
+acceptance annotation. Reuse qualifying M1/M2 evidence only when the descriptor
+identity is unchanged. A later M3 fixture or implementation change requires a
+new frozen descriptor and its own qualification; never edit a frozen bundle or
+copy acceptance between different identities. Any failed live behavior triggers
+a retained reproduction and coverage repair before M3 is declared complete.
 
 ## Full migration gate
 
