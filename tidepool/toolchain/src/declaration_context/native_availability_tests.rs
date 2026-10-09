@@ -513,6 +513,132 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
 }
 
 #[test]
+fn private_native_availability_distinguishes_exact_canonical_histories() {
+    let current = product("CanonicalHistory", 1);
+    let competitor = product("CanonicalHistory", 250);
+    assert_eq!(current.module_interface(), competitor.module_interface());
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    for length in 1..=4 {
+        let mut context = type_context(std::slice::from_ref(&current))
+            .as_ref()
+            .clone();
+        let mut products = vec![current.clone()];
+        for version in 2..=length + 1 {
+            let historical = fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    "CanonicalHistory",
+                    vec![(7, vec![]), (9001, vec![])],
+                    version,
+                    &BTreeMap::new(),
+                    vec![version],
+                ),
+                producer.sha256(),
+            );
+            assert_ne!(historical.module_interface(), current.module_interface());
+            products.push(historical);
+        }
+        let entries = products
+            .into_iter()
+            .map(|product| Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap()))
+            .collect::<Vec<_>>();
+        context.inventory = context
+            .inventory
+            .inventory()
+            .admit_shared_with_demand(
+                &context.inventory,
+                entries,
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        assert!(context
+            .inventory
+            .metadata_snapshot()
+            .ambiguous_native_owners
+            .contains(&identity("fixture", "CanonicalHistory")));
+        let before = context.inventory.selected_native_groups();
+        assert!(
+            before.is_empty(),
+            "historical custody selects no executable groups"
+        );
+        let private = OriginalCompilerInputs::from_native_availability(
+            &context,
+            producer,
+            std::slice::from_ref(&current),
+        )
+        .expect("different exact historical interfaces cannot obscure the current issuer");
+        let root = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(context.clone()))
+            .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private))
+            .unwrap();
+        assert_eq!(
+            request.compiler_original_products().unwrap(),
+            vec![current.clone()]
+        );
+        assert_eq!(
+            request.compiler_inputs().metadata.selected_native_groups,
+            before
+        );
+        let wire = scope(&request);
+        let rows = wire[6].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].as_array().unwrap()[4],
+            text(hex(&current.owner().product_sha256))
+        );
+
+        let mut unissued = context.clone();
+        unissued.compiler_projection = CompilerInputProjection::default();
+        assert!(
+            OriginalCompilerInputs::from_native_availability(
+                &unissued,
+                producer,
+                std::slice::from_ref(&current),
+            )
+            .is_err(),
+            "absence of an issuing canonical role retains strict ambiguity refusal"
+        );
+        let competing =
+            Arc::new(ArtifactEntry::original(producer.sha256(), competitor.clone()).unwrap());
+        context.inventory = context
+            .inventory
+            .inventory()
+            .admit_shared_with_demand(
+                &context.inventory,
+                vec![competing.clone()],
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        assert!(
+            OriginalCompilerInputs::from_native_availability(
+                &context,
+                producer,
+                std::slice::from_ref(&current),
+            )
+            .is_err(),
+            "two native bodies for the same exact canonical interface remain ambiguous"
+        );
+        context.compiler_projection =
+            CompilerInputProjection::from_issued_entries(&[competing]).unwrap();
+        assert!(
+            OriginalCompilerInputs::from_native_availability(
+                &context,
+                producer,
+                std::slice::from_ref(&current),
+            )
+            .is_err(),
+            "an issued native winner cannot be replaced by a canonical-equal competitor"
+        );
+        assert!(OriginalCompilerInputs::from_native_availability(
+            &context,
+            producer,
+            std::slice::from_ref(&competitor),
+        )
+        .is_ok());
+        assert_eq!(context.inventory.selected_native_groups(), before);
+    }
+}
+
+#[test]
 fn availability_refuses_wrong_external_group_before_advertising_binders() {
     use crate::certified_products::{
         certify_candidate_original_with_validation, OriginalNativeCandidate, PendingImportOwner,

@@ -246,7 +246,26 @@ impl OriginalCompilerInputs {
                             "private native availability competes with selected original",
                         ));
                     }
-                } else if retained.ambiguous_native_owners.contains(&owner) {
+                } else if retained.ambiguous_native_owners.contains(&owner)
+                    && retained
+                        .artifacts
+                        .values()
+                        .filter(|entry| match &entry.payload {
+                            ArtifactPayload::Original(original) => {
+                                original.module_interface().is_some_and(|interface| {
+                                    ArtifactEntry::canonical(interface.clone()).descriptor.id
+                                        == previous.descriptor.id
+                                })
+                            }
+                            _ => false,
+                        })
+                        .take(2)
+                        .count()
+                        > 1
+                {
+                    // Historical bodies with a different exact interface stay
+                    // dependencies. Only this issued canonical namespace can
+                    // be ambiguous without an explicit native winner.
                     return Err(failure(
                         "private native availability has ambiguous retained originals",
                     ));
