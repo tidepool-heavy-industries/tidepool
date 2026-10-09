@@ -647,7 +647,31 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                             .into_iter()
                             .filter(|group| nodes.contains(&group.0))
                             .collect();
-                        let facts = catalog.facts(ids.clone(), selected);
+                        let mut facts = catalog.facts(ids.clone(), selected);
+                        // A retained original's unselected bodies keep exact
+                        // dependency carriers, but add no group demand. The
+                        // oracle scans raw edges across every ordinal rather
+                        // than reading production's native-owner index.
+                        let available = carrier_ids(&view.facts);
+                        loop {
+                            let prior = facts.clone();
+                            let carriers = carrier_ids(&prior);
+                            let mut needed = carriers.clone();
+                            for (from, targets) in &catalog.edges {
+                                if carriers.contains(&catalog.originals[from.0].descriptor.id) {
+                                    for (target, _) in targets {
+                                        let id = catalog.originals[*target].descriptor.id;
+                                        if available.contains(&id) {
+                                            needed.insert(id);
+                                        }
+                                    }
+                                }
+                            }
+                            facts = catalog.facts(needed, groups(&prior));
+                            if facts == prior {
+                                break;
+                            }
+                        }
                         actual[*to] = Some(result);
                         model[*to] = Some(View {
                             inventory: view.inventory,

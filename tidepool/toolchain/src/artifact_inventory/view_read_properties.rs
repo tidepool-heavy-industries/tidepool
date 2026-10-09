@@ -85,12 +85,20 @@ fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
     let mut result = Oracle::default();
     let mut pending = vec![&view.lease];
     let mut seen_leases = BTreeSet::new();
+    let mut custody = BTreeSet::new();
     while let Some(lease) = pending.pop() {
         let address = Arc::as_ptr(lease) as usize;
         if !seen_leases.insert(address) {
             continue;
         }
         result.roots.extend(lease.roots.iter().copied());
+        custody.extend(
+            lease
+                .native_custody
+                .iter()
+                .copied()
+                .map(InventoryNodeKey::Artifact),
+        );
         pending.extend(lease.parents.iter());
     }
 
@@ -109,6 +117,7 @@ fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
     result.closure = result
         .roots
         .iter()
+        .chain(custody.iter())
         .filter(|root| adjacency.contains_key(root))
         .copied()
         .collect();
