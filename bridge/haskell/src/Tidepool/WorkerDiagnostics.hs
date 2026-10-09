@@ -15,6 +15,7 @@ import Data.List (intercalate)
 import GHC.Types.SourceError (SourceError)
 import System.Exit (ExitCode(..))
 import System.IO (hPutStrLn, stderr)
+import Tidepool.FamilyConsistency (FamilyConsistencyRejection, renderFamilyConsistencyRejection)
 import Tidepool.Binders (CellSplitError(..), CellSourceSpan(..))
 import Tidepool.DiagJson
   ( ReportOutcome(..), DiagSeverity(..), Diag(..), SourceRejection(..)
@@ -84,7 +85,10 @@ reportDiagsWithWarnings (Left e) = do
                 Just (LocatedCellRejection (CellSourceSpan sl sc el ec) message) ->
                   (ReportSourceFailure,
                     [Diag (Just ("<cell>", sl, sc, el, ec)) DiagError message])
-                Nothing -> (ReportWorkerFailure, [diagFromException e])
+                Nothing -> case fromException e of
+                  Just (rejection :: FamilyConsistencyRejection) ->
+                    (ReportSourceFailure, [Diag Nothing DiagError (renderFamilyConsistencyRejection rejection)])
+                  Nothing -> (ReportWorkerFailure, [diagFromException e])
   putStrLn (renderDiagsJson outcome diags)
   -- Debug copy for humans only; stdout (above) is the authoritative machine
   -- contract.

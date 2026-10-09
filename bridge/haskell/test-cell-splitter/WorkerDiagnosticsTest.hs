@@ -21,6 +21,8 @@ import Tidepool.DiagJson
   ( DependencyLoadFailure(..), Diag(..), DiagSeverity(..), InputRejection(..)
   , ReportOutcome(..), SourceRejection(..), diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (trySynchronous)
+import Tidepool.DeclarationJoin (JoinRejection(..))
+import Tidepool.FamilyConsistency (FamilyConsistencyRejection(..), renderFamilyConsistencyRejection)
 import Tidepool.WorkerDiagnostics
 
 -- Cancellation can be wrapped by an application-specific exception type.
@@ -54,6 +56,7 @@ runWorkerDiagnosticsTests = withScratch $ \root -> do
   let diagnostic = Diag (Just ("Authored.hs", 4, 2, 4, 9)) DiagError "bad source"
       warning = Diag Nothing DiagWarning "warning with \"quotes\"\nand newline"
       sourceError = mkSrcErr emptyMessages
+      familyError = FamilyConsistencyRejection FamilyInstanceConflict "incompatible retained equations"
       cases =
         [ (toException InvalidCellPlanRequest, ReportInputRejected,
             [Diag Nothing DiagError "InvalidCellPlanRequest"], "Error: InvalidCellPlanRequest\n")
@@ -64,6 +67,9 @@ runWorkerDiagnosticsTests = withScratch $ \root -> do
         , (toException DependencyWorkerFailure, ReportWorkerFailure,
             [diagFromException (toException DependencyWorkerFailure)],
             "Error: DependencyWorkerFailure\n")
+        , (toException familyError, ReportSourceFailure,
+            [Diag Nothing DiagError (renderFamilyConsistencyRejection familyError)],
+            "Error: " ++ show familyError ++ "\n")
         , (toException (SourceRejection "rejected"), ReportSourceFailure,
             [Diag Nothing DiagError "rejected"], "Error: SourceRejection \"rejected\"\n")
         , (toException (LocatedCellRejection (CellSourceSpan 2 3 5 6) "cell"), ReportSourceFailure,
@@ -85,7 +91,7 @@ runWorkerDiagnosticsTests = withScratch $ \root -> do
       && sourceFailureDiagnostics (toException sourceError) == Just []
       && all ((== Nothing) . sourceFailureDiagnostics)
         [toException DependencyWorkerFailure, toException InvalidCellPlanRequest,
-         toException (SourceRejection "contract"), toException ThreadKilled])
+         toException (SourceRejection "contract"), toException familyError, toException ThreadKilled])
     (fail "inspection fallback admitted a non-GHC source failure")
   unless (renderInspectionDiagnostics [diagnostic, warning]
       == "Authored.hs:4:2: bad source\nwarning with \"quotes\"\nand newline")
