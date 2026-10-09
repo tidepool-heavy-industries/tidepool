@@ -364,12 +364,16 @@ impl ConfiguredModulePackageOwner {
         let started = std::time::Instant::now();
         if let Some((selected, configured, package)) = &self.current {
             if selected == path && configured == authority {
-                let (files, bytes) = package.revalidate(path, policy)?;
+                let work = package.revalidate(path, policy)?;
                 tracing::info!(target: "tidepool_toolchain::module_candidates",
                     phase = "configured_package", reused = true,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     hydrated_modules = 0, retained_modules = package.records.len(),
-                    reauthenticated_artifact_files = files, reauthenticated_artifact_bytes = bytes,
+                    reauthenticated_artifact_files = work.artifact_files,
+                    reauthenticated_artifact_bytes = work.artifact_bytes,
+                    source_read_attempts = work.evidence.source_read_attempts,
+                    source_read_bytes = work.evidence.source_read_bytes,
+                    negative_metadata_calls = work.evidence.negative_metadata_calls,
                     revalidated_source_proofs = package.records.len(),
                     revalidated_package_imports = package.records.len());
                 return Ok(Arc::clone(package));
@@ -429,6 +433,13 @@ impl std::ops::Deref for DecodedDeploymentRecord {
     }
 }
 
+#[derive(Debug)]
+struct PackageRevalidationWork {
+    artifact_files: u64,
+    artifact_bytes: u64,
+    evidence: crate::cache::DependencyEvidenceWork,
+}
+
 impl DeploymentModulePackage {
     /// Retained decoded objects do not make a mutable package path immutable.
     /// Reauthenticate physical bytes before reusing semantic admission, including
@@ -437,7 +448,7 @@ impl DeploymentModulePackage {
         &self,
         path: &Path,
         policy: RootPolicy,
-    ) -> Result<(u64, u64), ModulePackageError> {
+    ) -> Result<PackageRevalidationWork, ModulePackageError> {
         let inventory = Arc::new(InventoryOperation::new(Default::default()));
         if absolute(path).as_ref() != Some(&self.artifact_root.join("catalog.json"))
             || absolute(&self.artifact_root).as_ref() != Some(&self.artifact_root)
@@ -525,8 +536,12 @@ impl DeploymentModulePackage {
                 bytes += observed.len() as u64;
             }
         }
+        let mut evidence_validation = super::shared_evidence::ValidationStage::configured_package();
         for record in &self.records {
-            if !record.evidence.valid(&record.target_source) {
+            if evidence_validation
+                .validate(&record.evidence, &record.target_source)
+                .is_err()
+            {
                 return Err(ModulePackageError::OpenCohort);
             }
             crate::recovery_artifacts::validate_package_imports_with_validation(
@@ -539,7 +554,11 @@ impl DeploymentModulePackage {
             )
             .map_err(canonical_error)?;
         }
-        Ok((files, bytes))
+        Ok(PackageRevalidationWork {
+            artifact_files: files,
+            artifact_bytes: bytes,
+            evidence: evidence_validation.work(),
+        })
     }
 
     pub fn source_selection(&self) -> &NativeCatalogSourceSelection {
@@ -751,6 +770,7 @@ impl DeploymentModulePackage {
             .map_err(|_| ModulePackageError::Bounds)?;
         let mut records = Vec::with_capacity(self.catalog.modules.len());
         let mut owners = BTreeSet::new();
+        let mut evidence_validation = super::shared_evidence::ValidationStage::configured_package();
         let mut graphs = std::collections::BTreeMap::new();
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
             inventory.clone(),
@@ -917,7 +937,9 @@ impl DeploymentModulePackage {
                     .source_selection
                     .contains_source(&record.source)
                 || absolute(&record.source).as_ref() != Some(&record.source)
-                || !record.evidence.valid(&record.target_source)
+                || evidence_validation
+                    .validate(&record.evidence, &record.target_source)
+                    .is_err()
                 || !record.evidence.selection_complete
             {
                 return Err(ModulePackageError::OpenCohort);
@@ -981,6 +1003,7 @@ fn validate_closed<'a>(
     records: impl IntoIterator<Item = &'a Record> + Clone,
     selection: &NativeCatalogSourceSelection,
 ) -> Result<(), ModulePackageError> {
+    let mut evidence_validation = super::shared_evidence::ValidationStage::configured_package();
     let owners: std::collections::BTreeMap<_, _> = records
         .clone()
         .into_iter()
@@ -990,7 +1013,9 @@ fn validate_closed<'a>(
         if record.include != selection.include_roots()
             || !selection.contains_source(&record.source)
             || absolute(&record.source).as_ref() != Some(&record.source)
-            || !record.evidence.valid(&record.target_source)
+            || evidence_validation
+                .validate(&record.evidence, &record.target_source)
+                .is_err()
             || !record.evidence.selection_complete
             || record.evidence.modules.iter().any(|module| {
                 module.source != Path::new("@generated-source")

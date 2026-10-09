@@ -489,6 +489,14 @@ pub enum ResolutionWitnessFailure {
     NegativeCandidateUnavailable { index: usize },
 }
 
+/// Physical source observations made by a fresh dependency validation stage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DependencyEvidenceWork {
+    pub source_read_attempts: u64,
+    pub source_read_bytes: u64,
+    pub negative_metadata_calls: u64,
+}
+
 impl DependencyEvidence {
     /// Admit replay-eligible worker evidence after validating consumed bytes.
     /// Authored dependencies retain their path identity.
@@ -535,13 +543,29 @@ impl DependencyEvidence {
     }
 
     pub(crate) fn validate(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
+        self.validate_with_work(source, &mut DependencyEvidenceWork::default())
+    }
+
+    pub(crate) fn validate_with_work(
+        &self,
+        source: &str,
+        work: &mut DependencyEvidenceWork,
+    ) -> Result<(), DependencyEvidenceFailure> {
         if !self.cache_safe {
             return Err(DependencyEvidenceFailure::Header);
         }
-        self.validate_consumed_sources(source)
+        self.validate_consumed_sources_with_work(source, work)
     }
 
     fn validate_consumed_sources(&self, source: &str) -> Result<(), DependencyEvidenceFailure> {
+        self.validate_consumed_sources_with_work(source, &mut DependencyEvidenceWork::default())
+    }
+
+    fn validate_consumed_sources_with_work(
+        &self,
+        source: &str,
+        work: &mut DependencyEvidenceWork,
+    ) -> Result<(), DependencyEvidenceFailure> {
         if self.version != 4 || self.sources.is_empty() || self.modules.is_empty() {
             return Err(DependencyEvidenceFailure::Header);
         }
@@ -564,12 +588,14 @@ impl DependencyEvidence {
                         reason: SourceWitnessFailure::Malformed,
                     });
                 }
+                work.source_read_attempts += 1;
                 let Ok(bytes) = fs::read(&item.path) else {
                     return Err(DependencyEvidenceFailure::Source {
                         index,
                         reason: SourceWitnessFailure::Unavailable,
                     });
                 };
+                work.source_read_bytes += bytes.len() as u64;
                 hex_digest(&Sha256::digest(bytes))
             };
             if digest != item.sha256 {
@@ -659,6 +685,7 @@ impl DependencyEvidence {
                 if Some(candidate) == resolution.selected.as_ref() {
                     continue;
                 }
+                work.negative_metadata_calls += 1;
                 match fs::metadata(candidate) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     _ => {

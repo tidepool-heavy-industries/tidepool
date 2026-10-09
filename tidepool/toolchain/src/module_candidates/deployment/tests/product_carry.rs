@@ -3,6 +3,59 @@ use crate::module_candidates::product_decode_observer::DecodeCounter;
 use tidepool_repr::execution_schema::RawModuleProduct;
 
 #[test]
+#[ignore = "requires a qualified frozen catalog and its exact compiler deployment environment"]
+fn configured_package_validation_timing_workload() {
+    let path = PathBuf::from(
+        std::env::var_os("TIDEPOOL_PACKAGE_VALIDATION_BENCHMARK_CATALOG")
+            .expect("select the matched frozen catalog explicitly"),
+    );
+    let crate::toolchain::CompilerDeploymentConfiguration::Configured(authority) =
+        crate::toolchain::CompilerDeploymentConfiguration::from_env().unwrap()
+    else {
+        panic!("benchmark requires the matched configured compiler authority");
+    };
+    let mut owner = ConfiguredModulePackageOwner::new();
+    let counter = DecodeCounter::new();
+    let started = std::time::Instant::now();
+    let package = owner.load(&path, &authority).unwrap();
+    let cold_elapsed = started.elapsed();
+    assert!(!package.records.is_empty());
+    assert_eq!(counter.count(), package.records.len());
+    let proof_owners = package
+        .records
+        .iter()
+        .map(|record| std::ptr::from_ref(&*record.evidence) as usize)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    println!(
+        "{}",
+        serde_json::json!({
+            "phase": "cold_configured_package", "elapsed_ns": cold_elapsed.as_nanos(),
+            "catalog_sha256": package.catalog_identity(), "modules": package.records.len(),
+            "native_decodes": counter.count(), "retained_proof_owners": proof_owners,
+        })
+    );
+    for sample in 0..5 {
+        let before = counter.count();
+        let started = std::time::Instant::now();
+        let work = package.revalidate(&path, RootPolicy::NixStore).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(counter.count(), before);
+        println!(
+            "{}",
+            serde_json::json!({
+                "phase": "warm_package_revalidation", "sample": sample,
+                "elapsed_ns": elapsed.as_nanos(), "native_decodes": counter.count() - before,
+                "artifact_read_files": work.artifact_files, "artifact_read_bytes": work.artifact_bytes,
+                "evidence_source_read_attempts": work.evidence.source_read_attempts,
+                "evidence_source_read_bytes": work.evidence.source_read_bytes,
+                "evidence_negative_metadata_calls": work.evidence.negative_metadata_calls,
+            })
+        );
+    }
+}
+
+#[test]
 fn deployment_hydration_decodes_once_and_selection_carries_exact_products() {
     let names = ["A", "B"];
     let fixture = Fixture::with_modules(&names);
