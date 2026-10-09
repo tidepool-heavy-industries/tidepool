@@ -1397,7 +1397,7 @@ decodeScope = do
     pure (requestTypes, admission)
   published <- bounded 4096 $ do
     array 7
-    root <- owner
+    root <- (,) <$> nonempty <*> nonempty
     interfaceSha <- digestField
     productSha <- digestField
     _revision <- nonempty
