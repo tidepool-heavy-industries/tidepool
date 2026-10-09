@@ -2,12 +2,12 @@
 {-# LANGUAGE TypeApplications #-}
 
 import qualified Tidepool.Agent.Contract as A
-import Tidepool.Effects.Core (Commands, Lookup)
+import Tidepool.Effects.Core (Commands, Console, Lookup)
 import Tidepool.Actors.Exomonad
 
 inheritedAnswer <- recursiveHelper
 Right childSeed <- checkpoint "recursive child native helper"
-let leafSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]
+let leafSpec = A.defaultWorkbenchSpec @'[Replies, Commands, Console, Lookup, BoundWorktree]
 let leafOptions = (defaultSpawnOptions leafSpec)
       { spawnModel = Just (Alias "luna"), spawnLifetime = ActorOwned, spawnLabel = Just "recursive-grandchild" }
 Right recursiveGrandchild <- spawnSubagent (ForkCtx childSeed) (ForkWorktree currentCheckout) leafOptions

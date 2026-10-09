@@ -114,14 +114,25 @@ async fn next_descendant(
     requests: &mut tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
     pending: &mut VecDeque<HostedScriptRound>,
     parent: ActorRef,
+    parent_operation: &OperationId,
 ) -> (ActorRef, HostedScriptRound) {
+    pending_claim(host, parent_operation);
     let round = match pending.pop_front() {
         Some(round) => round,
         None => host
             .context
             .while_root_live(
                 "recursive descendant provider barrier",
-                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, requests.recv()),
+                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                    let mut poll = tokio::time::interval(Duration::from_millis(10));
+                    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        tokio::select! {
+                            round = requests.recv() => break round,
+                            _ = poll.tick() => pending_claim(host, parent_operation),
+                        }
+                    }
+                }),
             )
             .await
             .unwrap_or_else(|error| panic!("{error}"))
@@ -415,8 +426,14 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             root.async_call(ROOT_CALL, ROOT);
             let root_wait = next(host, &mut requests, &mut pending, &root_path).await;
             unsettled(&root_wait, ROOT_CALL);
-            let (child_actor, child) =
-                next_descendant(host, &mut requests, &mut pending, root_actor).await;
+            let (child_actor, child) = next_descendant(
+                host,
+                &mut requests,
+                &mut pending,
+                root_actor,
+                &root_operation,
+            )
+            .await;
             captured(&child, &root_prefix, ROOT_CALL);
             let child_path = identity(&child).actor;
             let child_prefix = transcript(&child);
@@ -424,8 +441,14 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             child.async_call(CHILD_CALL, CHILD);
             let child_wait = next(host, &mut requests, &mut pending, &child_path).await;
             unsettled(&child_wait, CHILD_CALL);
-            let (grandchild_actor, mut grandchild) =
-                next_descendant(host, &mut requests, &mut pending, child_actor).await;
+            let (grandchild_actor, mut grandchild) = next_descendant(
+                host,
+                &mut requests,
+                &mut pending,
+                child_actor,
+                &child_operation,
+            )
+            .await;
             captured(&grandchild, &child_prefix, CHILD_CALL);
             let grandchild_path = identity(&grandchild).actor;
             let graph = host.context.forest.inspect_host_graph();
