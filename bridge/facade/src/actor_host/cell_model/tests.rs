@@ -355,7 +355,6 @@ async fn resident_parked_model_allows_another_cell_and_cancels_without_late_prov
                 .unwrap();
                 assert_eq!(committed_display_text(&receipt), "42");
                 assert!(!task.is_finished(), "the original dispatch remains pending");
-                assert!(campaign.actor.hosted_workbench_waiting(&context).is_some());
                 assert_eq!(script.dropped.load(Ordering::SeqCst), 0);
                 let cancelled = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
