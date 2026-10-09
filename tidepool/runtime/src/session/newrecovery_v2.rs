@@ -101,7 +101,7 @@ impl RecoveryCompilerContext {
     pub(crate) fn capture(
         context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
     ) -> Self {
-        Self {
+        let mut captured = Self {
             artifact_refs: context
                 .artifact_view()
                 .descriptors()
@@ -115,6 +115,21 @@ impl RecoveryCompilerContext {
                 .collect(),
             compiler_roles: context.compiler_input_roles(),
             lexical: context.lexical_graph().to_vec(),
+        };
+        captured.normalize();
+        captured
+    }
+
+    /// Lexical nodes and import edges describe an unordered exact graph.
+    /// Capture and durable sealing use the same representation for equality;
+    /// repeated lexical facts remain invalid rather than being deduplicated.
+    fn normalize(&mut self) {
+        self.artifact_refs.sort();
+        self.artifact_refs.dedup();
+        self.native_groups.sort();
+        self.lexical.sort_by(|a, b| a.owner.cmp(&b.owner));
+        for lexical in &mut self.lexical {
+            lexical.imports.sort();
         }
     }
 
@@ -1114,16 +1129,7 @@ fn normalize_artifact(artifact: &mut RecoveryArtifactClosure) {
     }
 }
 fn normalize_surface(surface: &mut RecoveryPublicSurface) {
-    surface.compiler_context.artifact_refs.sort();
-    surface.compiler_context.artifact_refs.dedup();
-    surface.compiler_context.native_groups.sort();
-    surface
-        .compiler_context
-        .lexical
-        .sort_by(|a, b| a.owner.cmp(&b.owner));
-    for lexical in &mut surface.compiler_context.lexical {
-        lexical.imports.sort();
-    }
+    surface.compiler_context.normalize();
     surface.bindings.sort_by(|a, b| a.name.cmp(&b.name));
     surface.source_instances.sort_by(|a, b| {
         (
@@ -2147,6 +2153,106 @@ mod tests {
         ExactModuleIdentity {
             unit: unit.into(),
             module: module.into(),
+        }
+    }
+
+    #[test]
+    fn public_compiler_context_normalization_preserves_duplicate_refusals() {
+        let mut valid = fixture();
+        valid.public_surfaces[0].compiler_context.lexical = vec![
+            ExactLexicalNode {
+                owner: module("main", "Z"),
+                imports: vec![module("other", "A"), module("main", "A")],
+            },
+            ExactLexicalNode {
+                owner: module("other", "A"),
+                imports: vec![],
+            },
+            ExactLexicalNode {
+                owner: module("main", "A"),
+                imports: vec![],
+            },
+        ];
+        valid.seal().unwrap();
+        for duplicate_node in [false, true] {
+            let mut malformed = valid.clone();
+            let lexical = &mut malformed.public_surfaces[0].compiler_context.lexical;
+            let repeated = lexical[0].clone();
+            if duplicate_node {
+                lexical.push(repeated);
+            } else {
+                let consumer = lexical
+                    .iter_mut()
+                    .find(|row| !row.imports.is_empty())
+                    .unwrap();
+                consumer.imports.push(consumer.imports[0].clone());
+            }
+            assert!(malformed.seal().is_err());
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config({
+            let mut config = proptest::test_runner::Config::default();
+            if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+                config.failure_persistence = Some(Box::new(proptest::test_runner::FileFailurePersistence::Direct(path)));
+            }
+            config
+        })]
+        #[test]
+        fn public_compiler_context_normalization_preserves_exact_selection(
+            rows in proptest::collection::vec((proptest::num::u16::ANY, proptest::num::u8::ANY, proptest::bool::ANY), 0..9)
+        ) {
+            let owners = (0..rows.len())
+                .map(|index| module(if index % 2 == 0 { "main" } else { "other" }, &format!("M{}", index / 2)))
+                .collect::<Vec<_>>();
+            let mut lexical = rows.iter().enumerate().map(|(index, (_, mask, reverse))| {
+                let mut imports = owners.iter().enumerate()
+                    .filter(|(target, _)| mask & (1u8 << target) != 0)
+                    .map(|(_, owner)| owner.clone()).collect::<Vec<_>>();
+                if *reverse { imports.reverse(); }
+                (rows[index].0, ExactLexicalNode { owner: owners[index].clone(), imports })
+            }).collect::<Vec<_>>();
+            lexical.sort_by_key(|(rank, _)| *rank);
+            let mut context = RecoveryCompilerContext {
+                artifact_refs: (0..rows.len()).rev().map(|index| ArtifactId([index as u8; 32])).collect(),
+                native_groups: (0..rows.len()).rev().map(|index| tidepool_toolchain::artifact_inventory::NativeGroupKey {
+                    artifact: ArtifactId([index as u8; 32]), original_ordinal: index as u32,
+                }).collect(),
+                compiler_roles: (0..rows.len()).map(|index| tidepool_toolchain::artifact_inventory::CompilerInputRole::InterfaceOnly {
+                    interface: ArtifactId([index as u8; 32]),
+                }).collect(),
+                lexical: lexical.into_iter().map(|(_, node)| node).collect(),
+            };
+            // This metadata-only model confers no compiler authority.
+            let model = context.lexical.iter().map(|node| (
+                node.owner.clone(), node.imports.iter().cloned().collect::<BTreeSet<_>>()
+            )).collect::<BTreeMap<_, _>>();
+            let artifact_set = context.artifact_refs.iter().cloned().collect::<BTreeSet<_>>();
+            let native_set = context.native_groups.iter().cloned().collect::<BTreeSet<_>>();
+            let roles = context.compiler_roles.clone();
+            context.normalize();
+            proptest::prop_assert_eq!(&context.lexical, &model.into_iter().map(|(owner, imports)| ExactLexicalNode {
+                owner, imports: imports.into_iter().collect(),
+            }).collect::<Vec<_>>());
+            proptest::prop_assert_eq!(&context.artifact_refs, &artifact_set.into_iter().collect::<Vec<_>>());
+            proptest::prop_assert_eq!(&context.native_groups, &native_set.into_iter().collect::<Vec<_>>());
+            proptest::prop_assert_eq!(&context.compiler_roles, &roles);
+            let canonical = serde_json::to_vec(&context).unwrap();
+            let mut reordered = context.clone();
+            reordered.lexical.reverse();
+            for node in &mut reordered.lexical { node.imports.reverse(); }
+            reordered.artifact_refs.reverse();
+            reordered.native_groups.reverse();
+            reordered.normalize();
+            proptest::prop_assert_eq!(serde_json::to_vec(&reordered).unwrap(), canonical);
+            reordered.normalize();
+            proptest::prop_assert_eq!(&reordered, &context);
+            reordered.native_groups.push(tidepool_toolchain::artifact_inventory::NativeGroupKey {
+                artifact: ArtifactId([255; 32]), original_ordinal: 9001,
+            });
+            reordered.normalize();
+            proptest::prop_assert_ne!(reordered, context);
         }
     }
 
