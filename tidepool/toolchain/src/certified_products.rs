@@ -9114,6 +9114,10 @@ pub(crate) mod tests {
 
     #[test]
     fn compile_input_proof_rejects_substituted_dependency_bundle() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, CompilerInputProjection, CompilerInputRole,
+        };
+
         let source = "module Fresh where";
         let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
         let packages = BTreeMap::new();
@@ -9130,15 +9134,20 @@ pub(crate) mod tests {
             b"admitted-producer",
         )
         .sha256();
+        let interface =
+            fixture_module_interface(producer, &owner.unit, &owner.module, BTreeMap::new());
+        let entry = Arc::new(ArtifactEntry::canonical(interface.clone()));
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        assert_eq!(
+            projection.roles(),
+            vec![CompilerInputRole::InterfaceOnly {
+                interface: entry.descriptor.id,
+            }],
+        );
         let artifacts = crate::declaration_context::certified_product_artifact_view(
             producer,
             &[],
-            &[fixture_module_interface(
-                producer,
-                &owner.unit,
-                &owner.module,
-                BTreeMap::new(),
-            )],
+            &[interface],
             None,
         )
         .unwrap();
@@ -9156,9 +9165,16 @@ pub(crate) mod tests {
             table.clone(),
             vec![],
             &artifacts,
+            &projection,
         )
         .unwrap()
         .unwrap();
+        assert_eq!(
+            proof
+                .issued_original_execution()
+                .compiler_input_projection(),
+            &projection,
+        );
         assert!(proof.matches_bundle(
             &target,
             &groups,
