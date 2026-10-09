@@ -27,6 +27,7 @@ tidepool-bridge-derive.workspace = true
 tidepool-bridge-effects.workspace = true
 tidepool-codegen.workspace = true
 tidepool-effect.workspace = true
+tidepool-extract-cmd.workspace = true
 tidepool-repr.workspace = true
 tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
@@ -40,7 +41,6 @@ tempfile.workspace = true
 proptest.workspace = true
 frunk.workspace = true
 serde_json.workspace = true
-tidepool-extract-cmd.workspace = true
 tidepool-testing.workspace = true
 tidepool-test-data.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
