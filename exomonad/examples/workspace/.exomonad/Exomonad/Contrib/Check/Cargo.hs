@@ -1,6 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 
 -- | Exact source, artifact and test-count evidence for a focused Cargo check.
@@ -20,7 +19,6 @@ import qualified Data.Text as Text
 import qualified Tidepool.Command as Cmd
 import Tidepool.Aeson (FromJSON (..), (.:), (.:?), withObject)
 import Tidepool.Effects.Core (Commands)
-import Tidepool.QQ.Bash (bash)
 
 data FocusedSpec = FocusedSpec
   { focusedIntent :: Text
@@ -152,42 +150,44 @@ focusedCommandAfter runner memory spec preparation = Cmd.withMemory memory $
         ([ focusedPackage spec, focusedTarget spec, focusedFilter spec
         , Text.pack (show (focusedExpected spec)), Text.pack (show (length preparation))
         ] ++ preparation ++ runner)
-        [bash|set -uo pipefail
-runner_output=$(mktemp) || { printf 'focused runner cannot allocate output capture\n' >&2; exit 125; }
-trap 'rm -f -- "$runner_output"' EXIT
-preparation_count=$5
-if (( preparation_count > 0 )); then
-  "${@:6:preparation_count}" > "$runner_output" 2>&1
-  preparation_exit=$?
-  tail -c 8192 "$runner_output" >&2
-  printf '\nfocused preparation exit: %s\n' "$preparation_exit" >&2
-  if (( preparation_exit != 0 )); then exit "$preparation_exit"; fi
-fi
-runner_start=$((6 + preparation_count))
-"${@:runner_start}" --package "$1" --target "$2" --filter "$3" --expect "$4" > "$runner_output" 2>&1
-runner_exit=$?
-tail -c 8192 "$runner_output" >&2
-evidence_file=
-while IFS= read -r line; do
-  case "$line" in
-    "focused test evidence: "*) evidence_file=${line#"focused test evidence: "} ;;
-  esac
-done < "$runner_output"
-if [[ -n "$evidence_file" ]]; then
-  printf 'focused test evidence: %s\n' "$evidence_file" >&2
-fi
-if [[ -n "$evidence_file" && -f "$evidence_file" && $(wc -c < "$evidence_file") -le 65536 ]]; then
-  printf '\nfocused test record begin\n' >&2
-  cat "$evidence_file" >&2
-  printf '\nfocused test record end\n' >&2
-  printf 'focused test record status: available\n' >&2
-elif [[ -n "$evidence_file" && -f "$evidence_file" ]]; then
-  printf 'focused test record exceeds 65536 bytes; artifact remains at %s\n' "$evidence_file" >&2
-  printf 'focused test record status: unavailable\n' >&2
-else
-  printf 'focused test record status: unavailable\n' >&2
-fi
-exit "$runner_exit"|]
+        (Cmd.bashCommand (Text.intercalate "\n"
+          [ "set -uo pipefail"
+          , "runner_output=$(mktemp) || { printf 'focused runner cannot allocate output capture\\n' >&2; exit 125; }"
+          , "trap 'rm -f -- \"$runner_output\"' EXIT"
+          , "preparation_count=$5"
+          , "if (( preparation_count > 0 )); then"
+          , "  \"${@:6:preparation_count}\" > \"$runner_output\" 2>&1"
+          , "  preparation_exit=$?"
+          , "  tail -c 8192 \"$runner_output\" >&2"
+          , "  printf '\\nfocused preparation exit: %s\\n' \"$preparation_exit\" >&2"
+          , "  if (( preparation_exit != 0 )); then exit \"$preparation_exit\"; fi"
+          , "fi"
+          , "runner_start=$((6 + preparation_count))"
+          , "\"${@:runner_start}\" --package \"$1\" --target \"$2\" --filter \"$3\" --expect \"$4\" > \"$runner_output\" 2>&1"
+          , "runner_exit=$?"
+          , "tail -c 8192 \"$runner_output\" >&2"
+          , "evidence_file="
+          , "while IFS= read -r line; do"
+          , "  case \"$line\" in"
+          , "    \"focused test evidence: \"*) evidence_file=${line#\"focused test evidence: \"} ;;"
+          , "  esac"
+          , "done < \"$runner_output\""
+          , "if [[ -n \"$evidence_file\" ]]; then"
+          , "  printf 'focused test evidence: %s\\n' \"$evidence_file\" >&2"
+          , "fi"
+          , "if [[ -n \"$evidence_file\" && -f \"$evidence_file\" && $(wc -c < \"$evidence_file\") -le 65536 ]]; then"
+          , "  printf '\\nfocused test record begin\\n' >&2"
+          , "  cat \"$evidence_file\" >&2"
+          , "  printf '\\nfocused test record end\\n' >&2"
+          , "  printf 'focused test record status: available\\n' >&2"
+          , "elif [[ -n \"$evidence_file\" && -f \"$evidence_file\" ]]; then"
+          , "  printf 'focused test record exceeds 65536 bytes; artifact remains at %s\\n' \"$evidence_file\" >&2"
+          , "  printf 'focused test record status: unavailable\\n' >&2"
+          , "else"
+          , "  printf 'focused test record status: unavailable\\n' >&2"
+          , "fi"
+          , "exit \"$runner_exit\""
+          ]))
 
 focusedExecution :: FocusedResult -> CheckExecution
 focusedExecution result
