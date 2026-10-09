@@ -362,6 +362,40 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         # complete projection can issue its matching runtime manifest entry.
         self.assertIn("src/actor_host/new.hs", self.groups("bridge/facade")[1]["tidepool_unit_tests_sources"])
 
+    def test_integration_executable_inputs_use_the_declared_binary_owner(self):
+        metadata = json.loads(self.metadata.read_text())
+        package = next(p for p in metadata["packages"] if p["name"] == "tidepool-extract-cmd")
+        for name in ("build_products_frontend", "build_products_ownership", "response_cleanup"):
+            source = f"tests/{name}.rs"
+            self.write("tidepool/extract-cmd/" + source,
+                       'const FRONTEND: &str = env!("CARGO_BIN_EXE_tidepool-extract");')
+            package["targets"].extend(self.package("unused", "tidepool/extract-cmd", [
+                (name, "test", source),
+            ])["targets"])
+        self.metadata.write_text(json.dumps(metadata))
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ("build_products_frontend", "build_products_ownership", "response_cleanup"):
+            self.assertEqual(self.rule("tidepool/extract-cmd", name)["compile_env"], {
+                "CARGO_BIN_EXE_tidepool-extract": "$(location //tidepool/extract-cmd:tidepool-extract)",
+            })
+        self.assertNotIn("compile_env", self.rule("tidepool/extract-cmd", "tidepool_extract_cmd", "tidepool_rust_library"))
+
+    def test_integration_executable_input_without_a_binary_owner_refuses_publication(self):
+        metadata = json.loads(self.metadata.read_text())
+        package = next(p for p in metadata["packages"] if p["name"] == "tidepool-extract-cmd")
+        self.write("tidepool/extract-cmd/tests/missing.rs",
+                   'const FRONTEND: Option<&str> = option_env!("CARGO_BIN_EXE_missing");')
+        package["targets"].extend(self.package("unused", "tidepool/extract-cmd", [
+            ("missing", "test", "tests/missing.rs"),
+        ])["targets"])
+        self.metadata.write_text(json.dumps(metadata))
+        self.write("tidepool/extract-cmd/BUCK", "retained graph\n")
+        result = self.generate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has no binary owner", result.stderr)
+        self.assertEqual((self.root / "tidepool/extract-cmd/BUCK").read_text(), "retained graph\n")
+
     def test_fixture_loader_cohort_has_no_compiler_or_browser_resources(self):
         self.write("bridge/testing/src/lib.rs", "pub fn fixtures() {}\n")
         result = self.generate("--package", "tidepool-testing")

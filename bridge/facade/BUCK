@@ -2365,6 +2365,7 @@ tidepool_rust_isolated_test(
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
         "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
     },
+    compile_env = {"CARGO_BIN_EXE_exomonad": "$(location //bridge/facade:exomonad)"},
     visibility = ["PUBLIC"],
 )
 
@@ -2453,6 +2454,7 @@ tidepool_rust_isolated_test(
         "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
         "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
     },
+    compile_env = {"CARGO_BIN_EXE_exomonad": "$(location //bridge/facade:exomonad)"},
     visibility = ["PUBLIC"],
 )
 

@@ -822,6 +822,24 @@ def runtime_arguments(env, resources, worker, resource_env=None):
     return "\n".join(lines)
 
 
+def integration_binary_compile_env(package, source_map):
+    """Project literal Cargo executable inputs from their emitted binary owners."""
+    requested = set()
+    for source in source_map:
+        if source.endswith(".rs") and not source.startswith(("//", ":", "root//", "toolchains//")):
+            contents = (ROOT / package_dir(package) / source).read_text()
+            requested.update(re.findall(
+                r'\b(?:option_)?env!\s*\(\s*"CARGO_BIN_EXE_([^\"]+)"', contents,
+            ))
+    environment = {}
+    binaries = NATIVE_TARGETS[package["name"]]["binaries"]
+    for binary in sorted(requested):
+        if binary not in binaries:
+            raise SystemExit(f"Cargo executable input {binary!r} has no binary owner in {package['name']}")
+        environment["CARGO_BIN_EXE_" + binary] = "$(location " + binaries[binary]["build"] + ")"
+    return environment
+
+
 def render_rule(rule, name, target, package, deps, named, extra="", features=(), test_target=False):
     crate_root = target["src_path"]
     src_root = pathlib.Path(crate_root).relative_to(ROOT).as_posix()
@@ -836,6 +854,10 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
         package, target, features,
         test_target=test_target or rule in ("tidepool_rust_test", "tidepool_rust_isolated_test"),
     )
+    if rule == "tidepool_rust_isolated_test" and "test" in target["kind"]:
+        compile_env = integration_binary_compile_env(package, source_map)
+        if compile_env:
+            extra += "\n    compile_env = " + json.dumps(compile_env, sort_keys=True) + ","
     CURRENT_QUALIFICATION_SOURCES.update(source for source in source_map if not source.startswith(("//", ":", "root//", "toolchains//")))
     lines.extend(
         "        " + json.dumps(source) + ": " + json.dumps(mapped) + ","
