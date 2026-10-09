@@ -66,7 +66,8 @@ import GHC.Types.SourceError (SourceError)
 import Tidepool.Binders
 import Tidepool.TurnSource
   ( spliceTemplate, generatedScaffoldModuleName, renameScaffoldModuleHeader
-  , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker )
+  , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker, preambleDefaultMarker )
+import Test.QuickCheck qualified as QC
 import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
 import Tidepool.ExtractUtil (getLibdir, shaHex)
@@ -637,13 +638,16 @@ compilerDefaultRecipeChecks = do
       && "default (TidepoolCompilerDefaultDouble.Text)" `isInfixOf` rendered
       && all (not . (`isInfixOf` rendered)) wrappers) $
     fail "compiler default aliases collided with native import namespaces or rewrote an authored default"
+  unless (case captureCompilerDefaultRecipe flags rendered of Left _ -> True; Right _ -> False) $
+    fail "already qualified protected defaults were recaptured as authored defaults"
   -- A bare authored/default fixture does not issue a compiler default recipe.
   plain <- either fail pure (captureCompilerDefaultRecipe flags "module Plain where\nimport Prelude\ndefault (Int)\n")
   unchanged <- either fail pure (qualifyCompilerDefault plain [] "module Plain where\nimport Prelude\ndefault (Int)\n")
   unless (unchanged == "module Plain where\nimport Prelude\ndefault (Int)\n") $
     fail "compiler default recipe changed an authored declaration"
-  forM_ ["module Malformed where\n" ++ preambleImportMarker ++ "default (Text)\n"
-    , "module Malformed where\n" ++ preambleImportMarker ++ preambleDefaultDeclaration] $ \malformed ->
+  forM_ ["module Malformed where\n" ++ preambleImportMarker ++ preambleDefaultMarker ++ "default (Text)\n"
+    , "module Malformed where\n" ++ preambleImportMarker ++ preambleDefaultDeclaration
+    , "module Malformed where\n" ++ preambleDefaultDeclaration ++ preambleDefaultMarker] $ \malformed ->
       unless (case captureCompilerDefaultRecipe flags malformed of Left _ -> True; Right _ -> False) $
         fail "malformed compiler default recipe silently became an authored default"
   let declarationTemplate = "{-# LANGUAGE StandaloneDeriving, DeriveGeneric #-}\nmodule DeclarationDefaults where\nimport Prelude\n"
@@ -660,7 +664,14 @@ compilerDefaultRecipeChecks = do
         { declarationPrologue = (declarationPrologue declarationSource)
             { prologueCompilerDefault = plain } }
   withoutDefault <- either fail pure (renderDeclarationForTemplate noDefaultTemplate noDefaultSource)
-  forM_ [declaration, withoutDefault] $ \renderedDeclaration -> do
+  let installerTemplate = "module InstallerImports where\nimport Prelude\n"
+        ++ preambleImportMarker ++ "{{TURN}}\n"
+  installerSource <- declarationSourceWithTemplateFlags flags installerTemplate
+    "import Data.List (sort)\nresult = sort [2,1 :: Int]\n" >>= either (fail . show) pure
+  installerRendered <- either fail pure (renderDeclarationForTemplate installerTemplate installerSource)
+  unless (not ("default (" `isInfixOf` installerRendered)) $
+    fail "import-only installer template acquired primitive defaults"
+  forM_ [declaration, withoutDefault, installerRendered] $ \renderedDeclaration -> do
     declarationFlags <- templateParserFlags flags renderedDeclaration >>= either (fail . show) pure
     case unP Parser.parseModule (initParserState (initParserOpts declarationFlags)
         (stringToStringBuffer renderedDeclaration)
@@ -674,6 +685,34 @@ compilerDefaultRecipeChecks = do
   let noImports = noDefaultSource
         { declarationPrologue = (declarationPrologue noDefaultSource) { prologueImports = [] } }
   _ <- either fail pure (renderDeclarationForTemplate "module NoImports where\n{{TURN}}\n" noImports)
+  -- Parsed imports and defaults are independent observations. Vary namespace
+  -- collisions and both template kinds through the real prologue/render owner.
+  result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess = 80 }
+    (QC.forAllShrink ((,) <$> QC.arbitrary <*> QC.chooseInt (0, 4)) QC.shrink $ \(protected, depth) ->
+      QC.classify protected "protected defaults" $
+      QC.classify (not protected) "import-only" $
+      QC.classify (depth > 0) "alias collision" $ QC.ioProperty $ do
+        let aliases = ["TidepoolCompilerDefault" ++ kind ++ replicate level 'X'
+              | kind <- ["Int", "Double", "Text"], level <- [0 .. depth]]
+            imports = concatMap (\alias -> "import qualified Data.Text as " ++ alias ++ "\n") aliases
+            selectedTemplate = "module GeneratedDefaults where\nimport Prelude\n"
+              ++ (if protected then preambleDefaultDeclaration else preambleImportMarker)
+              ++ "{{TURN}}\n"
+        selected <- declarationSourceWithTemplateFlags flags selectedTemplate
+          (imports ++ "result = ()\n") >>= either (fail . show) pure
+        renderedSource <- either fail pure (renderDeclarationForTemplate selectedTemplate selected)
+        selectedFlags <- templateParserFlags flags renderedSource >>= either (fail . show) pure
+        pure $ case unP Parser.parseModule (initParserState (initParserOpts selectedFlags)
+            (stringToStringBuffer renderedSource)
+            (mkRealSrcLoc (mkFastString "<generated-defaults>") 1 1)) of
+          PFailed _ -> False
+          POk _ parsed ->
+            let importedAliases = [moduleNameString (unLoc alias)
+                  | imported <- hsmodImports (unLoc parsed), Just alias <- [ideclAs (unLoc imported)]]
+                defaultCount = length [() | declaration' <- hsmodDecls (unLoc parsed)
+                  , DefD {} <- [unLoc declaration']]
+            in all (`elem` importedAliases) aliases && defaultCount == (if protected then 1 else 0))
+  unless (QC.isSuccess result) (fail "import slot/default recipe histories changed parsed authority")
   pure ()
 
 orderedInferenceSegments :: IO ()

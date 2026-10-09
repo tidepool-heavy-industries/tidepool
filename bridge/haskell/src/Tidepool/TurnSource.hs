@@ -15,7 +15,7 @@ module Tidepool.TurnSource
   , renameScaffoldModuleHeader
   , CompilerDefaultRecipe, emptyCompilerDefaultRecipe, captureCompilerDefaultRecipe
   , qualifyCompilerDefault, qualifyCompilerDefaultWithLineOffset
-  , preambleDefaultDeclaration, preambleImportMarker, importQualifierNamespaces
+  , preambleDefaultDeclaration, preambleImportMarker, preambleDefaultMarker, importQualifierNamespaces
   , PreparedDeclarationTemplate, prepareDeclarationTemplate, renderPreparedDeclaration
   ) where
 
@@ -41,13 +41,16 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Tidepool.ExtractUtil (shaHex)
 
--- This is the shared Rust/Haskell preamble ABI marker. Import insertion
--- consumes it before the compiler qualifies the protected default declaration.
+-- The import slot and protected default recipe have independent Rust/Haskell
+-- ABI markers. Installer templates need imports without primitive defaulting.
 preambleDefaultDeclaration :: String
-preambleDefaultDeclaration = preambleImportMarker ++ "default (Int, Double, Text)\n"
+preambleDefaultDeclaration = preambleImportMarker ++ preambleDefaultMarker ++ "default (Int, Double, Text)\n"
 
 preambleImportMarker :: String
 preambleImportMarker = "-- tidepool-preamble-imports-v1\n"
+
+preambleDefaultMarker :: String
+preambleDefaultMarker = "-- tidepool-preamble-defaults-v1\n"
 
 -- Only the protected template supplies this recipe. Keep native namespace facts
 -- from its parsed header; later rendering adds the parsed authored/import facts.
@@ -67,11 +70,16 @@ captureCompilerDefaultRecipe :: DynFlags -> String -> Either String CompilerDefa
 captureCompilerDefaultRecipe flags template =
   case T.breakOn (T.pack preambleDefaultDeclaration) (T.pack template) of
     (_, remaining) | T.null remaining ->
-      if T.pack preambleImportMarker `T.isInfixOf` T.pack template
-        then Left "compiler preamble import marker lacks its canonical default declaration"
-        else Right NoCompilerDefault
+      if T.pack preambleDefaultMarker `T.isInfixOf` T.pack template
+        then Left "compiler preamble default marker lacks its canonical default declaration"
+        else do
+          if T.pack preambleImportMarker `T.isInfixOf` T.pack template
+            then () <$ replaceTemplateMarker preambleImportMarker preambleImportMarker template
+            else Right ()
+          Right NoCompilerDefault
     (before, remaining) -> do
       _ <- replaceTemplateMarker preambleImportMarker preambleImportMarker template
+      _ <- replaceTemplateMarker preambleDefaultMarker preambleDefaultMarker template
       let after = T.drop (length preambleDefaultDeclaration) remaining
       if T.pack preambleDefaultDeclaration `T.isInfixOf` after
         then Left "compiler preamble repeats its default declaration"
@@ -107,7 +115,7 @@ qualifyCompilerDefaultWithLineOffset (PrimitiveCompilerDefault templateNamespace
       qualified alias name = moduleNameString alias ++ "." ++ occNameString (nameOccName name)
       replacement = primitive intAlias intTyConName ++ primitive doubleAlias doubleTyConName
         ++ "import qualified \"text\" Data.Text as " ++ moduleNameString textAlias ++ "\n"
-        ++ preambleImportMarker ++ "default (" ++ qualified intAlias intTyConName ++ ", " ++ qualified doubleAlias doubleTyConName
+        ++ preambleImportMarker ++ preambleDefaultMarker ++ "default (" ++ qualified intAlias intTyConName ++ ", " ++ qualified doubleAlias doubleTyConName
         ++ ", " ++ moduleNameString textAlias ++ ".Text)\n"
   prepared <- replaceTemplateMarker preambleDefaultDeclaration replacement template
   let prefix = "{-# LANGUAGE PackageImports #-}\n"
@@ -131,6 +139,9 @@ prepareDeclarationTemplate recipe namespaces imports template
         PreparedDeclarationTemplate <$> qualifyCompilerDefault recipe namespaces withImports
       NoCompilerDefault
         | null imports -> Right (PreparedDeclarationTemplate template)
+        | T.pack preambleImportMarker `T.isInfixOf` T.pack template ->
+            PreparedDeclarationTemplate <$> replaceTemplateMarker preambleImportMarker
+              (imports ++ preambleImportMarker) template
         | otherwise -> Left "declaration template with imports lacks {{CELL_IMPORTS}} or a protected preamble import marker"
 
 renderPreparedDeclaration :: PreparedDeclarationTemplate -> String -> String

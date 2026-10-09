@@ -2017,6 +2017,7 @@ pub const PREAMBLE_IMPORT_MARKER: &str = "-- tidepool-preamble-imports-v1\n";
 /// authored declarations, preserving the independent import insertion marker.
 pub const PREAMBLE_DEFAULT_DECL: &str = concat!(
     "-- tidepool-preamble-imports-v1\n",
+    "-- tidepool-preamble-defaults-v1\n",
     "default (Int, Double, Text)\n"
 );
 

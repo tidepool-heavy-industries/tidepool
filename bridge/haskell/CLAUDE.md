@@ -6,6 +6,13 @@ This directory owns the GHC-to-prepared-STG compiler worker and `lib/Tidepool`, 
 library auto-imported by the MCP surfaces. Toolchain discovery and caching live
 in `tidepool-toolchain`; CBOR decoding lives in `tidepool-repr`.
 
+Compiler templates distinguish the generic preamble import slot from the
+protected primitive default recipe. Installer templates may carry only the
+import marker. `TurnSource` captures the default recipe from its separate
+marker before authored syntax is inserted, then carries that typed fact through
+rendering. Do not infer defaulting authority from an import insertion marker or
+recapture an already qualified protected recipe.
+
 ## Build the compiler worker
 
 From the repository root, after materializing and configuring pinned tools:
