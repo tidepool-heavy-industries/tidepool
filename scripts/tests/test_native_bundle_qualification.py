@@ -56,10 +56,13 @@ def root_entry_source_fixture(root, modules):
         (root / relative).mkdir(parents=True, exist_ok=True)
     (root / 'TidepoolCatalog.hs').write_text(qualification.catalog_probe(modules))
     generated = qualification.root_entry_source_record(root)
+    for path, _ in qualification.BUILTIN_ENTRY_SOURCES.values():
+        (root / path).write_text('module ' + Path(path).stem + ' where\n')
     qualification.write_json(root / qualification.CATALOG_SOURCE_METADATA, {
-        'schema': 1, 'kind': 'native-catalog-source-snapshot', 'components': ['fixture'],
+        'schema': 2, 'kind': 'native-catalog-source-snapshot', 'components': ['fixture'],
         'modules': modules, 'roots': qualification.CATALOG_SOURCE_ROOTS,
-        'probe': 'TidepoolCatalog.hs', 'targets': ['catalogSentinel'], 'root_entry': generated})
+        'probe': 'TidepoolCatalog.hs', 'targets': ['catalogSentinel'], 'root_entry': generated,
+        'builtin_entries': qualification.builtin_entry_source_records(root)})
     return generated
 
 
@@ -1350,6 +1353,10 @@ class CatalogSourceTests(unittest.TestCase):
         self.args = SimpleNamespace(sources=self.sources, effects=self.effects,
                                     cohort=self.cohort, output=self.snapshot, jev_sources=self.jev_sources,
                                     root_entry_source=self.root_entry_source)
+        for name, (path, _) in qualification.BUILTIN_ENTRY_SOURCES.items():
+            source = self.root / path
+            source.write_text('module ' + Path(path).stem + ' where\n')
+            setattr(self.args, name + '_entry_source', source)
 
     def test_snapshot_keeps_library_roles_and_uses_declared_generated_bytes(self):
         source = self.sources / 'lib/Library.hs'
@@ -1515,6 +1522,27 @@ class CatalogSourceTests(unittest.TestCase):
         contract = {'stdlib_mode': 'catalog-backed', 'startup_mode': 'prepared', 'native_catalog': selected,
                     'native_root_entry': selected_entry,
                     'generated_root_source': qualification.catalog_source_metadata(original)['root_entry']}
+        contract['native_builtin_entries'] = {}
+        contract['generated_builtin_sources'] = qualification.catalog_source_metadata(original)['builtin_entries']
+        for name, (source_name, _) in qualification.BUILTIN_ENTRY_SOURCES.items():
+            directory = shared / 'builtin-entries' / name
+            qualification.write_json(directory / 'entry.json', {
+                'schema': 2, 'purpose': 'original_source', 'target': '__prepared',
+                'source': str(original / source_name),
+                'sources': {'kind': 'native_catalog', 'selection': self.selection(original)},
+                'producer': [3] * 32, 'worker': [4] * 32, 'files': {}})
+            shutil.copy2(record, directory / 'source-retention.json')
+            products = qualification.native_catalog_products(directory, qualification.NATIVE_ROOT_ENTRY_BUILD)
+            selected_builtin = {
+                'manifest_sha256': qualification.sha256(directory / 'entry.json'),
+                'source_selection': self.selection(original),
+                'source_inventory_sha256': selected['source_inventory_sha256'],
+                'product_inventory_sha256': qualification.digest_inventory(products)}
+            qualification.write_json(directory / qualification.NATIVE_ROOT_ENTRY_BUILD, {
+                'schema': 1, 'kind': 'native-root-entry-build',
+                'producer_target': '//tidepool/toolchain:tidepool-module-package',
+                'product_inventory': products, **selected_builtin})
+            contract['native_builtin_entries'][name] = selected_builtin
         qualification.write_json(shared / 'native-build-contract.json', contract)
         (shared / 'runtime-tools').symlink_to(tools)
         (shared / 'ghc-libdir.txt').write_text(str(tools) + '\n')
@@ -1623,6 +1651,8 @@ class CatalogSourceTests(unittest.TestCase):
             'native_catalog': contract['native_catalog'],
             'native_root_entry': contract['native_root_entry'],
             'generated_root_source': contract['generated_root_source'],
+            'native_builtin_entries': contract['native_builtin_entries'],
+            'generated_builtin_sources': contract['generated_builtin_sources'],
             'programs': qualification.programs(bundle), 'cohorts': qualification.cohorts(),
             'test_fixtures': {}, 'workspace_gitlink': workspace,
             'external_inputs': external, 'elf_runtime': {},
@@ -1669,7 +1699,7 @@ class CatalogSourceTests(unittest.TestCase):
                           wraps=qualification.verify_native_root_entry) as verify_root:
             self.assertEqual(qualification.verify(descriptor_path), descriptor)
             self.assertEqual(verify_catalog.call_count, 1)
-            self.assertEqual(verify_root.call_count, 1)
+            self.assertEqual(verify_root.call_count, 3)
 
             with self.assertRaises(TypeError):
                 qualification.native_environment(bundle, verified_catalog=contract['native_catalog'])
@@ -1682,7 +1712,7 @@ class CatalogSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'retained catalog sources differ'):
                 qualification.verify(descriptor_path)
             self.assertEqual(verify_catalog.call_count, 2)
-            self.assertEqual(verify_root.call_count, 1)
+            self.assertEqual(verify_root.call_count, 3)
             source.write_bytes(before)
 
     def test_root_entry_requires_schema_two_typed_source_selection(self):
@@ -1818,6 +1848,48 @@ class CatalogSourceTests(unittest.TestCase):
         self.assertTrue(all(not target.is_relative_to(original / relative)
                             for relative in qualification.CATALOG_SOURCE_ROOTS.values()))
         self.assertIn(qualification.ROOT_ENTRY_SOURCE, qualification.catalog_source_inventory(original))
+
+    def test_builtin_producer_uses_each_declared_named_source_on_the_same_entry_path(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        for name, (source_name, _) in qualification.BUILTIN_ENTRY_SOURCES.items():
+            args = self.producer_args(original, tools, record, self.root / ('entry-' + name))
+            args.entry_name = name
+            commands = []
+            def execute(command, **kwargs):
+                if '--verify-path' not in command:
+                    commands.append(command)
+                return subprocess.CompletedProcess(command, 0)
+            with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run', side_effect=execute):
+                qualification.invoke_retained_catalog_producer(args, qualification.CatalogProducerOperation.ENTRY)
+            self.assertEqual(commands, [[str(args.producer), 'entry', '--source', str(original / source_name),
+                '--target', '__prepared', '--source-root', str(original), '--output-root', str(args.output)]])
+
+    def test_builtin_selection_refuses_missing_policy_and_substituted_root_source(self):
+        original, tools, record, _, _ = self.retained_fixture()
+        bundle, contract, _ = self.catalog_fixture(original, tools, record)
+        self.assertEqual(qualification.verify_native_builtin_entries(bundle, contract['native_catalog']),
+                         contract['native_builtin_entries'])
+        manifest = bundle / 'share/exomonad/builtin-entries/workbench/entry.json'
+        before = manifest.read_bytes()
+        changed = json.loads(before)
+        changed['source'] = str(original / qualification.ROOT_ENTRY_SOURCE)
+        qualification.write_json(manifest, changed)
+        with self.assertRaisesRegex(ValueError, 'declared original'):
+            qualification.verify_native_builtin_entries(bundle, contract['native_catalog'])
+        manifest.write_bytes(before)
+        del contract['native_builtin_entries']['async_workbench']
+        qualification.write_json(bundle / 'share/exomonad/native-build-contract.json', contract)
+        with self.assertRaisesRegex(ValueError, 'both standard'):
+            qualification.verify_native_builtin_entries(bundle, contract['native_catalog'])
+
+    def test_snapshot_v1_is_refused_without_inferred_named_entry_provenance(self):
+        qualification.snapshot_catalog_sources(self.args)
+        path = self.snapshot / qualification.CATALOG_SOURCE_METADATA
+        value = json.loads(path.read_text())
+        value['schema'] = 1
+        qualification.write_json(path, value)
+        with self.assertRaisesRegex(ValueError, 'invalid native catalog source metadata'):
+            qualification.catalog_source_metadata(self.snapshot)
 
     def test_build_producer_refusal_still_rechecks_complete_retention(self):
         original, tools, record, pin, nar = self.retained_fixture()
