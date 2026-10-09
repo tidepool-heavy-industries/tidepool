@@ -19,6 +19,9 @@ EXPECTED_PHASES = (
 )
 THREE_ACTOR_ROSTER_PATH = (Path(__file__).resolve().parents[1] /
                            "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json")
+if not THREE_ACTOR_ROSTER_PATH.is_file():
+    THREE_ACTOR_ROSTER_PATH = (Path(__file__).resolve().parent / "test-fixtures" /
+                               "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json")
 THREE_ACTOR_PHASES = tuple(json.loads(THREE_ACTOR_ROSTER_PATH.read_text()))
 KNOWN_ROSTERS = {"harness-eight-phase": EXPECTED_PHASES,
                  "three-actor-capture": THREE_ACTOR_PHASES}

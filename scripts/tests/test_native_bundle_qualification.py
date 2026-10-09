@@ -788,6 +788,10 @@ class NativeQualificationTests(unittest.TestCase):
             reporter_path.parent.mkdir(parents=True)
             source_reporter = Path(__file__).resolve().parents[1] / 'harness-usecase-perf-report.py'
             shutil.copy2(source_reporter, reporter_path)
+            roster = Path(__file__).resolve().parents[2] / 'bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json'
+            frozen_roster = bundle / 'share/exomonad/test-fixtures/bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json'
+            frozen_roster.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(roster, frozen_roster)
             descriptor = {
                 'bundle_root': str(bundle), 'source_oid': 'a' * 40,
                 'harness_revision': 'b' * 40, 'profile': 'production',
@@ -865,6 +869,10 @@ class NativeQualificationTests(unittest.TestCase):
                 reporter_path = bundle / "share/exomonad/harness-usecase-perf-report.py"
                 reporter_path.parent.mkdir(parents=True)
                 shutil.copy2(Path(__file__).resolve().parents[1] / "harness-usecase-perf-report.py", reporter_path)
+                roster = Path(__file__).resolve().parents[2] / "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json"
+                frozen_roster = bundle / "share/exomonad/test-fixtures/bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json"
+                frozen_roster.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(roster, frozen_roster)
                 descriptor_path = fixture.root / "qualification.json"
                 descriptor_path.write_text("verified by run_cohort")
                 descriptor = {
