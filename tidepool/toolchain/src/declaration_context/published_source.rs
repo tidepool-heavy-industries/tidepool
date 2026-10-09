@@ -228,12 +228,10 @@ impl ExactDeclarationContext {
         root: &ExactModuleIdentity,
         original: ArtifactId,
     ) -> Result<Self, CompileError> {
-        let mut context = self.clone();
-        context.inventory = self
+        let inventory = self
             .inventory
             .select_roots(self.published_artifact_roots(root, original)?)?;
-        let ids = context
-            .inventory
+        let ids = inventory
             .descriptors()
             .into_iter()
             .map(|row| row.id)
@@ -262,10 +260,16 @@ impl ExactDeclarationContext {
                 }
             })
             .collect::<Vec<_>>();
-        context.compiler_projection = CompilerInputProjection::restore(&context.inventory, &roles)?;
-        context.lexical = self.published_lexical_closure(root)?;
-        context.original_instance_environment = OriginalInstanceEnvironment::Unknown;
-        Ok(context)
+        Ok(Self {
+            producer: self.producer,
+            compiler_projection: CompilerInputProjection::restore(&inventory, &roles)?,
+            inventory,
+            lexical: self.published_lexical_closure(root)?,
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            // Checked values retain their own template custody in the caller's
+            // context. A source publication carries its selected source graph.
+            template_imports: None,
+        })
     }
 
     pub(crate) fn issue_published_source_original(

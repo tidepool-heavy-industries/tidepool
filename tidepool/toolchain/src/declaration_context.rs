@@ -6950,6 +6950,109 @@ mod tests {
     }
 
     #[test]
+    fn published_original_projection_keeps_checked_template_custody_in_its_parent() {
+        let owners = [identity("fixture", "Alpha"), identity("fixture", "Beta")];
+        for root_index in 0..owners.len() {
+            for template_mask in 0u8..4 {
+                let mut issued = published_original_fixture();
+                issued.lexical[0].imports = owners.to_vec();
+                issued.lexical.push(ExactLexicalNode {
+                    owner: owners[1].clone(),
+                    imports: vec![],
+                });
+                let template_owners = owners
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| template_mask & (1 << index) != 0)
+                    .map(|(_, owner)| owner.clone())
+                    .collect::<BTreeSet<_>>();
+                let template = template_owners
+                    .iter()
+                    .map(|owner| format!("import {}\n", owner.module))
+                    .collect::<String>();
+                issued.template_imports =
+                    RetainedTemplateImports::capture(&issued, &[template.clone()]).unwrap();
+                issued.normalize().unwrap();
+                let before = issued.semantic_sha256();
+                let custody = issued.inventory.descriptors();
+                let retained = issued.template_imports.clone();
+                let selection = issued
+                    .issue_published_source_original("revision", "input", &owners[root_index])
+                    .unwrap();
+                let selected = selection.context();
+                selected.normalize().unwrap();
+                assert!(selected.template_imports.is_none());
+                assert_eq!(
+                    selected.lexical_graph(),
+                    &[ExactLexicalNode {
+                        owner: owners[root_index].clone(),
+                        imports: vec![],
+                    }]
+                );
+                assert!(selected
+                    .inventory
+                    .descriptors()
+                    .iter()
+                    .all(|entry| entry.owner == owners[root_index]));
+                assert_eq!(
+                    selected
+                        .selected_template_imports(&[template.clone()])
+                        .unwrap()
+                        .roots,
+                    template_owners
+                        .intersection(&BTreeSet::from([owners[root_index].clone()]))
+                        .cloned()
+                        .collect()
+                );
+                let mut parent = issued
+                    .clone()
+                    .with_published_source_originals(&selection)
+                    .unwrap();
+                parent = parent.extend(&[], &[], vec![]).unwrap();
+                assert_eq!(parent.template_imports, retained);
+                assert_eq!(
+                    parent
+                        .selected_template_imports(&[template.clone()])
+                        .unwrap()
+                        .roots,
+                    template_owners
+                );
+                let reopened = parent.published_source_original_selections().unwrap();
+                assert_eq!(reopened.len(), 1);
+                assert_eq!(
+                    reopened[0].context().semantic_sha256(),
+                    selected.semantic_sha256()
+                );
+                if let Some(retained) = &retained {
+                    let mut changed = issued.clone();
+                    let mut invalid = retained.as_ref().clone();
+                    invalid
+                        .graph
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .interface
+                        .interface_sha256[0] ^= 1;
+                    changed.template_imports = Some(Arc::new(invalid));
+                    assert!(changed.normalize().is_err());
+                }
+                if template_mask & (1 << (1 - root_index)) != 0 {
+                    let mut missing = issued.clone();
+                    missing.inventory = selected.inventory.clone();
+                    missing.compiler_projection =
+                        issued.compiler_projection.within_view(&missing.inventory);
+                    missing.lexical = selected.lexical.clone();
+                    assert!(missing.normalize().is_err());
+                }
+                assert_eq!(issued.semantic_sha256(), before);
+                assert_eq!(issued.inventory.descriptors(), custody);
+                assert_eq!(issued.template_imports, retained);
+                issued.normalize().unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn published_original_selection_refuses_unissued_root_and_custody_loss() {
         let issued = published_original_fixture();
         let root = identity("fixture", "Alpha");
