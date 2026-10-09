@@ -1259,47 +1259,47 @@ async fn read_command_captures_both_streams_of_a_failed_command() {
                 backend_request(campaign).await.supply(Ok(backend.clone()));
                 committed(campaign, "finished <- Cmd.await job").await;
 
-                let whole = committed(
-                    campaign,
-                    &tidepool_testing::fixture_source(
-                        "bridge/facade/src/actor_host/command_capture.hs",
-                    ),
-                )
-                .await;
-                let text = whole.to_string();
-                for marker in [
-                    "outcome-unreinterpreted",
-                    "failed-streams-captured",
-                    "stderr-read",
-                    "capture-display-ok",
-                    "stdout-still-gated",
-                    "readStdout-still-gated",
-                ] {
-                    assert!(text.contains(marker), "missing {marker}: {text}");
-                }
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let policy = campaign.root_installation.policy.clone();
+                let whole = campaign
+                    .drive_actor_output(
+                        &store,
+                        super::test_campaign::dispatch_haskell_script(
+                            policy.as_ref(),
+                            &tidepool_testing::fixture_source(
+                                "bridge/facade/src/actor_host/command_capture.hs",
+                            ),
+                        ),
+                    )
+                    .await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&whole),
+                    "True",
+                    "{whole}"
+                );
 
                 // The same retained job, now serving pages that rotated bytes away, decoded
                 // lossily, and stop short of end of file.
                 backend
                     .degraded_output
                     .store(true, std::sync::atomic::Ordering::Release);
-                let degraded = committed(
-                    campaign,
-                    &tidepool_testing::fixture_source(
-                        "bridge/facade/src/actor_host/command_capture_lossy.hs",
-                    ),
-                )
-                .await;
-                let text = degraded.to_string();
-                for marker in [
-                    "loss-signals-survive",
-                    "both-streams-partial",
-                    "outcome-survives-loss",
-                    "readStderr-partial",
-                    "incomplete-cannot-read-as-complete",
-                ] {
-                    assert!(text.contains(marker), "missing {marker}: {text}");
-                }
+                let degraded = campaign
+                    .drive_actor_output(
+                        &store,
+                        super::test_campaign::dispatch_haskell_script(
+                            policy.as_ref(),
+                            &tidepool_testing::fixture_source(
+                                "bridge/facade/src/actor_host/command_capture_lossy.hs",
+                            ),
+                        ),
+                    )
+                    .await;
+                assert_eq!(
+                    super::test_campaign::committed_display_text(&degraded),
+                    "True",
+                    "{degraded}"
+                );
                 assert_eq!(backend.executions(), 1, "reading must not run the command");
             })
         })
