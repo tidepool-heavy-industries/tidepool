@@ -107,6 +107,10 @@ if [[ $workspace_gitlink_mode != 160000 || $workspace_gitlink_kind != commit ||
   refuse 'missing committed workspace Gitlink'
 fi
 [[ $workspace_gitlink_revision == "$current_workspace_revision" ]] || refuse 'changed workspace Gitlink'
+# The native graph declares the stage-0 index Gitlink. It must agree with the
+# same retained revision as HEAD before any build can consume that declaration.
+workspace_gitlink_index=$("$git_bin" -C "$PWD" ls-files --stage -- .exomonad/workspace) || refuse 'cannot read workspace Gitlink index'
+[[ $workspace_gitlink_index == "160000 $workspace_gitlink_revision 0"$'\t.exomonad/workspace' ]] || refuse 'workspace Gitlink index differs from retained pin'
 if [[ -n ${TIDEPOOL_BUCK_CONFIG_FILE:-} ]]; then
   shared_config=$(mktemp)
   trap 'rm -f -- "$shared_config"' EXIT

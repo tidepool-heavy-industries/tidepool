@@ -326,6 +326,25 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
                         "change workspace Gitlink"], check=True)
         self.assert_refused("changed workspace Gitlink")
 
+    def test_changed_staged_workspace_gitlink_refuses_before_buck(self):
+        self.git_command("update-index", "--cacheinfo",
+                         f"160000,{'b' * 40},.exomonad/workspace")
+        self.assert_refused("workspace Gitlink index differs from retained pin")
+
+    def test_missing_index_workspace_gitlink_refuses_before_buck(self):
+        self.git_command("update-index", "--force-remove", ".exomonad/workspace")
+        self.assert_refused("workspace Gitlink index differs from retained pin")
+
+    def test_unmerged_workspace_gitlink_refuses_before_buck(self):
+        self.git_command("update-index", "--force-remove", ".exomonad/workspace")
+        entries = "".join(
+            f"160000 {revision * 40} {stage}\t.exomonad/workspace\n"
+            for stage, revision in ((1, "a"), (2, "b"), (3, "c"))
+        )
+        subprocess.run([self.git, "-C", str(self.root), "update-index", "--index-info"],
+                       input=entries.encode(), check=True, capture_output=True)
+        self.assert_refused("workspace Gitlink index differs from retained pin")
+
     def input_tree(self, revision="HEAD"):
         return subprocess.check_output(
             ["bash", "-c", 'source scripts/toolchain-inputs.sh; toolchain_input_tree git "$1"', "bash", revision],
