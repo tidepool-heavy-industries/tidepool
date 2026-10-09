@@ -11381,26 +11381,95 @@ mod tests {
             .compiler_input_roles()
             .iter()
             .all(|role| role.original().is_none()));
-        // The protected support offer is valid independently; the authored
-        // original requires that exact owner in the same private namespace.
+        let support_entry = ArtifactEntry::original_with_validation(
+            producer.sha256(),
+            configured_support[0].clone(),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(dependent_context
+            .inventory
+            .metadata_snapshot()
+            .selected_native_groups
+            .iter()
+            .any(|group| group.artifact == support_entry.descriptor.id));
+        // The exact support groups remain selected even though their compiler
+        // role is type-only. A redundant private support offer is optional.
         OriginalCompilerInputs::from_native_availability(
             &dependent_context,
             producer,
             &configured_support,
         )
         .unwrap();
-        assert!(OriginalCompilerInputs::from_selected_authored_declarations(
+        let selected_private = OriginalCompilerInputs::from_selected_authored_declarations(
             &dependent_context,
             producer,
-            &[]
+            &[],
         )
-        .is_err());
-        assert!(OriginalCompilerInputs::from_selected_authored_declarations(
+        .unwrap()
+        .expect("complete selected authored original can reuse exact selected support");
+        let selected_request = ExactCompileContext::new(Arc::new(dependent_context.clone()))
+            .prepare_compilation_with_private_input(
+                &root.join("selected-authored-scope"),
+                compiler_identity.producer_bytes(),
+                None,
+                Some(selected_private),
+            )
+            .unwrap();
+        assert_eq!(selected_request.context().as_ref(), &dependent_context);
+        assert_eq!(
+            selected_request
+                .compiler_original_products()
+                .unwrap()
+                .iter()
+                .map(|product| product.owner().clone())
+                .collect::<Vec<_>>(),
+            vec![changed.product().owner().clone()]
+        );
+        let inventory = dependent_context.inventory.inventory();
+        let type_only = ExactDeclarationContext {
+            producer: dependent_context.producer,
+            inventory: inventory
+                .admit_recovery_selection(
+                    &inventory.empty_view(),
+                    dependent_context.inventory.entries(),
+                    &BTreeSet::new(),
+                )
+                .unwrap(),
+            compiler_projection: dependent_context.compiler_projection.clone(),
+            lexical: dependent_context.lexical.clone(),
+            template_imports: dependent_context.template_imports.clone(),
+            original_instance_environment: dependent_context.original_instance_environment.clone(),
+        };
+        assert!(type_only
+            .inventory
+            .metadata_snapshot()
+            .selected_native_groups
+            .is_empty());
+        assert_eq!(
+            type_only.compiler_input_roles(),
+            dependent_context.compiler_input_roles()
+        );
+        let missing_support = OriginalCompilerInputs::from_native_availability(
+            &type_only,
+            producer,
+            std::slice::from_ref(changed.product()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(missing_support, CompileError::CompilerEvidence(cause)
+            if matches!(*cause, crate::certified_products::CertificationError::Mismatch("source binder/group closure")))
+        );
+        let conflicting_support = OriginalCompilerInputs::from_selected_authored_declarations(
             &dependent_context,
             producer,
-            &wrong_support
+            &wrong_support,
         )
-        .is_err());
+        .unwrap_err();
+        assert!(
+            matches!(conflicting_support, CompileError::ExtractFailed(detail)
+            if detail.contains("private native availability differs from selected canonical interface"))
+        );
         let private = OriginalCompilerInputs::from_selected_authored_declarations(
             &dependent_context,
             producer,
