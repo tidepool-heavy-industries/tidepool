@@ -14376,6 +14376,18 @@ pub(crate) mod request_tests {
             &self,
             context: crate::ActorSessionContext,
         ) -> Result<(), ResidentActorWorkbenchError> {
+            self.publish_completed_cell_with_commit_for_test(
+                context,
+                tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+            )
+            .await
+        }
+
+        async fn publish_completed_cell_with_commit_for_test(
+            &self,
+            context: crate::ActorSessionContext,
+            expected: tidepool_runtime::session::PublicManifestCommit,
+        ) -> Result<(), ResidentActorWorkbenchError> {
             let execution = self
                 .private_execution
                 .as_ref()
@@ -14386,9 +14398,9 @@ pub(crate) mod request_tests {
             assert!(matches!(
                 published,
                 PrivateExecutionPublication::Manifest {
-                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                    commit,
                     ..
-                }
+                } if commit == expected
             ));
             let public_scope = execution.public_scope;
             self.access
@@ -14411,12 +14423,21 @@ pub(crate) mod request_tests {
 
         async fn admit_private_cell_for_test(
             self,
-            mut context: crate::ActorSessionContext,
+            context: crate::ActorSessionContext,
         ) -> Result<(Self, crate::ActorSessionContext), ResidentActorWorkbenchError> {
             let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
             let owner =
                 crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
                     .expect("fixture has an ephemeral public owner");
+            self.admit_private_cell_with_owner_for_test(context, owner)
+                .await
+        }
+
+        async fn admit_private_cell_with_owner_for_test(
+            self,
+            mut context: crate::ActorSessionContext,
+            owner: Arc<crate::resident_actor::WorkbenchPublicOwner>,
+        ) -> Result<(Self, crate::ActorSessionContext), ResidentActorWorkbenchError> {
             let authority =
                 crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone());
             let private = Arc::new(
@@ -16310,6 +16331,63 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         use proptest::prelude::*;
         use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionLib};
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
+        struct RunOwner(PathBuf);
+        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.0)
+            }
+        }
+        let durable = tempfile::tempdir().unwrap();
+        let manifest = durable.path().join("declarations.json");
+        let authority = Arc::new(RunOwner(durable.path().canonicalize().unwrap()));
+        let declaration_root = durable.path().join("session");
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(7),
+            &declaration_root,
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_owned_recovery_graph_v3(&manifest, authority.clone())
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), 0);
+        let scope = session.mint_isolated_scope();
+        let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/published-bootstrap").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .initialize_durable_public_scope(owner.clone(), scope)
+            .unwrap();
+        let bootstrap = session
+            .begin_durable_public_bootstrap(owner.clone(), scope)
+            .unwrap();
+        let pending = session
+            .stage_published_source_originals_in(scope, Arc::clone(&selection))
+            .unwrap();
+        session.publish_source_originals(pending).unwrap();
+        session.publish_durable_public_bootstrap(bootstrap).unwrap();
+        let published = session.compile_view_in(scope).unwrap();
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(8),
+            &declaration_root,
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        lib.attach_owned_recovery_graph_v3(&manifest, authority)
+            .unwrap();
+        let mut recovered = PersistentSession::new(Some(lib), 0);
+        let scope = recovered.recover_public_scope(&owner).unwrap();
+        let view = recovered.compile_view_in(scope).unwrap();
+        assert_eq!(view.library(), None);
+        assert_eq!(
+            view.exact_declaration_context().unwrap().semantic_sha256(),
+            published
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            "native bootstrap durably carries an issued original at generation zero"
+        );
         let mut runner = proptest::test_runner::TestRunner::default();
         runner.run(&proptest::collection::vec(0_u8..5, 1..40), |operations| {
             let root = tempfile::tempdir().unwrap();
@@ -16379,7 +16457,24 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
 
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
     ) {
-        let (session, context, source, _session_root) = host_mount_fixture();
+        struct RunOwner(PathBuf);
+        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
+            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+                Ok(root.canonicalize()? == self.0)
+            }
+        }
+        let durable = tempfile::tempdir().unwrap();
+        let manifest = durable.path().join("declarations.json");
+        let authority = Arc::new(RunOwner(durable.path().canonicalize().unwrap()));
+        let (session, context, source, session_root) = host_mount_fixture_with_lib(|lib| {
+            lib.attach_owned_recovery_graph_v3(&manifest, authority.clone())
+                .unwrap();
+        });
+        let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
+            context.actor.incarnation.0,
+        )
+        .unwrap();
         let authored = tempfile::tempdir().unwrap();
         let quotation_input = authored.path().join("external-input");
         std::fs::write(&quotation_input, "41").unwrap();
@@ -16444,6 +16539,20 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .prepare_tools(context.clone(), 1, vec![])
             .await
             .unwrap();
+        workbench
+            .access
+            .with_machine(context.clone(), {
+                let owner = owner.clone();
+                move |session, context, _| {
+                    session
+                        .initialize_durable_public_scope(owner, context.placement.lexical_scope)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                }
+            })
+            .await
+            .unwrap();
         let installed_view = workbench
             .access
             .with_machine(context.clone(), |session, context, _| {
@@ -16461,6 +16570,33 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
         assert!(
             warm_view.exact_declaration_context().is_none(),
             "earlier capture remains immutable"
+        );
+        let recover_context = || {
+            let mut lib = tidepool_runtime::session::SessionLib::open(
+                tidepool_repr::SessionId(8_141),
+                session_root.path(),
+                tidepool_runtime::session::ModuleEnv::standalone_default(),
+            )
+            .unwrap()
+            .with_validation_include(roots.clone());
+            lib.attach_owned_recovery_graph_v3(&manifest, authority.clone())
+                .unwrap();
+            let mut recovered = tidepool_runtime::session::PersistentSession::new(Some(lib), 0);
+            let scope = recovered.recover_public_scope(&owner).unwrap();
+            recovered.compile_view_in(scope).unwrap()
+        };
+        let generation_zero_recovered = recover_context();
+        assert_eq!(generation_zero_recovered.library(), None);
+        assert_eq!(
+            generation_zero_recovered
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            installed_view
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            "generation-zero recovery restores the issued original policy"
         );
 
         assert!(Arc::ptr_eq(
@@ -16508,8 +16644,33 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             })
             .await
             .unwrap();
+        let second_bootstrap = workbench
+            .access
+            .with_machine(context.clone(), {
+                let owner = owner.clone();
+                move |session, context, _| {
+                    session
+                        .begin_durable_public_bootstrap(owner, context.placement.lexical_scope)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                }
+            })
+            .await
+            .unwrap();
         let second = workbench
             .prepare_tools(context.clone(), 2, vec![])
+            .await
+            .unwrap();
+        workbench
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session
+                    .publish_durable_public_bootstrap(second_bootstrap)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
             .await
             .unwrap();
         workbench
@@ -16561,21 +16722,54 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .expect("completed original source has its actual compiler owner");
 
         std::fs::write(&quotation_input, "42").unwrap();
+        let public_owner = workbench
+            .access
+            .with_machine(context.clone(), {
+                let owner = owner.clone();
+                move |session, context, _| {
+                    let descriptor =
+                        crate::ActorDescriptor::new("quoted original", context.placement)
+                            .with_actor_path(
+                                tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
+                            )
+                            .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+                    let readiness = session
+                        .durable_public_readiness(&owner, context.placement.lexical_scope)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
+                    Ok(crate::resident_actor::WorkbenchPublicOwner::issue(
+                        context,
+                        &descriptor,
+                        Some(readiness),
+                    )
+                    .unwrap())
+                }
+            })
+            .await
+            .unwrap();
         for cell in [
             "import qualified QuotedAgentSpec as Frozen\nlet frozenSpec = Frozen.agentSpec @'[]",
             "preparedOriginalHistory :: Int\npreparedOriginalHistory = 41",
             "import qualified QuotedAgentSpec as Frozen\nlet repeatedSpec = Frozen.agentSpec @'[]",
         ] {
-            let (private, private_context) = workbench
-                .admit_private_cell_for_test(context.clone())
-                .await
-                .unwrap();
+            let (private, private_context) = ResidentActorWorkbench::new(
+                Arc::clone(&workbench.access.machines),
+                source.clone(),
+                None,
+            )
+            .admit_private_cell_with_owner_for_test(context.clone(), Arc::clone(&public_owner))
+            .await
+            .unwrap();
             private
                 .execute_cell_for_test(private_context.clone(), cell)
                 .await
                 .unwrap();
             private
-                .publish_completed_cell_for_test(private_context)
+                .publish_completed_cell_with_commit_for_test(
+                    private_context,
+                    tidepool_runtime::session::PublicManifestCommit::Durable,
+                )
                 .await
                 .unwrap();
             let current = workbench
@@ -16608,10 +16802,14 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             })
             .await
             .unwrap();
-        let (failed, failed_context) = workbench
-            .admit_private_cell_for_test(context.clone())
-            .await
-            .unwrap();
+        let (failed, failed_context) = ResidentActorWorkbench::new(
+            Arc::clone(&workbench.access.machines),
+            source.clone(),
+            None,
+        )
+        .admit_private_cell_with_owner_for_test(context.clone(), Arc::clone(&public_owner))
+        .await
+        .unwrap();
         assert!(failed
             .prepare_cell(
                 failed_context,
@@ -16630,6 +16828,20 @@ Some(generated_binds_verdict(&["lookupResult".into()])))
             .await
             .unwrap();
         assert_eq!(after_failed_cell, before_failed_cell);
+        let later_recovered = recover_context();
+        assert!(later_recovered.library().is_some());
+        assert_eq!(
+            later_recovered
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            after_failed_cell
+                .exact_declaration_context()
+                .unwrap()
+                .semantic_sha256(),
+            "later declaration recovery preserves the original selection"
+        );
+        assert_eq!(generation_zero_recovered.library(), None);
         assert_eq!(
             std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
             completed_executions,
