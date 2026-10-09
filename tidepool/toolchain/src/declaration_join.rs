@@ -2215,18 +2215,10 @@ mod authored_tests {
         )
         .descriptor
         .id;
-        let context = ExactDeclarationContext::new(
-            &[baseline, Arc::new(result)],
-            &[],
-            vec![ExactLexicalNode {
-                owner: ExactModuleIdentity {
-                    unit: result_owner.unit.clone(),
-                    module: result_owner.module.clone(),
-                },
-                imports: Vec::new(),
-            }],
-        )
-        .unwrap();
+        // Retain the issued native roots while withdrawing source lexical
+        // owners, so exact preparation must supply their private inputs.
+        let context =
+            ExactDeclarationContext::new(&[baseline, Arc::new(result)], &[], Vec::new()).unwrap();
         assert!(context.authored_native_root(1).is_ok());
         assert!(context.authored_native_root(2).is_ok());
         assert!(context
