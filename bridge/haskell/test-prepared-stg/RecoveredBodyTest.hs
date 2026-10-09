@@ -1037,7 +1037,7 @@ assertBottomingApplications root = do
   partial <- projectEntry "bottomingPartial"
   assertPartialBottoming partial
   called <- projectEntry "bottomingCalled"
-  assertSaturatedBottoming called "bottomingCalled" "$wbottomingUnary" [IntRep 64]
+  assertSaturatedBottoming called "bottomingCalled" "bottomingUnary" [LiftedRefRep]
   tupleCalled <- projectEntry "bottomingTupleCalled"
   assertSaturatedBottoming tupleCalled "bottomingTupleCalled" "bottomingTuple"
     [IntRep 64, FloatRep 64]
@@ -1088,6 +1088,14 @@ assertBottomingApplications root = do
               (Stg.StgTopLifted (Stg.StgNonRec binder
                 (Stg.StgRhsClosure captures ccs update []
                   (Stg.StgApp worker [first]) (varType binder))), annotations)
+        restore (Stg.StgTopLifted (Stg.StgNonRec binder
+                 (Stg.StgRhsClosure captures ccs update [_]
+                   (Stg.StgApp worker [first, _]) _)), annotations)
+          | occNameString (nameOccName (varName binder)) == "partialApplication"
+          , occNameString (nameOccName (varName worker)) == "bottomingBinary" =
+              (Stg.StgTopLifted (Stg.StgNonRec binder
+                (Stg.StgRhsClosure captures ccs update []
+                  (Stg.StgApp worker [first]) (varType binder))), annotations)
         restore (Stg.StgTopLifted (Stg.StgNonRec binder rhs), _)
           | occNameString (nameOccName (varName binder)) == "partialApplication" =
               error ("unexpected prepared partialApplication: " ++ showSDocUnsafe (ppr rhs))
@@ -1098,8 +1106,8 @@ assertBottomingApplications root = do
       assert (any isConsumerCall consumerCalls)
         ("bottomingPartial did not pass the PAP closure to partialConsumer: "
           ++ show consumerCalls)
-      let entry = signatureAt program (topSignature program "$wbottomingBinary")
-      assert (signatureArguments entry == [IntRep 64, IntRep 64]
+      let entry = signatureAt program (topSignature program "bottomingBinary")
+      assert (signatureArguments entry == [LiftedRefRep, LiftedRefRep]
           && signatureResults entry == NoSuccess)
         ("$wbottomingBinary entry did not retain its two-argument bottoming contract: "
           ++ show entry)
@@ -1114,11 +1122,11 @@ assertBottomingApplications root = do
           callee == Ref (Local (topId program "partialConsumer"))
             && arguments == [Ref (Local (topId program "partialApplication"))]
         isPartialCall (callee, signature, arguments) =
-          callee == Ref (Local (topId program "$wbottomingBinary"))
+          callee == Ref (Local (topId program "bottomingBinary"))
             && length arguments == 1
             && length arguments < length (signatureArguments
-                 (signatureAt program (topSignature program "$wbottomingBinary")))
-            && signatureArguments signature == [IntRep 64]
+                 (signatureAt program (topSignature program "bottomingBinary")))
+            && signatureArguments signature == [LiftedRefRep]
             && signatureResults signature == Returns [LiftedRefRep]
 
     assertSaturatedBottoming program occurrence calleeName expectedArguments = do
