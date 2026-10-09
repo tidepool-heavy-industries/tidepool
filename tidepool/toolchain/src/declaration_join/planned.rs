@@ -1590,6 +1590,16 @@ mod tests {
     }
 
     proptest::proptest! {
+        #![proptest_config({
+            let mut config = proptest::test_runner::Config::default();
+            if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+                config.failure_persistence = Some(Box::new(
+                    proptest::test_runner::FileFailurePersistence::Direct(path),
+                ));
+            }
+            config
+        })]
+
         #[test]
         fn completed_source_adjacency_retains_exact_type_only_chains(length in 1usize..9) {
             let root = module("Authored");
