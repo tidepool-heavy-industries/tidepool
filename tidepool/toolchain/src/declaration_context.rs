@@ -1570,6 +1570,7 @@ impl ProgramSourceSupport {
         compiler_projection: CompilerInputProjection,
         imports: impl IntoIterator<Item = (ExactModuleIdentity, Vec<ExactModuleIdentity>)>,
     ) -> Result<Self, CompileError> {
+        let compiler_projection = compiler_projection.for_program_support(&artifacts);
         let compiler_projection = match previous {
             Some(previous) => previous.compiler_projection.merge(&compiler_projection)?,
             None => compiler_projection,
@@ -3163,7 +3164,7 @@ impl ExactCompilationRequest {
         let program_support = ProgramSourceSupport::extend(
             self.program_support.as_ref(),
             fresh.clone(),
-            context.compiler_projection.within_view(&fresh),
+            context.compiler_projection.clone(),
             imports
                 .into_iter()
                 .filter(|(owner, _)| fresh_owners.contains(owner)),
@@ -3268,7 +3269,7 @@ impl ExactCompilationRequest {
         request.program_support = Some(ProgramSourceSupport::extend(
             self.program_support.as_ref(),
             support.clone(),
-            planned.compiler_input_projection().within_view(&support),
+            planned.compiler_input_projection().clone(),
             planned
                 .original_home_imports()
                 .map(|(owner, imports)| (owner.clone(), imports.to_vec()))
@@ -9757,6 +9758,195 @@ mod tests {
             .is_err());
         assert!(foreign.program_support.is_none());
         assert!(empty.artifact_view().is_empty());
+    }
+
+    #[test]
+    fn program_support_scopes_published_roles_to_exact_carriers_without_retiring_parent() {
+        let owners = [identity("fixture", "Alpha"), identity("fixture", "Beta")];
+        let mut issuer = published_original_fixture();
+        issuer.lexical[0].imports = owners.to_vec();
+        issuer.lexical.push(ExactLexicalNode {
+            owner: owners[1].clone(),
+            imports: vec![],
+        });
+        issuer.normalize().unwrap();
+        let mut parent = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+        for owner in &owners {
+            parent = parent
+                .with_published_source_originals(
+                    &issuer
+                        .issue_published_source_original("revision", "input", owner)
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        let roles = parent.compiler_input_roles();
+        let before = parent.semantic_sha256();
+        let custody = parent.artifact_view().artifact_ids();
+        let mut histories = 0;
+        for alpha in 0..3 {
+            for beta in 0..3 {
+                for unrelated in [false, true] {
+                    histories += 1;
+                    let states = [alpha, beta];
+                    let mut roots = Vec::new();
+                    for (index, role) in roles.iter().enumerate() {
+                        if states[index] > 0 {
+                            roots.push(role.interface());
+                        }
+                        if states[index] == 2 {
+                            roots.push(role.original().unwrap());
+                        }
+                    }
+                    let mut view = parent.artifact_view().select_roots(roots).unwrap();
+                    if unrelated {
+                        view = view
+                            .merge(&support_view(&[support_product("Unrelated")]))
+                            .unwrap();
+                    }
+                    let support = ProgramSourceSupport::extend(
+                        None,
+                        view.clone(),
+                        parent.compiler_projection.clone(),
+                        [],
+                    )
+                    .unwrap();
+                    let scoped = support.compiler_projection.roles();
+                    assert_eq!(
+                        scoped.len(),
+                        states.iter().filter(|state| **state > 0).count()
+                    );
+                    for (index, role) in roles.iter().enumerate() {
+                        let observed = scoped
+                            .iter()
+                            .find(|candidate| candidate.interface() == role.interface());
+                        match states[index] {
+                            0 => assert!(observed.is_none()),
+                            1 => {
+                                assert_eq!(observed.unwrap().original(), None);
+                                assert!(!observed.unwrap().is_published_source_original());
+                            }
+                            2 => assert_eq!(observed.unwrap(), role),
+                            _ => unreachable!(),
+                        }
+                    }
+                    assert_eq!(support.artifacts.artifact_ids(), view.artifact_ids());
+                    assert_eq!(
+                        support.artifacts.selected_native_groups(),
+                        view.selected_native_groups()
+                    );
+                    // Repeated extension/reopening cannot convert a type carrier to native authority.
+                    let reopened = ProgramSourceSupport::extend(
+                        Some(&support),
+                        view.clone(),
+                        parent.compiler_projection.clone(),
+                        [],
+                    )
+                    .unwrap();
+                    assert_eq!(reopened.compiler_projection, support.compiler_projection);
+                    assert_eq!(reopened.imports, support.imports);
+                    if states != [2, 2] {
+                        assert!(
+                            parent
+                                .compiler_projection
+                                .within_view(&view)
+                                .validate(&view)
+                                .is_err(),
+                            "persistent publication still refuses missing required custody"
+                        );
+                    }
+                    assert_eq!(parent.semantic_sha256(), before);
+                    assert_eq!(parent.artifact_view().artifact_ids(), custody);
+                    assert_eq!(parent.compiler_input_roles(), roles);
+                    assert_eq!(
+                        parent.published_source_original_selections().unwrap().len(),
+                        2
+                    );
+                }
+            }
+        }
+        assert_eq!(histories, 18);
+    }
+
+    #[test]
+    fn program_support_completion_keeps_unrelated_publication_out_of_transient_offer() {
+        let directory = tempfile::tempdir().unwrap();
+        let issued = published_original_fixture();
+        let publication = issued
+            .issue_published_source_original("revision", "input", &identity("fixture", "Alpha"))
+            .unwrap();
+        let baseline = publication.context().clone();
+        let before = baseline.semantic_sha256();
+        let roles = baseline.compiler_input_roles();
+        let custody = baseline.artifact_view().artifact_ids();
+        let products = ["InstanceOwner", "InstanceRelay"]
+            .map(|module| scaffold_native_fixture(baseline.producer, "fixture", module, 1));
+        let offer = support_offer(&products);
+        let mut request = program_request(directory.path(), baseline.clone());
+        request.producer_sha256 = baseline.producer;
+        let context = request
+            .admit_fixture_support(
+                baseline.clone(),
+                &offer,
+                &[support_admission(directory.path())],
+                None,
+            )
+            .unwrap();
+        let transient = request.program_support.as_ref().unwrap();
+        assert_eq!(
+            transient.compiler_projection.roles(),
+            offer.projection.roles()
+        );
+        assert_eq!(
+            transient.artifacts.artifact_ids(),
+            offer.artifacts.artifact_ids()
+        );
+        assert!(!transient
+            .compiler_projection
+            .roles()
+            .iter()
+            .any(|role| role.is_published_source_original()));
+        assert!(context
+            .compiler_input_roles()
+            .iter()
+            .any(|role| role == &roles[0]));
+        assert_eq!(baseline.semantic_sha256(), before);
+        assert_eq!(baseline.artifact_view().artifact_ids(), custody);
+        assert_eq!(baseline.compiler_input_roles(), roles);
+        let effective = request
+            .in_program_context(&directory.path().join("program-inputs"), context)
+            .unwrap();
+        let receipt = import_receipt(directory.path(), &effective, "InstanceRelay");
+        let admission = effective
+            .validate_receipt(&receipt, None, effective.context())
+            .unwrap();
+        let consumer = scaffold_native_fixture(baseline.producer, "fixture", "Consumer", 1);
+        let artifacts = effective
+            .context()
+            .artifact_view()
+            .merge(&support_view(&[consumer]))
+            .unwrap();
+        let original = ExactProductAdmission {
+            request: &effective,
+            source: &admission,
+        }
+        .original_execution_fixture(&artifacts)
+        .unwrap();
+        assert_eq!(
+            original
+                .lexical_graph()
+                .iter()
+                .find(|node| node.owner == identity("fixture", "InstanceRelay"))
+                .unwrap()
+                .imports,
+            vec![identity("fixture", "InstanceOwner")]
+        );
+        assert_eq!(baseline.semantic_sha256(), before);
+        // The reopened source receipt remains byte- and owner-authenticated.
+        std::fs::write(directory.path().join("Consumer.hs"), b"changed source").unwrap();
+        assert!(effective
+            .validate_receipt(&receipt, None, effective.context())
+            .is_err());
     }
 
     #[test]
