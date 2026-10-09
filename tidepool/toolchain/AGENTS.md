@@ -25,6 +25,9 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   native availability. Authored dictionary bodies use retained originals matching
   that capture's canonical interfaces; type custody alone cannot replace native
   bytes, and source-original Core recovery must not replay authored declarations.
+- Validate compiler completion against the issued request roles, including private
+  native availability. Its persistent declaration snapshot retains independent
+  lexical and type roles and cannot validate a promoted request artifact closure.
 - `tidepool-extract-cmd` stays the small invocation builder. Do not move cache
   or runtime policy into that dependency leaf.
 - Cache tests must cover invalidation, relocation, warnings, and uncacheable

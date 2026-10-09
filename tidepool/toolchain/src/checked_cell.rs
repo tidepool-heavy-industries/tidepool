@@ -1523,9 +1523,7 @@ impl HostBindingInterfaceOffer {
         self,
         receipt: &[u8],
     ) -> Result<Arc<ExactHostBindingInterface>, CompileError> {
-        self.prototype
-            .context
-            .validate_artifacts(&self.request.artifacts)?;
+        self.request.validate_artifacts()?;
         if receipt.len() > 4 << 20 {
             return Err(failure("binding interface receipt exceeds byte bound"));
         }

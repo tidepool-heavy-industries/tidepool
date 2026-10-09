@@ -137,6 +137,7 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
     let request = ExactCompileContext::new(context.clone())
         .prepare_compilation_with_private_input(scratch.path(), PRODUCER, None, private)
         .unwrap();
+    request.validate_artifacts().unwrap();
     assert_eq!(context.lexical_graph(), lexical);
     assert_eq!(context.artifact_view().selected_native_groups(), groups);
     assert!(
@@ -165,6 +166,38 @@ fn original_native_declaration_body_is_available_without_heap_or_lexical_promoti
     assert!(
         offered_native_owners(&earlier).is_empty(),
         "a later declaration cannot enter an earlier capture"
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let private = original_native_declaration_inputs(&later, PRODUCER).unwrap();
+    let request = ExactCompileContext::new(later.clone())
+        .prepare_compilation_with_private_input(scratch.path(), PRODUCER, None, private)
+        .unwrap();
+    request.validate_artifacts().unwrap();
+    assert!(
+        later.validate_artifacts(&request.artifacts).is_err(),
+        "request availability must not promote persistent type-only roles"
+    );
+    let native = request
+        .artifacts
+        .iter()
+        .position(|artifact| artifact.product.is_some())
+        .unwrap();
+    let mut missing_native = request.clone();
+    missing_native.artifacts[native].product = None;
+    assert!(
+        missing_native.validate_artifacts().is_err(),
+        "an issued private native role requires its original product"
+    );
+    let canonical = request
+        .artifacts
+        .iter()
+        .position(|artifact| artifact.product.is_none())
+        .unwrap();
+    let mut extra_native = request.clone();
+    extra_native.artifacts[canonical].product = request.artifacts[native].product.clone();
+    assert!(
+        extra_native.validate_artifacts().is_err(),
+        "private availability cannot give unrelated type-only roles executable products"
     );
     let unissued =
         original_context_with_products(&[(true, true, true)], vec![declaration(1, true)]);

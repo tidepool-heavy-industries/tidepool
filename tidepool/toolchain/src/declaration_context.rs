@@ -2302,6 +2302,14 @@ impl ExactCompilationRequest {
     pub(crate) fn compiler_inputs(&self) -> &RequestCompilerInputs {
         &self.inputs.compiler
     }
+
+    /// Validate the issued request roles, including private native availability.
+    /// Persistent declarations retain their independent lexical and type roles.
+    pub(crate) fn validate_artifacts(&self) -> Result<(), CompileError> {
+        self.context()
+            .validate_artifacts_from_metadata(&self.artifacts, &self.compiler_inputs().metadata)
+    }
+
     /// Grow a same-offer request from its already certified private selection.
     /// New roles materialize in the same atomic transition as declaration growth.
     pub(crate) fn in_program_context_with_private_input(
@@ -3105,8 +3113,7 @@ impl ExactCompilationRequest {
         validation: &mut PackageInterfaceValidation,
     ) -> Result<Vec<ExactSourceAdmission>, CompileError> {
         let context_validate_start = std::time::Instant::now();
-        self.context()
-            .validate_artifacts_from_metadata(&self.artifacts, &self.compiler_inputs().metadata)?;
+        self.validate_artifacts()?;
         self.checked_value_imports.validate()?;
         if sha256(
             &crate::certified_products::read_bounded_with_operation(

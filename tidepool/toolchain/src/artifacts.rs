@@ -1434,7 +1434,7 @@ impl ModuleCandidateOffer {
         match &self.checked {
             Some(NativeCheckedOffer::ActivationPreview(preview)) => {
                 let exact = self.exact.as_ref().expect("preview has exact offer");
-                exact.context().validate_artifacts(&exact.artifacts)?;
+                exact.validate_artifacts()?;
                 preview.unavailable(root, &exact.request_sha256)
             }
             _ => {
