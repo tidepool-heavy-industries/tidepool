@@ -30,7 +30,7 @@ mod process;
 mod request;
 mod resources;
 pub use endpoint::{
-    with_compiler_transaction, with_compiler_transaction_cancellable,
+    compiler_host_checkpoint, with_compiler_transaction, with_compiler_transaction_cancellable,
     with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
     CompilerEndpoint, CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause,
     CompilerScratchFailure, CompilerScratchRetirement, CompilerTermination, CompilerTransaction,

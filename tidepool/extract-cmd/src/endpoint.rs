@@ -1353,6 +1353,28 @@ thread_local! {
     static TRANSACTION_SCOPE: RefCell<Option<TransactionScope>> = const { RefCell::new(None) };
 }
 
+/// Check cooperative host work against its enclosing compiler cancellation owner.
+/// Unscoped work is allowed. An interrupted checkpoint leaves accepted requests
+/// and transaction cleanup custody with the existing scope.
+pub fn compiler_host_checkpoint() -> io::Result<()> {
+    let cancelled = TRANSACTION_SCOPE.with(|scope| {
+        scope.borrow().as_ref().is_some_and(|state| {
+            state
+                .cancellation
+                .as_ref()
+                .is_some_and(CompilerTransactionCancellation::is_cancelled)
+        })
+    });
+    if cancelled {
+        Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "compiler host work was cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn bind_scoped_endpoint(
     cmd: &ExtractCmd,
     bind: impl FnOnce(Option<&CompilerTransactionCancellation>) -> Result<CompilerEndpoint, SpawnError>,
@@ -2878,6 +2900,75 @@ mod tests {
     }
 
     #[test]
+    fn scoped_host_checkpoint_refuses_prebind_cancellation_and_fresh_scope_recovers() {
+        let cancellation = CompilerTransactionCancellation::new();
+        let mut fixture =
+            DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, cancellation.clone());
+        let command = fixture.command();
+        compiler_host_checkpoint().unwrap();
+        let refused = with_compiler_transaction_cancellable(
+            cancellation.clone(),
+            |_| {},
+            || {
+                compiler_host_checkpoint().unwrap();
+                cancellation.cancel();
+                assert_eq!(
+                    compiler_host_checkpoint().unwrap_err().kind(),
+                    io::ErrorKind::Interrupted
+                );
+                TRANSACTION_SCOPE.with(|scope| {
+                    assert!(matches!(
+                        scope.borrow().as_ref().unwrap().compiler,
+                        ScopedCompiler::Unbound
+                    ));
+                });
+                let counts = fixture.counts.lock().unwrap();
+                assert_eq!(
+                    (
+                        counts.preflights,
+                        counts.begins,
+                        counts.admissions,
+                        counts.requests
+                    ),
+                    (0, 0, 0, 0)
+                );
+            },
+        );
+        assert_eq!(refused.close, CompilerTransactionClose::NotStarted);
+        compiler_host_checkpoint().unwrap();
+        let recovered = with_compiler_transaction_cancellable(
+            CompilerTransactionCancellation::new(),
+            |_| {},
+            || {
+                compiler_host_checkpoint().unwrap();
+                let body = fixture
+                    .bind(&command)
+                    .unwrap()
+                    .execute(&command)
+                    .unwrap()
+                    .output
+                    .stdout;
+                compiler_host_checkpoint().unwrap();
+                body
+            },
+        );
+        assert_eq!(recovered.action, [1]);
+        assert_eq!(recovered.close, CompilerTransactionClose::Clean);
+        fixture.settle();
+        let counts = fixture.counts.lock().unwrap();
+        assert_eq!(
+            (
+                counts.preflights,
+                counts.begins,
+                counts.admissions,
+                counts.requests,
+                counts.active
+            ),
+            (1, 1, 1, 1, 0)
+        );
+    }
+
+    #[test]
     fn scoped_daemon_unexecuted_and_pre_admission_cancelled_bindings_have_no_permit() {
         for cancel in [false, true] {
             let cancellation = CompilerTransactionCancellation::new();
@@ -2978,6 +3069,10 @@ mod tests {
                     .output
                     .stdout;
                 cancellation.cancel();
+                assert_eq!(
+                    compiler_host_checkpoint().unwrap_err().kind(),
+                    io::ErrorKind::Interrupted
+                );
                 let error = fixture
                     .bind(&command)
                     .unwrap()

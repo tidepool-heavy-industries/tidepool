@@ -47,6 +47,11 @@ default 15 minutes); a worker that never replies is killed at expiry and the
 daemon recovers it through the same worker-replacement path a crash uses,
 which only `--persistent` survives.
 
+Host-side preparation polls `compiler_host_checkpoint` within the same compiler
+scope. It returns `io::ErrorKind::Interrupted` when that scope is cancelled;
+unscoped work is allowed. Polling acquires no endpoint or admission and leaves
+accepted-request and END cleanup custody with the original owner.
+
 Direct identity and transaction-BEGIN handshakes share the same process owner.
 A scoped cancellation token arms the child immediately after spawn, before
 identity reads; explicitly bound transactions arm it before BEGIN. Each
