@@ -271,13 +271,15 @@ assertRecoveredDictionaryBody = do
     owners <- liftIO newOwnerInterfaceCache
     bodies <- liftIO newPreparedBodyCache
     closure <- liftIO $ recoverPreparedClosure env cache owners bodies context [prepared]
-    recovered <- case [modul | modul <- closureModules closure
-          , moduleNameString (moduleName (pmModule modul)) == "Control.Monad.Freer.Internal"] of
+    let ownerUnits = [modul | modul <- closureModules closure
+          , moduleNameString (moduleName (pmModule modul)) == "Control.Monad.Freer.Internal"]
+    recovered <- case [modul | modul <- ownerUnits
+          , any ((== "$fApplicativeEff") . occurrence . fst) (pairs modul)] of
       [modul] -> pure modul
-      _ -> fail ("genuine dictionary owner was not recovered: " ++ show (closureFailures closure))
+      _ -> fail ("genuine dictionary has no unique recovered unit: " ++ show (closureFailures closure))
     let owner = pmModule recovered
         wanted = Set.fromList [varName identifier
-          | (Stg.StgTopLifted binding, _) <- pmBindings recovered
+          | modul <- ownerUnits, (Stg.StgTopLifted binding, _) <- pmBindings modul
           , (identifier, _) <- stgPairs binding]
     (iface, _) <- liftIO $ readExactInterface env owner
       >>= either (const (fail "dictionary defining interface is unreadable")) pure
@@ -774,8 +776,12 @@ assertRecoveredKindRep root = do
   group <- case raw of
     FatIfaceFound body -> pure body
     _ -> fail "genuine krep$* fat body was unavailable"
+  let incomplete = [binding | binding <- group
+        , all ((/= "krep$*1") . occurrence) (bindersOfBinds [binding])]
+  assert (length incomplete < length group)
+    "strict-sibling control did not remove its genuine original dependency"
   partialCache <- newPreparedBodyCache
-  partial <- prepareRecoveredBodies (prHscEnv pipeline) ownerCache partialCache owner group
+  partial <- prepareRecoveredBodies (prHscEnv pipeline) ownerCache partialCache owner incomplete
     >>= either (fail . show) pure
   partialBinder <- case
       [binder | (Stg.StgTopLifted binding, _) <- pmBindings partial
