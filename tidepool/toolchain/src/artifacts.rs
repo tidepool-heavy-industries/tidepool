@@ -3995,17 +3995,37 @@ fn compile_invocation_inner(
             .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
         crate::toolchain::admit_bound_endpoint(&endpoint)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let request = context
-            .prepare_compilation(
+        let producer = endpoint.identity().producer_bytes();
+        let request = match &policy {
+            CompilationPolicy::Authored { admission, .. } => {
+                // A lexical join can hide an already selected authored body.
+                // Its complete native closure remains a private compiler input.
+                let selected = immutable_candidates_in_context(
+                    context,
+                    producer,
+                    inv.include,
+                    output_owner.path(),
+                    BTreeSet::from([admission.owner.module.clone()]),
+                )?;
+                let private = crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
+                    context,
+                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
+                    selected.as_ref().map_or(&[], |selected| selected.native_availability.as_slice()),
+                )?;
+                crate::declaration_context::ExactCompileContext::new(Arc::clone(context))
+                    .prepare_compilation_with_private_input(
+                        &output_owner.path().join("exact-scope"),
+                        producer,
+                        None,
+                        private,
+                    )?
+            }
+            _ => context.prepare_compilation(
                 &output_owner.path().join("exact-scope"),
-                endpoint.identity().producer_bytes(),
-            )?
-            .with_source_search_context(
-                &inv.include
-                    .iter()
-                    .map(|path| path.to_path_buf())
-                    .collect::<Vec<_>>(),
-            );
+                producer,
+            )?,
+        }
+        .with_source_search_context(inv.include);
         request.apply_to(
             &mut cmd,
             crate::declaration_context::RetainedGenerationPolicy::PreserveCertifiedDemand,

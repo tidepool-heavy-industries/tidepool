@@ -277,6 +277,177 @@ fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effe
 }
 
 #[test]
+fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let durable = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let manifest = durable.path().join("declarations.json");
+    let mut session = PersistentSession::new(
+        Some(library(
+            4420,
+            source.path(),
+            &manifest,
+            effects.include_paths(),
+        )),
+        1024 * 1024,
+    );
+    let public = session.mint_isolated_scope();
+    session
+        .initialize_durable_public_scope(owner(1), public)
+        .unwrap();
+    let execution = session.begin_private_execution(public).unwrap();
+    let private = execution.private_scope();
+    let public_before = session.public_visibility_snapshot_in(public).unwrap();
+    let original = session
+        .define_scoped_in(private, &[include_str!("fixtures/recovery-original.hs")])
+        .expect("public declaration API certifies its first original");
+    let original_owner = session
+        .lib()
+        .log
+        .certified_authored_at(original)
+        .unwrap()
+        .product()
+        .owner()
+        .clone();
+    let selected = session.compile_view_in(private).unwrap();
+    assert!(selected
+        .exact_declaration_context()
+        .unwrap()
+        .lexical_graph()
+        .iter()
+        .all(|node| node.owner.module != original_owner.module));
+    let dependent = session
+        .define_scoped_in(private, &[include_str!("fixtures/recovery-dependent.hs")])
+        .expect("public declaration API reuses the selected original behind its lexical join");
+    let certificate = session.lib().log.certified_authored_at(dependent).unwrap();
+    assert!(certificate
+        .recovery_products()
+        .iter()
+        .any(|product| product.owner() == &original_owner));
+    let native_root = |owner| {
+        certificate
+            .artifact_view()
+            .entries()
+            .into_iter()
+            .find_map(|entry| {
+                matches!(&entry.payload,
+                tidepool_toolchain::artifact_inventory::ArtifactPayload::Original(product)
+                if product.owner() == owner)
+                .then_some(entry.descriptor.id)
+            })
+            .unwrap()
+    };
+    let original_root = native_root(&original_owner);
+    let dependent_root = native_root(certificate.product().owner());
+    assert!(certificate
+        .artifact_view()
+        .dependencies()
+        .iter()
+        .any(|(from, to, edge)| {
+            *from == dependent_root
+                && *to == original_root
+                && matches!(
+                    edge,
+                    tidepool_toolchain::artifact_inventory::ArtifactDependency::NativeGroup { .. }
+                )
+        }));
+
+    let private_before = session.public_visibility_snapshot_in(private).unwrap();
+    let high_water = session.lib().generation();
+    assert!(session
+        .define_scoped_in(private, &["bad :: Int\nbad = True"])
+        .is_err());
+    assert_eq!(session.lib().scope_tip(private), dependent);
+    assert!(session.lib().generation() > high_water);
+    assert_eq!(
+        session.public_visibility_snapshot_in(private),
+        Some(private_before)
+    );
+    assert!(session
+        .lib()
+        .current_decl_heads_in(private)
+        .iter()
+        .all(|(name, _)| name != "bad"));
+    assert_eq!(
+        session.public_visibility_snapshot_in(public),
+        Some(public_before)
+    );
+
+    session
+        .retract_many_in(private, &["answer".into(), "HiddenResult".into()])
+        .unwrap();
+    let view = session.compile_view_in(private).unwrap();
+    let context = view.exact_declaration_context().unwrap().clone();
+    assert!(context
+        .recovery_products()
+        .iter()
+        .any(|product| product.owner() == &original_owner));
+    let imports = view.turn_imports(&SourceImports::new());
+    let include = view.include_paths(effects.include_paths());
+    let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let injected = view.injected_module_names();
+    let queries = [
+        InspectionQuery::TypeOf("recoveredAnswer (41 :: Int)".into()),
+        InspectionQuery::TypeOf("answer (41 :: Int)".into()),
+        InspectionQuery::TypeOf("(undefined :: HiddenResult)".into()),
+    ];
+    let inspected = run_inspections(InspectionRequest {
+        exact_context: Some(Arc::new(
+            tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
+        )),
+        preamble: effects.preamble(),
+        imports: &imports,
+        include: &include,
+        session_root: view.session_root(),
+        inject_modules: &injected,
+        queries: &queries,
+        effects: Some(effects.row()),
+    })
+    .unwrap();
+    assert!(matches!(&inspected[0], InspectionResult::Type { display, .. } if display == "Int"));
+    assert!(matches!(&inspected[1], InspectionResult::Rejected { .. }));
+    assert!(matches!(&inspected[2], InspectionResult::Rejected { .. }));
+    let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+    let TurnResult::Expr { compiled, .. } = run_turn(TurnRequest {
+        exact_context: Some(Arc::new(
+            tidepool_toolchain::declaration_join::ExactCompileContext::new(context),
+        )),
+        session_id: Some(view.session()),
+        turn_text: "recoveredAnswer (41 :: Int)",
+        templates: &templates,
+        include: &include,
+        session_root: view.session_root(),
+        inject_modules: &injected,
+        gen: view.next_value_generation().0,
+        verdict: None,
+        target: None,
+        retained_imports: &[],
+    })
+    .unwrap() else {
+        panic!("dependent declaration must compile as a native expression");
+    };
+    let mut resident = ResidentSession::from_persistent_for_test(frunk::HNil, EmptyOutput, session);
+    resident
+        .set_actor_execution(
+            SessionRunContext {
+                lexical_scope: private,
+                ..SessionRunContext::ROOT
+            },
+            EffectRunPolicy::HandleOrSuspend,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .unwrap();
+    let ResidentOutcome::Completed { result, .. } = resident
+        .run_with_sites("public_scoped_original_dependency", compiled.code())
+        .unwrap()
+    else {
+        panic!("dependent declaration must execute its retained original");
+    };
+    assert_eq!(result.to_json(), serde_json::json!([42, "42"]));
+}
+
+#[test]
 fn materialization_retraction_attaches_authored_owner_before_publication() {
     tidepool_testing::eval_harness::require_extract();
     let durable = tempfile::tempdir().unwrap();
