@@ -419,16 +419,20 @@ mod tests {
             Arc::new(
                 ArtifactEntry::original(
                     producer,
-                    crate::certified_products::fixture_finalized_product_with_requirements(
-                        crate::certified_products::tests::original_groups_fixture(
-                            module,
-                            groups,
-                            version,
-                            &BTreeMap::new(),
+                    crate::certified_products::tests::recovered_witness_fixtures(&[
+                        crate::certified_products::fixture_finalized_product_with_requirements(
+                            crate::certified_products::tests::original_groups_fixture(
+                                module,
+                                groups,
+                                version,
+                                &BTreeMap::new(),
+                            ),
+                            producer,
+                            Some(requirements),
                         ),
-                        producer,
-                        Some(requirements),
-                    ),
+                    ])
+                    .remove(0)
+                    .product,
                 )
                 .unwrap(),
             )
