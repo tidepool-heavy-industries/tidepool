@@ -5,7 +5,7 @@
 module Tidepool.CompilerExecution
   ( CompilerExecutionGrant, compilerExecutionGrant, serialCompilerExecutionGrant
   , compilerModuleJobs
-  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, dependencyClosedReuse
+  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, runCompilerWorklist, runCompilerWorklistWithStarted, dependencyClosedReuse
   ) where
 
 import Control.Concurrent (forkFinally, killThread)
@@ -70,34 +70,53 @@ withCompilerExecutor grant use = mask $ \restore -> do
 -- already acquired inputs; live Session acquisition stays with its owner.
 runCompilerTasks :: CompilerExecutor -> (input -> IO output)
   -> (input -> output -> IO ()) -> [input] -> IO [output]
-runCompilerTasks (CompilerExecutor queue state) action completed inputs = mask $ \restore -> do
+runCompilerTasks executor action completed inputs =
+  runCompilerWorklist executor action (\input output -> completed input output >> pure []) inputs
+
+-- Dynamic demand is submitted to this same executor and consumed by one
+-- coordinator. Completed ancestor tasks never wait behind a nested collector.
+runCompilerWorklist :: CompilerExecutor -> (input -> IO output)
+  -> (input -> output -> IO [input]) -> [input] -> IO [output]
+runCompilerWorklist executor action completed inputs =
+  runCompilerWorklistWithStarted executor action (const (pure ())) completed inputs
+
+runCompilerWorklistWithStarted :: CompilerExecutor -> (input -> IO output)
+  -> (input -> IO ()) -> (input -> output -> IO [input]) -> [input] -> IO [output]
+runCompilerWorklistWithStarted (CompilerExecutor queue state) action started completed inputs = mask $ \restore -> do
   events <- newChan
-  forM_ (zip [0 :: Int ..] inputs) $ \(ordinal, input) -> do
-    result <- newEmptyMVar
-    let settle outcome = do
-          first <- tryPutMVar result outcome
-          when first (writeChan events (ordinal, input, outcome))
-    key <- modifyMVar state $ \(ExecutorState closed next pending) ->
-      if closed then throwIO ThreadKilled else pure
-        (ExecutorState False (next + 1)
-          (Map.insert next (settle . Left) pending), next)
-    writeChan queue $ mask $ \run -> do
-      outcome <- try (run (action input))
-      modifyMVar_ state $ \(ExecutorState closed next pending) ->
-        pure (ExecutorState closed next (Map.delete key pending))
-      settle outcome
-      -- A shutdown signal must leave the worker loop after settling its task.
-      -- Consuming it here would strand teardown waiting for an idle worker.
-      case outcome of
-        Left failure | Just async <- (fromException failure :: Maybe SomeAsyncException) -> throwIO async
-        _ -> pure ()
-  let collect 0 outputs = pure (Map.elems outputs)
-      collect remaining outputs = do
-        (ordinal, input, outcome) <- restore (readChan events)
-        output <- either throwIO pure outcome
-        restore (completed input output)
-        collect (remaining - 1) (Map.insert ordinal output outputs)
-  collect (length inputs) Map.empty
+  let submit first tasks = forM_ (zip [first..] tasks) $ \(ordinal, input) -> do
+        result <- newEmptyMVar
+        let settle outcome = do
+              first <- tryPutMVar result outcome
+              when first (writeChan events (Right (ordinal, input, outcome)))
+        key <- modifyMVar state $ \(ExecutorState closed next pending) ->
+          if closed then throwIO ThreadKilled else pure
+            (ExecutorState False (next + 1)
+              (Map.insert next (settle . Left) pending), next)
+        writeChan queue $ mask $ \run -> do
+          writeChan events (Left input)
+          outcome <- try (run (action input))
+          modifyMVar_ state $ \(ExecutorState closed next pending) ->
+            pure (ExecutorState closed next (Map.delete key pending))
+          settle outcome
+          -- A shutdown signal must leave the worker loop after settling its task.
+          -- Consuming it here would strand teardown waiting for an idle worker.
+          case outcome of
+            Left failure | Just async <- (fromException failure :: Maybe SomeAsyncException) -> throwIO async
+            _ -> pure ()
+      collect 0 _ outputs = pure (Map.elems outputs)
+      collect remaining next outputs = do
+        event <- restore (readChan events)
+        case event of
+          Left input -> restore (started input) >> collect remaining next outputs
+          Right (ordinal,input,outcome) -> do
+            output <- either throwIO pure outcome
+            additions <- restore (completed input output)
+            submit next additions
+            collect (remaining - 1 + length additions) (next + length additions)
+              (Map.insert ordinal output outputs)
+  submit 0 inputs
+  collect (length inputs) (length inputs) Map.empty
 
 -- | Greatest dependency-closed subset of independently valid owners. Native
 -- cycles may survive together; an invalid or absent dependency removes every

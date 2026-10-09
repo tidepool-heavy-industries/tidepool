@@ -17,6 +17,11 @@ module Tidepool.PreparedStg
   , PreparedBodyCache, newPreparedBodyCache, copyPreparedBodyCache, mergePreparedBodyCaches, selectPreparedBodyCaches, evictPreparedBodyMatching
   , PreparedBodyReuse(..), newPreparedOriginalModuleTaskPreparer
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
+  , PreparedComponents, PreparedComponentTask, newPreparedComponentUnitsPreparer
+  , runPreparedComponentTask, PreparedUnitKey, PreparedUnitTask
+  , preparedUnitTaskKey, preparedComponentTaskKnown, preparedComponentTaskPending
+  , runPreparedUnitTask, finishPreparedComponentTask, preparedComponentUnitRows, preparedUnitIsSite
+  , preparedComponentModules, preparedComponentVersion, validatePreparedComponents
   , newPreparedComponentTaskPreparer
   ) where
 
@@ -25,7 +30,7 @@ import Control.Exception
   , throwIO, try, evaluate )
 import Control.Monad (unless, forM)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, readMVar)
-import Data.List (foldl', partition, sortOn)
+import Data.List (foldl', sortOn)
 import Data.Maybe (fromMaybe, listToMaybe, isJust)
 import Data.IntMap.Strict qualified as IntMap
 import Data.Map.Strict (Map)
@@ -312,7 +317,7 @@ acquireTypedBindingsWithSiteEnvironment = acquireTypedBindingsWithWorkers Includ
 data ConstructorWorkerPolicy = IncludeConstructorWorkers | OmitConstructorWorkers
   deriving (Eq, Ord)
 
-data FatPreparationUnit = OriginalComponent Int | ConstructorWorkers
+data FatPreparationUnit = OriginalComponent Int | ConstructorWorkers | SiteComponents [Int]
   deriving (Eq, Ord)
 
 acquireTypedBindingsWithWorkers :: ConstructorWorkerPolicy -> Maybe PreparedSiteEnvironment -> PreparedCoverage
@@ -366,11 +371,11 @@ data PreparedBodyCache = PreparedBodyCache
   }
 
 -- Defining-context wrappers retain their exact binder census. Canonical fat
--- selections additionally seal the original body version, so identical Names
--- and consumed site facts cannot admit another version's prepared batch.
+-- selections additionally seal the original body version. Every key retains
+-- its defining-context issuer, so equal interface bytes cannot mix contexts.
 data PreparedBodyKey
-  = ContextBodyKey ConstructorWorkerPolicy [[Word64]]
-  | FatBodyKey ConstructorWorkerPolicy FatOriginalVersion [[Word64]]
+  = ContextBodyKey ConstructorWorkerPolicy Unique [[Word64]]
+  | FatBodyKey ConstructorWorkerPolicy Unique FatOriginalVersion [[Word64]]
   deriving (Eq, Ord)
 
 newPreparedBodyCache :: IO PreparedBodyCache
@@ -505,10 +510,10 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
               (pure . insertOriginalAlternative (originalVersionOwner version) version (admitted,prepared))
             pure prepared))
 
-preparedBodyKey :: ConstructorWorkerPolicy -> Maybe FatOriginalVersion -> [CoreBind] -> PreparedBodyKey
-preparedBodyKey workers version bindings = case version of
-  Nothing -> ContextBodyKey workers census
-  Just original -> FatBodyKey workers original census
+preparedBodyKey :: ConstructorWorkerPolicy -> OwnerInterfaceContext -> Maybe FatOriginalVersion -> [CoreBind] -> PreparedBodyKey
+preparedBodyKey workers context version bindings = case version of
+  Nothing -> ContextBodyKey workers (Shared.ownerInterfaceIdentity context) census
+  Just original -> FatBodyKey workers (Shared.ownerInterfaceIdentity context) original census
   where
     census = [map (getKey . varUnique) (bindersOf binding) | binding <- bindings]
     bindersOf (NonRec binder _) = [binder]
@@ -541,14 +546,118 @@ runPreparedBodyTask (PreparedBodyTask action) = action
 -- units survive subset growth; the shared per-key loader coalesces overlapping
 -- growth and releases waiters on failure or cancellation. Live defining and
 -- site context work is acquired before the returned task runs.
+-- Canonical selection remains a component-backed view throughout recovery.
+-- No aggregate entry map or prepared binding list is reconstructed on growth.
+data PreparedComponents = PreparedComponents
+  { componentsSelection :: FatIfaceSelection
+  , componentsContext :: OwnerInterfaceContext
+  , componentsWorkers :: PreparedModule
+  , componentsPure :: Map Int ([Int],PreparedModule)
+  , componentsSiteRoster :: [Int]
+  , componentsSite :: Maybe PreparedModule
+  }
+
+-- A unit's key includes the exact Core/interface version and the retained
+-- declaring context. Site batches additionally include their complete roster.
+data PreparedUnitKey = PreparedUnitKey FatOriginalVersion Unique FatPreparationUnit
+  deriving (Eq,Ord)
+
+data PreparedUnitTask = PreparedUnitTask PreparedUnitKey
+  (IO (Either RecoveredModuleFailure PreparedModule))
+
+data PreparedComponentTask = PreparedComponentTask
+  { componentTaskSelection :: FatIfaceSelection
+  , componentTaskContext :: OwnerInterfaceContext
+  , preparedComponentTaskKnown :: Map PreparedUnitKey PreparedModule
+  , preparedComponentTaskPending :: [PreparedUnitTask]
+  }
+
+preparedUnitTaskKey :: PreparedUnitTask -> PreparedUnitKey
+preparedUnitTaskKey (PreparedUnitTask key _) = key
+
+preparedUnitIsSite :: PreparedUnitKey -> Bool
+preparedUnitIsSite (PreparedUnitKey _ _ SiteComponents{}) = True
+preparedUnitIsSite _ = False
+
+runPreparedUnitTask :: PreparedUnitTask -> IO (Either RecoveredModuleFailure PreparedModule)
+runPreparedUnitTask (PreparedUnitTask _ action) = action
+
+finishPreparedComponentTask :: PreparedComponentTask -> Map PreparedUnitKey PreparedModule
+  -> Either RecoveredModuleFailure PreparedComponents
+finishPreparedComponentTask task completed = do
+  let selection = componentTaskSelection task
+      context = componentTaskContext task
+      version = fatSelectionVersion selection
+      owner = fatOriginalOwner version
+      key unit = PreparedUnitKey version (Shared.ownerInterfaceIdentity context) unit
+      units = Map.union completed (preparedComponentTaskKnown task)
+      missing = [preparedUnitTaskKey pending | pending <- preparedComponentTaskPending task
+        , Map.notMember (preparedUnitTaskKey pending) units]
+      lookupUnit unit = maybe (Left (RecoveredModulePreparationFailure owner "component unit did not complete")) Right
+        (Map.lookup (key unit) units)
+  unless (null missing) (Left (RecoveredModulePreparationFailure owner "component selection has unfinished units"))
+  workers <- lookupUnit ConstructorWorkers
+  let pureUnits = Map.fromList
+        [(ordinal,(fatComponentOrdinals component,prepared))
+        | component <- fatSelectionComponents selection
+        , let ordinal = fatComponentOrdinal component
+        , Just prepared <- [Map.lookup (key (OriginalComponent ordinal)) units]]
+      siteUnits = [(roster,prepared) | (PreparedUnitKey _ _ (SiteComponents roster),prepared) <- Map.toList units]
+  case siteUnits of
+    [] -> Right (PreparedComponents selection context workers pureUnits [] Nothing)
+    [(roster,prepared)] -> Right (PreparedComponents selection context workers pureUnits roster (Just prepared))
+    _ -> Left (RecoveredModulePreparationFailure owner "component selection has conflicting site arenas")
+
+runPreparedComponentTask :: PreparedComponentTask -> IO (Either RecoveredModuleFailure PreparedComponents)
+runPreparedComponentTask task = do
+  outcomes <- forM (preparedComponentTaskPending task) $ \unit ->
+    fmap (fmap ((,) (preparedUnitTaskKey unit))) (runPreparedUnitTask unit)
+  pure (sequence outcomes >>= finishPreparedComponentTask task . Map.fromList)
+
+preparedComponentUnitRows :: PreparedComponents -> Map PreparedUnitKey PreparedModule
+preparedComponentUnitRows selected = Map.fromList
+  ([(key ConstructorWorkers,componentsWorkers selected)]
+    ++ [(key (OriginalComponent ordinal),prepared) | (ordinal,(_,prepared)) <- Map.toList (componentsPure selected)]
+    ++ maybe [] (\site -> [(key (SiteComponents (componentsSiteRoster selected)),site)]) (componentsSite selected))
+  where key unit = PreparedUnitKey (preparedComponentVersion selected)
+          (Shared.ownerInterfaceIdentity (componentsContext selected)) unit
+
+preparedComponentVersion :: PreparedComponents -> FatOriginalVersion
+preparedComponentVersion = fatSelectionVersion . componentsSelection
+
+componentRows :: PreparedComponents -> [([Int],PreparedModule)]
+componentRows selected = sortOn (minimum . fst) (Map.elems (componentsPure selected)
+  ++ maybe [] (\site -> [(componentsSiteRoster selected,site)]) (componentsSite selected))
+
+preparedComponentModules :: PreparedComponents -> [PreparedModule]
+preparedComponentModules selected = componentsWorkers selected : map snd (componentRows selected)
+
+validatePreparedComponents :: PreparedComponents -> IO ()
+validatePreparedComponents selected = do
+  _ <- checkComponentSelection (componentsSelection selected) (componentsWorkers selected) (componentRows selected)
+  pure ()
+
+-- Compatibility callers requesting one concrete module materialize it once.
+-- Recovery consumes the component view instead.
 newPreparedComponentTaskPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
   -> IO (FatIfaceSelection -> IO (Either RecoveredModuleFailure PreparedBodyTask))
 newPreparedComponentTaskPreparer env owners stable = do
+  acquire <- newPreparedComponentUnitsPreparer env owners stable
+  pure $ \selection -> do
+    acquired <- acquire Nothing selection
+    pure $ fmap (\task -> PreparedBodyTask $ do
+      outcome <- runPreparedComponentTask task
+      traverse (\selected -> assembleComponentSelection (componentsSelection selected)
+        (componentsWorkers selected) (componentRows selected)) outcome) acquired
+
+newPreparedComponentUnitsPreparer :: HscEnv -> OwnerInterfaceCache -> PreparedBodyCache
+  -> IO (Maybe PreparedComponents -> FatIfaceSelection -> IO (Either RecoveredModuleFailure PreparedComponentTask))
+newPreparedComponentUnitsPreparer env owners stable = do
   disabled <- bodyReuseDisabled
   environment <- resolvePreparedSiteEnvironment env
   acquireSiteBatch <- newPreparedBodyTaskPreparerWithWorkers OmitConstructorWorkers environment env owners stable
   timing <- readTimingEnabled
-  pure $ \selection -> do
+  pure $ \previous selection -> do
     let version = fatSelectionVersion selection
         owner = fatOriginalOwner version
         components = sortOn fatComponentOrdinal (fatSelectionComponents selection)
@@ -558,71 +667,83 @@ newPreparedComponentTaskPreparer env owners stable = do
       Right context | not (ownerInterfaceMatchesOriginal context version) ->
         pure (Left (RecoveredModuleInterfaceFailure owner "declaring context differs from exact original interface"))
       Right context -> do
-        bucket <- modifyMVar (cachedFatComponents stable) $ \buckets ->
-          case Map.lookup owner buckets of
-            Just cache -> pure (buckets,cache)
-            Nothing -> do
-              cache <- Shared.newLoadCache
-              pure (Map.insert owner cache buckets,cache)
-        let pureUnit component = intrinsicFree (censusPreparedIntrinsics
-              (ownerInterfaceTyCons context) (IntMap.elems (fatComponentBindings component)))
-            (plain, siteBearing) = partition pureUnit components
-        acquired <- forM plain $ \component -> do
-          let key = (version,Shared.ownerInterfaceIdentity context,OriginalComponent (fatComponentOrdinal component))
-          completed <- Shared.lookupCompletedLoadCache bucket key
-          task <- case completed of
-            Just prepared | not disabled -> pure (Right (PreparedModuleTask (pure prepared)))
-            _ -> acquireRecoveredWithWorkers OmitConstructorWorkers (Just environment) env owner context
-              (IntMap.elems (fatComponentBindings component))
-          pure ((component,key,disabled && maybe False (const True) completed),task)
-        -- Site graphs have owner-local indexes. Until their owning type policy
-        -- supplies checked rebasing, all selected site units form one typed
-        -- batch; pure-unit reuse remains independent of that batch's growth.
-        siteTask <- if null siteBearing then pure (Right Nothing) else
-          fmap (fmap Just) (acquireSiteBatch (Just version) owner (IntMap.elems (IntMap.unions
-            (map fatComponentBindings siteBearing))))
-        -- CorePrep injects every defining constructor worker independently of
-        -- the original body subset. Give that implicit arena one version-bound
-        -- cache key and one place in assembly, including for site-bearing units.
-        workerTask <- case disabled of
-          False -> Shared.lookupCompletedLoadCache bucket (version,Shared.ownerInterfaceIdentity context,ConstructorWorkers) >>= \case
-            Just completed -> pure (Right (PreparedModuleTask (pure completed)))
-            Nothing -> acquireRecoveredWithSiteContext (Just environment) env owner context []
-          True -> acquireRecoveredWithSiteContext (Just environment) env owner context []
-        case (sequence [fmap ((,) pair) task | (pair,task) <- acquired], siteTask, workerTask) of
-          (Left failure, _, _) -> pure (Left failure)
-          (_, Left failure, _) -> pure (Left failure)
-          (_, _, Left failure) -> pure (Left failure)
-          (Right tasks, Right site, Right workers) -> pure (Right (PreparedBodyTask $ do
-            outcome <- trySynchronous $ do
-              pureResults <- forM tasks $ \((component,key,normalHitDisabled),task) -> do
-                let lower = do
-                      fresh <- runPreparedModuleTask task
-                      unless (not (preparedUsesSiteAuthority fresh))
-                        (ioError (userError "pure fat component acquired site authority"))
-                      emitCount timing "prepared_recover_component_new_groups"
-                        (fromIntegral (length (fatComponentOrdinals component)))
-                      if normalHitDisabled then emitCount timing "prepared_recover_component_disabled_groups"
-                        (fromIntegral (length (fatComponentOrdinals component))) else pure ()
-                      pure (issueComponentSpellings component fresh)
-                prepared <- if disabled then lower else Shared.lookupLoadCache bucket key lower
-                pure (fatComponentOrdinals component,prepared)
-              siteResult <- case site of
-                Nothing -> pure []
-                Just task -> do
-                  result <- runPreparedBodyTask task >>= either (ioError . userError . show) pure
-                  pure [(concatMap fatComponentOrdinals siteBearing,result)]
-              workerResult <- if disabled then runPreparedModuleTask workers else
-                Shared.lookupLoadCache bucket (version,Shared.ownerInterfaceIdentity context,ConstructorWorkers) (runPreparedModuleTask workers)
-              assembled <- assembleComponentSelection selection workerResult (pureResults ++ siteResult)
-              emitCount timing "prepared_recover_component_demanded_groups"
-                (fromIntegral (fatSelectionDemandedGroupCount selection))
-              emitCount timing "prepared_recover_component_prepared_groups"
-                (fromIntegral (fatSelectionPreparedGroupCount selection))
-              pure assembled
-            pure $ case outcome of
-              Left reason -> Left (RecoveredModulePreparationFailure owner reason)
-              Right prepared -> Right prepared))
+        bucket <- modifyMVar (cachedFatComponents stable) $ \buckets -> case Map.lookup owner buckets of
+          Just cache -> pure (buckets,cache)
+          Nothing -> do
+            cache <- Shared.newLoadCache
+            pure (Map.insert owner cache buckets,cache)
+        let contextIdentity = Shared.ownerInterfaceIdentity context
+            key unit = PreparedUnitKey version contextIdentity unit
+            cacheKey unit = (version,contextIdentity,unit)
+            reusable = case previous of
+              Just old | not disabled && preparedComponentVersion old == version
+                && sameOwnerInterfaceContext context (componentsContext old) -> preparedComponentUnitRows old
+              _ -> Map.empty
+            priorSiteOrdinals = case previous of
+              Just old | sameOwnerInterfaceContext context (componentsContext old) -> Set.fromList (componentsSiteRoster old)
+              _ -> Set.empty
+            classify component = do
+              let ordinal = fatComponentOrdinal component
+                  retained = Map.lookup (key (OriginalComponent ordinal)) reusable
+              cached <- Shared.lookupCompletedLoadCache bucket (cacheKey (OriginalComponent ordinal))
+              pure $ case retained `orElse` cached of
+                Just prepared -> not (preparedUsesSiteAuthority prepared)
+                Nothing | ordinal `Set.member` priorSiteOrdinals -> False
+                Nothing -> intrinsicFree (censusPreparedIntrinsics (ownerInterfaceTyCons context)
+                  (IntMap.elems (fatComponentBindings component)))
+            wrap unit action = PreparedUnitTask (key unit) $ do
+              outcome <- trySynchronous action
+              pure (either (Left . RecoveredModulePreparationFailure owner) Right outcome)
+            acquireCached unit bindings workers = do
+              cached <- Shared.lookupCompletedLoadCache bucket (cacheKey unit)
+              let hit = Map.lookup (key unit) reusable `orElse` cached
+              case hit of
+                Just prepared | not disabled -> pure (Right (Left (key unit,prepared)))
+                _ -> do
+                  acquired <- acquireRecoveredWithWorkers workers (Just environment) env owner context bindings
+                  pure $ fmap (\task -> Right (wrap unit $ do
+                    let lower = do
+                          output <- runPreparedModuleTask task
+                          case unit of
+                            OriginalComponent ordinal -> do
+                              unless (not (preparedUsesSiteAuthority output)) (fail "pure fat component acquired site authority")
+                              let component = head [item | item <- components,fatComponentOrdinal item == ordinal]
+                              emitCount timing "prepared_recover_component_new_groups"
+                                (fromIntegral (length (fatComponentOrdinals component)))
+                              whenDisabled hit component
+                              pure (issueComponentSpellings component output)
+                            _ -> pure output
+                    if disabled then lower else Shared.lookupLoadCache bucket (cacheKey unit) lower)) acquired
+            whenDisabled hit component = case hit of
+              Just _ | disabled -> emitCount timing "prepared_recover_component_disabled_groups"
+                (fromIntegral (length (fatComponentOrdinals component)))
+              _ -> pure ()
+            orElse (Just value) _ = Just value
+            orElse Nothing other = other
+        classified <- forM components (\component -> (,) component <$> classify component)
+        let plain = [component | (component,True) <- classified]
+            siteBearing = [component | (component,False) <- classified]
+            siteRoster = concatMap fatComponentOrdinals siteBearing
+        emitCount timing "prepared_recover_component_demanded_groups" (fromIntegral (fatSelectionDemandedGroupCount selection))
+        emitCount timing "prepared_recover_component_prepared_groups" (fromIntegral (fatSelectionPreparedGroupCount selection))
+        purePlans <- forM plain $ \component -> acquireCached
+          (OriginalComponent (fatComponentOrdinal component)) (IntMap.elems (fatComponentBindings component)) OmitConstructorWorkers
+        workerPlan <- acquireCached ConstructorWorkers [] IncludeConstructorWorkers
+        sitePlan <- if null siteRoster then pure (Right Nothing) else case Map.lookup (key (SiteComponents siteRoster)) reusable of
+          Just prepared | not disabled -> pure (Right (Just (Left (key (SiteComponents siteRoster),prepared))))
+          _ -> do
+            acquired <- acquireSiteBatch (Just version) owner (IntMap.elems (IntMap.unions (map fatComponentBindings siteBearing)))
+            pure $ fmap (\task -> Just (Right (wrap (SiteComponents siteRoster) $ do
+              output <- runPreparedBodyTask task >>= either (fail . show) pure
+              emitCount timing "prepared_recover_site_replacements" 1
+              pure output))) acquired
+        pure $ do
+          plainUnits <- sequence purePlans
+          workerUnit <- workerPlan
+          siteUnit <- sitePlan
+          let plans = workerUnit : plainUnits ++ maybe [] pure siteUnit
+          pure (PreparedComponentTask selection context
+            (Map.fromList [known | Left known <- plans]) [task | Right task <- plans])
 
 issueComponentSpellings :: FatIfaceComponent -> PreparedModule -> PreparedModule
 issueComponentSpellings component prepared = prepared
@@ -651,8 +772,22 @@ preparedTopBinders (StgTopLifted (StgRec pairs)) = map fst pairs
 -- constructor workers; the single site batch supplies the owner-local type graph.
 assembleComponentSelection :: FatIfaceSelection -> PreparedModule -> [([Int],PreparedModule)] -> IO PreparedModule
 assembleComponentSelection selection workers units = do
+  (base,prepared,siblings) <- checkComponentSelection selection workers units
   timing <- readTimingEnabled
   emitCount timing "prepared_recover_assemblies" 1
+  pure base
+    { preparedBindings = concatMap pmBindings prepared
+    , preparedOriginalTopNames = Set.unions (map pmOriginalTopNames prepared)
+    , preparedTagSigs = foldl plusNameEnv emptyNameEnv (map pmTagSigs prepared)
+    , preparedStableTopSpellings = Map.unions (map pmStableTopSpellings prepared)
+    , preparedSitedSiblings = siblings
+    , preparedExpectedEntries = preparedExpectedEntries workers
+    }
+
+checkComponentSelection :: FatIfaceSelection -> PreparedModule -> [([Int],PreparedModule)]
+  -> IO (PreparedModule,[PreparedModule],Map String Id)
+checkComponentSelection selection workers units = do
+  timing <- readTimingEnabled
   emitCount timing "prepared_recover_declaring_context_checks" (fromIntegral (1 + length units))
   let version = fatSelectionVersion selection
       owner = fatOriginalOwner version
@@ -689,14 +824,7 @@ assembleComponentSelection selection workers units = do
       && maybe False (const True) siblings && all consistentContext prepared)
     (ioError (userError "canonical fat component assembly has inconsistent or overlapping evidence"))
   let base = case siteUnits of site:_ -> site; [] -> head prepared
-  pure base
-    { preparedBindings = concatMap pmBindings prepared
-    , preparedOriginalTopNames = Set.unions (map pmOriginalTopNames prepared)
-    , preparedTagSigs = foldl plusNameEnv emptyNameEnv (map pmTagSigs prepared)
-    , preparedStableTopSpellings = Map.unions (map pmStableTopSpellings prepared)
-    , preparedSitedSiblings = fromMaybe Map.empty siblings
-    , preparedExpectedEntries = preparedExpectedEntries workers
-    }
+  pure (base,prepared,fromMaybe Map.empty siblings)
 
 -- Shared owner facts may occur in several units, but conflicting typed
 -- identities cannot be hidden by the order of component assembly.
@@ -733,33 +861,36 @@ newPreparedBodyTaskPreparerWithWorkers workers environment env owners bodyCache 
   timing <- readTimingEnabled
   scoped <- newMVar Map.empty
   pure $ \version owner bindings -> do
-    let stable = cachedExactBodies bodyCache
-        key = preparedBodyKey workers version bindings
-    stableHit <- lookupOwnerEntry owner key <$> readMVar stable
-    scopedHit <- lookupOwnerEntry owner key <$> readMVar scoped
-    let matching candidates = case filter (preparedSiteDependenciesMatch environment Map.empty)
-          (maybe [] id candidates) of
-            hit:_ -> Just hit
-            [] -> Nothing
-    let normalHit = matching stableHit `orElse` matching scopedHit
-    case normalHit of
-      Just hit | not disabled -> pure (Right (PreparedBodyTask (pure (Right hit))))
-      _ -> do
-        resolved <- acquireRecoveredContext env owners owner
-        acquired <- case resolved of
-          Left failure -> pure (Left failure)
-          Right context -> acquireRecoveredWithWorkers workers (Just environment) env owner context bindings
-        pure $ fmap (\task -> PreparedBodyTask $ do
-          outcome <- trySynchronous (runPreparedModuleTask task)
-          case outcome of
-            Left reason -> pure (Left (RecoveredModulePreparationFailure owner reason))
-            Right prepared -> do
-              if disabled && maybe False (const True) normalHit
-                then emitCount timing "prepared_recover_body_disabled_batches" 1 else pure ()
-              let cache = if preparedSiteDependenciesMatch environment Map.empty prepared then stable else scoped
-              modifyMVar_ cache (pure . Map.insertWith (Map.unionWith (flip mergePreparedVariants)) owner
-                (Map.singleton key [prepared]))
-              pure (Right prepared)) acquired
+    resolved <- acquireRecoveredContext env owners owner
+    case resolved of
+      Left failure -> pure (Left failure)
+      Right context | maybe False (not . ownerInterfaceMatchesOriginal context) version ->
+        pure (Left (RecoveredModuleInterfaceFailure owner "declaring context differs from exact original interface"))
+      Right context -> do
+        let stable = cachedExactBodies bodyCache
+            key = preparedBodyKey workers context version bindings
+        stableHit <- lookupOwnerEntry owner key <$> readMVar stable
+        scopedHit <- lookupOwnerEntry owner key <$> readMVar scoped
+        let matching candidates = case filter (preparedSiteDependenciesMatch environment Map.empty)
+              (maybe [] id candidates) of
+                hit:_ -> Just hit
+                [] -> Nothing
+            normalHit = matching stableHit `orElse` matching scopedHit
+        case normalHit of
+          Just hit | not disabled -> pure (Right (PreparedBodyTask (pure (Right hit))))
+          _ -> do
+            acquired <- acquireRecoveredWithWorkers workers (Just environment) env owner context bindings
+            pure $ fmap (\task -> PreparedBodyTask $ do
+              outcome <- trySynchronous (runPreparedModuleTask task)
+              case outcome of
+                Left reason -> pure (Left (RecoveredModulePreparationFailure owner reason))
+                Right prepared -> do
+                  if disabled && maybe False (const True) normalHit
+                    then emitCount timing "prepared_recover_body_disabled_batches" 1 else pure ()
+                  let cache = if preparedSiteDependenciesMatch environment Map.empty prepared then stable else scoped
+                  modifyMVar_ cache (pure . Map.insertWith (Map.unionWith (flip mergePreparedVariants)) owner
+                    (Map.singleton key [prepared]))
+                  pure (Right prepared)) acquired
   where
     orElse (Just hit) _ = Just hit
     orElse Nothing other = other

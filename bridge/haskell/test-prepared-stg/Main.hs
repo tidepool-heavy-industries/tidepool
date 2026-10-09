@@ -65,7 +65,7 @@ import Tidepool.PreparedStg
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.ExactHydration (forkExactContext)
 import Tidepool.FatIface.Internal (issueOwnerInterfaceContext)
-import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts)
+import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts, mi_module)
 import Tidepool.FatIface
   ( OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, cacheOwnerInterface )
 import qualified Data.Map.Strict as Map
@@ -1061,7 +1061,7 @@ verifySiteDependencyHistories dir = do
     fork <- forkExactContext (prHscEnv (pprPipelineResult changedCarrier))
     let originalHome = finalizedHomeModInfo (finalizedFixtureOwner "Tidepool.Internal.RequestSite" first)
         currentHome = finalizedHomeModInfo (finalizedFixtureOwner "Tidepool.Internal.RequestSite" changedCarrier)
-        carrierOwner = pmModule (preparedFixtureOwner "Tidepool.Internal.RequestSite" first)
+        carrierOwner = mi_module (hm_iface originalHome)
         ExternalUnitCache externalCell = ue_eps (hsc_unit_env fork)
         partialHome = currentHome
           { hm_details = (hm_details currentHome) { md_types = emptyTypeEnv } }

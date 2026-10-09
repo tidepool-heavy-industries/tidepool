@@ -378,6 +378,18 @@ include the transitive private top scope from that same decoded interface;
 external sibling dependencies retain the normal demand loop. Final selected emission still checks
 the canonical entry signature and evaluatedness.
 
+Recovery retains a component ledger under one target owner. Each canonical
+unit carries its exact original version and the retained declaring-context
+issuer; equal interface bytes do not prove equal dependency contexts. Cache
+copy, owner selection and eviction retain that issuer. Pure units and one
+constructor-worker arena survive demand growth. A complete site batch replaces
+its previous arena, advances the site epoch and rebuilds target reachability.
+New units issue dependency facts once; the existing bounded executor has one
+completion pump for ready units and newly discovered CorePrep references.
+At quiescence, component projection supplies actual exact original-package
+demand to the same ledger. Final candidate emission checks entry ABI and
+conflicting evidence before flattening the stable closure.
+
 After changing translation or serialization, run `just fixtures-check`.
 Each native corpus producer compiles its declared module/targets and emits
 constructor metadata and prepared programs from that same graph. The native

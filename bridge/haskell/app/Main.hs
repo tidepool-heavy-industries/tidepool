@@ -82,7 +82,7 @@ import Tidepool.CompilerProducts
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest )
-import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
+import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
 import Tidepool.HostBindingAuthority
   ( HostBindingRepresentation, hostBindingRepresentationJsonAuthority )
 import Tidepool.ExecutionSchema
@@ -93,8 +93,8 @@ import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( pmModule, pmYieldSites )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithPackageRoots, newPreparedRecoveryWithExecutor
-  , preparedRecoveryClosure, growPreparedRecovery, requirePreparedRecoveryPublication )
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithDemand
+  , preparedRecoveryClosure, requirePreparedRecoveryPublication )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), candidateExecutionSources )
 import Tidepool.CompileInput (writeCompileInputProof)
@@ -697,46 +697,41 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
           [(originalOrdinal group, originalBinders group, originalGlobals group)
            | group <- originalGroups originalProduct])
         | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
-  let newRecovery = case recoveryExecutor caches of
-        Nothing -> newPreparedRecoveryWithPackageRoots
-        Just executor -> newPreparedRecoveryWithExecutor executor
-  recover <- newRecovery hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
+  finalCandidates <- newIORef Map.empty
+  let demandPackages entry packageRoots recovered = do
+        let target = T.unpack (symbolOccurrence entry)
+            roots = Set.toAscList (Set.fromList (map preparedRootIdentity packageRoots))
+            finalContext = (withOriginals (contextFor target))
+              { projectionAuxiliaryRoots = projectionAuxiliaryRoots (contextFor target) ++ roots }
+        requirePreparedRecoveryPublication target recovered
+        selected <- timePhase timing "prepared_project" $
+          project (prepareComponentProjectionWithReachability finalContext
+            (closureHomeModules recovered) (closureComponentSelections recovered) (closureReachability recovered))
+        candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
+        project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders (candidateGlobals candidate))
+        required <- either (ioError . userError) pure (originalPackageGlobals (candidateGlobals candidate))
+        let additions = Set.toAscList (Set.fromList required `Set.difference` Set.fromList roots)
+        if null additions then do
+          modifyIORef' finalCandidates (Map.insert entry (candidate,roots))
+          pure []
+        else forM additions $ \identity -> do
+          (identifier,_) <- resolvePackageGlobal hscEnv identity >>= either (ioError . userError) pure
+          when (preparedRootIdentity identifier /= identity) $
+            ioError (userError "package recovery root differs from canonical original global")
+          pure identifier
+  recover <- newPreparedRecoveryWithDemand (recoveryExecutor caches) demandPackages
+    hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
     (compilerPreparedBodies recoveryCaches) (withOriginals (contextFor firstTarget)) originalModules []
   artifacts <- forM targets $ \target -> do
     let context = withOriginals (contextFor target)
-    -- Package roots grow only from the finite exact original-group inventory.
-    -- Recovered package code may expose another original group; rescan each
-    -- projected target before admitting the final executable closure.
-    initial <- timePhase timing "prepared_recover"
-      (recover (projectionEntry context))
-    let closePackages roots recoveryState = do
-          let recovered = preparedRecoveryClosure recoveryState
-              finalContext = context
-                { projectionAuxiliaryRoots = projectionAuxiliaryRoots context ++ roots }
-          requirePreparedRecoveryPublication target recovered
-          selected <- timePhase timing "prepared_project" $
-            project (prepareProjectionWithReachability finalContext
-              (closureModules recovered) (closureReachability recovered))
-          candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
-          project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders
-            (candidateGlobals candidate))
-          required <- either (ioError . userError) pure
-            (originalPackageGlobals (candidateGlobals candidate))
-          let nextRoots = Set.toAscList (Set.fromList (roots ++ required))
-          if nextRoots == roots
-            then do
-              (program, constructors) <- project (finalizePreparedCandidate candidate)
-              pure (recovered, program, constructors, roots)
-            else do
-              packageRoots <- forM nextRoots $ \identity -> do
-                (identifier, _) <- resolvePackageGlobal hscEnv identity >>= either (ioError . userError) pure
-                when (preparedRootIdentity identifier /= identity) $
-                  ioError (userError "package recovery root differs from canonical original global")
-                pure identifier
-              next <- timePhase timing "prepared_recover_original_packages"
-                (growPreparedRecovery recoveryState packageRoots)
-              closePackages nextRoots next
-    (recovered, program, constructors, roots) <- closePackages [] initial
+    -- The same component ledger closes ordinary dependencies and exact
+    -- original-package demand before the final candidate is flattened.
+    closed <- timePhase timing "prepared_recover" (recover (projectionEntry context))
+    let recovered = preparedRecoveryClosure closed
+    candidatesByTarget <- readIORef finalCandidates
+    (candidate,roots) <- maybe (fail "closed recovery did not issue its final projected candidate") pure
+      (Map.lookup (projectionEntry context) candidatesByTarget)
+    (program,constructors) <- project (finalizePreparedCandidate candidate)
     reportRecoveryResiduals target (closureFailures recovered)
     let defined = Set.fromList
           [identity | group <- programBindings program
