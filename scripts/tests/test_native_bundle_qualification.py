@@ -351,6 +351,9 @@ class NativeQualificationTests(unittest.TestCase):
             output = root / 'assembled'
             browser_driver = root / 'browser-driver'
             browser_driver_fixture(source, browser_driver)
+            roster = source / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE
+            roster.parent.mkdir(parents=True, exist_ok=True)
+            roster.write_bytes((Path(__file__).resolve().parents[2] / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE).read_bytes())
             args = SimpleNamespace(
                 output=output, host=inputs['host'], view_helper=inputs['view-helper'],
                 frontend=inputs['frontend'], worker=inputs['worker'], libtest=inputs['libtest'],
@@ -373,8 +376,71 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual((output / 'share/exomonad/test-fixtures.json').read_bytes(),
                              (source / qualification.TEST_FIXTURE_MANIFEST).read_bytes())
             qualification.verify_browser_driver(output / qualification.BROWSER_DRIVER_ROOT, contract)
+            qualification.verify_harness_performance_roster(output, contract)
+            self.assertEqual((output / qualification.HARNESS_PERFORMANCE_ROSTER_RESOURCE).read_bytes(), roster.read_bytes())
+            self.assertEqual(contract['source_inputs'][qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE], qualification.sha256(roster))
+            self.assertNotIn(qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE, contract['test_fixtures']['files'])
+            reporter_source = Path(__file__).resolve().parents[1] / 'harness-usecase-perf-report.py'
+            reporter_path = output / 'share/exomonad/harness-usecase-perf-report.py'
+            shutil.copy2(reporter_source, reporter_path)
+            frozen = root / 'frozen'
+            shutil.copytree(output, frozen, symlinks=False)
+            for layout in (output, frozen):
+                retained_reporter = layout / 'share/exomonad/harness-usecase-perf-report.py'
+                spec = importlib.util.spec_from_file_location('retained_roster', retained_reporter)
+                reporter = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(reporter)
+                self.assertEqual(reporter.THREE_ACTOR_ROSTER_PATH, layout / qualification.HARNESS_PERFORMANCE_ROSTER_RESOURCE)
+                qualification.verify_harness_performance_roster(layout, contract)
+            for change in ('missing', 'changed'):
+                with self.subTest(change=change):
+                    resource = frozen / qualification.HARNESS_PERFORMANCE_ROSTER_RESOURCE
+                    if change == 'missing':
+                        resource.unlink()
+                        with self.assertRaises(FileNotFoundError):
+                            spec.loader.exec_module(reporter)
+                    else:
+                        resource.write_text('["different-phase"]\n')
+                    with self.assertRaisesRegex(ValueError, 'performance roster'):
+                        qualification.verify_harness_performance_roster(frozen, contract)
+                    resource.write_bytes(roster.read_bytes())
+            roster.unlink()
+            args.output = root / 'missing-roster-assembly'
+            with patch.object(qualification, 'native_runtime_tools', return_value=tools), \
+                 patch.object(qualification, 'nix_path', side_effect=lambda path: path.resolve(strict=True)), \
+                 patch.object(qualification, 'verify_workspace_bundle'), \
+                 self.assertRaisesRegex(ValueError, 'source snapshot lacks'):
+                qualification.assemble(args)
             self.assertEqual(qualification.inventory(output / qualification.BROWSER_DRIVER_ROOT),
                              qualification.inventory(browser_driver))
+
+    def test_performance_roster_requires_declared_source_and_regular_retained_bytes(self):
+        for mutation in ('missing-source-contract', 'wrong-source-hash', 'missing', 'changed', 'alias'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                bundle = Path(directory) / 'bundle'
+                source = Path(__file__).resolve().parents[2]
+                qualification.copy_harness_performance_roster(source, bundle)
+                resource = bundle / qualification.HARNESS_PERFORMANCE_ROSTER_RESOURCE
+                contract = {'source_inputs': {qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE:
+                                             qualification.sha256(source / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE)}}
+                qualification.verify_harness_performance_roster(bundle, contract)
+                if mutation == 'missing-source-contract':
+                    contract['source_inputs'].clear()
+                elif mutation == 'wrong-source-hash':
+                    contract['source_inputs'][qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE] = '0' * 64
+                elif mutation == 'missing':
+                    resource.unlink()
+                elif mutation == 'changed':
+                    resource.write_text('["changed"]\n')
+                else:
+                    retained = resource.with_suffix('.retained')
+                    resource.rename(retained)
+                    resource.symlink_to(retained.name)
+                with self.assertRaisesRegex(ValueError, 'performance roster'):
+                    qualification.verify_harness_performance_roster(bundle, contract)
+                observed = qualification.inventory(bundle)
+                with self.assertRaisesRegex(ValueError, 'performance roster'):
+                    qualification.verify_harness_performance_roster(bundle, contract, observed)
 
     def test_browser_driver_rejects_changed_authored_inputs_and_dependency_artifacts(self):
         for relative in ('driver.mjs', 'package.json', 'package-lock.json',
@@ -432,6 +498,9 @@ class NativeQualificationTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('artifact: ' + relative)
                 contract['artifacts'][relative] = {'target': target, 'sha256': qualification.sha256(path)}
+            qualification.copy_harness_performance_roster(Path(__file__).resolve().parents[2], bundle)
+            contract['source_inputs'][qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE] = qualification.sha256(
+                Path(__file__).resolve().parents[2] / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE)
             files = qualification.inventory(bundle)
             descriptor = {'inventory': files, 'inventory_sha256': qualification.digest_inventory(files)}
             observed = qualification.verify_frozen_inventory(bundle, descriptor)
@@ -789,10 +858,7 @@ class NativeQualificationTests(unittest.TestCase):
             reporter_path.parent.mkdir(parents=True)
             source_reporter = Path(__file__).resolve().parents[1] / 'harness-usecase-perf-report.py'
             shutil.copy2(source_reporter, reporter_path)
-            roster = Path(__file__).resolve().parents[2] / 'bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json'
-            frozen_roster = bundle / 'share/exomonad/test-fixtures/bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json'
-            frozen_roster.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(roster, frozen_roster)
+            qualification.copy_harness_performance_roster(Path(__file__).resolve().parents[2], bundle)
             descriptor = {
                 'bundle_root': str(bundle), 'source_oid': 'a' * 40,
                 'harness_revision': 'b' * 40, 'profile': 'production',
@@ -888,10 +954,7 @@ class NativeQualificationTests(unittest.TestCase):
                 reporter_path = bundle / "share/exomonad/harness-usecase-perf-report.py"
                 reporter_path.parent.mkdir(parents=True)
                 shutil.copy2(Path(__file__).resolve().parents[1] / "harness-usecase-perf-report.py", reporter_path)
-                roster = Path(__file__).resolve().parents[2] / "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json"
-                frozen_roster = bundle / "share/exomonad/test-fixtures/bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json"
-                frozen_roster.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(roster, frozen_roster)
+                qualification.copy_harness_performance_roster(Path(__file__).resolve().parents[2], bundle)
                 descriptor_path = fixture.root / "qualification.json"
                 descriptor_path.write_text("verified by run_cohort")
                 descriptor = {
@@ -1164,6 +1227,11 @@ class NativeQualificationTests(unittest.TestCase):
             subprocess.run(['git', 'init', '-q', str(source)], check=True)
             (source / 'native.rs').write_text('fn shipped() {}\n')
             inputs = browser_driver_fixture(source, bundle / qualification.BROWSER_DRIVER_ROOT)
+            roster = source / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE
+            roster.parent.mkdir(parents=True, exist_ok=True)
+            roster.write_bytes((Path(__file__).resolve().parents[2] / qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE).read_bytes())
+            qualification.copy_harness_performance_roster(source, bundle)
+            inputs[qualification.HARNESS_PERFORMANCE_ROSTER_SOURCE] = qualification.sha256(roster)
             subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
             commit = ['git', '-C', str(source), '-c', 'user.name=Qualification test',
                       '-c', 'user.email=qualification@example.invalid', 'commit', '-qm']

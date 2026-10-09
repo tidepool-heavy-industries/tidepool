@@ -371,8 +371,13 @@ capture versus truncated detailed samples, queue admission evidence, explicit
 startup ownership, cleanup, and descriptor/profile identity. Missing or
 ambiguous joins remain partial; every queue event counts, including invalid or
 duplicate records. The selected cohort seals its named workload roster, rather
-than accepting a shortened roster from observed output. Root startup attribution
-requires the production preparation owner or canonical `actor_path = "root"`;
+than accepting a shortened roster from observed output. Assembly retains the
+three-actor roster as `share/exomonad/three-actor-workload-roster.json` from its
+exact declared native source input. Assembly, freezing and frozen verification
+check that asset against the build source contract. Bundle resource tests must
+use the production assembly/copy owner; manually adding a reporter dependency
+to a test bundle does not establish that assembly delivers it. Root startup
+attribution requires the production preparation owner or canonical `actor_path = "root"`;
 missing actor paths remain unknown. Queue or startup evidence is not inferred
 from counts or timestamps. `measurement.completed` becomes true only when every
 required evidence dimension is complete. It imposes no latency threshold and

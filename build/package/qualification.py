@@ -742,6 +742,35 @@ def verify_artifact_contract(bundle: Path, contract: dict, observed_inventory: d
         driver_inventory = {path[len(prefix):]: item for path, item in observed_inventory.items()
                             if path.startswith(prefix)}
     verify_browser_driver(bundle / BROWSER_DRIVER_ROOT, contract, driver_inventory)
+    verify_harness_performance_roster(bundle, contract, observed_inventory)
+
+
+HARNESS_PERFORMANCE_ROSTER_SOURCE = "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json"
+HARNESS_PERFORMANCE_ROSTER_RESOURCE = "share/exomonad/three-actor-workload-roster.json"
+
+
+def copy_harness_performance_roster(source_inputs: Path, bundle: Path) -> None:
+    """Retain the reporter's exact declared source asset, outside Haskell fixtures."""
+    source = source_inputs / HARNESS_PERFORMANCE_ROSTER_SOURCE
+    if not source.is_file():
+        raise ValueError("native source snapshot lacks the Harness performance roster")
+    expected = sha256(source)
+    destination = bundle / HARNESS_PERFORMANCE_ROSTER_RESOURCE
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    if sha256(destination) != expected:
+        raise ValueError("Harness performance roster changed during assembly")
+
+
+def verify_harness_performance_roster(bundle: Path, contract: dict, observed_inventory: dict | None = None) -> None:
+    expected = contract["source_inputs"].get(HARNESS_PERFORMANCE_ROSTER_SOURCE)
+    path = bundle / HARNESS_PERFORMANCE_ROSTER_RESOURCE
+    if observed_inventory is None:
+        actual = {"kind": "file", "sha256": sha256(path)} if path.is_file() and not path.is_symlink() else {}
+    else:
+        actual = observed_inventory.get(HARNESS_PERFORMANCE_ROSTER_RESOURCE, {})
+    if expected is None or actual.get("kind") != "file" or actual.get("sha256") != expected:
+        raise ValueError("Harness performance roster differs from its declared source")
 
 
 def browser_driver_record(driver: Path, source_inputs: dict, files: dict | None = None) -> dict:
@@ -1134,6 +1163,7 @@ def assemble(args) -> None:
         shutil.copytree(source, shared / name, symlinks=False)
     for source in args.libraries.iterdir():
         shutil.copy2(source.resolve(strict=True), root / "lib/tidepool" / source.name)
+    copy_harness_performance_roster(args.build_sources, root)
     fixture_record = copy_test_fixtures(args.build_sources, args.fixture_manifest,
                                         args.test_fixtures, shared)
     shutil.copy2(args.harness_revision, shared / "harness-source-revision.txt")
@@ -1182,6 +1212,7 @@ def assemble(args) -> None:
             builtin_receipt = json.loads((shared / "builtin-entries" / name / NATIVE_ROOT_ENTRY_BUILD).read_text())
             contract["native_builtin_entries"][name] = {key: builtin_receipt[key] for key in
                 ("manifest_sha256", "source_selection", "source_inventory_sha256", "product_inventory_sha256")}
+    verify_harness_performance_roster(root, contract)
     write_json(shared / "native-build-contract.json", contract)
     if contract["stdlib_mode"] == "catalog-backed":
         verify_native_catalog(root, tools)
