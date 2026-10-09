@@ -23,7 +23,9 @@ Compiler work receives its stop relationship with the affine `CompilerWorkTicket
 issued by the execution or preparation owner. The ticket opens and settles the
 entire native scope; callers must not create an unrelated cancellation token.
 Shared preparation owns its producer independently: waiters retain close
-observations without acquiring permission to interrupt that producer. A stop
+observations without acquiring permission to interrupt that producer. Loading a
+completed original also authenticates inside that scope and records a close;
+it does not submit a physical compiler request. A stop
 that loses the publication commit claim waits for settlement instead of revoking
 completed output.
 

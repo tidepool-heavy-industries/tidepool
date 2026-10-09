@@ -12,7 +12,13 @@ pub(crate) fn read_to_end(reader: &mut impl Read, bytes: &mut Vec<u8>) -> io::Re
     let mut chunk = [0; 64 * 1024];
     loop {
         checkpoint()?;
-        let count = reader.read(&mut chunk)?;
+        let count = match reader.read(&mut chunk) {
+            Ok(count) => count,
+            // Retry a transient syscall interruption through the scope's next
+            // checkpoint; only that owner can turn a stop into a refusal.
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
         if count == 0 {
             return checkpoint();
         }
@@ -35,6 +41,60 @@ mod tests {
         with_compiler_transaction_cancellable, CompilerTransactionCancellation,
         CompilerTransactionClose,
     };
+
+    #[test]
+    fn transient_read_interruption_recovers_but_cancelled_retry_refuses() {
+        struct InterruptedOnce {
+            first: bool,
+            cancellation: Option<CompilerTransactionCancellation>,
+            bytes: io::Cursor<&'static [u8]>,
+        }
+        impl Read for InterruptedOnce {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                if self.first {
+                    self.first = false;
+                    if let Some(cancellation) = &self.cancellation {
+                        cancellation.cancel();
+                    }
+                    return Err(io::Error::from(io::ErrorKind::Interrupted));
+                }
+                self.bytes.read(bytes)
+            }
+        }
+        let mut reader = InterruptedOnce {
+            first: true,
+            cancellation: None,
+            bytes: io::Cursor::new(b"complete"),
+        };
+        let mut bytes = Vec::new();
+        let recovered = with_compiler_transaction_cancellable(
+            CompilerTransactionCancellation::new(),
+            |_| {},
+            || read_to_end(&mut reader, &mut bytes),
+        );
+        recovered.action.unwrap();
+        assert_eq!(bytes, b"complete");
+        assert_eq!(recovered.close, CompilerTransactionClose::NotStarted);
+        let cancellation = CompilerTransactionCancellation::new();
+        let mut reader = InterruptedOnce {
+            first: true,
+            cancellation: Some(cancellation.clone()),
+            bytes: io::Cursor::new(b"must not read"),
+        };
+        let mut bytes = Vec::new();
+        let refused = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || read_to_end(&mut reader, &mut bytes),
+        );
+        assert_eq!(
+            refused.action.unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(bytes.is_empty());
+        assert_eq!(reader.bytes.position(), 0);
+        assert_eq!(refused.close, CompilerTransactionClose::NotStarted);
+    }
 
     #[test]
     fn chunked_host_read_interrupts_between_reads_and_fresh_scope_recovers() {

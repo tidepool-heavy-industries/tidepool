@@ -38,18 +38,30 @@ impl FrozenEntrySources {
             .map(|root| {
                 let path = std::fs::canonicalize(root)?;
                 Ok(FrozenEntryRoot {
-                    files: crate::cache::source_root_manifest(&path).map_err(invalid)?,
+                    files: crate::cache::source_root_manifest(&path).map_err(|error| {
+                        if error.source.kind() == std::io::ErrorKind::Interrupted {
+                            CompileError::Io(error.source)
+                        } else {
+                            invalid(error)
+                        }
+                    })?,
                     path,
                 })
             })
             .collect::<Result<Vec<_>, CompileError>>()?;
         let source = std::fs::canonicalize(source)?;
-        let source_sha256 = hex_sha256(&std::fs::read(&source)?);
+        let source_sha256 = hex_sha256(&crate::host_work::read(&source)?);
         Ok(Self {
             roots,
             source,
             source_sha256,
         })
+    }
+
+    /// Compare a generated wrapper without exposing or retaining partial bytes.
+    /// Acquisition still authenticates the complete source and output closure.
+    pub fn source_file_matches(source: &Path, expected: &[u8]) -> Result<bool, CompileError> {
+        Ok(crate::host_work::read(source)? == expected)
     }
 
     fn revalidate(&self) -> Result<(), CompileError> {
@@ -523,6 +535,7 @@ pub fn load_selected_production_entry(
     authority: &CompilerDeploymentAuthority,
     sources: &ProductionEntrySources,
 ) -> Result<ProductionEntryOutput, CompileError> {
+    crate::host_work::checkpoint()?;
     let bytes = crate::checked_cell::read(directory.join(MANIFEST), 16 << 20)?;
     let manifest: EntryManifest = serde_json::from_slice(&bytes).map_err(invalid)?;
     if manifest.schema != ENTRY_SCHEMA
@@ -542,7 +555,8 @@ pub fn load_selected_production_entry(
     if inventory(&raw)? != manifest.files {
         return Err(invalid("complete original container differs"));
     }
-    let source = std::fs::read_to_string(&manifest.source)?;
+    let source = String::from_utf8(crate::host_work::read(&manifest.source)?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let prepared = Arc::new(tidepool_repr::execution_schema::parse_program(
         &crate::checked_cell::read(raw.join(prepared_artifact_name("__prepared")), 128 << 20)?,
         &crate::prepared_artifact::production_requirements()?,
@@ -578,6 +592,7 @@ pub fn load_selected_production_entry(
     if products.checked.is_some() || products.original_compile_input.is_none() {
         return Err(invalid("entry has no complete original source custody"));
     }
+    crate::host_work::checkpoint()?;
     Ok(ProductionEntryOutput {
         prepared,
         table,
@@ -596,7 +611,9 @@ fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>, CompileError> {
     let mut files = BTreeMap::new();
     let mut total = 0u64;
     while let Some(directory) = remaining.pop() {
+        crate::host_work::checkpoint()?;
         for entry in std::fs::read_dir(directory)? {
+            crate::host_work::checkpoint()?;
             let entry = entry?;
             let path = entry.path();
             let metadata = std::fs::symlink_metadata(&path)?;
@@ -618,7 +635,7 @@ fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>, CompileError> {
             let relative = path.strip_prefix(root).map_err(invalid)?.to_owned();
             files.insert(
                 relative,
-                format!("{:x}", Sha256::digest(std::fs::read(&path)?)),
+                format!("{:x}", Sha256::digest(crate::host_work::read(&path)?)),
             );
         }
     }
@@ -629,6 +646,42 @@ fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>, CompileError> {
 mod source_selection_tests {
     use super::*;
     use crate::toolchain::NativeSourceRole;
+
+    #[test]
+    fn frozen_original_authentication_interrupts_without_source_or_container_fallback() {
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Original.hs");
+        std::fs::write(&source, b"module Original where\nvalue = 1\n").unwrap();
+        let cancellation = CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let stopped = with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || FrozenEntrySources::capture(&[root.path().to_owned()], &source),
+        );
+        assert!(
+            matches!(stopped.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        assert_eq!(stopped.close, CompilerTransactionClose::NotStarted);
+        let fresh = with_compiler_transaction_cancellable(
+            CompilerTransactionCancellation::new(),
+            |_| {},
+            || {
+                let sources = FrozenEntrySources::capture(&[root.path().to_owned()], &source)?;
+                assert!(FrozenEntrySources::source_file_matches(
+                    &source,
+                    b"module Original where\nvalue = 1\n"
+                )?);
+                sources.revalidate()
+            },
+        );
+        fresh.action.unwrap();
+        assert_eq!(fresh.close, CompilerTransactionClose::NotStarted);
+    }
 
     #[test]
     fn direct_entry_source_remains_outside_library_import_roots() {

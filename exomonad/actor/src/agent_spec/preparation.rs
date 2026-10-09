@@ -165,6 +165,8 @@ pub(crate) struct ToolsetPreparation {
     compiler_owner: crate::RetainedActorExit,
     #[cfg(test)]
     fresh_launch_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    completed_load_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Default)]
@@ -204,6 +206,13 @@ impl ToolsetPreparation {
     pub(crate) fn observe_fresh_launch(&self, observer: Arc<dyn Fn() + Send + Sync>) {
         let mut slot = self.fresh_launch_observer.lock();
         assert!(slot.is_none(), "fresh launch observer already installed");
+        *slot = Some(observer);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_completed_load(&self, observer: Arc<dyn Fn() + Send + Sync>) {
+        let mut slot = self.completed_load_observer.lock();
+        assert!(slot.is_none(), "completed load observer already installed");
         *slot = Some(observer);
     }
 
@@ -252,45 +261,25 @@ impl ToolsetPreparation {
             "toolset preparation lookup"
         );
         if disposition == PreparationLookupDisposition::New {
-            let completed_original = match selected_original_present(&recipe, &source) {
-                Ok(present) => present,
+            let admitted =
+                crate::resident_workbench::CompilerCloseOwner::current().and_then(|owner| {
+                    owner
+                        .shared_preparation(self.compiler_owner.clone())
+                        .register_work()
+                });
+            let compiler_work = match admitted {
+                Ok(ticket) => ticket,
                 Err(error) => {
-                    self.settle(recipe, &task, Err(error));
+                    self.settle(
+                        recipe,
+                        &task,
+                        Err(PreparationFailure::Admission(Arc::new(error))),
+                    );
                     return task.wait().await;
                 }
             };
-            let compiler_work = if completed_original {
-                None
-            } else {
-                let admitted =
-                    crate::resident_workbench::CompilerCloseOwner::current().and_then(|owner| {
-                        owner
-                            .shared_preparation(self.compiler_owner.clone())
-                            .register_work()
-                    });
-                match admitted {
-                    Ok(ticket) => Some(ticket),
-                    Err(error) => {
-                        self.settle(
-                            recipe,
-                            &task,
-                            Err(PreparationFailure::Admission(Arc::new(error))),
-                        );
-                        return task.wait().await;
-                    }
-                }
-            };
-            let acquisition = if completed_original {
-                OriginalAcquisition::LoadCompleted
-            } else {
-                OriginalAcquisition::CompileIfAbsent
-            };
             #[cfg(test)]
-            let fresh_launch_observer = if compiler_work.is_some() {
-                self.fresh_launch_observer.lock().take()
-            } else {
-                None
-            };
+            let observer_owner = Arc::clone(self);
             let task = Arc::clone(&task);
             let owner = Arc::clone(self);
             let key = recipe.clone();
@@ -299,17 +288,29 @@ impl ToolsetPreparation {
             tokio::spawn(
                 async move {
                     let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
-                        if let Some(ticket) = compiler_work {
-                            ticket.run_for_workload(workload, || {
-                                #[cfg(test)]
-                                if let Some(observer) = fresh_launch_observer {
+                        compiler_work.run_for_workload(workload, || {
+                            tidepool_extract_cmd::compiler_host_checkpoint()
+                                .map_err(preparation_io_failure)?;
+                            let completed_original = selected_original_present(&recipe, &source)?;
+                            let acquisition = if completed_original {
+                                OriginalAcquisition::LoadCompleted
+                            } else {
+                                OriginalAcquisition::CompileIfAbsent
+                            };
+                            #[cfg(test)]
+                            {
+                                let observer = if completed_original {
+                                    &observer_owner.completed_load_observer
+                                } else {
+                                    &observer_owner.fresh_launch_observer
+                                };
+                                let observer = observer.lock().take();
+                                if let Some(observer) = observer {
                                     observer();
                                 }
-                                compile_installer(recipe, resolved, source, registry, acquisition)
-                            })
-                        } else {
+                            }
                             compile_installer(recipe, resolved, source, registry, acquisition)
-                        }
+                        })
                     })
                     .await
                     .unwrap_or_else(|error| Err(PreparationFailure::Native(error.to_string())));
@@ -884,6 +885,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn interrupted_original_authentication_preserves_infrastructure_classification() {
+        let failure = preparation_auth_failure(tidepool_toolchain::CompileError::Io(
+            std::io::Error::from(std::io::ErrorKind::Interrupted),
+        ));
+        assert!(matches!(failure, PreparationFailure::Compiler(diagnostic)
+            if diagnostic.class == tidepool_toolchain::failclass::FailureClass::Infra));
+        let ordinary = preparation_auth_failure(tidepool_toolchain::CompileError::ExtractFailed(
+            "changed original".into(),
+        ));
+        assert!(matches!(ordinary, PreparationFailure::Source(_)));
+    }
+
+    #[test]
     fn only_an_absent_original_path_can_select_compilation() {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("entry");
@@ -988,8 +1002,8 @@ pub(crate) fn durable_recipe_key(recipe: &InstallerRecipe) -> Result<String, Pre
     .to_string())
 }
 
-/// Presence only chooses whether a compiler ticket is needed. It never grants
-/// original custody: all present outputs still pass the complete loader.
+/// Presence chooses physical compilation or completed-original authentication.
+/// Both run inside the shared producer's scope; presence grants no custody.
 fn selected_original_present(
     recipe: &InstallerRecipe,
     source: &crate::CheckpointSourceLayer,
@@ -1077,6 +1091,23 @@ fn compile_unprepared_installer(
     Ok(compiled)
 }
 
+fn preparation_io_failure(error: std::io::Error) -> PreparationFailure {
+    PreparationFailure::Compiler(tidepool_runtime::classify_compile(
+        &tidepool_toolchain::CompileError::Io(error),
+    ))
+}
+
+fn preparation_auth_failure(error: tidepool_toolchain::CompileError) -> PreparationFailure {
+    if matches!(&error, tidepool_toolchain::CompileError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted)
+    {
+        return PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error));
+    }
+    if let Err(interrupted) = tidepool_extract_cmd::compiler_host_checkpoint() {
+        return preparation_io_failure(interrupted);
+    }
+    PreparationFailure::Source(error.to_string())
+}
+
 fn retained_installer(
     recipe: &InstallerRecipe,
     storage: &crate::SourceEntryStorage,
@@ -1089,7 +1120,11 @@ fn retained_installer(
     };
     use tidepool_toolchain::toolchain::CompilerDeploymentConfiguration;
     let source_error =
-        |error: &dyn std::fmt::Display| PreparationFailure::Source(error.to_string());
+        |error: &dyn std::fmt::Display| match tidepool_extract_cmd::compiler_host_checkpoint() {
+            Err(interrupted) => preparation_io_failure(interrupted),
+            Ok(()) => PreparationFailure::Source(error.to_string()),
+        };
+    tidepool_extract_cmd::compiler_host_checkpoint().map_err(preparation_io_failure)?;
     let key = durable_recipe_key(recipe)?;
     let directory = storage.directory().join(&key);
     let (original, selected) = match storage {
@@ -1136,8 +1171,8 @@ fn retained_installer(
     if !completed && matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
         match std::fs::symlink_metadata(&source_path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                if std::fs::read(&source_path).map_err(|error| source_error(&error))?
-                    != wrapper.as_bytes()
+                if !FrozenEntrySources::source_file_matches(&source_path, wrapper.as_bytes())
+                    .map_err(preparation_auth_failure)?
                 {
                     return Err(PreparationFailure::Source(
                         "retained installer wrapper changed before retry".into(),
@@ -1160,8 +1195,8 @@ fn retained_installer(
             std::fs::symlink_metadata(&source_path).map_err(|error| source_error(&error))?;
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
-            || std::fs::read(&source_path).map_err(|error| source_error(&error))?
-                != wrapper.as_bytes()
+            || !FrozenEntrySources::source_file_matches(&source_path, wrapper.as_bytes())
+                .map_err(preparation_auth_failure)?
         {
             return Err(PreparationFailure::Source(
                 "completed installer wrapper differs from selected source and row".into(),
@@ -1169,7 +1204,7 @@ fn retained_installer(
         }
     }
     let sources = FrozenEntrySources::capture(&recipe.roots, &source_path)
-        .map_err(|error| source_error(&error))?;
+        .map_err(preparation_auth_failure)?;
     if sources
         .source_revision(b"exomonad-agent-spec-ordered-source-closure-v1")
         .map_err(|error| source_error(&error))?
@@ -1196,7 +1231,7 @@ fn retained_installer(
         &authority,
         &ProductionEntrySources::FrozenWorkspace(sources),
     )
-    .map_err(|error| source_error(&error))?;
+    .map_err(preparation_auth_failure)?;
     // A previous rename may have succeeded before parent fsync failed. This
     // confirms publication of that exact validated original without source.
     tidepool_atomic_write::sync_parent_directory(&output).map_err(|error| source_error(&error))?;

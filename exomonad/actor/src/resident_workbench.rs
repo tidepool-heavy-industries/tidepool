@@ -15436,16 +15436,57 @@ pub(crate) mod request_tests {
             .collect(),
         });
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let loaded = source
-            .prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                selected.clone(),
-                &[],
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            )
+        let load_control = crate::WorkbenchExecutionControl::untracked();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (release, proceed) = std::sync::mpsc::channel();
+        let proceed = parking_lot::Mutex::new(proceed);
+        source.toolset_preparation.observe_completed_load(Arc::new({
+            let entered = entered.clone();
+            move || {
+                entered.notify_one();
+                proceed
+                    .lock()
+                    .recv_timeout(Duration::from_secs(15))
+                    .unwrap();
+            }
+        }));
+        let loading = tokio::spawn({
+            let source = source.clone();
+            let selected = selected.clone();
+            let owner = CompilerCloseOwner::Hosted(load_control.clone());
+            async move {
+                owner
+                    .scope(source.prepare_source_toolset(
+                        tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                        selected,
+                        &[],
+                        &[],
+                        Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+                    ))
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(15), entered.notified())
             .await
             .unwrap();
+        assert!(matches!(
+            load_control.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Pending]
+        ));
+        assert!(load_control.request_cancellation());
+        assert!(load_control.publication_decision().claim_commit().is_none());
+        release.send(()).unwrap();
+        let loaded = tokio::time::timeout(Duration::from_secs(15), loading)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            load_control.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        ));
         assert!(matches!(
             loaded.acquisition(),
             crate::ToolsetAcquisition::DeploymentOriginal { .. }
@@ -15480,27 +15521,25 @@ pub(crate) mod request_tests {
         let original_metadata = std::fs::read(&metadata).unwrap();
         std::fs::write(&metadata, b"post-publication fault").unwrap();
         source.toolset_preparation = Default::default();
-        assert!(source
-            .prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                retried_source.clone(),
-                &[],
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            )
-            .await
-            .is_err());
+        assert!(with_test_compiler_owner(source.prepare_source_toolset(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            retried_source.clone(),
+            &[],
+            &[],
+            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+        ))
+        .await
+        .is_err());
         std::fs::write(&metadata, original_metadata).unwrap();
-        let retried = source
-            .prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                retried_source,
-                &[],
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            )
-            .await
-            .unwrap();
+        let retried = with_test_compiler_owner(source.prepare_source_toolset(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            retried_source,
+            &[],
+            &[],
+            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+        ))
+        .await
+        .unwrap();
         assert!(matches!(
             retried.acquisition(),
             crate::ToolsetAcquisition::ExistingRunOriginal { .. }
@@ -15526,16 +15565,15 @@ pub(crate) mod request_tests {
         });
         source.toolset_preparation = Default::default();
         assert!(
-            source
-                .prepare_source_toolset(
-                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                    invalid,
-                    &[],
-                    &[],
-                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-                )
-                .await
-                .is_err(),
+            with_test_compiler_owner(source.prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                invalid,
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            ))
+            .await
+            .is_err(),
             "a missing owner-selected original cannot fall back to source"
         );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
@@ -15550,15 +15588,14 @@ pub(crate) mod request_tests {
             selections: Default::default(),
         });
         assert!(matches!(
-            source
-                .prepare_source_toolset(
-                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                    uncovered,
-                    &[],
-                    &[],
-                    Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-                )
-                .await,
+            with_test_compiler_owner(source.prepare_source_toolset(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                uncovered,
+                &[],
+                &[],
+                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+            ))
+            .await,
             Err(ResidentActorWorkbenchError::PreparedEntryAbsent { .. })
         ));
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
@@ -15573,16 +15610,15 @@ pub(crate) mod request_tests {
             .into_iter()
             .collect(),
         });
-        assert!(source
-            .prepare_source_toolset(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                missing,
-                &[],
-                &[],
-                Arc::new(tidepool_runtime::session::ImageRegistry::new()),
-            )
-            .await
-            .is_err());
+        assert!(with_test_compiler_owner(source.prepare_source_toolset(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            missing,
+            &[],
+            &[],
+            Arc::new(tidepool_runtime::session::ImageRegistry::new()),
+        ))
+        .await
+        .is_err());
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
     }
 
