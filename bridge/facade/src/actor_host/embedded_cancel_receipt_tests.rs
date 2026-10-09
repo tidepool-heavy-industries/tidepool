@@ -196,22 +196,18 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                 let native_failure = native_reply
                     .as_ref()
                     .expect_err("native interruption retains its full failure receipt");
-                assert!(
-                    native_failure
-                        .receipts()
-                        .iter()
-                        .any(|receipt| !receipt.output.is_empty())
-                );
-                assert!(
-                    native_failure
-                        .receipts()
-                        .iter()
-                        .flat_map(|receipt| &receipt.operations)
-                        .any(|operation| {
-                            operation.disposition
+                assert!(native_failure
+                    .receipts()
+                    .iter()
+                    .any(|receipt| !receipt.output.is_empty()));
+                assert!(native_failure
+                    .receipts()
+                    .iter()
+                    .flat_map(|receipt| &receipt.operations)
+                    .any(|operation| {
+                        operation.disposition
                             == tidepool_runtime::session::WorkbenchOperationDisposition::Committed
-                        })
-                );
+                    }));
                 assert!(
                     !failure.message().contains("unreachable suffix"),
                     "the suffix must not execute: {failure}"
