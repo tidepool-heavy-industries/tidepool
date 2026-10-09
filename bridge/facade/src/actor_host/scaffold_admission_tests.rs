@@ -28,6 +28,18 @@ pub(super) fn scaffold(config: &mut super::ActorHostConfig) {
     );
 }
 
+pub(super) fn prepared_scaffold(config: &mut super::ActorHostConfig) {
+    scaffold(config);
+    let embedded = config
+        .embedded
+        .clone()
+        .expect("the hosted test owns its transport settings");
+    crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
+        project.launch.embedded = Some(embedded);
+    });
+    commit_workspace(&config.workspace);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the matched native prepared root entry and workspace bundle"]
 async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_originals() {
@@ -36,18 +48,7 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
     let settings = hosted_test_settings(&files, 2);
     let (provider, mut requests) = hosted_script_provider();
     let host = HostedTestRuntime::start_prepared_configured(&settings, &provider, |config| {
-        scaffold(config);
-        let embedded = config
-            .embedded
-            .clone()
-            .expect("the hosted test owns its transport settings");
-        crate::exomonad::edit_fixture_project_config(
-            &config.workspace.join(".exomonad"),
-            |project| {
-                project.launch.embedded = Some(embedded);
-            },
-        );
-        commit_workspace(&config.workspace);
+        prepared_scaffold(config);
         config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
     })
     .await

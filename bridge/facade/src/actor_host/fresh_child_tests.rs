@@ -20,7 +20,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
     let host = HostedTestRuntime::start_prepared_configured(
         &settings,
         &provider,
-        super::scaffold_admission_tests::scaffold,
+        super::scaffold_admission_tests::prepared_scaffold,
     )
     .await
     .expect("the shipped workspace prepares and selects its original before host readiness");
