@@ -4,20 +4,20 @@
 module Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveryPublicationFailure(..), requirePreparedRecoveryPublication
   , RecoveredClosure(..), recoverPreparedClosure
-  , newPreparedRecovery, newPreparedRecoveryWithPackageRoots, newPreparedRecoveryWithExecutor
+  , newPreparedRecovery, newPreparedRecoveryWithPackageRoots, newPreparedRecoveryWithExecutor, newPreparedRecoveryWithDemand
   , PreparedRecovery, preparedRecoveryClosure, growPreparedRecovery
   , insertGroup
   ) where
 
 import Control.Exception (Exception, evaluate, throwIO)
-import Control.Monad (unless, when)
+import Control.Monad (unless, when, forM_)
 import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Maybe (isJust)
 import Data.Word (Word64)
 import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet, sizeUniqSet, addListToUniqSet)
-import GHC.Types.Unique (getKey)
+import GHC.Types.Unique (Unique, getKey)
 import System.Environment (lookupEnv)
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Driver.Env (HscEnv)
@@ -32,7 +32,7 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionProjection
   ( PreparedReachability(..), ProjectionContext(..), PreparedReachUpdate(..), updatePreparedReachability
   , PreparedReferenceWorklist, emptyPreparedReferenceWorklist, admitPreparedReferenceUnits, discoverPreparedReferences
-  , combinePreparedTargetReferences, emptyPreparedReachability
+  , ReferenceFact, emptyPreparedReachability
   , preparedModuleReachFacts, preparedModuleReferenceFacts, preparedSeedUniques
   , preparedTargetReferences, preparedRootIdentity, topBinders )
 import Tidepool.ExecutionSchema (SymbolIdentity)
@@ -174,19 +174,30 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
 newPreparedRecoveryWithPackageRoots :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryWithPackageRoots = newPreparedRecoveryUsing Nothing
+newPreparedRecoveryWithPackageRoots = newPreparedRecoveryUsing Nothing (\_ _ _ -> pure [])
 
 -- | All recovery jobs use the request's existing allowance. Module contexts
 -- are acquired by its coordinator before lowering tasks enter the executor.
 newPreparedRecoveryWithExecutor :: CompilerExecutor -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryWithExecutor executor = newPreparedRecoveryUsing (Just executor)
+newPreparedRecoveryWithExecutor executor = newPreparedRecoveryUsing (Just executor) (\_ _ _ -> pure [])
 
-newPreparedRecoveryUsing :: Maybe CompilerExecutor -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache
+-- The demand owner projects only a quiescent component selection and returns
+-- canonical package roots from actual executable globals. Root growth stays
+-- on this same ledger and completion pump; it never rebuilds a target closure.
+newPreparedRecoveryWithDemand :: Maybe CompilerExecutor
+  -> (SymbolIdentity -> [Id] -> RecoveredClosure -> IO [Id])
+  -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache -> PreparedBodyCache
+  -> ProjectionContext -> [PreparedModule] -> [Id]
+  -> IO (SymbolIdentity -> IO PreparedRecovery)
+newPreparedRecoveryWithDemand = newPreparedRecoveryUsing
+
+newPreparedRecoveryUsing :: Maybe CompilerExecutor
+  -> (SymbolIdentity -> [Id] -> RecoveredClosure -> IO [Id]) -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext home initialRoots = do
+newPreparedRecoveryUsing executor demand env cache ownerCache bodyCache baseContext home initialRoots = do
   timing <- readTimingEnabled
   checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
   let factsOf prepared =
@@ -206,14 +217,14 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
   acquireBodies <- newPreparedComponentUnitsPreparer env ownerCache bodyCache
   pure $ \entry -> do
     let homeOwners = Set.fromList (map pmModule home)
-        run roots carriedAttempts carriedGroups carriedModules carriedFailures carriedOwners carriedReach = do
-          let context = baseContext
+        run roots carriedAttempts carriedGroups carriedModules carriedFailures carriedReach = do
+          rootState <- newIORef roots
+          let contextFor selectedRoots = baseContext
                 { projectionEntry = entry
                 , projectionAuxiliaryRoots = projectionAuxiliaryRoots baseContext
-                    ++ map preparedRootIdentity roots
-                }
-              seedList = nonDetEltsUniqSet (addListToUniqSet (preparedSeedUniques context home)
-                (map varUnique roots))
+                    ++ map preparedRootIdentity selectedRoots }
+              seedsFor selectedRoots = nonDetEltsUniqSet (addListToUniqSet
+                (preparedSeedUniques (contextFor selectedRoots) home) (map varUnique selectedRoots))
           factHits <- newIORef (0 :: Int)
           spent <- newIORef (Spent 0 0 0 0 0 0 0)
           state <- newIORef RecoveryState
@@ -221,15 +232,14 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
             , recoveryGroups = carriedGroups
             , recoveryPrepared = carriedModules
             , recoveryFailures = carriedFailures
-            , recoveryAdmitted = carriedOwners
             , recoveryReach = carriedReach
             , recoveryDirty = Set.empty
             , recoveryVersions = Map.map (const 0) carriedGroups
             , recoveryRunning = Set.empty
-            , recoveryNewUnits = home
+            , recoveryNewUnits = homeFacts
             , recoveryRebuild = not (Map.null carriedModules)
             , recoveryReferences = emptyPreparedReferenceWorklist
-            , recoveryLiveUnits = Map.map preparedComponentUnitRows carriedModules
+            , recoveryLiveUnits = Map.empty
             , recoverySelections = Map.empty
             , recoverySiteEpochs = Map.empty
             }
@@ -242,9 +252,9 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                     atomicModifyIORef' factsMemo (\known ->
                       (Map.insert (preparedBodyKey prepared) fresh known, ()))
                     pure (fresh, False)
-              includeRoots reach references = Map.elems (Map.fromList
+              includeRoots selectedRoots reach references = Map.elems (Map.fromList
                 [(varName binder, binder)
-                | binder <- references ++ roots
+                | binder <- references ++ selectedRoots
                 , not (elementOfUniqSet (varUnique binder) (admittedTops reach))])
               charge update = modifyIORef' spent update
               recordLookup found = modifyIORef' state $ \current -> case found of
@@ -268,7 +278,7 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
               lookupNeeded binder
                 | Just _ <- wiredInErrorKind binder = pure Nothing
                 | Just _ <- deferredFunction binder = pure Nothing
-                | Map.member (varName binder) (projectionCurrentOriginals context) = pure Nothing
+                | Map.member (varName binder) (projectionCurrentOriginals baseContext) = pure Nothing
                 | maybe False (`Set.member` homeOwners) (nameModule_maybe (varName binder)) = do
                     modifyIORef' state (\current -> current
                       { recoveryFailures = recoveryFailures current ++ [MissingHomeImplementation (varName binder)] })
@@ -291,39 +301,29 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
               -- demand never creates a second pool or a visited-owner shortcut.
               expand = do
                 current <- readIORef state
-                (recovered, factsMs) <- timeSection $ do
-                  entries <- mapM (\prepared -> do
-                    (facts, hit) <- factsFor prepared
-                    when hit (modifyIORef' factHits (+ 1))
-                    pure (prepared, facts)) (concatMap Map.elems (Map.elems (recoveryLiveUnits current)))
-                  mapM_ (\(_, (references, reach)) -> do
-                    _ <- evaluate (sum (map length (Map.elems references)))
-                    evaluate (sum (map (length . snd) reach))) entries
-                  pure entries
-                let entries = homeFacts ++ recovered
-                    modules = home ++ concatMap Map.elems (Map.elems (recoveryLiveUnits current))
+                selectedRoots <- readIORef rootState
+                let context = contextFor selectedRoots
+                    seedList = seedsFor selectedRoots
+                    entries = homeFacts ++ concatMap Map.elems (Map.elems (recoveryLiveUnits current))
+                    additions = if recoveryRebuild current then entries else recoveryNewUnits current
+                    modules = map fst entries
                 (reach, reachMs) <- timeSection $ do
-                  let newlyAdmitted = Set.fromList (map preparedBodyKey (recoveryNewUnits current))
-                      admittedFacts =
-                        [ facts | (prepared, (_, facts)) <- entries
-                        , recoveryRebuild current || preparedBodyKey prepared `Set.member` newlyAdmitted ]
+                  let admittedFacts = [facts | (_,(_,facts)) <- additions]
                       update = if recoveryRebuild current then ReplacePreparedFacts admittedFacts else AdmitPreparedFacts admittedFacts
                       extended = updatePreparedReachability seedList update (recoveryReach current)
                   _ <- evaluate (sizeUniqSet (reachedUniques extended))
                   _ <- evaluate (sizeUniqSet (admittedTops extended))
                   pure extended
                 (references, refsMs) <- timeSection $ do
-                  let newlyAdmitted = Set.fromList (map preparedBodyKey (recoveryNewUnits current))
-                      additions = [(prepared,references) | (prepared,(references,_)) <- entries
-                        , recoveryRebuild current || preparedBodyKey prepared `Set.member` newlyAdmitted]
+                  let referenceAdditions = [(prepared,references) | (prepared,(references,_)) <- additions]
                       prior = if recoveryRebuild current then emptyPreparedReferenceWorklist else recoveryReferences current
-                      admittedReferences = admitPreparedReferenceUnits additions prior
+                      admittedReferences = admitPreparedReferenceUnits referenceAdditions prior
                       (frontier,nextReferences) = discoverPreparedReferences context reach admittedReferences
                   modifyIORef' state (\latest -> latest { recoveryReferences=nextReferences })
-                  refs <- evaluate (includeRoots reach frontier)
+                  refs <- evaluate (includeRoots selectedRoots reach frontier)
                   _ <- evaluate (length refs)
                   when checking $ do
-                    let expected = includeRoots reach (preparedTargetReferences context modules)
+                    let expected = includeRoots selectedRoots reach (preparedTargetReferences context modules)
                     unless (all (\binder -> varName binder `Set.member` recoveryAttempted current
                         || varName binder `Set.member` Set.fromList (map varName refs)
                         || typePrimRep_maybe (idType binder) == Just []) expected) $
@@ -334,14 +334,12 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                         && typePrimRep_maybe (idType binder) /= Just []) references
                 modifyIORef' state (\latest -> latest
                   { recoveryReach = reach
-                  , recoveryAdmitted = Set.empty
                   , recoveryNewUnits = []
                   , recoveryRebuild = False
                   , recoveryAttempted = Set.union (recoveryAttempted latest) (Set.fromList (map varName pending))
                   })
                 charge (\cost -> cost
-                  { spentFacts = spentFacts cost + factsMs
-                  , spentReach = spentReach cost + reachMs
+                  { spentReach = spentReach cost + reachMs
                   , spentRefs = spentRefs cost + refsMs
                   , spentRounds = spentRounds cost + 1 })
                 -- Interface/finder hydration is a compiler-context operation,
@@ -363,19 +361,48 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                 -- Cached newly selected units issue facts immediately. Continue
                 -- coordinator demand before waiting for any unrelated task.
                 after <- readIORef state
-                additional <- if null (recoveryNewUnits after) then pure [] else expand
+                additional <- if not (null (recoveryNewUnits after)) then expand
+                  else if Set.null (recoveryRunning after) && Set.null (recoveryDirty after)
+                    then requestPackageDemand else pure []
                 pure (jobs ++ additional)
-              admitUnit owner key prepared current =
+              closureOf current hits = RecoveredClosure
+                (home ++ concatMap preparedComponentModules (Map.elems (recoveryPrepared current)))
+                home (Map.elems (recoveryPrepared current)) (recoveryFailures current) hits (recoveryReach current)
+              requestPackageDemand = do
+                current <- readIORef state
+                selectedRoots <- readIORef rootState
+                hits <- readIORef factHits
+                mapM_ validatePreparedComponents (Map.elems (recoveryPrepared current))
+                discovered <- demand entry selectedRoots (closureOf current hits)
+                let rootsByName = Map.fromList [(varName binder,binder) | binder <- selectedRoots]
+                    extended = Map.union rootsByName (Map.fromList [(varName binder,binder) | binder <- discovered])
+                if Map.keysSet rootsByName == Map.keysSet extended then pure [] else do
+                  modifyIORef' rootState (const (Map.elems extended))
+                  emitCount timing "prepared_recover_package_root_additions"
+                    (fromIntegral (Map.size extended - Map.size rootsByName))
+                  expand
+              admitUnit owner key prepared = do
+                current <- readIORef state
                 let previous = Map.findWithDefault Map.empty owner (recoveryLiveUnits current)
-                    replaced = preparedUnitIsSite key && any preparedUnitIsSite (Map.keys previous)
-                    retained = if preparedUnitIsSite key then Map.filterWithKey (\old _ -> not (preparedUnitIsSite old)) previous else previous
-                    fresh = Map.notMember key previous
-                in current
-                  { recoveryLiveUnits = Map.insert owner (Map.insert key prepared retained) (recoveryLiveUnits current)
-                  , recoveryNewUnits = if fresh then recoveryNewUnits current ++ [prepared] else recoveryNewUnits current
-                  , recoveryRebuild = recoveryRebuild current || (replaced && fresh)
-                  , recoverySiteEpochs = if preparedUnitIsSite key && fresh
-                      then Map.insertWith (+) owner 1 (recoverySiteEpochs current) else recoverySiteEpochs current }
+                when (Map.notMember key previous) $ do
+                  ((facts,hit),factsMs) <- timeSection $ do
+                    result@(facts,_) <- factsFor prepared
+                    _ <- evaluate (sum (map length (Map.elems (fst facts))))
+                    _ <- evaluate (sum (map (length . snd) (snd facts)))
+                    pure result
+                  when hit (modifyIORef' factHits (+ 1))
+                  charge (\cost -> cost { spentFacts = spentFacts cost + factsMs })
+                  emitCount timing "prepared_recover_unit_fact_admissions" 1
+                  let replaced = preparedUnitIsSite key && any preparedUnitIsSite (Map.keys previous)
+                      retained = if preparedUnitIsSite key
+                        then Map.filterWithKey (\old _ -> not (preparedUnitIsSite old)) previous else previous
+                      unit = (prepared,facts)
+                  modifyIORef' state $ \latest -> latest
+                    { recoveryLiveUnits = Map.insert owner (Map.insert key unit retained) (recoveryLiveUnits latest)
+                    , recoveryNewUnits = unit : recoveryNewUnits latest
+                    , recoveryRebuild = recoveryRebuild latest || replaced
+                    , recoverySiteEpochs = if preparedUnitIsSite key
+                        then Map.insertWith (+) owner 1 (recoverySiteEpochs latest) else recoverySiteEpochs latest }
               enqueueSelection (owner,version,acquired) = case acquired of
                 Left failure -> do
                   modifyIORef' state (\current -> current
@@ -386,11 +413,10 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                       known = preparedComponentTaskKnown plan
                       progress = SelectionProgress plan version known
                         (Map.fromList [(preparedUnitTaskKey task,UnitQueued) | task <- pending])
-                  modifyIORef' state $ \current ->
-                    let admitted = Map.foldlWithKey' (\latest key prepared -> admitUnit owner key prepared latest) current known
-                    in admitted
-                      { recoverySelections=Map.insert owner progress (recoverySelections admitted)
-                      , recoveryRunning=if null pending then recoveryRunning admitted else Set.insert owner (recoveryRunning admitted) }
+                  forM_ (Map.toAscList known) (\(key,prepared) -> admitUnit owner key prepared)
+                  modifyIORef' state $ \current -> current
+                    { recoverySelections=Map.insert owner progress (recoverySelections current)
+                    , recoveryRunning=if null pending then recoveryRunning current else Set.insert owner (recoveryRunning current) }
                   settleSelection owner
                   pure [(owner,version,task) | task <- pending]
               settleSelection owner = do
@@ -425,20 +451,25 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
                 charge (\cost -> cost { spentPrepare=spentPrepare cost + prepareMs })
                 current <- readIORef state
                 case Map.lookup owner (recoverySelections current) of
-                  Just progress | selectionVersion progress == version ->
-                    modifyIORef' state $ \latest ->
-                      let key = preparedUnitTaskKey task
-                          (incorporated,next) = case outcome of
-                            Right prepared -> (admitUnit owner key prepared latest,progress
-                              { selectionCompleted=Map.insert key prepared (selectionCompleted progress)
-                              , selectionPhases=Map.insert key UnitCompleted (selectionPhases progress) })
-                            Left failure -> (latest
-                              { recoveryFailures=recoveryFailures latest ++ [DefiningPreparationFailure failure] },progress
-                              { selectionPhases=Map.insert key UnitFailed (selectionPhases progress) })
-                      in incorporated { recoverySelections=Map.insert owner next (recoverySelections incorporated) }
+                  Just progress | selectionVersion progress == version -> do
+                    let key = preparedUnitTaskKey task
+                    next <- case outcome of
+                      Right prepared -> do
+                        admitUnit owner key prepared
+                        pure progress
+                          { selectionCompleted=Map.insert key prepared (selectionCompleted progress)
+                          , selectionPhases=Map.insert key UnitCompleted (selectionPhases progress) }
+                      Left failure -> do
+                        modifyIORef' state (\latest -> latest
+                          { recoveryFailures=recoveryFailures latest ++ [DefiningPreparationFailure failure] })
+                        pure progress { selectionPhases=Map.insert key UnitFailed (selectionPhases progress) }
+                    modifyIORef' state (\latest -> latest
+                      { recoverySelections=Map.insert owner next (recoverySelections latest) })
                   _ -> pure ()
                 settleSelection owner
                 expand
+          forM_ (Map.toAscList carriedModules) $ \(owner,selected) ->
+            forM_ (Map.toAscList (preparedComponentUnitRows selected)) $ \(key,prepared) -> admitUnit owner key prepared
           initialJobs <- expand
           _ <- runJobs
             (\(_,_,task) -> timeSection (runPreparedUnitTask task)) started complete initialJobs
@@ -452,34 +483,32 @@ newPreparedRecoveryUsing executor env cache ownerCache bodyCache baseContext hom
           emitCount timing "prepared_recover_rounds" rounds
           emitCount timing "prepared_recover_unit_preparations" preparations
           emitCount timing "prepared_recover_site_epochs" (fromIntegral (sum (Map.elems (recoverySiteEpochs settled))))
-          mapM_ validatePreparedComponents (Map.elems (recoveryPrepared settled))
           hits <- readIORef factHits
-          pure (PreparedRecovery
-            (RecoveredClosure (home ++ concatMap preparedComponentModules (Map.elems (recoveryPrepared settled)))
-              home (Map.elems (recoveryPrepared settled))
-              (recoveryFailures settled) hits (recoveryReach settled))
+          finalRoots <- readIORef rootState
+          pure (PreparedRecovery (closureOf settled hits)
             (\extra -> run (Map.elems (Map.fromList
-                [(preparedRootIdentity root, root) | root <- roots ++ extra]))
+                [(preparedRootIdentity root, root) | root <- finalRoots ++ extra]))
               (recoveryAttempted settled) (recoveryGroups settled)
-              (recoveryPrepared settled) (recoveryFailures settled) Set.empty (recoveryReach settled)))
-    run initialRoots Set.empty Map.empty Map.empty [] homeOwners emptyPreparedReachability
+              (recoveryPrepared settled) (recoveryFailures settled) (recoveryReach settled)))
+    run initialRoots Set.empty Map.empty Map.empty [] emptyPreparedReachability
 
 -- Only the coordinator mutates demand, reachability and incorporation. Exact
 -- versions fence late completions when another task grows an owner's body set.
+type RecoveryUnitFacts = (PreparedModule, (Map.Map Word64 [ReferenceFact], [(Id,[Unique])]))
+
 data RecoveryState = RecoveryState
   { recoveryAttempted :: Set.Set Name
   , recoveryGroups :: Map.Map Module [CoreBind]
   , recoveryPrepared :: Map.Map Module PreparedComponents
   , recoveryFailures :: [RecoveryFailure]
-  , recoveryAdmitted :: Set.Set Module
   , recoveryReach :: PreparedReachability
   , recoveryDirty :: Set.Set Module
   , recoveryVersions :: Map.Map Module Int
   , recoveryRunning :: Set.Set Module
-  , recoveryNewUnits :: [PreparedModule]
+  , recoveryNewUnits :: [RecoveryUnitFacts]
   , recoveryRebuild :: Bool
   , recoveryReferences :: PreparedReferenceWorklist
-  , recoveryLiveUnits :: Map.Map Module (Map.Map PreparedUnitKey PreparedModule)
+  , recoveryLiveUnits :: Map.Map Module (Map.Map PreparedUnitKey RecoveryUnitFacts)
   , recoverySelections :: Map.Map Module SelectionProgress
   , recoverySiteEpochs :: Map.Map Module Int
   }

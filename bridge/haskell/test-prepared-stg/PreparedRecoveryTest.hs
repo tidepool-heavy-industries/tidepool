@@ -14,6 +14,7 @@ import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (stripPrefix)
 import Data.Maybe (isJust)
+import Data.IORef (newIORef, readIORef, modifyIORef')
 import System.Mem.StableName (makeStableName)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -68,8 +69,9 @@ import Tidepool.FatIface
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
   , RecoveryPublicationFailure(..), requirePreparedRecoveryPublication
-  , recoverPreparedClosure, newPreparedRecovery, newPreparedRecoveryWithPackageRoots
+  , recoverPreparedClosure, newPreparedRecovery, newPreparedRecoveryWithPackageRoots, newPreparedRecoveryWithDemand
   , preparedRecoveryClosure, growPreparedRecovery )
+import Tidepool.CompilerExecution (withCompilerExecutor, compilerExecutionGrant)
 import Tidepool.OriginalProductRoots (requiredOriginalPackageGlobalsWithRetained)
 import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.PreparedStg
@@ -642,6 +644,26 @@ scenario = do
       finalProgram <- project allRoots (preparedRecoveryClosure final)
       finalDemand <- required finalProgram
       assert (all (`elem` allRoots) finalDemand) "two-round fixture did not close package demand"
+      forM_ [1,2] $ \jobCount -> do
+        grant <- either fail pure (compilerExecutionGrant jobCount)
+        waves <- newIORef []
+        withCompilerExecutor grant $ \executor -> do
+          let demand _ packageRoots closed = do
+                let currentRoots = Set.toAscList (Set.fromList (map preparedRootIdentity packageRoots))
+                modifyIORef' waves (++ [Set.fromList currentRoots])
+                current <- project currentRoots closed
+                next <- required current
+                resolve (Set.toAscList (Set.fromList next `Set.difference` Set.fromList currentRoots))
+          pumping <- newPreparedRecoveryWithDemand (Just executor) demand hsc cache ownerCache bodyCache
+            fixtureContext [subset] []
+          pumped <- pumping entry
+          observed <- readIORef waves
+          assert (observed == map Set.fromList [[],firstRoots,allRoots])
+            ("completion pump changed projected package demand waves: " ++ show observed)
+          pumpedProgram <- project allRoots (preparedRecoveryClosure pumped)
+          assert (pumpedProgram == finalProgram
+              && closureFailures (preparedRecoveryClosure pumped) == closureFailures (preparedRecoveryClosure final))
+            "component completion pump disagreed with independent outer-loop recomputation"
       -- Compare with the old outer loop at identical roots, graph and authority.
       oldResults <- forM [[], firstRoots, allRoots] $ \roots -> do
         binders <- resolve roots
