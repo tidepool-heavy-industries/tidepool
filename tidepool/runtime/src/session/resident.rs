@@ -2820,6 +2820,23 @@ where
         self.state.set_image_registry(registry);
     }
 
+    pub fn stage_published_source_originals_in(
+        &mut self,
+        scope: ScopeId,
+        selection: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
+    ) -> Result<super::PendingPublishedSourceOriginals, ResidentError> {
+        Ok(self
+            .state
+            .stage_published_source_originals_in(scope, selection)?)
+    }
+
+    pub fn publish_source_originals(
+        &mut self,
+        pending: super::PendingPublishedSourceOriginals,
+    ) -> Result<(), ResidentError> {
+        Ok(self.state.publish_source_originals(pending)?)
+    }
+
     fn advance_public_visibility(&mut self, scope: ScopeId) {
         self.state.advance_public_visibility(scope);
     }

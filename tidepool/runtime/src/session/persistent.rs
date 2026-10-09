@@ -302,6 +302,7 @@ struct CompileViewKey {
     tip: Generation,
     bindings: BindingScopeWitness,
     stubs: u64,
+    public_epoch: u64,
 }
 
 struct CachedCompileView {
@@ -1539,6 +1540,11 @@ impl PersistentSession {
                 tip: lib.scope_tip(scope),
                 bindings,
                 stubs: self.stub_revision,
+                public_epoch: self
+                    .public_visibility_epochs
+                    .get(&scope)
+                    .copied()
+                    .unwrap_or(0),
             });
         if let Some(key) = &key {
             if let Some(cached) = self
@@ -1628,7 +1634,7 @@ impl PersistentSession {
                 reachable_values,
                 shadowing,
                 staged_hiding: Vec::new(),
-                exact_context: lib.log.joined_context_at(lib.scope_tip(scope)),
+                exact_context: lib.current_exact_context_in(scope),
             }),
         }
         .canonicalize()
@@ -1982,6 +1988,7 @@ impl PersistentSession {
         if let Some(lib) = self.lib.as_mut() {
             let inherited = lib.scope_tip(parent);
             lib.seed_scope(child, inherited);
+            lib.inherit_source_context(parent, child);
         }
         self.bindings.seed_scope(&self.scopes, parent, child);
         Some(child)
@@ -1999,6 +2006,7 @@ impl PersistentSession {
         if let Some(lib) = self.lib.as_mut() {
             let inherited = lib.scope_tip(parent);
             lib.seed_scope(root, inherited);
+            lib.inherit_source_context(parent, root);
         }
         self.bindings
             .seed_detached_scope(&self.scopes, parent, root);
@@ -2045,7 +2053,10 @@ impl PersistentSession {
 
     /// Reserve map capacity and check exhaustion before an authoritative
     /// manifest rename. Finalization only updates this existing entry.
-    fn prepare_public_visibility_advance(&mut self, scope: ScopeId) -> Result<u64, SessionError> {
+    pub(super) fn prepare_public_visibility_advance(
+        &mut self,
+        scope: ScopeId,
+    ) -> Result<u64, SessionError> {
         let path = self
             .lib
             .as_ref()
@@ -2058,6 +2069,10 @@ impl PersistentSession {
                 path,
                 detail: "public visibility epoch exhausted".into(),
             })
+    }
+
+    pub(super) fn commit_public_visibility_advance(&mut self, scope: ScopeId, epoch: u64) {
+        self.public_visibility_epochs.insert(scope, epoch);
     }
 
     /// Full internal identity of the paired lexical view. Observation may
@@ -3639,6 +3654,9 @@ impl PersistentSession {
         let mut retired = Vec::new();
         let mut source_instances = Vec::new();
         for dead in &doomed {
+            if let Some(lib) = self.lib.as_mut() {
+                lib.tips.remove(dead);
+            }
             self.compile_views.lock().remove(dead);
             let drained = self.bindings.drain_scope_with_sources(*dead);
             retired.extend(drained.bindings);
@@ -4027,7 +4045,7 @@ mod checkpoint_scope_tests {
             parent: None,
         };
         let generation = session.lib_mut().log.push(turn);
-        session.lib_mut().tips.insert(scope, generation);
+        session.lib_mut().set_scope_tip_in(scope, generation);
         let declared = session.scoped_compile_view_in(scope).unwrap();
         assert_ne!(declared.digest, rebound.digest);
         // Same session/path/tip counters cannot reuse another library's cache.
@@ -4047,7 +4065,7 @@ mod checkpoint_scope_tests {
             retracts: Vec::new(),
             parent: None,
         });
-        replacement.tips.insert(scope, generation);
+        replacement.set_scope_tip_in(scope, generation);
         *session.lib_mut() = replacement;
         let replaced = session.scoped_compile_view_in(scope).unwrap();
         assert!(!Arc::ptr_eq(&declared, &replaced));
@@ -4317,7 +4335,7 @@ mod checkpoint_scope_tests {
             .begin_durable_public_bootstrap(owner.clone(), public)
             .unwrap();
         let original = std::fs::read(root.path().join("declarations.json")).unwrap();
-        session.lib_mut().tips.insert(public, Generation(99));
+        session.lib_mut().set_scope_tip_in(public, Generation(99));
         assert!(matches!(
             session.publish_durable_public_bootstrap(seal),
             Err(SessionError::InvalidDurablePublicAdmission {

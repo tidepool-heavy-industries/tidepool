@@ -1822,7 +1822,7 @@ impl PersistentSession {
             },
             module,
             receipt,
-            exact_context: self.lib().log.joined_context_at(base_tip),
+            exact_context: self.lib().current_exact_context_in(scope),
             session_id: self.lib().id,
             root: self.lib().root.clone(),
             scope,

@@ -1903,6 +1903,36 @@ impl CompiledTurn {
         )
     }
 
+    /// Issue a published source selection only from this exact original bundle.
+    pub fn published_source_original_selection(
+        &self,
+        revision: &str,
+        public_root: &tidepool_toolchain::declaration_join::ExactModuleIdentity,
+    ) -> Result<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>, CompileError>
+    {
+        let certification = self.certification.as_ref().ok_or_else(|| {
+            CompileError::ExtractFailed("published source original lacks compiler custody".into())
+        })?;
+        let proof = certification
+            .original_compile_input
+            .as_ref()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed(
+                    "published source original lacks original input authority".into(),
+                )
+            })?;
+        proof.published_source_original_selection(
+            &self.prepared,
+            &certification.groups,
+            &certification.target_owners,
+            &certification.package_interfaces,
+            &self.table,
+            &self.asks,
+            revision,
+            public_root,
+        )
+    }
+
     /// Exact original artifact identities retained by this compiler output.
     pub fn source_artifacts(
         &self,
