@@ -19,6 +19,14 @@ session rather than opening parallel contexts for one actor. Worker lifecycle,
 wake correlation, collection, and acknowledgement remain Rust interpreter
 state.
 
+Compiler work receives its stop relationship with the affine `CompilerWorkTicket`
+issued by the execution or preparation owner. The ticket opens and settles the
+entire native scope; callers must not create an unrelated cancellation token.
+Shared preparation owns its producer independently: waiters retain close
+observations without acquiring permission to interrupt that producer. A stop
+that loses the publication commit claim waits for settlement instead of revoking
+completed output.
+
 Fork inheritance is a snapshot, not a live link to later parent turns. Keep
 source seed, inherited scope, candidate commit, integration head, and recipient
 acknowledgement distinct. `fork_workspace.rs` owns fork workspace preparation.

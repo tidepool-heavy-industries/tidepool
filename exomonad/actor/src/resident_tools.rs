@@ -234,7 +234,14 @@ impl WorkbenchExecutionControl {
         if terminal.is_some() {
             return false;
         }
-        self.compiler_work.lock().push(receipt);
+        self.compiler_work.lock().push(receipt.clone());
+        let cancelled = self
+            .native_cancel
+            .load(std::sync::atomic::Ordering::Acquire);
+        drop(terminal);
+        if cancelled {
+            receipt.request_cancellation();
+        }
         true
     }
 
@@ -454,6 +461,13 @@ impl WorkbenchExecutionControl {
         ) {
             self.publication_waited
                 .store(true, std::sync::atomic::Ordering::Release);
+        }
+        drop(terminal);
+        if claimed {
+            let receipts = self.compiler_work.lock().clone();
+            for receipt in receipts {
+                receipt.request_cancellation();
+            }
         }
         (claimed, publication)
     }

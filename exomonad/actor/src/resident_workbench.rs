@@ -66,6 +66,10 @@ tokio::task_local! {
 #[derive(Clone)]
 pub(crate) enum CompilerCloseOwner {
     Initialization(crate::RetainedActorExit),
+    SharedPreparation {
+        producer: crate::RetainedActorExit,
+        observer: Box<CompilerCloseOwner>,
+    },
     Hosted(Arc<crate::WorkbenchExecutionControl>),
     Invocation {
         work: Arc<crate::resident_actor::invocation_work::InvocationWork>,
@@ -77,6 +81,10 @@ impl CompilerCloseOwner {
     pub(crate) fn close_settled(&self) {
         match self {
             Self::Initialization(owner) => owner.notify_compiler_close(),
+            Self::SharedPreparation { producer, observer } => {
+                producer.notify_compiler_close();
+                observer.close_settled();
+            }
             Self::Hosted(control) => control.notify_compiler_close(),
             Self::Invocation { control, .. } => {
                 if let Some(control) = control {
@@ -134,16 +142,26 @@ impl CompilerCloseOwner {
         self.register_work_in(CompilerWorkAdmission::Publication)
     }
 
-    fn register_work_in(
+    pub(crate) fn shared_preparation(&self, producer: crate::RetainedActorExit) -> Self {
+        Self::SharedPreparation {
+            producer,
+            observer: Box::new(self.clone()),
+        }
+    }
+
+    fn register_receipt(
         &self,
+        receipt: crate::termination::CompilerWorkReceipt,
         admission: CompilerWorkAdmission,
-    ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
-        let receipt = crate::termination::CompilerWorkReceipt::pending();
-        let ticket = crate::termination::CompilerWorkTicket::new(receipt.clone(), self.clone());
-        let admitted = match self {
-            CompilerCloseOwner::Initialization(owner) => owner.register_compiler_work(receipt),
-            CompilerCloseOwner::Hosted(owner) => owner.register_compiler_work(receipt),
-            CompilerCloseOwner::Invocation { work, control } => {
+    ) -> bool {
+        match self {
+            Self::Initialization(owner) => owner.register_compiler_work(receipt),
+            Self::SharedPreparation { producer, observer } => {
+                producer.register_compiler_work(receipt.clone())
+                    && observer.register_receipt(receipt.observation_only(), admission)
+            }
+            Self::Hosted(owner) => owner.register_compiler_work(receipt),
+            Self::Invocation { work, control } => {
                 let admitted = match admission {
                     CompilerWorkAdmission::Active => work.register_compiler_work(receipt.clone()),
                     CompilerWorkAdmission::Publication => {
@@ -155,7 +173,16 @@ impl CompilerCloseOwner {
                         .as_ref()
                         .is_none_or(|owner| owner.register_compiler_work(receipt))
             }
-        };
+        }
+    }
+
+    fn register_work_in(
+        &self,
+        admission: CompilerWorkAdmission,
+    ) -> Result<crate::termination::CompilerWorkTicket, ResidentActorWorkbenchError> {
+        let receipt = crate::termination::CompilerWorkReceipt::pending();
+        let ticket = crate::termination::CompilerWorkTicket::new(receipt.clone(), self.clone());
+        let admitted = self.register_receipt(receipt, admission);
         if admitted {
             return Ok(ticket);
         }
@@ -5549,11 +5576,11 @@ where
             .await?;
         if let Some((admission, dependencies)) = reused {
             let original_admission = admission.clone();
-            let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
-            let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+            let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
             let compiler_work = register_compiler_work()?;
+            cancel_on_drop.0 = Some(compiler_work.cancellation());
             let interface = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                compiler_work.run(cancellation, || {
+                compiler_work.run(|| {
                     let prototype = original_admission.prototype();
                     tidepool_toolchain::artifacts::issue_host_binding_interface(
                         prototype.compiler().clone(),
@@ -5770,13 +5797,12 @@ where
                 Ok(specification)
             })
             .await?;
-        let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
-        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
         let parser_specification = specification.clone();
-        let parser_cancellation = cancellation.clone();
         let compiler_work = register_compiler_work()?;
+        cancel_on_drop.0 = Some(compiler_work.cancellation());
         let plan = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-            compiler_work.run(parser_cancellation, || {
+            compiler_work.run(|| {
                 tidepool_toolchain::artifacts::parse_cell_plan(
                     Arc::new(parser_specification.cell.clone()),
                     &parser_specification.include,
@@ -5822,9 +5848,10 @@ where
         let check_specification = specification.clone();
         let check_admission = admission.clone();
         let compiler_work = register_compiler_work()?;
+        cancel_on_drop.0 = Some(compiler_work.cancellation());
         let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                compiler_work.run(cancellation, || {
+                compiler_work.run(|| {
                     tidepool_runtime::session::turn::compile_cell_program_admitted(check_admission)
                         .map_err(|failure| {
                             cell_check_error(failure, &check_specification.cell.cell_source)
@@ -6006,8 +6033,7 @@ where
             &prepared.imports,
             &provenance.fingerprint,
         ) {
-            let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
-            let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+            let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
             let timing = crate::call_timing::current_registration();
             let compile_span = tracing::info_span!(
                 "compile_blocking",
@@ -6021,14 +6047,15 @@ where
             let injected = prepared.injected.clone();
             let include = prepared.include.clone();
             let workspace_modules = source.workspace_modules.clone();
-            let compile_cancellation = cancellation.clone();
             let inspection_view = view.clone();
             let effects = effects_alias.clone();
             let compiler_work = register_compiler_work()?;
+            let cancellation = compiler_work.cancellation();
+            cancel_on_drop.0 = Some(cancellation.clone());
             let spawn = {
                 let _entered = compile_span.enter();
                 spawn_blocking_in_span(move || {
-                    let answer = compiler_work.run(compile_cancellation, || {
+                    let answer = compiler_work.run(|| {
                         crate::lookup::execute(
                             request,
                             request_view,
@@ -7473,8 +7500,7 @@ where
             .await
             .map_err(|error| publication_error(PrivatePublicationPhase::Freeze, error))?;
         let native_bindings = intent.native_binding_names();
-        let cancellation = tidepool_runtime::CompilerTransactionCancellation::new();
-        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(Some(cancellation.clone()));
+        let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
         loop {
             if matches!(
                 execution.decision.phase(),
@@ -7503,15 +7529,14 @@ where
                 })
                 .await
                 .map_err(|error| publication_error(PrivatePublicationPhase::Restage, error))?;
-            let compile_cancellation = cancellation.clone();
             let compiler_work = CompilerCloseOwner::current()
                 .and_then(|owner| owner.register_publication_work())
                 .map_err(|error| {
                     publication_error(PrivatePublicationPhase::CertifyAndStage, error)
                 })?;
+            cancel_on_drop.0 = Some(compiler_work.cancellation());
             let prepared = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 compiler_work.run(
-                    compile_cancellation,
                     || match baseline {
                         tidepool_runtime::session::ExecutionPublication::Bindings(base) => {
                             base.stage().map(PreparedExecutionPublication::Manifest)
@@ -11969,6 +11994,182 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
+    async fn actor_stop_interrupts_owned_host_work_before_source_read_and_recovers() {
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let original = control.clone();
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("must-not-be-read");
+        let task = tokio::spawn(async move {
+            CompilerCloseOwner::Hosted(original)
+                .scope(async move {
+                    let ticket = register_compiler_work().unwrap();
+                    spawn_blocking_in_span(move || {
+                        ticket.run(|| {
+                            entered.send(()).unwrap();
+                            proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                            // This is the real source-observation owner. Interruption
+                            // must win over the absent path's filesystem failure.
+                            let refused = tidepool_toolchain::cache::source_root_manifest(&missing);
+                            let command = tidepool_extract_cmd::ExtractCmd::with_bin(
+                                tidepool_extract_cmd::ResolvedExtractBin::assume_resolved(&missing),
+                            );
+                            let bind = command.bind().err().expect("stopped owner cannot bind");
+                            assert_eq!(bind.source.kind(), std::io::ErrorKind::Interrupted);
+                            assert!(bind.definitely_unsubmitted());
+                            refused
+                        })
+                    })
+                    .await
+                    .unwrap()
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(control.request_cancellation());
+        assert!(control.publication_decision().claim_commit().is_none());
+        release.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.source.kind(), std::io::ErrorKind::Interrupted);
+        assert!(matches!(
+            control.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        ));
+        let fresh = crate::WorkbenchExecutionControl::untracked();
+        let root = directory.path().to_path_buf();
+        std::fs::write(
+            root.join("Recovery.hs"),
+            b"module Recovery where\nvalue = 1\n",
+        )
+        .unwrap();
+        let result = CompilerCloseOwner::Hosted(fresh.clone())
+            .scope(async move {
+                let ticket = register_compiler_work().unwrap();
+                spawn_blocking_in_span(move || {
+                    ticket.run(|| tidepool_toolchain::cache::source_root_manifest(&root))
+                })
+                .await
+                .unwrap()
+                .unwrap()
+            })
+            .await;
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            fresh.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        ));
+    }
+
+    #[tokio::test]
+    async fn commit_claimed_compiler_work_settles_after_losing_stop() {
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let ticket = CompilerCloseOwner::Hosted(control.clone())
+            .register_work()
+            .unwrap();
+        let claim = control.publication_decision().claim_commit().unwrap();
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let task = spawn_blocking_in_span(move || {
+            ticket.run(|| {
+                entered.send(()).unwrap();
+                proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                tidepool_extract_cmd::compiler_host_checkpoint()
+            })
+        });
+        tokio::time::timeout(Duration::from_secs(5), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!control.request_cancellation());
+        assert!(matches!(
+            control.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Pending]
+        ));
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            control.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        ));
+        assert!(claim.published());
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_observes_shared_producer_completion_without_interrupting_it() {
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let producer = crate::RetainedActorExit::new();
+        let owner =
+            CompilerCloseOwner::Hosted(control.clone()).shared_preparation(producer.clone());
+        let ticket = owner.register_work().unwrap();
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("Shared.hs"),
+            b"module Shared where\nvalue = 1\n",
+        )
+        .unwrap();
+        let root = directory.path().to_path_buf();
+        let work = spawn_blocking_in_span(move || {
+            ticket.run(|| {
+                entered.send(()).unwrap();
+                proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                tidepool_toolchain::cache::source_root_manifest(&root)
+            })
+        });
+        tokio::time::timeout(Duration::from_secs(5), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(control.request_cancellation());
+        assert!(matches!(
+            control.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Pending]
+        ));
+        assert!(matches!(
+            producer.compiler_close_observations().as_slice(),
+            [crate::termination::CompilerWorkClose::Pending]
+        ));
+        release.send(()).unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(5), work)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.len(), 1);
+        for closes in [
+            control.compiler_close_observations(),
+            producer.compiler_close_observations(),
+        ] {
+            assert!(matches!(
+                closes.as_slice(),
+                [crate::termination::CompilerWorkClose::Settled(
+                    tidepool_runtime::CompilerTransactionClose::NotStarted
+                )]
+            ));
+        }
+        assert!(directory.path().join("Shared.hs").exists());
+    }
+
+    #[tokio::test]
     async fn compiler_obligation_survives_waiter_loss_and_actor_stop_until_late_close() {
         let retained = crate::RetainedActorExit::new();
         let owner = CompilerCloseOwner::Initialization(retained.clone());
@@ -11980,16 +12181,13 @@ pub(crate) mod request_tests {
                 // Exercise the same admission boundary as every real compiler spawn.
                 let ticket = register_compiler_work().unwrap();
                 let native = spawn_blocking_in_span(move || {
-                    let action = ticket.run(
-                        tidepool_runtime::CompilerTransactionCancellation::new(),
-                        || {
-                            entered.send(()).unwrap();
-                            proceed
-                                .recv_timeout(std::time::Duration::from_secs(5))
-                                .unwrap();
-                            Err::<(), _>("completed primary refusal")
-                        },
-                    );
+                    let action = ticket.run(|| {
+                        entered.send(()).unwrap();
+                        proceed
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        Err::<(), _>("completed primary refusal")
+                    });
                     settled.send(action).unwrap();
                 });
                 tokio::spawn(async move { native.await })
@@ -12049,7 +12247,6 @@ pub(crate) mod request_tests {
             spawn_blocking_in_span(move || {
                 let action = ticket.run_for_workload(
                     tidepool_extract_cmd::CompileWorkload::Preparation,
-                    tidepool_runtime::CompilerTransactionCancellation::new(),
                     || {
                         entered.send(()).unwrap();
                         proceed

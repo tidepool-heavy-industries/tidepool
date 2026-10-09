@@ -162,6 +162,7 @@ impl PreparationTask {
 #[derive(Default)]
 pub(crate) struct ToolsetPreparation {
     state: Mutex<PreparationState>,
+    compiler_owner: crate::RetainedActorExit,
     #[cfg(test)]
     fresh_launch_observer: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
@@ -261,13 +262,14 @@ impl ToolsetPreparation {
             let compiler_work = if completed_original {
                 None
             } else {
-                let admitted = crate::resident_workbench::CompilerCloseOwner::current()
-                    .and_then(|owner| owner.register_work());
+                let admitted =
+                    crate::resident_workbench::CompilerCloseOwner::current().and_then(|owner| {
+                        owner
+                            .shared_preparation(self.compiler_owner.clone())
+                            .register_work()
+                    });
                 match admitted {
-                    Ok(ticket) => Some((
-                        ticket,
-                        tidepool_runtime::CompilerTransactionCancellation::new(),
-                    )),
+                    Ok(ticket) => Some(ticket),
                     Err(error) => {
                         self.settle(
                             recipe,
@@ -297,8 +299,8 @@ impl ToolsetPreparation {
             tokio::spawn(
                 async move {
                     let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
-                        if let Some((ticket, cancellation)) = compiler_work {
-                            ticket.run_for_workload(workload, cancellation, || {
+                        if let Some(ticket) = compiler_work {
+                            ticket.run_for_workload(workload, || {
                                 #[cfg(test)]
                                 if let Some(observer) = fresh_launch_observer {
                                     observer();
