@@ -79,7 +79,12 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
                     .split("\n\n")
                     .find(|block| block.starts_with(&format!("{name}\n")))
                     .unwrap_or_else(|| panic!("missing lookup result for {name}: {lookup}"));
-                assert!(block.contains(" :: "), "{lookup}");
+                assert!(
+                    block
+                        .split_once("::")
+                        .is_some_and(|(_, signature)| !signature.trim().is_empty()),
+                    "{lookup}"
+                );
             }
             round.call(
                 "prepared-default-child",
