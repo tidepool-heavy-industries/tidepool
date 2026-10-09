@@ -4211,7 +4211,7 @@ impl PreparedEngine {
             // A target can contain incidental package tops absent from its
             // selected canonical interfaces. Keep those definitions local;
             // their presence cannot issue a retained package import later.
-            let exports = exportable_code_tops(&target.prepared)
+            let exports: Vec<_> = exportable_code_tops(&target.prepared)
                 .into_iter()
                 .filter(|(identity, _, _)| {
                     certified_exports.contains_key(identity)
