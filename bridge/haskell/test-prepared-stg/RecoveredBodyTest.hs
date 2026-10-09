@@ -789,7 +789,7 @@ assertRecoveredKindRep root = do
       , occurrence binder == "krep$*", update /= Stg.ReEntrant, null parameters] of
     [binder] -> pure binder
     _ -> fail ("partial krep$* did not exercise the genuine strict-sibling thunk: "
-      ++ showSDocUnsafe (ppr (map fst (pmBindings partial)))
+      ++ show [(occurrence binder, case rhs of Stg.StgRhsCon{} -> "constructor"; Stg.StgRhsClosure _ _ update args _ _ -> show update ++ ":" ++ show (length args)) | (Stg.StgTopLifted binding,_) <- pmBindings partial, (binder,rhs) <- stgPairs binding]
       ++ "; raw Core: " ++ showSDocUnsafe (ppr incomplete))
   case importedIdLFInfo <$> preparedExpectedEntry partial partialBinder of
     Just LFCon{} -> pure ()
