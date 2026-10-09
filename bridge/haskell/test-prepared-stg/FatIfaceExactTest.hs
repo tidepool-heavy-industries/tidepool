@@ -50,7 +50,7 @@ import Tidepool.FatIface
   , lookupFatIfaceComponents, privateOriginalDependencies
   , newFatIfaceCache
   , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, copyOwnerInterfaceCache
-  , lookupOwnerInterface, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
+  , lookupOwnerInterface, sameOwnerInterfaceContext, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
   )
 import Tidepool.FatIface.Internal
   ( newLoadCache, lookupLoadCache, lookupCompletedLoadCache
@@ -292,6 +292,31 @@ scenario = do
         selectedBindings <- physicalBindings selectedPrepared
         assert (selectedBindings == firstBindings)
           "owner-indexed completed cache selection discarded a prepared private unit"
+        originalContext <- lookupOwnerInterface privateOwners privateOwner >>= maybe
+          (fail "prepared original lacks its declaring context") pure
+        independentOwners <- newOwnerInterfaceCache
+        acquireIndependent <- newPreparedComponentTaskPreparer hsc independentOwners componentCache
+        independentTask <- acquireIndependent selected >>= either (fail . show) pure
+        independent <- runPreparedBodyTask independentTask >>= either (fail . show) pure
+        independentContext <- lookupOwnerInterface independentOwners privateOwner >>= maybe
+          (fail "independently loaded original lacks its declaring context") pure
+        assert (not (sameOwnerInterfaceContext originalContext independentContext))
+          "independent defining-context issuers aliased the same interface"
+        independentBindings <- physicalBindings independent
+        assert (any (\(name,identity) -> Map.lookup name independentBindings /= Just identity)
+          (Map.toList firstBindings))
+          "prepared component cache crossed independently retained declaring contexts"
+        independentBodies <- prepareRecoveredBodies hsc independentOwners privateBodies
+          privateOwner privateGroups >>= either (fail . show) pure
+        oldBodies <- physicalBindings privatePrepared
+        newBodies <- physicalBindings independentBodies
+        assert (any (\(name,identity) -> Map.lookup name newBodies /= Just identity)
+          (Map.toList oldBodies))
+          "prepared body cache crossed independently retained declaring contexts"
+        retainedAgain <- runPreparedBodyTask =<< (acquireSelected selected >>= either (fail . show) pure)
+        retained <- either (fail . show) physicalBindings retainedAgain
+        assert (retained == firstBindings)
+          "another context's completion displaced the retained original context"
       privateOwnerClone <- liftIO (copyOwnerInterfaceCache privateOwners)
       privateOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
       liftIO (assert (maybe False (const True) privateOwnerContext)

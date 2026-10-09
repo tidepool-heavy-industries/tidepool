@@ -50,7 +50,7 @@ import System.FilePath ((</>))
 import System.Process (proc, readCreateProcessWithExitCode)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities, preparedTopIdentityBindings
-  , prepareProjection, prepareProjectionWithReachability, projectSelected
+  , prepareProjection, prepareProjectionWithReachability, prepareComponentProjectionWithReachability, projectSelected
   , projectPreparedTarget, preparedModuleReachFacts, preparedSeedUniques
   , admitReachFacts, emptyPreparedReachability, reachedUniques, admittedTops
   , PreparedReachUpdate(..), updatePreparedReachability
@@ -62,7 +62,9 @@ import Tidepool.ExecutionSchema
 import Tidepool.FatIface
   ( newFatIfaceCache, newOwnerInterfaceCache, lookupFatIfaceComponents
   , FatIfaceComponentLookup(..), fatSelectionComponents
-  , readExactInterface, lookupFatIfaceExact, FatIfaceLookup(..), FatIfaceMissing(..) )
+  , readExactInterface, lookupFatIfaceExact, FatIfaceLookup(..), FatIfaceMissing(..)
+  , OwnerInterfaceContext, copyOwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface
+  , selectOwnerInterfaceCaches, evictOwnerInterfaceMatching, sameOwnerInterfaceContext )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveredClosure(..), insertGroup
   , RecoveryPublicationFailure(..), requirePreparedRecoveryPublication
@@ -148,6 +150,67 @@ reachHistoryProperty = do
           | node `Set.member` seen = grow seen pending
           | otherwise = grow (Set.insert node seen) (Map.findWithDefault [] node rows ++ pending)
 
+-- The two values are issued by real interface reads/typechecks. Histories
+-- exercise only custody operations, never fabricate declaring authority.
+data ContextOperation
+  = InstallContext Int Int
+  | CopyContext Int Int
+  | EvictContext Int
+  | SelectContexts Int Int Int Bool Bool
+  deriving Show
+
+verifyContextHistories :: Module -> OwnerInterfaceContext -> OwnerInterfaceContext -> IO ()
+verifyContextHistories owner first second = do
+  let generator = QC.listOf $ QC.oneof
+        [ InstallContext <$> slot <*> QC.chooseInt (0,1)
+        , CopyContext <$> slot <*> slot
+        , EvictContext <$> slot
+        , SelectContexts <$> slot <*> slot <*> slot <*> QC.arbitrary <*> QC.arbitrary ]
+      slot = QC.chooseInt (0,2)
+      contexts = [first,second]
+      history operations = do
+        initial <- mapM (const newOwnerInterfaceCache) [0..2 :: Int]
+        let observe caches expected = do
+              actual <- mapM (\cache -> lookupOwnerInterface cache owner) caches
+              pure $ and [case (value,model) of
+                (Nothing,Nothing) -> True
+                (Just retained,Just identity) -> sameOwnerInterfaceContext retained (contexts !! identity)
+                _ -> False | (value,model) <- zip actual expected]
+            replace index value rows = take index rows ++ [value] ++ drop (index+1) rows
+            walk _ _ [] = pure True
+            walk caches expected (operation:rest) = do
+              (next,model) <- case operation of
+                InstallContext target identity -> do
+                  cacheOwnerInterface (caches !! target) owner (contexts !! identity)
+                  pure (caches,replace target (Just identity) expected)
+                CopyContext target source -> do
+                  copied <- copyOwnerInterfaceCache (caches !! source)
+                  pure (replace target copied caches,replace target (expected !! source) expected)
+                EvictContext target -> do
+                  evictOwnerInterfaceMatching (caches !! target) (== owner)
+                  pure (caches,replace target Nothing expected)
+                SelectContexts target left right keepLeft keepRight -> do
+                  selected <- selectOwnerInterfaceCaches
+                    [(caches !! left, if keepLeft then Set.singleton owner else Set.empty)
+                    ,(caches !! right,if keepRight then Set.singleton owner else Set.empty)]
+                  let choose = case if keepLeft then expected !! left else Nothing of
+                        Just value -> Just value
+                        Nothing -> if keepRight then expected !! right else Nothing
+                  pure (replace target selected caches,replace target choose expected)
+              correct <- observe next model
+              if correct then walk next model rest else pure False
+        walk initial (replicate 3 Nothing) operations
+  calibration <- history [InstallContext 0 0,CopyContext 1 0,InstallContext 0 1
+    ,SelectContexts 2 1 0 True True,EvictContext 1]
+  assert calibration "declaring-context copy/selection/eviction calibration failed"
+  -- Matching interface bytes alone is a deliberately invalid cache identity.
+  assert (not (sameOwnerInterfaceContext first second))
+    "context identity mutation escaped the independently loaded-owner control"
+  result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess=120, QC.maxSize=40 }
+    (QC.forAllShrink generator (QC.shrinkList (const [])) $ \operations ->
+      QC.counterexample (show operations) (QC.ioProperty (history operations)))
+  unless (QC.isSuccess result) (fail "retained declaring-context histories diverged")
+
 scenario :: IO ()
 scenario = do
   root <- getCurrentDirectory
@@ -193,6 +256,25 @@ scenario = do
       bodyCache <- newPreparedBodyCache
       recover <- newPreparedRecovery hsc cache ownerCache bodyCache context modules
       first <- recover entry
+      let fstUnits = [prepared | prepared <- closureModules first, recoveredFst prepared]
+      (fstOwner, fstName) <- case fstUnits of
+        [prepared] -> case [varName binder | binder <- topBindersOfModule prepared
+              , occNameString (nameOccName (varName binder)) == "fst"] of
+          [name] -> pure (pmModule prepared,name)
+          _ -> fail "retained context history lacks an exact fst binder"
+        _ -> fail "retained context history lacks one fst unit"
+      firstContext <- lookupOwnerInterface ownerCache fstOwner >>= maybe
+        (fail "recovered fst lacks its retained context") pure
+      independentOwners <- newOwnerInterfaceCache
+      groups <- lookupFatIfaceExact hsc cache fstName >>= \case
+        FatIfaceFound bodies -> pure bodies
+        _ -> fail "context history lost the exact original fst body"
+      _ <- prepareRecoveredBodies hsc independentOwners bodyCache fstOwner groups >>= either (fail . show) pure
+      secondContext <- lookupOwnerInterface independentOwners fstOwner >>= maybe
+        (fail "independent fst load lacks its retained context") pure
+      assert (not (sameOwnerInterfaceContext firstContext secondContext))
+        "independent retained dependency contexts share an issuer"
+      verifyContextHistories fstOwner firstContext secondContext
       otherEntry <- case [identity | identity <- either (error . show) id (preparedTopIdentities [home])
                                   , symbolOccurrence identity == Text.pack "homeOther"] of
         [identity] -> pure identity
@@ -329,6 +411,10 @@ scenario = do
           old = projectionResult (prepareProjection context modules)
           carried = projectionResult
             (prepareProjectionWithReachability context modules (closureReachability closure))
+          component = projectionResult
+            (prepareComponentProjectionWithReachability context (closureHomeModules closure)
+              (closureComponentSelections closure) (closureReachability closure))
+      assert (old == component) "component-backed projection changed complete recomputation"
       assert (old == carried)
         ("carried reachability changed projection for " ++ show (projectionEntry context)
           ++ ": " ++ show (fmap (length . programBindings) old)
@@ -502,9 +588,11 @@ scenario = do
         [binder] -> pure binder
         found -> fail ("expected one recovered fst, got " ++ show (length found))
       showPrepared <- case [prepared | prepared <- closureModules hiddenClosure
-          , moduleNameString (moduleName (pmModule prepared)) == "GHC.Internal.Show"] of
-        [prepared] -> pure prepared
-        found -> fail ("expected one recovered Show module, got " ++ show (length found))
+          , moduleNameString (moduleName (pmModule prepared)) == "GHC.Internal.Show"
+          , any (\binder -> varUnique binder `elementOfUniqSet` reachedUniques (closureReachability hiddenClosure))
+              (topBindersOfModule prepared)] of
+        prepared : _ -> pure prepared
+        [] -> fail "recovered Show owner has no demanded component"
       let sourceRoot = identity home "homeValue"
           entry = identity home "homeOther"
           subset = home { preparedCoverage = ExactBodySubset

@@ -21,7 +21,7 @@ module Tidepool.PreparedStg
   , runPreparedComponentTask, PreparedUnitKey, PreparedUnitTask
   , preparedUnitTaskKey, preparedComponentTaskKnown, preparedComponentTaskPending
   , runPreparedUnitTask, finishPreparedComponentTask, preparedComponentUnitRows, preparedUnitIsSite
-  , preparedComponentModules, preparedComponentVersion, preparedComponentDelta, validatePreparedComponents
+  , preparedComponentModules, preparedComponentVersion, validatePreparedComponents
   , newPreparedComponentTaskPreparer
   ) where
 
@@ -374,8 +374,8 @@ data PreparedBodyCache = PreparedBodyCache
 -- selections additionally seal the original body version, so identical Names
 -- and consumed site facts cannot admit another version's prepared batch.
 data PreparedBodyKey
-  = ContextBodyKey ConstructorWorkerPolicy [[Word64]]
-  | FatBodyKey ConstructorWorkerPolicy FatOriginalVersion [[Word64]]
+  = ContextBodyKey ConstructorWorkerPolicy Unique [[Word64]]
+  | FatBodyKey ConstructorWorkerPolicy Unique FatOriginalVersion [[Word64]]
   deriving (Eq, Ord)
 
 newPreparedBodyCache :: IO PreparedBodyCache
@@ -510,10 +510,10 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
               (pure . insertOriginalAlternative (originalVersionOwner version) version (admitted,prepared))
             pure prepared))
 
-preparedBodyKey :: ConstructorWorkerPolicy -> Maybe FatOriginalVersion -> [CoreBind] -> PreparedBodyKey
-preparedBodyKey workers version bindings = case version of
-  Nothing -> ContextBodyKey workers census
-  Just original -> FatBodyKey workers original census
+preparedBodyKey :: ConstructorWorkerPolicy -> OwnerInterfaceContext -> Maybe FatOriginalVersion -> [CoreBind] -> PreparedBodyKey
+preparedBodyKey workers context version bindings = case version of
+  Nothing -> ContextBodyKey workers (Shared.ownerInterfaceIdentity context) census
+  Just original -> FatBodyKey workers (Shared.ownerInterfaceIdentity context) original census
   where
     census = [map (getKey . varUnique) (bindersOf binding) | binding <- bindings]
     bindersOf (NonRec binder _) = [binder]
@@ -631,18 +631,6 @@ componentRows selected = sortOn (minimum . fst) (Map.elems (componentsPure selec
 
 preparedComponentModules :: PreparedComponents -> [PreparedModule]
 preparedComponentModules selected = componentsWorkers selected : map snd (componentRows selected)
-
--- Pure units and constructor workers survive growth. A changed site roster
--- replaces its entire owner-local arena and requires fresh target reachability.
-preparedComponentDelta :: Maybe PreparedComponents -> PreparedComponents -> (Bool,[PreparedModule])
-preparedComponentDelta previous next = case previous of
-  Just old | preparedComponentVersion old == preparedComponentVersion next
-    && sameOwnerInterfaceContext (componentsContext old) (componentsContext next) ->
-      let newPure = Map.elems (Map.difference (componentsPure next) (componentsPure old))
-          siteChanged = componentsSiteRoster old /= componentsSiteRoster next
-          sites = if siteChanged then maybe [] pure (componentsSite next) else []
-      in (siteChanged,map snd newPure ++ sites)
-  _ -> (isJust (componentsSite next),preparedComponentModules next)
 
 validatePreparedComponents :: PreparedComponents -> IO ()
 validatePreparedComponents selected = do
@@ -866,33 +854,36 @@ newPreparedBodyTaskPreparerWithWorkers workers environment env owners bodyCache 
   timing <- readTimingEnabled
   scoped <- newMVar Map.empty
   pure $ \version owner bindings -> do
-    let stable = cachedExactBodies bodyCache
-        key = preparedBodyKey workers version bindings
-    stableHit <- lookupOwnerEntry owner key <$> readMVar stable
-    scopedHit <- lookupOwnerEntry owner key <$> readMVar scoped
-    let matching candidates = case filter (preparedSiteDependenciesMatch environment Map.empty)
-          (maybe [] id candidates) of
-            hit:_ -> Just hit
-            [] -> Nothing
-    let normalHit = matching stableHit `orElse` matching scopedHit
-    case normalHit of
-      Just hit | not disabled -> pure (Right (PreparedBodyTask (pure (Right hit))))
-      _ -> do
-        resolved <- acquireRecoveredContext env owners owner
-        acquired <- case resolved of
-          Left failure -> pure (Left failure)
-          Right context -> acquireRecoveredWithWorkers workers (Just environment) env owner context bindings
-        pure $ fmap (\task -> PreparedBodyTask $ do
-          outcome <- trySynchronous (runPreparedModuleTask task)
-          case outcome of
-            Left reason -> pure (Left (RecoveredModulePreparationFailure owner reason))
-            Right prepared -> do
-              if disabled && maybe False (const True) normalHit
-                then emitCount timing "prepared_recover_body_disabled_batches" 1 else pure ()
-              let cache = if preparedSiteDependenciesMatch environment Map.empty prepared then stable else scoped
-              modifyMVar_ cache (pure . Map.insertWith (Map.unionWith (flip mergePreparedVariants)) owner
-                (Map.singleton key [prepared]))
-              pure (Right prepared)) acquired
+    resolved <- acquireRecoveredContext env owners owner
+    case resolved of
+      Left failure -> pure (Left failure)
+      Right context | maybe False (not . ownerInterfaceMatchesOriginal context) version ->
+        pure (Left (RecoveredModuleInterfaceFailure owner "declaring context differs from exact original interface"))
+      Right context -> do
+        let stable = cachedExactBodies bodyCache
+            key = preparedBodyKey workers context version bindings
+        stableHit <- lookupOwnerEntry owner key <$> readMVar stable
+        scopedHit <- lookupOwnerEntry owner key <$> readMVar scoped
+        let matching candidates = case filter (preparedSiteDependenciesMatch environment Map.empty)
+              (maybe [] id candidates) of
+                hit:_ -> Just hit
+                [] -> Nothing
+            normalHit = matching stableHit `orElse` matching scopedHit
+        case normalHit of
+          Just hit | not disabled -> pure (Right (PreparedBodyTask (pure (Right hit))))
+          _ -> do
+            acquired <- acquireRecoveredWithWorkers workers (Just environment) env owner context bindings
+            pure $ fmap (\task -> PreparedBodyTask $ do
+              outcome <- trySynchronous (runPreparedModuleTask task)
+              case outcome of
+                Left reason -> pure (Left (RecoveredModulePreparationFailure owner reason))
+                Right prepared -> do
+                  if disabled && maybe False (const True) normalHit
+                    then emitCount timing "prepared_recover_body_disabled_batches" 1 else pure ()
+                  let cache = if preparedSiteDependenciesMatch environment Map.empty prepared then stable else scoped
+                  modifyMVar_ cache (pure . Map.insertWith (Map.unionWith (flip mergePreparedVariants)) owner
+                    (Map.singleton key [prepared]))
+                  pure (Right prepared)) acquired
   where
     orElse (Just hit) _ = Just hit
     orElse Nothing other = other
