@@ -3,24 +3,20 @@ module AwaitSettledDependencies where
 import Tidepool.Agent.Ref.Internal (internalAgentRef)
 import Tidepool.Agent.Reply.Internal
   ( RequestId (..)
-  , Response
+  , Request
   , newRequestHandles
   )
-import Tidepool.Agent.Watch.Internal
-  ( Await (..)
-  , AwaitDependency (..)
-  , awaitSettled
-  )
+import Tidepool.Agent.Watch.Internal qualified as Watch
 
-sampleResponse :: Response Int
-sampleResponse = response
+sampleRequest :: Request Int
+sampleRequest = request
   where
-    (response, _) = newRequestHandles () (RequestId 17) (internalAgentRef 23 29)
+    (request, _) = newRequestHandles () (RequestId 17) (internalAgentRef 23 29)
 
 awaitSettledDependencies :: [[(Int, Bool)]]
-awaitSettledDependencies = case awaitSettled sampleResponse of
-  Await dependencies _ -> map (map dependency) dependencies
-  where
-    dependency (AwaitDependency (RequestId request) settled) = (request, settled)
-    dependency (AwaitProgress (RequestId request) _) = (request, False)
-    dependency (AwaitCommand _) = (-1, False)
+awaitSettledDependencies = case Watch.settledResponse sampleRequest of
+  -- This projection reads the compiler-issued plan; it does not run `await`.
+  Watch.Await (Watch.AwaitPlan
+      [Watch.LeafNode (Watch.AwaitDependency (RequestId request) settled)] 0) _ ->
+    [[(request, settled)]]
+  _ -> error "settled response did not produce its single request dependency"
