@@ -737,6 +737,10 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
   originalBytes <- BS.readFile owner
   dependencyBytes <- BS.readFile (work </> "CanonicalDependency.hs")
   withResidentPipelineSelected includes $ \compile -> do
+    -- An ordinary request admits the worker's default search roots. Its
+    -- unchanged summaries must not supply that broader search order to the
+    -- next exact request, whose source selection owns only sealed roots.
+    _ <- compile CheckedEnvironment Set.empty GeneralCompile Nothing consumer includes Nothing
     _ <- check compile purpose
     receipts <- listDirectory (work </> ".exact-compilations")
     let receiptPath = work </> ".exact-compilations" </> head receipts </> "receipt.cbor"
