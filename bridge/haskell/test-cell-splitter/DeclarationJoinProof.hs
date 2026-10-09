@@ -31,7 +31,7 @@ tests = testGroup "declaration-join-proof"
       , ("distinct-instances", ["Common.hs", "Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], ExpectedAccepted, ExpectedAccepted)
       , ("duplicate-instances", ["Common.hs", "Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], ExpectedAccepted, ExpectedSourceRefusal)
       , ("class-conflict", ["Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], ExpectedSourceRefusal, ExpectedSourceRefusal)
-      , ("family-conflict", ["Common.hs", "Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], ExpectedFamilyRefusal, ExpectedFamilyRefusal)
+      , ("family-conflict", ["Common.hs", "Private.hs", "Public.hs", "Join.hs", "Consumer.hs"], ExpectedFamilyRefusal, ExpectedSourceRefusal)
       ]
 
 data ExpectedOutcome = ExpectedAccepted | ExpectedSourceRefusal | ExpectedFamilyRefusal
