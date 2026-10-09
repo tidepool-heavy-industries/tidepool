@@ -371,8 +371,8 @@ data PreparedBodyCache = PreparedBodyCache
   }
 
 -- Defining-context wrappers retain their exact binder census. Canonical fat
--- selections additionally seal the original body version, so identical Names
--- and consumed site facts cannot admit another version's prepared batch.
+-- selections additionally seal the original body version. Every key retains
+-- its defining-context issuer, so equal interface bytes cannot mix contexts.
 data PreparedBodyKey
   = ContextBodyKey ConstructorWorkerPolicy Unique [[Word64]]
   | FatBodyKey ConstructorWorkerPolicy Unique FatOriginalVersion [[Word64]]
@@ -730,8 +730,8 @@ newPreparedComponentUnitsPreparer env owners stable = do
           (OriginalComponent (fatComponentOrdinal component)) (IntMap.elems (fatComponentBindings component)) OmitConstructorWorkers
         workerPlan <- acquireCached ConstructorWorkers [] IncludeConstructorWorkers
         sitePlan <- if null siteRoster then pure (Right Nothing) else case Map.lookup (key (SiteComponents siteRoster)) reusable of
-          Just prepared -> pure (Right (Just (Left (key (SiteComponents siteRoster),prepared))))
-          Nothing -> do
+          Just prepared | not disabled -> pure (Right (Just (Left (key (SiteComponents siteRoster),prepared))))
+          _ -> do
             acquired <- acquireSiteBatch (Just version) owner (IntMap.elems (IntMap.unions (map fatComponentBindings siteBearing)))
             pure $ fmap (\task -> Just (Right (wrap (SiteComponents siteRoster) $ do
               output <- runPreparedBodyTask task >>= either (fail . show) pure

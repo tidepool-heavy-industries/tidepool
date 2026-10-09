@@ -104,7 +104,11 @@ data ReachOperation = AdmitNode Int [Int] | ReplaceArena [(Int,[Int])] | AddRoot
 reachHistoryProperty :: IO ()
 reachHistoryProperty = do
   result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess=160, QC.maxSize=40 }
-    (QC.forAllShrink history (QC.shrinkList shrinkOperation) $ \operations ->
+    (QC.checkCoverage $ QC.forAllShrink history (QC.shrinkList shrinkOperation) $ \operations ->
+      QC.cover 20 (any isReplacement operations) "site replacement" $
+      QC.cover 20 (any isAdmission operations) "pure admission" $
+      QC.cover 20 (any isRoot operations) "root growth" $
+      QC.cover 5 (any selfCycle operations) "cycles" $
       QC.counterexample (show operations) (runHistory False operations))
   unless (QC.isSuccess result) (fail "component reachability history differs from recomputation")
   -- Mutation calibration: retaining a removed site's edge keeps an unrelated
@@ -118,6 +122,15 @@ reachHistoryProperty = do
       ,(2,ReplaceArena <$> QC.listOf ((,) <$> vertex <*> QC.listOf vertex))
       ,(2,AddRoot <$> vertex)]
     vertex = QC.chooseInt (0,6)
+    isReplacement ReplaceArena{} = True
+    isReplacement _ = False
+    isAdmission AdmitNode{} = True
+    isAdmission _ = False
+    isRoot AddRoot{} = True
+    isRoot _ = False
+    selfCycle (AdmitNode node edges) = node `elem` edges
+    selfCycle (ReplaceArena rows) = any (\(node,edges) -> node `elem` edges) rows
+    selfCycle _ = False
     shrinkOperation operation = case operation of
       AdmitNode node edges -> [AdmitNode smaller remaining | (smaller,remaining) <- QC.shrink (node,edges)]
       ReplaceArena rows -> map ReplaceArena (QC.shrink rows)
@@ -170,7 +183,7 @@ verifyContextHistories owner first second = do
         , SelectContexts <$> slot <*> slot <*> slot <*> QC.arbitrary <*> QC.arbitrary ]
       slot = QC.chooseInt (0,2)
       contexts = [first,second]
-      history operations = do
+      history mutate operations = do
         initial <- mapM (const newOwnerInterfaceCache) [0..2 :: Int]
         let observe caches expected = do
               actual <- mapM (\cache -> lookupOwnerInterface cache owner) caches
@@ -183,7 +196,7 @@ verifyContextHistories owner first second = do
             walk caches expected (operation:rest) = do
               (next,model) <- case operation of
                 InstallContext target identity -> do
-                  cacheOwnerInterface (caches !! target) owner (contexts !! identity)
+                  cacheOwnerInterface (caches !! target) owner (contexts !! (if mutate then 0 else identity))
                   pure (caches,replace target (Just identity) expected)
                 CopyContext target source -> do
                   copied <- copyOwnerInterfaceCache (caches !! source)
@@ -202,15 +215,22 @@ verifyContextHistories owner first second = do
               correct <- observe next model
               if correct then walk next model rest else pure False
         walk initial (replicate 3 Nothing) operations
-  calibration <- history [InstallContext 0 0,CopyContext 1 0,InstallContext 0 1
-    ,SelectContexts 2 1 0 True True,EvictContext 1]
-  assert calibration "declaring-context copy/selection/eviction calibration failed"
+  let calibrationSteps = [InstallContext 0 0,CopyContext 1 0,InstallContext 0 1
+        ,SelectContexts 2 1 0 True True,EvictContext 1]
+  calibration <- history False calibrationSteps
+  mutated <- history True calibrationSteps
+  assert (calibration && not mutated)
+    "declaring-context issuer-alias mutation escaped custody recomputation"
   -- Matching interface bytes alone is a deliberately invalid cache identity.
   assert (not (sameOwnerInterfaceContext first second))
     "context identity mutation escaped the independently loaded-owner control"
   result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess=120, QC.maxSize=40 }
-    (QC.forAllShrink generator (QC.shrinkList (const [])) $ \operations ->
-      QC.counterexample (show operations) (QC.ioProperty (history operations)))
+    (QC.checkCoverage $ QC.forAllShrink generator (QC.shrinkList (const [])) $ \operations ->
+      QC.cover 20 (any (\case CopyContext{} -> True; _ -> False) operations) "copy" $
+      QC.cover 20 (any (\case SelectContexts{} -> True; _ -> False) operations) "selected closure" $
+      QC.cover 20 (any (\case EvictContext{} -> True; _ -> False) operations) "eviction" $
+      QC.cover 20 (any (\case InstallContext _ 1 -> True; _ -> False) operations) "changed issuer" $
+      QC.counterexample (show operations) (QC.ioProperty (history False operations)))
   unless (QC.isSuccess result) (fail "retained declaring-context histories diverged")
 
 scenario :: IO ()

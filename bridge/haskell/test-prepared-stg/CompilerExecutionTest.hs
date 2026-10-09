@@ -21,6 +21,8 @@ compilerExecutionTests = testGroup "compiler execution"
   , testCase "dynamic demand incorporates ready ancestors before blocked descendants" dynamicDemand
   , testCase "cancellation joins running work and fences submission" cancellation
   , testCase "failed work cancels and joins its siblings" failedWork
+  , testCase "dynamic cancellation joins children and preserves completed facts" dynamicCancellation
+  , testCase "coordinator failure joins running sibling tasks" callbackFailure
   , testCase "reuse agrees with independent graph closure" reuseOracle
   ]
 
@@ -144,6 +146,47 @@ failedWork = within $ do
   observe finalized
   assert (case outcome of Left (_ :: SomeException) -> True; Right _ -> False)
     "failed compiler task reported success"
+
+dynamicCancellation :: IO ()
+dynamicCancellation = within $ do
+  entered <- newEmptyMVar
+  finalized <- newEmptyMVar
+  never <- newEmptyMVar
+  done <- newEmptyMVar
+  incorporated <- newIORef []
+  thread <- forkFinally
+    (withCompilerExecutor (jobs 1) $ \executor -> runCompilerWorklist executor
+      (\value -> if value == (0 :: Int) then pure value
+        else (putMVar entered () >> readMVar never >> pure value) `finally` putMVar finalized ())
+      (\value _ -> do
+        atomicModifyIORef' incorporated (\known -> (known ++ [value],()))
+        pure (if value == 0 then [1,2] else [])) [0]) (putMVar done)
+  observe entered
+  killThread thread
+  observe finalized
+  outcome <- observe done
+  facts <- readIORef incorporated
+  assert (facts == [0]) "cancelled dynamic children changed completed ancestor facts"
+  assert (case outcome of Left (_ :: SomeException) -> True; Right _ -> False)
+    "dynamic cancellation reported successful closure"
+
+callbackFailure :: IO ()
+callbackFailure = within $ do
+  running <- newEmptyMVar
+  finalized <- newEmptyMVar
+  never <- newEmptyMVar
+  done <- newEmptyMVar
+  _ <- forkFinally
+    (withCompilerExecutor (jobs 2) $ \executor -> runCompilerWorklist executor
+      (\value -> if value == (0 :: Int) then pure value
+        else (putMVar running () >> readMVar never >> pure value) `finally` putMVar finalized ())
+      (\value _ -> if value == 0
+        then observe running >> fail "deliberate demand-owner failure"
+        else pure []) [0,1]) (putMVar done)
+  outcome <- observe done
+  observe finalized
+  assert (case outcome of Left (_ :: SomeException) -> True; Right _ -> False)
+    "coordinator failure reported successful closure"
 
 -- Enumerate every three-owner graph and validity subset. The oracle walks
 -- each root independently, instead of reusing the implementation's pruning.

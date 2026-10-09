@@ -58,6 +58,7 @@ import Tidepool.FatIface.Internal
   , privateComponents
   )
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
+import Tidepool.ExactHydration (forkExactContext)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedStg
   (newPreparedBodyCache, prepareRecoveredBodies, pmBindings, pmStableTopSpellings
@@ -295,7 +296,8 @@ scenario = do
         originalContext <- lookupOwnerInterface privateOwners privateOwner >>= maybe
           (fail "prepared original lacks its declaring context") pure
         independentOwners <- newOwnerInterfaceCache
-        acquireIndependent <- newPreparedComponentTaskPreparer hsc independentOwners componentCache
+        independentEnvironment <- forkExactContext hsc
+        acquireIndependent <- newPreparedComponentTaskPreparer independentEnvironment independentOwners componentCache
         independentTask <- acquireIndependent selected >>= either (fail . show) pure
         independent <- runPreparedBodyTask independentTask >>= either (fail . show) pure
         independentContext <- lookupOwnerInterface independentOwners privateOwner >>= maybe
@@ -306,7 +308,7 @@ scenario = do
         assert (any (\(name,identity) -> Map.lookup name independentBindings /= Just identity)
           (Map.toList firstBindings))
           "prepared component cache crossed independently retained declaring contexts"
-        independentBodies <- prepareRecoveredBodies hsc independentOwners privateBodies
+        independentBodies <- prepareRecoveredBodies independentEnvironment independentOwners privateBodies
           privateOwner privateGroups >>= either (fail . show) pure
         oldBodies <- physicalBindings privatePrepared
         newBodies <- physicalBindings independentBodies

@@ -137,7 +137,7 @@ data Spent = Spent
   , spentPreparations :: !Integer
   }
 
--- | Reprepare only defining modules whose exact body set grows. Attempted
+-- | Acquire new exact components only when defining demand grows. Attempted
 -- names include typed failures, so unavailable bodies terminate the worklist
 -- without a retry limit. New CorePrep references re-enter this same loop.
 --
@@ -168,7 +168,7 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
 
 -- | Share immutable facts between targets; continue only within one target.
 -- Roots affect seeds and selection, not module facts. Authority remains fixed;
--- a replaced exact body set still invalidates facts through 'preparedBodyKey'.
+-- each unit issues facts once; site replacement rebuilds from current units.
 -- Certified homes come only from admitted original products; package roots
 -- come from the emitted-global demand of those exact original groups.
 newPreparedRecoveryWithPackageRoots :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
@@ -413,6 +413,7 @@ newPreparedRecoveryUsing executor demand env cache ownerCache bodyCache baseCont
                       known = preparedComponentTaskKnown plan
                       progress = SelectionProgress plan version known
                         (Map.fromList [(preparedUnitTaskKey task,UnitQueued) | task <- pending])
+                  emitCount timing "prepared_recover_cached_units" (fromIntegral (Map.size known))
                   forM_ (Map.toAscList known) (\(key,prepared) -> admitUnit owner key prepared)
                   modifyIORef' state $ \current -> current
                     { recoverySelections=Map.insert owner progress (recoverySelections current)
@@ -442,12 +443,15 @@ newPreparedRecoveryUsing executor demand env cache ownerCache bodyCache baseCont
               terminal _ = False
               failed UnitFailed = True
               failed _ = False
-              started (owner,version,task) = modifyIORef' state $ \current -> current
-                { recoverySelections=Map.adjust (\progress ->
-                    if selectionVersion progress == version then progress
-                      { selectionPhases=Map.insert (preparedUnitTaskKey task) UnitRunning (selectionPhases progress) }
-                    else progress) owner (recoverySelections current) }
+              started (owner,version,task) = do
+                emitCount timing "prepared_recover_units_started" 1
+                modifyIORef' state $ \current -> current
+                  { recoverySelections=Map.adjust (\progress ->
+                      if selectionVersion progress == version then progress
+                        { selectionPhases=Map.insert (preparedUnitTaskKey task) UnitRunning (selectionPhases progress) }
+                      else progress) owner (recoverySelections current) }
               complete (owner,version,task) (outcome,prepareMs) = do
+                emitCount timing (case outcome of Right _ -> "prepared_recover_units_completed"; Left _ -> "prepared_recover_units_failed") 1
                 charge (\cost -> cost { spentPrepare=spentPrepare cost + prepareMs })
                 current <- readIORef state
                 case Map.lookup owner (recoverySelections current) of
