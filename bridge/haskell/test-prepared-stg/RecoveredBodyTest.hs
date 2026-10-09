@@ -778,8 +778,8 @@ assertRecoveredKindRep root = do
     _ -> fail "genuine krep$* fat body was unavailable"
   let incomplete = [binding | binding <- group
         , all ((/= "krep$*1") . occurrence) (bindersOfBinds [binding])]
-  assert (length incomplete < length group)
-    "strict-sibling control did not remove its genuine original dependency"
+  assert (all (all ((/= "krep$*1") . occurrence) . bindersOfBinds . pure) incomplete)
+    "strict-sibling control retained its genuine original dependency"
   partialCache <- newPreparedBodyCache
   partial <- prepareRecoveredBodies (prHscEnv pipeline) ownerCache partialCache owner incomplete
     >>= either (fail . show) pure
@@ -788,7 +788,9 @@ assertRecoveredKindRep root = do
       , (binder, Stg.StgRhsClosure _ _ update parameters _ _) <- stgPairs binding
       , occurrence binder == "krep$*", update /= Stg.ReEntrant, null parameters] of
     [binder] -> pure binder
-    _ -> fail "partial krep$* did not exercise the genuine strict-sibling thunk"
+    _ -> fail ("partial krep$* did not exercise the genuine strict-sibling thunk: "
+      ++ showSDocUnsafe (ppr (map fst (pmBindings partial)))
+      ++ "; raw Core: " ++ showSDocUnsafe (ppr incomplete))
   case importedIdLFInfo <$> preparedExpectedEntry partial partialBinder of
     Just LFCon{} -> pure ()
     _ -> fail "partial krep$* lost its exact canonical constructor expectation"
