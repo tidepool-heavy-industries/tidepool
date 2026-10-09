@@ -439,6 +439,7 @@ pub(crate) mod tests {
         model: CacheModel,
         handles: HashMap<usize, (InstallerRecipe, Arc<PreparationTask>)>,
         ready: Arc<PreparedToolset>,
+        payloads: HashMap<usize, Arc<PreparedToolset>>,
     }
 
     impl CacheHistory {
@@ -448,6 +449,7 @@ pub(crate) mod tests {
                 model: CacheModel::default(),
                 handles: HashMap::new(),
                 ready,
+                payloads: HashMap::new(),
             }
         }
 
@@ -488,11 +490,30 @@ pub(crate) mod tests {
             if let Some((_, expected_handle)) = self.handles.get(&expected_task) {
                 assert!(Arc::ptr_eq(&actual, expected_handle));
             } else {
+                assert!(self
+                    .handles
+                    .values()
+                    .all(|(_, issued)| !Arc::ptr_eq(&actual, issued)));
                 self.handles
                     .insert(expected_task, (key.clone(), Arc::clone(&actual)));
             }
             self.assert_matches_model();
             expected_task
+        }
+
+        fn lookup_with_payload(
+            &mut self,
+            key: InstallerRecipe,
+            payload: &Arc<PreparedToolset>,
+        ) -> usize {
+            let task = self.lookup(key);
+            if let Some(expected) = self.payloads.get(&task) {
+                assert!(Arc::ptr_eq(expected, payload));
+            } else {
+                self.payloads.insert(task, Arc::clone(payload));
+            }
+            self.assert_matches_model();
+            task
         }
 
         fn settle_success(&mut self, task: usize) {
@@ -511,7 +532,7 @@ pub(crate) mod tests {
             let is_current_pending = current
                 .is_some_and(|entry| entry.task == task && entry.phase == ModelPhase::Pending);
             let outcome = if success {
-                Ok(Arc::clone(&self.ready))
+                Ok(Arc::clone(self.payloads.get(&task).unwrap_or(&self.ready)))
             } else {
                 Err(PreparationFailure::Source(format!(
                     "history failure {task}"
@@ -561,13 +582,110 @@ pub(crate) mod tests {
                 match (expected.phase, outcome.as_ref()) {
                     (ModelPhase::Pending, None) => {}
                     (ModelPhase::Ready, Some(Ok(prepared))) => {
-                        assert!(Arc::ptr_eq(prepared, &self.ready));
-                        assert_eq!(prepared.acquisition, self.ready.acquisition);
+                        assert!(self.payload_matches(expected.task, prepared));
                     }
                     _ => panic!("retained preparation outcome differs from modeled readiness"),
                 }
             }
         }
+
+        fn payload_matches(&self, task: usize, prepared: &Arc<PreparedToolset>) -> bool {
+            let expected = self.payloads.get(&task).unwrap_or(&self.ready);
+            Arc::ptr_eq(prepared, expected)
+                && prepared.acquisition == expected.acquisition
+                && prepared.source_revision == expected.source_revision
+        }
+    }
+
+    /// Both products are issued by the real source installer fixture once;
+    /// generated histories create fresh cache/task state without compilation.
+    pub(crate) fn distinct_ready_payload_histories(payloads: [Arc<PreparedToolset>; 2]) {
+        use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+        use std::cell::Cell;
+
+        assert!(!Arc::ptr_eq(&payloads[0], &payloads[1]));
+        assert_ne!(payloads[0].acquisition, payloads[1].acquisition);
+        assert_ne!(payloads[0].source_revision, payloads[1].source_revision);
+        // Mutate only a settled payload, preserving key, task, disposition and
+        // retention state. The old shared-payload fixture could not expose this.
+        let mut sensitivity = CacheHistory::new(Arc::clone(&payloads[0]));
+        let task = sensitivity.lookup_with_payload(recipe("payload-swap"), &payloads[0]);
+        sensitivity.settle_success(task);
+        let handle = &sensitivity.handles[&task].1;
+        *handle.outcome.lock() = Some(Ok(Arc::clone(&payloads[1])));
+        let outcome = handle.outcome.lock();
+        let Some(Ok(swapped)) = outcome.as_ref() else {
+            unreachable!()
+        };
+        assert!(!sensitivity.payload_matches(task, swapped));
+        drop(outcome);
+        drop(sensitivity);
+        let mut config = Config::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 192;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::distinct_ready_payload_histories"
+        ));
+        let configured = config.cases;
+        let completed = Cell::new(0usize);
+        let result = TestRunner::new(config).run(
+            &proptest::collection::vec((0usize..23, 0u8..3), 0..64),
+            |operations| {
+                let mut history = CacheHistory::new(Arc::clone(&payloads[0]));
+                let key = |index| recipe(&format!("distinct-history-{index}"));
+                let mut issued = Vec::new();
+                // Both payloads cross the actual retention bound in every case.
+                for index in 0..RETAINED_TOOLSETS + 4 {
+                    let task = history.lookup_with_payload(key(index), &payloads[index % 2]);
+                    history.settle_success(task);
+                    issued.push(task);
+                }
+                for (index, task) in issued.iter().enumerate() {
+                    let outcome = history.handles[task].1.outcome.lock();
+                    let Some(Ok(prepared)) = outcome.as_ref() else {
+                        panic!("retained waiter lost its original result");
+                    };
+                    assert!(Arc::ptr_eq(prepared, &payloads[index % 2]));
+                }
+                // A stale owner cannot replace the new pending task or payload.
+                let retry = key(22);
+                let old = history.lookup_with_payload(retry.clone(), &payloads[0]);
+                history.settle_failure(old);
+                let new = history.lookup_with_payload(retry, &payloads[0]);
+                assert_ne!(old, new);
+                history.settle_failure(old);
+                history.settle_success(new);
+
+                for (index, operation) in operations {
+                    let task = history.lookup_with_payload(key(index), &payloads[index % 2]);
+                    // A producer settles exactly once. Ready hits remain reads.
+                    if history.model.entries[&key(index)].phase == ModelPhase::Pending {
+                        match operation {
+                            0 => { history.lookup_with_payload(key(index), &payloads[index % 2]); }
+                            1 => history.settle_success(task),
+                            2 => history.settle_failure(task),
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                history.assert_matches_model();
+                let count = completed.get() + 1;
+                completed.set(count);
+                if count.is_power_of_two() {
+                    eprintln!("distinct cache payload history: immutable_products=2, completed_cases={count}");
+                }
+                Ok(())
+            },
+        );
+        eprintln!("distinct cache payload history: configured_cases={configured}, completed_cases={}, immutable_products=2", completed.get());
+        result.expect("distinct prepared payload histories match independent cache model");
     }
 
     async fn run_cache_history(ready: Arc<PreparedToolset>) {

@@ -14907,6 +14907,10 @@ pub(crate) mod request_tests {
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&original.prepared, &warm_original.prepared));
+        crate::agent_spec::preparation::tests::distinct_ready_payload_histories([
+            Arc::clone(&original.prepared),
+            Arc::clone(&changed.prepared),
+        ]);
         for (prepared, expected) in [
             (&original, "41"),
             (&reordered, "41"),

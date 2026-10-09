@@ -9348,6 +9348,20 @@ pub(crate) mod tests {
         interface: Vec<u8>,
         sites: &BTreeMap<u32, Vec<tidepool_repr::execution_schema::SiteRow>>,
     ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+        original_groups_fixture_in_unit_with_sites(
+            "fixture", module, groups, version, packages, interface, sites,
+        )
+    }
+
+    pub(crate) fn original_groups_fixture_in_unit_with_sites(
+        unit: &str,
+        module: &str,
+        groups: Vec<(u32, Vec<PendingImportOwner>)>,
+        version: u8,
+        packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+        interface: Vec<u8>,
+        sites: &BTreeMap<u32, Vec<tidepool_repr::execution_schema::SiteRow>>,
+    ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         let projected = groups
             .iter()
             .map(|(ordinal, imports)| {
@@ -9362,6 +9376,7 @@ pub(crate) mod tests {
                 if groups.len() == 1 && *ordinal == 7 {
                     top.identity = testing::identity(module, "entry");
                 }
+                top.identity.unit = unit.into();
                 top.binding.rhs = tidepool_repr::execution_schema::HeapRhs::Bytes(Vec::new());
                 let top = top.clone();
                 wire.bindings = vec![tidepool_repr::execution_schema::Group::Recursive(vec![top])];
@@ -9401,13 +9416,13 @@ pub(crate) mod tests {
             .collect();
         let product_bytes =
             tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
-                unit: "fixture".into(),
+                unit: unit.into(),
                 module: module.into(),
                 interface: interface.clone(),
                 groups: projected,
             }]);
         let owner = CachedHomeOwner {
-            unit: "fixture".into(),
+            unit: unit.into(),
             module: module.into(),
             module_version: ModuleVersion([version; 32]),
             skinny_iface_sha256: sha(&interface),

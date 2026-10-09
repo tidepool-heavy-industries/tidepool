@@ -9,11 +9,9 @@ use crate::certified_products::{
 use crate::declaration_context::ExactCompileContext;
 use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use crate::recovery_artifacts::CertifiedRecoveryProduct;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion, RawModuleProduct};
 
 const PRODUCER: &[u8] = b"preview original native declaration inputs";
 // Four prefix rows, the complete eight-role matrix and four later rows.
@@ -69,29 +67,14 @@ fn declaration(generation: u64, native: bool) -> CertifiedRecoveryProduct {
     let module =
         tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation)).module_name();
     let interface = format!("original interface {generation}").into_bytes();
-    let product =
-        tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
-            unit: "main".into(),
-            module: module.clone(),
-            interface: interface.clone(),
-            groups: Vec::new(),
-        }]);
-    let owner = CachedHomeOwner {
-        unit: "main".into(),
-        module,
-        module_version: ModuleVersion([generation as u8; 32]),
-        skinny_iface_sha256: Sha256::digest(&interface).into(),
-        product_sha256: Sha256::digest(&product).into(),
-    };
-    let certificate =
-        crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
-            .unwrap();
-    let product = CertifiedRecoveryProduct::from_certification(
-        owner,
+    let product = crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+        "main",
+        &module,
+        vec![(3, Vec::new()), (17, Vec::new())],
+        generation as u8,
+        &BTreeMap::new(),
         interface,
-        product,
-        Vec::new(),
-        certificate,
+        &BTreeMap::new(),
     );
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     if native {
@@ -207,7 +190,35 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
         .as_array()
         .unwrap()
         .iter()
-        .map(|row| string(&row.as_array().unwrap()[1]).unwrap().to_owned())
+        .map(|row| {
+            let row = row.as_array().unwrap();
+            let module = string(&row[1]).unwrap();
+            // Literal fixture expectations do not consult the issued census or
+            // selected groups, so truncation and ordinal renumbering are visible.
+            let expected = Value::Array(
+                [3u32, 17]
+                    .into_iter()
+                    .map(|ordinal| {
+                        Value::Array(vec![
+                            Value::Integer(ordinal.into()),
+                            Value::Array(vec![Value::Array(vec![
+                                Value::Text("main".into()),
+                                Value::Text(module.into()),
+                                Value::Text("value".into()),
+                                Value::Text(format!("entry_{ordinal}")),
+                                Value::Null,
+                            ])]),
+                            Value::Array(Vec::new()),
+                        ])
+                    })
+                    .collect(),
+            );
+            assert_eq!(
+                row[6], expected,
+                "complete sparse native availability census"
+            );
+            module.to_owned()
+        })
         .collect::<Vec<_>>();
     owners.sort();
     owners
