@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import NamedTuple
 import uuid
 
 
@@ -40,12 +41,8 @@ COMPILER_SELECTION_FLAGS = (
     'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT',
     'TIDEPOOL_EXTRACT_NO_DAEMON',
 )
-RESULT = re.compile(
-    r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
-    re.MULTILINE,
-)
 EXECUTION_RESULT = re.compile(
-    r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
+    r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
     re.MULTILINE,
 )
 ACTIVE_PROCESSES = {}
@@ -501,18 +498,36 @@ def select_tests(all_names, ignored_names, options):
     return selected
 
 
-def record_actual_counts(record, stdout, delegated=False):
-    if record is None:
-        return
+class LibtestSummary(NamedTuple):
+    succeeded: bool
+    passed: int
+    failed: int
+    ignored: int
+
+
+def terminal_summary(stdout):
+    """The last unprefixed libtest result owns both outcome and counts."""
     if isinstance(stdout, bytes):
         stdout = stdout.decode(errors='replace')
-    actual = list(EXECUTION_RESULT.finditer(stdout or ''))
-    if actual:
-        passed, failed, ignored = map(int, actual[-1].groups())
-        record.update(executed_test_count=passed + failed,
-                      passed_test_count=passed, failed_test_count=failed,
-                      ignored_test_count=ignored)
-        if delegated and passed + failed > 0:
+    last = None
+    for line in (stdout or '').splitlines():
+        if not line.startswith('test result: '):
+            continue
+        match = EXECUTION_RESULT.fullmatch(line)
+        if match is None:
+            last = None
+            continue
+        outcome, passed, failed, ignored = match.groups()
+        last = LibtestSummary(outcome == 'ok', int(passed), int(failed), int(ignored))
+    return last
+
+
+def record_actual_counts(record, summary, delegated=False):
+    if record is not None and summary is not None:
+        record.update(executed_test_count=summary.passed + summary.failed,
+                      passed_test_count=summary.passed, failed_test_count=summary.failed,
+                      ignored_test_count=summary.ignored)
+        if delegated and summary.passed + summary.failed > 0:
             record['process_execution_count'] = 1
 
 
@@ -1138,7 +1153,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             stdout = stdout.decode(errors='replace')
         if isinstance(stderr, bytes):
             stderr = stderr.decode(errors='replace')
-        record_actual_counts(record, stdout, service_record is not None)
+        record_actual_counts(record, terminal_summary(stdout), service_record is not None)
         detail = f'timed out after {timeout:g}s'
         if stdout:
             detail += f'\n{stdout}'
@@ -1160,13 +1175,12 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     record.update(status='finished', process_execution_count=(None if service_record is not None else 1),
                   exit_code=result.returncode, elapsed_ns=time.monotonic_ns() - started,
                   process_cleanup_status=process_cleanup_status(result, service_record))
-    record_actual_counts(record, result.stdout, service_record is not None)
-    summaries = list(RESULT.finditer(result.stdout))
-    summary = summaries[-1] if summaries else None
+    summary = terminal_summary(result.stdout)
+    record_actual_counts(record, summary, service_record is not None)
     passed = (
         result.returncode == 0
         and summary is not None
-        and summary.groups() == ('1', '0', '0')
+        and summary == LibtestSummary(True, 1, 0, 0)
         and record['process_cleanup_status'] == 'confirmed'
         and (service_record is None or service_record.get('cleanup_confirmed') is True)
     )

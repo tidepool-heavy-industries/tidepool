@@ -2144,6 +2144,74 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(execution['passed_test_count'], 0)
         self.assertEqual(execution['failed_test_count'], 0)
 
+    def test_contradictory_child_and_terminal_summaries_refuse_with_terminal_counts(self):
+        record = {}
+        reached = []
+        def run(args, timeout, environment=None):
+            reached.append(args[2])
+            return completed_process(args, 0,
+                'test result: ok. 1 passed; 0 failed; 0 ignored;\n'
+                'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n', '')
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::contradiction', False,
+                5, record, artifact_root=Path(self.tmp.name) / 'contradictory-summary')
+        self.assertFalse(passed)
+        self.assertEqual(reached, ['suite::contradiction'])
+        self.assertEqual(record['status'], 'finished')
+        self.assertEqual(record['exit_code'], 0)
+        self.assertEqual(record['executed_test_count'], 1)
+        self.assertEqual(record['passed_test_count'], 0)
+        self.assertEqual(record['failed_test_count'], 1)
+
+    def test_generated_terminal_summaries_agree_with_independent_sequence_oracle(self):
+        # Each producer model explicitly says whether it owns the terminal
+        # result. The oracle folds these models, without parsing output text.
+        rows = [
+            ('ok', True, (True, 1, 0, 0), 'test result: ok. 1 passed; 0 failed; 0 ignored;\n'),
+            ('failed', True, (False, 0, 1, 0), 'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n'),
+            ('zero', True, (True, 0, 0, 0), 'test result: ok. 0 passed; 0 failed; 0 ignored;\n'),
+            ('multiple', True, (True, 2, 0, 0), 'test result: ok. 2 passed; 0 failed; 0 ignored;\n'),
+            ('ignored', True, (True, 0, 0, 1), 'test result: ok. 0 passed; 0 failed; 1 ignored;\n'),
+            ('ok-with-failure', True, (True, 1, 1, 0), 'test result: ok. 1 passed; 1 failed; 0 ignored;\n'),
+            ('failed-with-success', True, (False, 1, 0, 0), 'test result: FAILED. 1 passed; 0 failed; 0 ignored;\n'),
+            ('prefixed-child', False, None, 'child output: test result: ok. 1 passed; 0 failed; 0 ignored;\n'),
+            ('prefixed-child-failure', False, None, 'child output: test result: FAILED. 0 passed; 1 failed; 0 ignored;\n'),
+            ('diagnostic', False, None, 'diagnostic after result\n'),
+            ('invalid-tag', True, None, 'test result: UNKNOWN. 1 passed; 0 failed; 0 ignored;\n'),
+            ('invalid-count', True, None, 'test result: ok. missing passed; 0 failed; 0 ignored;\n'),
+        ]
+        histories = itertools.chain.from_iterable(itertools.product(rows, repeat=n) for n in range(3))
+        for index, history in enumerate(histories):
+            expected = None
+            for _, owns_terminal, result, _ in history:
+                if owns_terminal:
+                    expected = result
+            stdout = ''.join(row[3] for row in history)
+            self.assertEqual(runner.terminal_summary(stdout), expected)
+            self.assertEqual(runner.terminal_summary(stdout.encode()), expected)
+            for exit_code, cleanup in itertools.product((0, 101), (False, True)):
+                with self.subTest(history=[row[0] for row in history], exit_code=exit_code, cleanup=cleanup):
+                    record = {}
+                    reached = []
+                    def run(args, timeout, environment=None):
+                        reached.append(args[2])
+                        result = completed_process(args, exit_code, stdout, '')
+                        result.cleanup_confirmed = cleanup
+                        return result
+                    root = Path(self.tmp.name) / f'summary-{index}-{exit_code}-{cleanup}'
+                    with patch.object(runner, 'execute', side_effect=run):
+                        passed, _, _ = runner.run_one(str(self.binary), 'suite::summary', False,
+                            5, record, artifact_root=root)
+                    self.assertEqual(reached, ['suite::summary'])
+                    self.assertEqual(record['status'], 'finished')
+                    self.assertEqual(record['exit_code'], exit_code)
+                    self.assertEqual(passed, exit_code == 0 and cleanup and expected == (True, 1, 0, 0))
+                    self.assertEqual(record['executed_test_count'],
+                                     None if expected is None else expected[1] + expected[2])
+                    self.assertEqual(record['passed_test_count'], None if expected is None else expected[1])
+                    self.assertEqual(record['failed_test_count'], None if expected is None else expected[2])
+                    self.assertEqual(record.get('ignored_test_count'), None if expected is None else expected[3])
+
     def test_test_failure_and_timeout_are_counted(self):
         def fail(argv, timeout, environment=None):
             discovered = self.discover(argv)
