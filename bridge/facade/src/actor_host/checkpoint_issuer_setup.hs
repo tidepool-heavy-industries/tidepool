@@ -6,11 +6,9 @@ import qualified Tidepool.Agent.Contract as A
 import Tidepool.Effects.Core (Commands, Lookup)
 import Tidepool.Actors.Exomonad
 
-let x = 41 :: Int
-let getX = x + 1
 Right seed <- checkpoint "checkpoint issuer context"
 Right producer <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)
-  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree]))
+  ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree, Actor]))
     { spawnLabel = Just "producer", spawnLifetime = ActorOwned })
 Right producerRequest <- request @Text producer ("capture" :: Text)
   (defaultRequestOptions { requestLabel = Just "producer" })

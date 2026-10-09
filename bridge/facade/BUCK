@@ -2974,6 +2974,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f656d6265646465645f63617074757265645f756e666f6c645f616e645f61776169745f696e766f636174696f6e5f6f776e65642e6873",
+    src = "src/actor_host/embedded_captured_unfold_and_await_invocation_owned.hs",
+    out = "embedded_captured_unfold_and_await_invocation_owned.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f656d6265646465645f63617074757265645f756e666f6c645f61776169745f7468656e5f6661696c2e6873",
     src = "src/actor_host/embedded_captured_unfold_await_then_fail.hs",
     out = "embedded_captured_unfold_await_then_fail.hs",
