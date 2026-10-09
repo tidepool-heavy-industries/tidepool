@@ -54,6 +54,7 @@
     "bridge/facade/src/actor_host/embedded_captured_group_cleanup.hs",
     "bridge/facade/src/actor_host/embedded_captured_group_setup.hs",
     "bridge/facade/src/actor_host/embedded_captured_unfold_and_await.hs",
+    "bridge/facade/src/actor_host/embedded_captured_unfold_and_await_invocation_owned.hs",
     "bridge/facade/src/actor_host/embedded_captured_unfold_await_then_fail.hs",
     "bridge/facade/src/actor_host/embedded_captured_unfold_reuse_after_failure.hs",
     "bridge/facade/src/actor_host/embedded_checkpoint_admit_stored_children.hs",

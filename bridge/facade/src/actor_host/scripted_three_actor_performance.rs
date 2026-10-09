@@ -417,8 +417,8 @@ async fn production_harness_three_actor_capture_phases() {
             completed.finish();
         }
         let phase = PhaseClock::begin();
-        let scripted_response_hold_ns = round.scripted_response_hold_ns();
         round = next_root(host, &mut requests, &mut pending).await;
+        let scripted_response_hold_ns = round.scripted_response_hold_ns();
         assert_eq!(round.request.session_id, root_session);
         assert_eq!(round.request.model, "gpt-6.1-sol");
         round.assert_value(PARENT_CALL, "True");
