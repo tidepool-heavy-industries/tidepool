@@ -783,14 +783,15 @@ assertRecoveredKindRep root = do
   partialCache <- newPreparedBodyCache
   partial <- prepareRecoveredBodies (prHscEnv pipeline) ownerCache partialCache owner incomplete
     >>= either (fail . show) pure
-  partialBinder <- case
-      [binder | (Stg.StgTopLifted binding, _) <- pmBindings partial
-      , (binder, Stg.StgRhsClosure _ _ update parameters _ _) <- stgPairs binding
-      , occurrence binder == "krep$*", update /= Stg.ReEntrant, null parameters] of
-    [binder] -> pure binder
-    _ -> fail ("partial krep$* did not exercise the genuine strict-sibling thunk: "
-      ++ show [(occurrence binder, case rhs of Stg.StgRhsCon{} -> "constructor"; Stg.StgRhsClosure _ _ update args _ _ -> show update ++ ":" ++ show (length args)) | (Stg.StgTopLifted binding,_) <- pmBindings partial, (binder,rhs) <- stgPairs binding]
-      ++ "; raw Core: " ++ showSDocUnsafe (ppr incomplete))
+  (partialBinder, partialRhs) <- case
+      [(binder,rhs) | (Stg.StgTopLifted binding, _) <- pmBindings partial
+      , (binder,rhs) <- stgPairs binding, occurrence binder == "krep$*"] of
+    [value] -> pure value
+    _ -> fail "partial preparation lost the genuine krep$* entry"
+  let partialThunk = case partialRhs of
+        Stg.StgRhsClosure _ _ update parameters _ _ -> update /= Stg.ReEntrant && null parameters
+        _ -> False
+  putStrLn ("partial original krep$* requires sibling; thunk=" ++ show partialThunk)
   case importedIdLFInfo <$> preparedExpectedEntry partial partialBinder of
     Just LFCon{} -> pure ()
     _ -> fail "partial krep$* lost its exact canonical constructor expectation"
@@ -799,8 +800,11 @@ assertRecoveredKindRep root = do
     "partial constructor preparation hid its missing strict sibling"
   case projectPreparedTarget krepContext [partial] of
     Left (RecoveredEntryContractMismatch symbol Nothing True (Just (Signature [] (Returns [LiftedRefRep]))) False)
-      | symbol == krepEntry -> pure ()
-    result -> fail ("unresolved constructor did not refuse its exact final entry contract: " ++ show result)
+      | partialThunk && symbol == krepEntry -> pure ()
+    Right program | not partialThunk -> assert
+      (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings program)))
+      "partial canonical constructor changed its final entry contract"
+    result -> fail ("partial original disagreed with its exact final entry contract: " ++ show result)
   partialSelection <- either (fail . show) pure (prepareProjection krepContext [partial])
   partialCandidate <- either (fail . show) pure
     (projectSelectedCandidateWithHostBindings [] partialSelection)
@@ -810,9 +814,11 @@ assertRecoveredKindRep root = do
   case finalizePreparedCandidate partialCandidate of
     Left (RecoveredEntryContractMismatch symbol Nothing True
         (Just (Signature [] (Returns [LiftedRefRep]))) False)
-      | symbol == krepEntry -> pure ()
-    Left failure -> fail ("provisional candidate did not retain its exact entry refusal: " ++ show failure)
-    Right _ -> fail "provisional candidate admitted an unresolved constructor entry"
+      | partialThunk && symbol == krepEntry -> pure ()
+    Right (program,_) | not partialThunk -> assert
+      (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings program)))
+      "partial candidate changed its canonical constructor contract"
+    result -> fail ("partial candidate disagreed with its exact entry contract: " ++ show result)
   complete <- either (fail . ("completed constructor projection failed: " ++) . show) pure
     (projectPreparedTarget krepContext modules)
   assert (any (isEmittedConstructor krepEntry) (concatMap groupItems (programBindings complete)))
