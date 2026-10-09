@@ -7686,7 +7686,35 @@ mod tests {
         let mut next = context.as_ref().clone();
         next.inventory = retained;
         next.lexical = lexical;
-        next.normalize().unwrap();
+        assert!(next
+            .inventory
+            .descriptors()
+            .iter()
+            .all(|descriptor| descriptor.owner.module != "Joined"));
+        assert!(
+            next.normalize().is_err(),
+            "the former Joined compiler role cannot outlive its retained interface"
+        );
+        let hidden_original = next
+            .inventory
+            .descriptors()
+            .into_iter()
+            .find(|descriptor| {
+                descriptor.kind == crate::artifact_inventory::ArtifactKind::OriginalModule
+                    && descriptor.owner.module == "HiddenNative"
+            })
+            .unwrap()
+            .id;
+        let hidden_role = context
+            .compiler_input_roles()
+            .into_iter()
+            .find(|role| role.original() == Some(hidden_original))
+            .unwrap();
+        let projection = context
+            .compiler_input_projection()
+            .within_view(&next.inventory);
+        let next = next.with_compiler_input_projection(projection).unwrap();
+        assert!(next.compiler_input_roles().contains(&hidden_role));
         let next = Arc::new(next);
         let request = next
             .prepare_compilation(&scratch.path().join("projected"), &producer)
