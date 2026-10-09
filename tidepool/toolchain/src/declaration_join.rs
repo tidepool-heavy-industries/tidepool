@@ -2094,7 +2094,7 @@ mod authored_tests {
     fn authored_declaration_in_exact_context_keeps_its_native_origin() {
         let root = tempfile::tempdir().unwrap();
         let baseline_module = SessionModule::lib(Generation(1));
-        let baseline_source = "module Tidepool.Session.Lib.G1 where\nbaseline = (40 :: Int)\nalternateBaseline = (41 :: Int)\n";
+        let baseline_source = "module Tidepool.Session.Lib.G1 where\nbaseline = (40 :: Int)\n{-# NOINLINE baseline #-}\nalternateBaseline = (41 :: Int)\n{-# NOINLINE alternateBaseline #-}\n";
         let baseline_path = root.path().join(baseline_module.relative_hs_path());
         std::fs::create_dir_all(baseline_path.parent().unwrap()).unwrap();
         std::fs::write(&baseline_path, baseline_source).unwrap();
@@ -2116,7 +2116,18 @@ mod authored_tests {
             endpoint.identity().producer_bytes(),
         );
         let context = Arc::new(
-            ExactDeclarationContext::new(std::slice::from_ref(&baseline), &[], Vec::new()).unwrap(),
+            ExactDeclarationContext::new(
+                std::slice::from_ref(&baseline),
+                &[],
+                vec![ExactLexicalNode {
+                    owner: ExactModuleIdentity {
+                        unit: baseline.product().owner().unit.clone(),
+                        module: baseline_module.module_name(),
+                    },
+                    imports: Vec::new(),
+                }],
+            )
+            .unwrap(),
         );
         assert_ne!(context.toolchain_identity_sha256(), [0; 32]);
         assert_eq!(
@@ -2124,7 +2135,7 @@ mod authored_tests {
             baseline.toolchain_identity_sha256()
         );
         let module = SessionModule::lib(Generation(2));
-        let source = "module Tidepool.Session.Lib.G2 where\nanswer = (41 :: Int)\n";
+        let source = "module Tidepool.Session.Lib.G2 where\nimport Tidepool.Session.Lib.G1 (baseline)\nanswer = baseline + 1\n{-# NOINLINE answer #-}\n";
         let path = root.path().join(module.relative_hs_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, source).unwrap();
@@ -2151,6 +2162,10 @@ mod authored_tests {
             .introduced_exports()
             .iter()
             .any(|export| export.head.occurrence == "answer"));
+        assert!(result
+            .recovery_products()
+            .iter()
+            .any(|product| product.owner() == baseline.product().owner()));
         let context =
             ExactDeclarationContext::new(&[baseline, Arc::new(result)], &[], Vec::new()).unwrap();
         assert!(context.authored_native_root(1).is_ok());
