@@ -894,7 +894,7 @@ impl<I: Clone + AsRef<ValueInterfaceSnapshot>> CheckedInterfaces<I> {
 pub struct RuntimeCheckedPrefix {
     admission: Arc<RuntimeCellAdmission>,
     first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-    program: Option<Arc<tidepool_toolchain::checked_cell::CellProgram>>,
+    program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     state: parking_lot::Mutex<RuntimeCheckedState>,
 }
 
@@ -1005,8 +1005,8 @@ impl RuntimeCheckedPrefixSnapshot {
 }
 
 impl RuntimeCheckedPrefix {
-    pub fn cell_program(&self) -> Option<&Arc<tidepool_toolchain::checked_cell::CellProgram>> {
-        self.program.as_ref()
+    pub fn cell_program(&self) -> &Arc<tidepool_toolchain::checked_cell::CellProgram> {
+        &self.program
     }
     pub fn admission(&self) -> &Arc<RuntimeCellAdmission> {
         &self.admission
@@ -1030,13 +1030,13 @@ impl RuntimeCheckedPrefix {
                 reservation.item != *execution.item()
                     || reservation.generation.0 != execution.generation()
             })
-            || self.program.as_ref().is_some_and(|program| {
-                program
+            || {
+                self.program
                     .items()
                     .get(execution.item().index())
                     .and_then(|item| item.native())
                     .is_none_or(|native| !Arc::ptr_eq(native, &execution))
-            })
+            }
             || execution.item().admission_digest() != self.admission.digest()
             || session.public_visibility_snapshot_in(scope).as_ref()
                 != Some(&state.snapshot.visibility)
@@ -1614,12 +1614,13 @@ impl PersistentSession {
         let scope = prefix.admission.visibility.scope;
         if !prefix.admission.belongs_to(self)
             || !item.same_cell(&prefix.first_item)
-            || prefix.program.as_ref().is_some_and(|program| {
-                program
+            || {
+                prefix
+                    .program
                     .items()
                     .get(item.index())
                     .is_none_or(|prepared| prepared.checked_item() != &item)
-            })
+            }
             || item.index() != state.snapshot.compiler_prefix.next_item()
             || state.in_flight.is_some()
             || state.reservation.is_some()
@@ -1632,63 +1633,26 @@ impl PersistentSession {
         let snapshot = state.snapshot.clone();
         let planned_row = prefix
             .admission
-            .planned
-            .as_ref()
-            .map(|planned| {
-                planned
-                    .items()
-                    .get(item.index())
-                    .ok_or(SessionError::StaleStagedDeclaration)
-            })
-            .transpose()?;
-        let generation = match planned_row {
-            Some(row) => {
-                use super::RuntimePlannedCellItemKind as Kind;
-                use tidepool_toolchain::checked_cell::CheckedItemKind as CheckedKind;
-                if !matches!(
-                    (row.kind(), item.kind()),
-                    (Kind::Prologue | Kind::Declaration, CheckedKind::Declaration)
-                        | (Kind::Bind, CheckedKind::Bind)
-                        | (Kind::Expression, CheckedKind::Expression)
-                ) {
-                    return Err(SessionError::StaleStagedDeclaration);
-                }
-                row.value_generation()
-                    .or_else(|| row.declaration_generation())
-                    .ok_or(SessionError::StaleStagedDeclaration)?
-            }
-            None if item.index() == 0 => prefix.admission.initial_value_generation,
-            None => {
-                let generation = self.val_gen().next();
-                self.set_val_gen(generation);
-                generation
-            }
-        };
-        let observation_name = if let Some(row) = planned_row {
-            row.observation_name().map(str::to_owned)
-        } else {
-            (item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Expression).then(
-                || {
-                    let mut name = format!("observation{}", generation.0);
-                    let visible = self.bindings().iter_current_in(self.scope_tree(), scope);
-                    let declaration_names = self
-                        .lib()
-                        .log
-                        .current_items_at(snapshot.visibility.declaration_tip)
-                        .into_iter()
-                        .flat_map(|(item, _)| {
-                            item.value_names().map(str::to_owned).collect::<Vec<_>>()
-                        })
-                        .collect::<std::collections::BTreeSet<_>>();
-                    while visible.iter().any(|(existing, _)| existing.0 == name)
-                        || declaration_names.contains(&name)
-                    {
-                        name.push('_');
-                    }
-                    name
-                },
-            )
-        };
+            .plan_reservation()
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .items()
+            .get(item.index())
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        use super::RuntimePlannedCellItemKind as Kind;
+        use tidepool_toolchain::checked_cell::CheckedItemKind as CheckedKind;
+        if !matches!(
+            (planned_row.kind(), item.kind()),
+            (Kind::Prologue | Kind::Declaration, CheckedKind::Declaration)
+                | (Kind::Bind, CheckedKind::Bind)
+                | (Kind::Expression, CheckedKind::Expression)
+        ) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let generation = planned_row
+            .value_generation()
+            .or_else(|| planned_row.declaration_generation())
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let observation_name = planned_row.observation_name().map(str::to_owned);
         let mut digest = blake3::Hasher::new();
         digest.update(b"TidepoolRuntimeCheckedItem1");
         digest.update(&snapshot.digest());
@@ -1751,18 +1715,14 @@ impl PersistentSession {
         let original_source = item
             .planned_declaration_source()
             .ok_or(SessionError::StaleStagedDeclaration)?;
-        let generation = match &prefix.admission.planned {
-            Some(planned) => planned
-                .items()
-                .get(item.index())
-                .and_then(|row| row.declaration_generation())
-                .ok_or(SessionError::StaleStagedDeclaration)?,
-            None => *prefix
-                .admission
-                .reserved_generations
-                .first()
-                .ok_or(SessionError::StaleStagedDeclaration)?,
-        };
+        let generation = prefix
+            .admission
+            .plan_reservation()
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .items()
+            .get(item.index())
+            .and_then(|row| row.declaration_generation())
+            .ok_or(SessionError::StaleStagedDeclaration)?;
         let prepared = prefix.admission.prepared_declaration(item)?;
         let module = tidepool_repr::SessionModule::lib(generation);
         if prepared.generation != generation
@@ -1942,16 +1902,6 @@ impl PersistentSession {
         }
         Ok(())
     }
-    pub fn begin_checked_prefix(
-        &self,
-        admission: Arc<RuntimeCellAdmission>,
-        first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-    ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
-        if admission.planned.is_some() {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        self.begin_checked_prefix_inner(admission, first_item, None)
-    }
 
     pub fn begin_cell_program(
         &self,
@@ -1998,15 +1948,15 @@ impl PersistentSession {
                 .map_err(|_| SessionError::StaleStagedDeclaration)?;
             return Ok(None);
         };
-        self.begin_checked_prefix_inner(admission, first.checked_item().clone(), Some(program))
+        self.begin_cell_program_prefix(admission, first.checked_item().clone(), program)
             .map(Some)
     }
 
-    fn begin_checked_prefix_inner(
+    fn begin_cell_program_prefix(
         &self,
         admission: Arc<RuntimeCellAdmission>,
         first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-        program: Option<Arc<tidepool_toolchain::checked_cell::CellProgram>>,
+        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
     ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
         if !admission.belongs_to(self)
             || first_item.admission_digest() != admission.digest()

@@ -3009,14 +3009,6 @@ where
             .begin_durable_private_execution(owner, public_scope)
     }
 
-    pub fn begin_checked_prefix(
-        &self,
-        admission: Arc<super::RuntimeCellAdmission>,
-        first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-    ) -> Result<Arc<super::RuntimeCheckedPrefix>, SessionError> {
-        self.state.begin_checked_prefix(admission, first_item)
-    }
-
     pub fn begin_cell_program(
         &self,
         admission: Arc<super::RuntimeCellAdmission>,
@@ -7978,10 +7970,10 @@ mod authored_publication_tests {
     }
 
     fn checked_interface_publication_failure(write_failure: bool) {
-        use crate::session::turn::{check_cell_admitted, run_checked_item};
+        use crate::session::turn::{compile_cell_program_admitted, consume_cell_program_item};
         use crate::session::{
             resident_cell_check_template, resident_workbench_templates, CellCheckRequest,
-            SourceImports, TurnRequest, TurnResult,
+            SourceImports, TurnResult,
         };
         use std::os::unix::fs::PermissionsExt;
         use tidepool_testing::effect_surface::TestEffectSurface;
@@ -8021,20 +8013,25 @@ mod authored_publication_tests {
             reserved_declaration_modules: vec![],
         };
         let admission = state
-            .admit_cell_for_execution(
+            .admit_planned_cell_for_execution(
                 execution.clone(),
-                0,
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(specification.clone()),
+                    &(view.include_paths(effects.include_paths())),
+                )
+                .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
                 [1; 32],
                 view.include_paths(effects.include_paths()),
+                None,
             )
             .unwrap();
         let view = admission.view();
         let include = view.include_paths(effects.include_paths());
         let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let injected = view.injected_module_names();
-        let checked = check_cell_admitted(
+        let (checked, program) = compile_cell_program_admitted(
             CellCheckRequest {
                 exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
@@ -8052,7 +8049,8 @@ mod authored_publication_tests {
         .unwrap();
         let first = checked.checked_item(0).unwrap();
         let prefix = state
-            .begin_checked_prefix(admission, first.clone())
+            .begin_cell_program(admission, program)
+            .unwrap()
             .unwrap();
         let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
         resident
@@ -8064,28 +8062,9 @@ mod authored_publication_tests {
         let reservation = resident
             .admit_checked_item(prefix.clone(), first.clone())
             .unwrap();
-        let snapshot = reservation.snapshot();
-        let view = snapshot.view();
-        let injected = snapshot.compiler_prefix().injected_modules();
         let TurnResult::Bind {
             bound, compiled, ..
-        } = run_checked_item(
-            TurnRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                turn_text: first.source(),
-                templates: &templates,
-                include: &include,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                gen: reservation.generation().0,
-                verdict: Some(checked.items[0].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            reservation.clone(),
-        )
-        .unwrap()
+        } = consume_cell_program_item(reservation.clone()).unwrap()
         else {
             panic!("expected checked binding");
         };
@@ -9527,10 +9506,12 @@ mod authored_publication_tests {
 
     #[test]
     fn unsupported_checked_routes_refuse_before_native_install_and_prefix_settlement() {
-        use crate::session::turn::{check_cell_admitted, run_checked_item, TemplateSelector};
+        use crate::session::turn::{
+            compile_cell_program_admitted, consume_cell_program_item, TemplateSelector,
+        };
         use crate::session::{
             resident_cell_check_template, resident_workbench_templates, CellCheckRequest,
-            TurnRequest, TurnResult,
+            TurnResult,
         };
         use tidepool_testing::effect_surface::TestEffectSurface;
         use tidepool_toolchain::checked_cell::CheckedCellSpecification;
@@ -9582,17 +9563,22 @@ mod authored_publication_tests {
         };
         let includes = view.include_paths(effects.include_paths());
         let admission = session
-            .admit_cell_for_execution(
+            .admit_planned_cell_for_execution(
                 private,
-                0,
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(specification.clone()),
+                    &(includes.clone()),
+                )
+                .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
                 [0; 32],
                 includes.clone(),
+                None,
             )
             .unwrap();
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let checked = check_cell_admitted(
+        let (checked, program) = compile_cell_program_admitted(
             CellCheckRequest {
                 exact_context: view.exact_compile_context(),
                 session_id: Some(view.session()),
@@ -9610,29 +9596,14 @@ mod authored_publication_tests {
         .unwrap();
         let item = checked.checked_item(0).unwrap();
         let prefix = session
-            .begin_checked_prefix(admission, item.clone())
+            .begin_cell_program(admission, program)
+            .unwrap()
             .unwrap();
         let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();
         let generation = item_admission.generation();
         let TurnResult::Bind {
             bound, compiled, ..
-        } = run_checked_item(
-            TurnRequest {
-                exact_context: view.exact_compile_context(),
-                session_id: Some(view.session()),
-                turn_text: &checked.items[0].source,
-                templates: &templates,
-                include: &includes,
-                session_root: view.session_root(),
-                inject_modules: &injected,
-                gen: generation.0,
-                verdict: Some(checked.items[0].verdict.clone()),
-                target: None,
-                retained_imports: &[],
-            },
-            item_admission.clone(),
-        )
-        .unwrap()
+        } = consume_cell_program_item(item_admission.clone()).unwrap()
         else {
             panic!("expected compiler-owned binders");
         };

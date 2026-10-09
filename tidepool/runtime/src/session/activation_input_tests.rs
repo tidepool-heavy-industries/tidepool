@@ -635,8 +635,6 @@ fn mount_original(
 struct CheckedFixtureCell {
     checked: turn::CellCheck,
     prefix: Arc<crate::session::RuntimeCheckedPrefix>,
-    templates: Vec<turn::TurnTemplate>,
-    include: Vec<PathBuf>,
 }
 
 fn check_fixture_cell(
@@ -650,29 +648,6 @@ fn check_fixture_cell(
         .expect("check fixture bindings through runtime admission")
 }
 
-#[derive(Clone, Copy)]
-enum FixtureCompilation {
-    CheckedItems,
-    WholeCell,
-}
-
-fn check_compiled_fixture_cell(
-    resident: &mut TestSession,
-    recipe: &InputRecipe,
-    source: &str,
-    execution: Arc<crate::session::PrivateExecutionAdmission>,
-) -> CheckedFixtureCell {
-    try_issue_fixture_cell(
-        resident,
-        recipe,
-        source,
-        execution,
-        0,
-        FixtureCompilation::WholeCell,
-    )
-    .expect("compile fixture through the complete cell issuer")
-}
-
 fn try_check_fixture_cell(
     resident: &mut TestSession,
     recipe: &InputRecipe,
@@ -680,14 +655,7 @@ fn try_check_fixture_cell(
     execution: Arc<crate::session::PrivateExecutionAdmission>,
     declaration_count: usize,
 ) -> Result<CheckedFixtureCell, turn::CellCheckFailure> {
-    try_issue_fixture_cell(
-        resident,
-        recipe,
-        source,
-        execution,
-        declaration_count,
-        FixtureCompilation::CheckedItems,
-    )
+    try_issue_fixture_cell(resident, recipe, source, execution, declaration_count)
 }
 
 fn try_issue_fixture_cell(
@@ -696,7 +664,6 @@ fn try_issue_fixture_cell(
     source: &str,
     execution: Arc<crate::session::PrivateExecutionAdmission>,
     declaration_count: usize,
-    compilation: FixtureCompilation,
 ) -> Result<CheckedFixtureCell, turn::CellCheckFailure> {
     use crate::session::{CellCheckRequest, TemplateSelector};
     use tidepool_toolchain::checked_cell::CheckedCellSpecification;
@@ -740,30 +707,18 @@ fn try_issue_fixture_cell(
         reserved_declaration_modules: Vec::new(),
     });
     let includes = view.include_paths(&recipe.include);
-    let admission = match compilation {
-        FixtureCompilation::CheckedItems => resident.admit_cell_for_execution(
+    let plan = tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &includes)?;
+    let admission = resident
+        .admit_planned_cell_for_execution(
             execution,
-            declaration_count,
+            plan,
             specification.clone(),
             specification.specification_digest(),
             recipe.digest(),
             includes,
-        ),
-        FixtureCompilation::WholeCell => {
-            let plan =
-                tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &includes)?;
-            resident.admit_planned_cell_for_execution(
-                execution,
-                plan,
-                specification.clone(),
-                specification.specification_digest(),
-                recipe.digest(),
-                includes,
-                None,
-            )
-        }
-    }
-    .expect("admit checked fixture bindings with their selected interfaces");
+            None,
+        )
+        .expect("admit checked fixture bindings with their selected interfaces");
     let view = admission.view();
     let includes = admission.include_paths().to_vec();
     let include = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
@@ -779,29 +734,13 @@ fn try_issue_fixture_cell(
         compile_generation: admission.initial_value_generation().0,
         compile_view_evidence: "",
     };
-    let (checked, prefix) = match compilation {
-        FixtureCompilation::CheckedItems => {
-            let checked = turn::check_cell_admitted(request, admission.clone(), &templates)?;
-            let first = checked.checked_item(0).unwrap();
-            let prefix = resident.begin_checked_prefix(admission, first).unwrap();
-            (checked, prefix)
-        }
-        FixtureCompilation::WholeCell => {
-            let (checked, program) =
-                turn::compile_cell_program_admitted(request, admission.clone(), &templates)?;
-            let prefix = resident
-                .begin_cell_program(admission, program)
-                .unwrap()
-                .expect("compiled fixture has executable items");
-            (checked, prefix)
-        }
-    };
-    Ok(CheckedFixtureCell {
-        checked,
-        prefix,
-        templates,
-        include: includes,
-    })
+    let (checked, program) =
+        turn::compile_cell_program_admitted(request, admission.clone(), &templates)?;
+    let prefix = resident
+        .begin_cell_program(admission, program)
+        .unwrap()
+        .expect("compiled fixture has executable items");
+    Ok(CheckedFixtureCell { checked, prefix })
 }
 
 impl CheckedFixtureCell {
@@ -815,41 +754,13 @@ impl CheckedFixtureCell {
         Arc<crate::session::RuntimeCheckedItemAdmission>,
     ) {
         let item = self.checked.checked_item(index).unwrap();
-        let source = item.source();
-        let include = self
-            .include
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<_>>();
         let reservation = resident
             .admit_checked_item(self.prefix.clone(), item.clone())
             .unwrap();
-        let snapshot = reservation.snapshot();
-        let view = snapshot.view();
-        let injected = snapshot.compiler_prefix().injected_modules();
         let TurnResult::Bind {
             bound, compiled, ..
-        } = (if self.prefix.cell_program().is_some() {
-            turn::consume_cell_program_item(reservation.clone())
-        } else {
-            turn::run_checked_item(
-                TurnRequest {
-                    exact_context: view.exact_compile_context(),
-                    session_id: Some(view.session()),
-                    turn_text: source,
-                    templates: &self.templates,
-                    include: &include,
-                    session_root: view.session_root(),
-                    inject_modules: &injected,
-                    gen: reservation.generation().0,
-                    verdict: Some(self.checked.items[index].verdict.clone()),
-                    target: None,
-                    retained_imports: snapshot.admitted_retained_imports(),
-                },
-                reservation.clone(),
-            )
-        })
-        .expect("obtain admitted fixture bindings")
+        } = turn::consume_cell_program_item(reservation.clone())
+            .expect("obtain admitted fixture bindings")
         else {
             panic!("fixture setup or value probe must be a checked bind");
         };
@@ -1056,13 +967,18 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
         reserved_declaration_modules: Vec::new(),
     });
     let admission = resident
-        .admit_cell_for_execution(
+        .admit_planned_cell_for_execution(
             execution.clone(),
-            0,
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &(view.include_paths(&fixture.recipe.include)),
+            )
+            .unwrap(),
             specification.clone(),
             specification.specification_digest(),
             fixture.recipe.digest(),
             view.include_paths(&fixture.recipe.include),
+            None,
         )
         .unwrap();
     let view = admission.view();
@@ -1072,7 +988,7 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
     let injected = view.injected_module_names();
-    let checked = turn::check_cell_admitted(
+    let (checked, program) = turn::compile_cell_program_admitted(
         CellCheckRequest {
             exact_context: view.exact_compile_context(),
             session_id: Some(view.session()),
@@ -1090,31 +1006,13 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     .unwrap();
     let item = checked.checked_item(0).unwrap();
     let prefix = resident
-        .begin_checked_prefix(admission, item.clone())
+        .begin_cell_program(admission, program)
+        .unwrap()
         .unwrap();
     let reservation = resident.admit_checked_item(prefix.clone(), item).unwrap();
-    let snapshot = reservation.snapshot();
-    let view = snapshot.view();
-    let injected = snapshot.compiler_prefix().injected_modules();
     let TurnResult::Bind {
         bound, compiled, ..
-    } = turn::run_checked_item(
-        TurnRequest {
-            exact_context: view.exact_compile_context(),
-            session_id: Some(view.session()),
-            turn_text: source,
-            templates: &templates,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &injected,
-            gen: reservation.generation().0,
-            verdict: Some(checked.items[0].verdict.clone()),
-            target: None,
-            retained_imports: snapshot.admitted_retained_imports(),
-        },
-        reservation.clone(),
-    )
-    .unwrap()
+    } = turn::consume_cell_program_item(reservation.clone()).unwrap()
     else {
         panic!("real checked bind must carry its original site map");
     };
@@ -1870,11 +1768,12 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             ..SessionRunContext::ROOT
         })
         .unwrap();
-    let checked = check_compiled_fixture_cell(
+    let checked = check_fixture_cell(
         &mut source,
         &recipe,
         include_str!("fixtures/activation-selected-site-segment.hs"),
         execution.clone(),
+        0,
     );
     assert_eq!(checked.checked.items.len(), 4);
     let mut outputs = Vec::new();
