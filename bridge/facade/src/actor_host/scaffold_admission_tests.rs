@@ -61,8 +61,37 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
                 .await;
             assert!(matches!(
                 installation.acquisition.as_ref(),
-                Some(exomonad_actor::ToolsetAcquisition::DeploymentOriginal { .. })
+                Some(exomonad_actor::ToolsetAcquisition::FreshRunOriginal { .. })
             ));
+            let frozen = host
+                .context
+                .config
+                .workspace_inputs
+                .as_ref()
+                .expect("the immediate launch selected its completed workspace");
+            let completed = frozen
+                .completed_entry_selections()
+                .expect("the workspace owns its completed original inventory");
+            let coverage = frozen
+                .prepared_toolset_coverage()
+                .expect("the workspace owns its prepared root coverage");
+            assert_eq!(coverage.len(), 1);
+            assert_eq!(
+                coverage[0].requested_effects,
+                exomonad_actor::ActorCapabilities::default().effect_keys()
+            );
+            let selection = installation
+                .acquisition
+                .as_ref()
+                .and_then(exomonad_actor::ToolsetAcquisition::selection)
+                .expect("the issuing acquisition retains its exact original selection");
+            let exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal { recipe, original } =
+                &selection
+            else {
+                panic!("the shipped workspace must install its prepared workspace original");
+            };
+            assert_eq!(completed.get(recipe), Some(original));
+            assert_eq!(selection, coverage[0].program);
             host.input("Inspect and fork the prepared default workspace.")
                 .await
                 .unwrap();

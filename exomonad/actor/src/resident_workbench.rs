@@ -15701,6 +15701,7 @@ pub(crate) mod request_tests {
         .await
         .unwrap();
         assert!(Arc::ptr_eq(&fresh.prepared, &immediate.prepared));
+        assert_eq!(immediate.acquisition(), fresh.acquisition());
         let (immediate_session, immediate_context, _, _immediate_root) = host_mount_fixture();
         run_native_quoted_probe(
             immediate_session,
