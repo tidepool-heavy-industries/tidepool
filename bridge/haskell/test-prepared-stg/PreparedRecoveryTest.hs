@@ -636,9 +636,10 @@ scenario = do
             [(homeUnit, homeName, [(0, [sourceRoot], [(preparedRootIdentity textRoot, True)])]),
              (showUnit, showName, [(0, showBinders, [(preparedRootIdentity fstRoot, True)])])]
           project roots closed = either (fail . show) (pure . fst) $
-            prepareProjectionWithReachability
+            prepareComponentProjectionWithReachability
               (fixtureContext { projectionAuxiliaryRoots = roots })
-              (closureModules closed) (closureReachability closed) >>= projectSelected
+              (closureHomeModules closed) (closureComponentSelections closed)
+              (closureReachability closed) >>= projectSelected
           required program = either fail pure $
             requiredOriginalPackageGlobalsWithRetained [] [] originals Set.empty (programGlobals program)
           resolve roots = forM roots $ \symbol -> do
@@ -664,7 +665,10 @@ scenario = do
       finalProgram <- project allRoots (preparedRecoveryClosure final)
       finalDemand <- required finalProgram
       assert (all (`elem` allRoots) finalDemand) "two-round fixture did not close package demand"
-      forM_ [1,2] $ \jobCount -> do
+      forM_ [(cold, jobs) | cold <- [False, True], jobs <- [1,2]] $ \(cold, jobCount) -> do
+        (pumpCache, pumpOwners, pumpBodies) <- if cold
+          then (,,) <$> newFatIfaceCache <*> newOwnerInterfaceCache <*> newPreparedBodyCache
+          else pure (cache, ownerCache, bodyCache)
         grant <- either fail pure (compilerExecutionGrant jobCount)
         waves <- newIORef []
         withCompilerExecutor grant $ \executor -> do
@@ -674,9 +678,21 @@ scenario = do
                 current <- project currentRoots closed
                 next <- required current
                 resolve (Set.toAscList (Set.fromList next `Set.difference` Set.fromList currentRoots))
-          pumping <- newPreparedRecoveryWithDemand (Just executor) demand hsc cache ownerCache bodyCache
+          pumping <- newPreparedRecoveryWithDemand (Just executor) demand hsc pumpCache pumpOwners pumpBodies
             fixtureContext [subset] []
-          pumped <- pumping entry
+          (pumped, counters) <- measureRecoveryCounts (pumping entry)
+          let count name = Map.findWithDefault 0 ("prepared_recover_" ++ name) counters
+          when cold $ do
+            assert (count "unit_preparations" > 0
+                && count "units_started" == count "unit_preparations"
+                && count "units_completed" == count "units_started"
+                && count "units_failed" == 0
+                && count "component_new_groups" > 0
+                && count "unit_fact_admissions" > 0
+                && count "package_root_additions" == fromIntegral (length allRoots))
+              ("cold completion pump did not execute and settle exact component work: " ++ show counters)
+          putStrLn ("package completion pump: cold=" ++ show cold ++ ", jobs=" ++ show jobCount
+            ++ ", counters=" ++ show (Map.toAscList counters))
           observed <- readIORef waves
           assert (observed == map Set.fromList [[],firstRoots,allRoots])
             ("completion pump changed projected package demand waves: " ++ show observed)
@@ -739,6 +755,53 @@ scenario = do
       assert (expandedCount > 0) "larger exact body set did not reprepare its owner"
       assert (expandedProgram == restartedProgram)
         "same-owner root growth changed canonical output or reused stale body facts"
+      -- Use genuine compiler-resolved roots to drive the complete recovery
+      -- ledger/frontier. Each prefix is compared with a separate target state
+      -- and a projection that recomputes reachability from all retained units.
+      -- The request caches are shared here; the controls above separately prove
+      -- cold execution and settlement rather than only cache-hit assembly.
+      let historyRoots = [textRoot, fstRoot, head sndRoots]
+          rootSymbols indices = Set.toAscList (Set.fromList
+            [preparedRootIdentity (historyRoots !! index) | index <- indices])
+          recompute roots closed = either (fail . show) (pure . fst) $
+            prepareProjection (fixtureContext { projectionAuxiliaryRoots = roots })
+              (closureModules closed) >>= projectSelected
+      forM_ [1,2] $ \jobCount -> do
+        grant <- either fail pure (compilerExecutionGrant jobCount)
+        withCompilerExecutor grant $ \executor -> do
+          setEnv "TIDEPOOL_RECOVERY_CHECK" "1"
+          historyFactory <- newPreparedRecoveryWithDemand (Just executor) (\_ _ _ -> pure [])
+            hsc cache ownerCache bodyCache fixtureContext [subset] []
+          let checkPrefixes _ _ [] = pure True
+              checkPrefixes current seen (index:rest) = do
+                let nextSeen = seen ++ [index]
+                    roots = rootSymbols nextSeen
+                grown <- growPreparedRecovery current [historyRoots !! index]
+                binders <- resolve roots
+                restart <- newPreparedRecoveryWithPackageRoots hsc cache ownerCache bodyCache
+                  fixtureContext [subset] binders
+                restarted <- restart entry
+                let closed = preparedRecoveryClosure grown
+                    reference = preparedRecoveryClosure restarted
+                selected <- project roots closed
+                restartedProgram <- project roots reference
+                recomputed <- recompute roots closed
+                later <- checkPrefixes grown nextSeen rest
+                pure (selected == restartedProgram && selected == recomputed
+                  && closureFailures closed == closureFailures reference && later)
+          result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess=24, QC.maxSize=6 }
+            (QC.forAllShrink (QC.listOf1 (QC.elements [0,1,2])) (QC.shrinkList (const [])) $
+              \indices -> QC.classify (length indices > Set.size (Set.fromList indices)) "repeated root" $
+                QC.classify (Set.size (Set.fromList indices) > 1) "owner growth" $
+                QC.counterexample ("recovery root history " ++ show indices) $
+                QC.ioProperty (historyFactory entry >>= \start -> checkPrefixes start [] indices))
+          unless (QC.isSuccess result) (fail "full recovery ledger history differs from recomputation")
+      -- Calibrate the oracle against omission of a newly demanded real root.
+      staleProgram <- recompute [preparedRootIdentity fstRoot] (preparedRecoveryClosure initial)
+      completeFst <- growPreparedRecovery initial [fstRoot]
+      completeProgram <- recompute [preparedRootIdentity fstRoot] (preparedRecoveryClosure completeFst)
+      assert (staleProgram /= completeProgram)
+        "full recovery history oracle missed omission of a demanded component"
       -- A failed exact Name remains attempted; growth cannot substitute a
       -- compatible lookup later and erase its original type-mismatch witness.
       bad <- growPreparedRecovery initial [setIdType fstRoot boolTy]
@@ -757,6 +820,12 @@ scenario = do
     -- Count the existing diagnostic owner instead of widening recovery's
     -- result contract for instrumentation. The suite executes sequentially.
     measurePreparations action = do
+      (result, counters) <- measureRecoveryCounts action
+      let key = "prepared_recover_module_preparations"
+      assert (Map.member key counters) "recovery emitted no preparation count"
+      pure (result, Map.findWithDefault 0 key counters)
+
+    measureRecoveryCounts action = do
       setEnv "TIDEPOOL_TIMING" "1"
       bracket (openTempFile "/tmp" "tidepool-recovery-count")
         (\(path, handle) -> hClose handle >> removeFile path) $ \(_, handle) -> do
@@ -767,13 +836,14 @@ scenario = do
           hSeek handle AbsoluteSeek 0
           diagnostics <- hGetContents handle
           _ <- evaluate (length diagnostics)
-          let counts = [read count :: Integer
+          let counts = Map.fromListWith (+)
+                [(name, read count :: Integer)
                 | line <- lines diagnostics
                 , let fields = words line
-                , "name=prepared_recover_module_preparations" `elem` fields
-                , field <- fields, Just count <- [stripPrefix "count=" field]]
-          assert (not (null counts)) "recovery emitted no preparation count"
-          pure (result, sum counts)
+                , nameField <- fields, Just name <- [stripPrefix "name=" nameField]
+                , isJust (stripPrefix "prepared_recover_" name)
+                , countField <- fields, Just count <- [stripPrefix "count=" countField]]
+          pure (result, counts)
 
     topIsFst (binding, _) = any
       ((== "fst") . occNameString . nameOccName . varName)
