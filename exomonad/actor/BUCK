@@ -436,6 +436,7 @@ tidepool_rust_binary(
     test_fixtures = [
         "exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs",
         "exomonad/actor/src/fixtures/prepared-instance-provider.hs",
+        "exomonad/actor/src/fixtures/request-alias-borrow.hs",
         "exomonad/actor/src/local_actor/failure_origin.hs",
         "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
         "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
@@ -1004,6 +1005,13 @@ export_file(
     name = "haskell_test_fixture_7372632f66697874757265732f71756f7465642d6167656e742d737065632e6873",
     src = "src/fixtures/quoted-agent-spec.hs",
     out = "quoted-agent-spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f66697874757265732f726571756573742d616c6961732d626f72726f772e6873",
+    src = "src/fixtures/request-alias-borrow.hs",
+    out = "request-alias-borrow.hs",
     visibility = ["PUBLIC"],
 )
 

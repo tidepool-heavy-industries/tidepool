@@ -255,6 +255,7 @@
     "exomonad/actor/src/fixtures/prepared-instance-provider.hs",
     "exomonad/actor/src/fixtures/quoted-agent-provider.hs",
     "exomonad/actor/src/fixtures/quoted-agent-spec.hs",
+    "exomonad/actor/src/fixtures/request-alias-borrow.hs",
     "exomonad/actor/src/fixtures/scope-live-result.hs",
     "exomonad/actor/src/local_actor/failure_origin.hs",
     "exomonad/actor/src/resident_actor/capture_workspace_child.hs",

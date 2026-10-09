@@ -121,6 +121,7 @@ TEST_ONLY_FIXTURES = {
     'exomonad-actor': frozenset({
         'exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs',
         'exomonad/actor/src/fixtures/prepared-instance-provider.hs',
+        'exomonad/actor/src/fixtures/request-alias-borrow.hs',
         'exomonad/actor/src/local_actor/failure_origin.hs',
         'exomonad/actor/src/resident_actor/capture_workspace_child.hs',
         'exomonad/actor/src/resident_workbench/display_callback_immediate.hs',

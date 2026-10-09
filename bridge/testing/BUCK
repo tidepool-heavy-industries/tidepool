@@ -383,6 +383,7 @@ filegroup(
         "exomonad/actor/src/fixtures/prepared-instance-provider.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f70726570617265642d696e7374616e63652d70726f76696465722e6873",
         "exomonad/actor/src/fixtures/quoted-agent-provider.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f71756f7465642d6167656e742d70726f76696465722e6873",
         "exomonad/actor/src/fixtures/quoted-agent-spec.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f71756f7465642d6167656e742d737065632e6873",
+        "exomonad/actor/src/fixtures/request-alias-borrow.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f726571756573742d616c6961732d626f72726f772e6873",
         "exomonad/actor/src/fixtures/scope-live-result.hs": "//exomonad/actor:haskell_test_fixture_7372632f66697874757265732f73636f70652d6c6976652d726573756c742e6873",
         "exomonad/actor/src/local_actor/failure_origin.hs": "//exomonad/actor:haskell_test_fixture_7372632f6c6f63616c5f6163746f722f6661696c7572655f6f726967696e2e6873",
         "exomonad/actor/src/resident_actor/capture_workspace_child.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f636170747572655f776f726b73706163655f6368696c642e6873",
