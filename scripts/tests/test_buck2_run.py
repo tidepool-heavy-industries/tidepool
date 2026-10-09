@@ -115,13 +115,19 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         path.write_text(f"#!{shutil.which('bash')}\nset -euo pipefail\n" + body + "\n")
         path.chmod(0o755)
 
-    def run_runner(self, *args, **environment):
+    def run_runner(self, *args, timeout_seconds=10, **environment):
         with subprocess.Popen(
             ["bash", str(self.root / "scripts/buck2-run.sh"), *args], cwd="/",
             env=dict(self.env, **environment), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
         ) as process:
             self.launch_pid = process.pid
-            stdout, stderr = process.communicate()
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                self.fail(f"Buck launcher did not finish within {timeout_seconds} seconds")
             return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
     def assert_no_shell_or_buck(self):
@@ -201,6 +207,30 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         config_file = self.root / "retained-buck-config.json"
         config_file.write_text(json.dumps({"tidepool.profile": "fast-dev"}))
         config_file.chmod(0o640)
+        result = self.run_runner(
+            "build", TIDEPOOL_BUCK_CONFIG_FILE=str(config_file),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shared Buck configuration is invalid", result.stderr)
+        self.assertFalse(self.buck_log.exists())
+
+    def test_shared_configuration_refuses_a_private_fifo_without_blocking(self):
+        config_file = self.root / "retained-buck-config.json"
+        os.mkfifo(config_file, mode=0o600)
+        config_file.chmod(0o600)
+        result = self.run_runner(
+            "build", TIDEPOOL_BUCK_CONFIG_FILE=str(config_file), timeout_seconds=2,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shared Buck configuration is invalid", result.stderr)
+        self.assertFalse(self.buck_log.exists())
+
+    def test_shared_configuration_refuses_symlinks_to_private_regular_files(self):
+        target = self.root / "actual-config.json"
+        target.write_text(json.dumps({"tidepool.profile": "fast-dev"}))
+        target.chmod(0o600)
+        config_file = self.root / "retained-buck-config.json"
+        config_file.symlink_to(target)
         result = self.run_runner(
             "build", TIDEPOOL_BUCK_CONFIG_FILE=str(config_file),
         )
