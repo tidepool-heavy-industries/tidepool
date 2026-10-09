@@ -41,5 +41,11 @@ command.extend(["--chdir", "/tmp", str(python), record["programs"]["runner"],
                 "--exact", "actor_host::packaged_catalog_tests::packaged_cohort_executes_and_displays_without_build_inputs",
                 "--expected-count", "1", "--ignored", "--jobs", "1", "--timeout", "900",
                 "--output-dir", "/evidence/tests"])
+# The isolated runner clears undeclared compiler selections. Carry the catalog
+# required by this consumer and the descriptor's optional native test resources.
+command.extend(["--resource-env", "TIDEPOOL_COMPILER_MODULES"])
+for name in ("TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES", "TIDEPOOL_TEST_FIXTURE_ROOT"):
+    if name in record["environment"]:
+        command.extend(["--resource-env", name])
 raise SystemExit(subprocess.run(command, check=False).returncode)
 PY

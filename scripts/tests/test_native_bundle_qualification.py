@@ -2166,5 +2166,79 @@ class CatalogSourceTests(unittest.TestCase):
             execute.assert_not_called()
 
 
+class CatalogConsumerNamespaceTests(unittest.TestCase):
+    def test_declared_namespace_resources_survive_isolated_runner_without_ambient_authority(self):
+        script = (SCRIPT.parent / 'packaged-catalog-consumer.sh').read_text()
+        namespace_source = script.split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        runner_spec = importlib.util.spec_from_file_location(
+            'catalog_namespace_runner', SCRIPT.parent.parent / 'rust/isolated-libtest.py')
+        runner = importlib.util.module_from_spec(runner_spec)
+        runner_spec.loader.exec_module(runner)
+        optional = ('TIDEPOOL_PREPARED_ROOT_ENTRY', 'TIDEPOOL_PREPARED_BUILTIN_ENTRIES',
+                    'TIDEPOOL_TEST_FIXTURE_ROOT')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {}
+            for name in ('TIDEPOOL_COMPILER_MODULES', *optional):
+                path = root / name
+                path.write_text('immutable resource fixture')
+                paths[name] = str(path)
+            for subset in range(8):
+                for reverse in (False, True):
+                    with self.subTest(subset=subset, reverse=reverse):
+                        selected = {'TIDEPOOL_COMPILER_MODULES': paths['TIDEPOOL_COMPILER_MODULES']}
+                        selected.update({name: paths[name] for index, name in enumerate(optional)
+                                         if subset & (1 << index)})
+                        environment = dict(reversed(list(selected.items()))) if reverse else dict(selected)
+                        environment['TIDEPOOL_EXTRACT_DAEMON_SOCKET'] = '/ambient/daemon.sock'
+                        descriptor = root / 'qualification.json'
+                        descriptor.write_text(json.dumps({
+                            'bundle_root': str(root), 'stdlib_mode': 'catalog-backed',
+                            'programs': {'libtest': str(root / 'bin/tidepool-tests'),
+                                         'runner': str(root / 'runner.py')},
+                            'environment': environment,
+                        }))
+
+                        def consume(command, **kwargs):
+                            declared = [command[index + 1] for index, value in enumerate(command)
+                                        if value == '--resource-env']
+                            self.assertEqual(set(declared), set(selected))
+                            self.assertEqual(len(declared), len(selected))
+                            supplied = {command[index + 1]: command[index + 2]
+                                        for index, value in enumerate(command) if value == '--setenv'}
+                            self.assertNotIn('TIDEPOOL_EXTRACT_DAEMON_SOCKET', supplied)
+                            self.assertIn('--clearenv', command)
+                            # Actual receiving owner clears ambient selection and binds only
+                            # the paths carried by the production namespace command.
+                            supplied['TIDEPOOL_EXTRACT_DAEMON_SOCKET'] = '/ambient/injected.sock'
+                            with patch.dict(os.environ, supplied, clear=True):
+                                runner.resolve_resource_environment(declared)
+                                for name, value in selected.items():
+                                    self.assertEqual(os.environ[name], value)
+                                for name in set(optional) - set(selected):
+                                    self.assertNotIn(name, os.environ)
+                                self.assertNotIn('TIDEPOOL_EXTRACT_DAEMON_SOCKET', os.environ)
+                                self.assertNotIn('TIDEPOOL_EXTRACT_NO_DAEMON', os.environ)
+                            # Missing issued resources must refuse before a test process.
+                            for missing in declared:
+                                for mutation in ('absent', 'empty', 'missing-path'):
+                                    with patch.dict(os.environ, supplied, clear=True):
+                                        if mutation == 'absent':
+                                            os.environ.pop(missing)
+                                        else:
+                                            os.environ[missing] = ('' if mutation == 'empty'
+                                                                   else str(root / 'missing-resource'))
+                                        with self.assertRaisesRegex(RuntimeError, 'declared resource'):
+                                            runner.resolve_resource_environment(declared)
+                            return subprocess.CompletedProcess(command, 0)
+
+                        with patch.object(sys, 'argv', ['namespace', str(root), str(descriptor),
+                                                       '/pinned/bwrap', str(root / 'evidence'), sys.executable]), \
+                             patch.object(subprocess, 'run', side_effect=consume), \
+                             self.assertRaises(SystemExit) as stopped:
+                            exec(compile(namespace_source, 'packaged-catalog-consumer.sh', 'exec'), {})
+                        self.assertEqual(stopped.exception.code, 0)
+
+
 if __name__ == '__main__':
     unittest.main()
