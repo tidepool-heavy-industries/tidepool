@@ -86,6 +86,7 @@ library tidepool-extract-internal
     Tidepool.FinalizedCore
     Tidepool.GhcPipeline
     Tidepool.ExactHydration
+    Tidepool.RequestInputs
     Tidepool.ExactScope
     Tidepool.ExecutionSource
     Tidepool.HostBindingAuthority
@@ -412,6 +413,7 @@ test-suite source-boot-product-reuse-test
   main-is:          Main.hs
   hs-source-dirs:   test-source-boot
   other-modules:    SourceBootCases
+                    RequestInputsTest
                     PhysicalExecutableEpochTest
                     BoundedReadTest
                     ExecutionSourceDecodeTest
@@ -428,6 +430,7 @@ test-suite source-boot-product-reuse-test
   build-tool-depends: tidepool-extract:source-boot-child
   build-depends:
     base >= 4.20 && < 5,
+    QuickCheck >= 2.14 && < 2.16,
     ghc >= 9.12 && < 9.13,
     ghc-boot >= 9.12 && < 9.13,
     containers,

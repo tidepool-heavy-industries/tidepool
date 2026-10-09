@@ -132,6 +132,7 @@ def declare_haskell_components():
         "Tidepool/FinalizedCore.hs": "src/Tidepool/FinalizedCore.hs",
         "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
         "Tidepool/ExactHydration.hs": "src/Tidepool/ExactHydration.hs",
+        "Tidepool/RequestInputs.hs": "src/Tidepool/RequestInputs.hs",
         "Tidepool/ExactScope.hs": "src/Tidepool/ExactScope.hs",
         "Tidepool/ExecutionSource.hs": "src/Tidepool/ExecutionSource.hs",
         "Tidepool/HostBindingAuthority.hs": "src/Tidepool/HostBindingAuthority.hs",
@@ -267,6 +268,7 @@ def declare_haskell_components():
         "Tidepool/FinalizedCore.hs": "src/Tidepool/FinalizedCore.hs",
         "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
         "Tidepool/ExactHydration.hs": "src/Tidepool/ExactHydration.hs",
+        "Tidepool/RequestInputs.hs": "src/Tidepool/RequestInputs.hs",
         "Tidepool/ExactScope.hs": "src/Tidepool/ExactScope.hs",
         "Tidepool/ExecutionSource.hs": "src/Tidepool/ExecutionSource.hs",
         "Tidepool/HostBindingAuthority.hs": "src/Tidepool/HostBindingAuthority.hs",
@@ -3260,6 +3262,7 @@ def declare_haskell_components():
         "Main.hs": "test-source-boot/Main.hs",
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
         "SourceBootCases.hs": "test-source-boot/SourceBootCases.hs",
+        "RequestInputsTest.hs": "test-source-boot/RequestInputsTest.hs",
         "PhysicalExecutableEpochTest.hs": "test-source-boot/PhysicalExecutableEpochTest.hs",
         "BoundedReadTest.hs": "test-source-boot/BoundedReadTest.hs",
         "ExecutionSourceDecodeTest.hs": "test-source-boot/ExecutionSourceDecodeTest.hs",
@@ -3280,6 +3283,7 @@ def declare_haskell_components():
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
+        "QuickCheck",
         "bytestring",
         "cborg",
         "containers",
@@ -3300,6 +3304,7 @@ def declare_haskell_components():
         "-rtsopts"
     ]),
         linker_flags = haskell_component_link_flags([
+        "QuickCheck",
         "bytestring",
         "cborg",
         "containers",
@@ -3446,6 +3451,7 @@ def declare_haskell_components():
         "test-source-boot/Main.hs": "test-source-boot/Main.hs",
         "test-source-boot/PhysicalExecutableEpochTest.hs": "test-source-boot/PhysicalExecutableEpochTest.hs",
         "test-source-boot/ProgressBoundaryTest.hs": "test-source-boot/ProgressBoundaryTest.hs",
+        "test-source-boot/RequestInputsTest.hs": "test-source-boot/RequestInputsTest.hs",
         "test-source-boot/SourceBootCases.hs": "test-source-boot/SourceBootCases.hs",
         "test-source-boot/SourceBootChildMain.hs": "test-source-boot/SourceBootChildMain.hs",
         "test-source-boot/SourceBootFixtureSupport.hs": "test-source-boot/SourceBootFixtureSupport.hs",
