@@ -1286,7 +1286,8 @@ impl ArtifactInventory {
         let retained_roots = match root_intent {
             ArtifactRootIntent::SuppliedArtifacts => None,
             ArtifactRootIntent::RetainedView(source) => {
-                source.collect_materializations(&mut materialization_parents, &mut BTreeSet::new());
+                source
+                    .collect_materializations(&mut materialization_parents, &mut BTreeSet::new())?;
                 Some(source.roots().to_vec())
             }
         };
@@ -1443,19 +1444,39 @@ struct ViewReadProjection {
     dependencies: OnceLock<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>,
 }
 impl ViewLease {
+    fn lock_materialization(
+        &self,
+    ) -> std::io::Result<
+        std::sync::MutexGuard<
+            '_,
+            BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+        >,
+    > {
+        loop {
+            crate::host_work::checkpoint()?;
+            match self.materialization.try_lock() {
+                Ok(retained) => return Ok(retained),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(2))
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("materialization lock"),
+            }
+        }
+    }
+
     fn collect_materializations(
         self: &Arc<Self>,
         materializations: &mut Vec<
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
         visited: &mut BTreeSet<usize>,
-    ) {
+    ) -> Result<(), CompileError> {
         let mut pending = vec![self];
         while let Some(view) = pending.pop() {
             if !visited.insert(Arc::as_ptr(view) as usize) {
                 continue;
             }
-            let retained = view.materialization.lock().expect("materialization lock");
+            let retained = view.lock_materialization()?;
             if !retained.is_empty() {
                 for materialization in retained.values() {
                     if !materializations
@@ -1477,6 +1498,7 @@ impl ViewLease {
                 pending.extend(view.parents.iter().rev());
             }
         }
+        Ok(())
     }
 }
 impl Drop for ViewLease {
@@ -1712,16 +1734,7 @@ impl ArtifactView {
     {
         // Waiting for another producer must remain responsive to this scope's
         // stop edge without interrupting that producer or evicting its result.
-        let mut retained = loop {
-            crate::host_work::checkpoint()?;
-            match self.lease.materialization.try_lock() {
-                Ok(retained) => break retained,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-                Err(std::sync::TryLockError::Poisoned(_)) => panic!("materialization lock"),
-            }
-        };
+        let mut retained = self.lease.lock_materialization()?;
         let key = metadata.materialization_key();
         if let Some(materialization) = retained.get(&key) {
             return Ok(Arc::clone(materialization));
@@ -1729,7 +1742,7 @@ impl ArtifactView {
         let mut parents = self.lease.materialization_parents.clone();
         let mut visited = BTreeSet::new();
         for parent in &self.lease.parents {
-            parent.collect_materializations(&mut parents, &mut visited);
+            parent.collect_materializations(&mut parents, &mut visited)?;
         }
         let materialization = Arc::new(prepare(parents)?);
         retained.insert(key, Arc::clone(&materialization));
@@ -1742,21 +1755,23 @@ impl ArtifactView {
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
         visited: &mut BTreeSet<usize>,
-    ) {
+    ) -> Result<(), CompileError> {
         self.lease
-            .collect_materializations(materializations, visited);
+            .collect_materializations(materializations, visited)
     }
 
     pub(crate) fn retained_materialization(
         &self,
         metadata: &ArtifactMetadataSnapshot,
-    ) -> Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>> {
-        self.lease
-            .materialization
-            .lock()
-            .expect("materialization lock")
+    ) -> Result<
+        Option<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+        CompileError,
+    > {
+        Ok(self
+            .lease
+            .lock_materialization()?
             .get(&metadata.materialization_key())
-            .cloned()
+            .cloned())
     }
     pub(crate) fn metadata_snapshot(&self) -> ArtifactMetadataSnapshot {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
@@ -2121,7 +2136,7 @@ impl ArtifactView {
             .retain(selected, Vec::new(), Vec::new());
         let mut materializations = Vec::new();
         if !retained.is_empty() {
-            self.collect_materializations(&mut materializations, &mut BTreeSet::new());
+            self.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
             if !materializations.is_empty() {
                 let custody =
                     crate::declaration_context::RetainedArtifactMaterialization::select_custody(

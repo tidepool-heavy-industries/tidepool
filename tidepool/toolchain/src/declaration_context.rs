@@ -4876,7 +4876,7 @@ impl ExactDeclarationContext {
         artifacts: &[DeclarationArtifact],
         metadata: &ArtifactMetadataSnapshot,
     ) -> Result<(), CompileError> {
-        let retained = self.inventory.retained_materialization(metadata);
+        let retained = self.inventory.retained_materialization(metadata)?;
         let rows = retained
             .as_ref()
             .map(|retained| retained.selected_rows(metadata))
@@ -5221,7 +5221,10 @@ impl ExactDeclarationContext {
         let inputs = scaffold.compiler_inputs(self, None)?;
         let metadata = &inputs.metadata;
         if !root.is_absolute()
-            || self.inventory.retained_materialization(&metadata).is_some()
+            || self
+                .inventory
+                .retained_materialization(&metadata)?
+                .is_some()
             || self.producer
                 != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                     producer,
@@ -5530,7 +5533,7 @@ impl ExactDeclarationContext {
             ));
         }
         std::fs::create_dir_all(root)?;
-        let reused = self.inventory.retained_materialization(metadata).is_some();
+        let reused = self.inventory.retained_materialization(metadata)?.is_some();
         let retained = self
             .inventory
             .retain_materialization(&metadata, |parents| {
@@ -7392,12 +7395,13 @@ mod tests {
         let retained = completed.action.unwrap();
         assert_eq!(completed.close, CompilerTransactionClose::NotStarted);
         let weak = Arc::downgrade(&retained);
-        let path = retained._directory.path().to_path_buf();
+        let path = retained.directory().path().to_path_buf();
         assert!(Arc::ptr_eq(
             &retained,
             &context
                 .inventory
                 .retained_materialization(&metadata)
+                .unwrap()
                 .unwrap()
         ));
         drop(retained);
@@ -7435,7 +7439,7 @@ mod tests {
             .unwrap();
         let retained = first.materialization.as_ref().unwrap();
         let weak = Arc::downgrade(retained);
-        let owned = retained._directory.path().to_path_buf();
+        let owned = retained.directory().path().to_path_buf();
         let paths = first.artifacts.clone();
         let stopped = with_compiler_transaction_cancellable(
             cancelled(),
@@ -7958,6 +7962,7 @@ mod tests {
             let retained = context
                 .inventory
                 .retained_materialization(&context.compiler_metadata_snapshot().unwrap())
+                .unwrap()
                 .unwrap();
             let mut stored_rows = 0;
             let mut stored_groups = 0;

@@ -687,6 +687,7 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
     let retained_a = a
         .artifact_view()
         .retained_materialization(&metadata_a)
+        .unwrap()
         .unwrap();
     let second = b
         .prepare_compilation(&scratch.path().join("b"), PRODUCER)
@@ -695,6 +696,7 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
     let retained_b = b
         .artifact_view()
         .retained_materialization(&metadata_b)
+        .unwrap()
         .unwrap();
     assert!(!Arc::ptr_eq(&retained_a, &retained_b));
     assert_ne!(
@@ -733,6 +735,7 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
         &retained_a,
         &a.artifact_view()
             .retained_materialization(&metadata_a)
+            .unwrap()
             .unwrap()
     ));
     assert_eq!(
