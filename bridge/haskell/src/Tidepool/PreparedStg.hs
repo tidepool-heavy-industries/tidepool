@@ -453,7 +453,9 @@ data PreparedBodyReuse = PreparedBodyReused | PreparedBodyMiss | PreparedBodyDis
 bodyReuseDisabled :: IO Bool
 bodyReuseDisabled = (== Just "1") <$> lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE"
 
-type PreparedOriginalAlternative = (AdmittedFinalizedOriginal,PreparedModule)
+-- Retained acceleration carries decoded bodies, never a consuming request's
+-- admission proof. Every reoffer acquires its authority from the current scope.
+data PreparedOriginalAlternative = PreparedOriginalAlternative !FinalizedModule PreparedModule
 
 -- Preserve each reusable site view of one canonical body, in completion order.
 -- Unverifiable preparation can retain decoded Core, but has no reusable site
@@ -462,10 +464,10 @@ mergeOriginalAlternatives :: [PreparedOriginalAlternative] -> [PreparedOriginalA
   -> [PreparedOriginalAlternative]
 mergeOriginalAlternatives = foldl' add
   where
-    reusable (_,prepared) = preparedSiteDependenciesEquivalent prepared prepared
-    add earlier candidate@(_,prepared)
+    reusable (PreparedOriginalAlternative _ prepared) = preparedSiteDependenciesEquivalent prepared prepared
+    add earlier candidate@(PreparedOriginalAlternative _ prepared)
       | not (reusable candidate) = if null earlier then [candidate] else earlier
-      | any (\(_,old) -> preparedSiteDependenciesEquivalent old prepared) earlier = earlier
+      | any (\(PreparedOriginalAlternative _ old) -> preparedSiteDependenciesEquivalent old prepared) earlier = earlier
       | otherwise = filter reusable earlier ++ [candidate]
 
 insertOriginalAlternative :: Module -> OriginalVersion -> PreparedOriginalAlternative
@@ -489,8 +491,9 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
     let key = originalVersionInRecoveryScope admittedScope owner
     alternatives <- maybe (pure []) (\version -> fromMaybe [] . lookupOwnerEntry owner version
       <$> readMVar (cachedOriginalModules cache)) key
-    let previous = (,) <$> key <*> (fst <$> listToMaybe alternatives)
-        hit = listToMaybe [prepared | (_,prepared) <- alternatives
+    let previous = (,) <$> key <*> ((\(PreparedOriginalAlternative original _) -> original)
+          <$> listToMaybe alternatives)
+        hit = listToMaybe [prepared | PreparedOriginalAlternative _ prepared <- alternatives
           , preparedSiteDependenciesMatch siteEnvironment siblings prepared]
     original <- recoverAdmittedFinalizedOriginalWithPrevious admittedScope owner previous
     case original of
@@ -499,15 +502,17 @@ newPreparedOriginalModuleTaskPreparer env cache scope = do
         Just prepared | not disabled ->
           pure (Just (admitted,PreparedBodyReused,PreparedModuleTask (pure prepared)))
         _ -> do
+          originalModule <- evaluate (admittedOriginalModule admitted)
           task <- acquirePreparedModuleWithSiteEnvironment siteEnvironment env
-            (admittedOriginalLocation admitted) siblings (admittedOriginalModule admitted)
+            (admittedOriginalLocation admitted) siblings originalModule
           let observation = case hit of
                 Just _ | disabled -> PreparedBodyDisabled
                 _ -> PreparedBodyMiss
           pure (Just (admitted,observation,PreparedModuleTask $ do
             prepared <- runPreparedModuleTask task
             modifyMVar_ (cachedOriginalModules cache)
-              (pure . insertOriginalAlternative (originalVersionOwner version) version (admitted,prepared))
+              (pure . insertOriginalAlternative (originalVersionOwner version) version
+                (PreparedOriginalAlternative originalModule prepared))
             pure prepared))
 
 preparedBodyKey :: ConstructorWorkerPolicy -> OwnerInterfaceContext -> Maybe FatOriginalVersion -> [CoreBind] -> PreparedBodyKey

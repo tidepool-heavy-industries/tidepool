@@ -192,7 +192,7 @@ originalVersionInRecoveryScope (OriginalRecoveryScope _ scope interfaces _) owne
 -- Core is reused; proof, interface row and location belong to the consuming
 -- scope, including relocated identical artifacts.
 recoverAdmittedFinalizedOriginalWithPrevious
-  :: OriginalRecoveryScope -> Module -> Maybe (OriginalVersion,AdmittedFinalizedOriginal)
+  :: OriginalRecoveryScope -> Module -> Maybe (OriginalVersion,FinalizedModule)
   -> IO (Maybe (OriginalVersion,AdmittedFinalizedOriginal))
 recoverAdmittedFinalizedOriginalWithPrevious admittedScope@(OriginalRecoveryScope env scope interfaces seals) owner previous = case Map.lookup key (scopeModuleInterfaceProofs scope) of
   Just proof | isSourceOriginal (canonicalOrigin proof), Just _ <- canonicalCoreArtifact proof -> do
@@ -208,7 +208,7 @@ recoverAdmittedFinalizedOriginalWithPrevious admittedScope@(OriginalRecoveryScop
     version <- maybe (throwIO CandidateCoreHomeMissing) pure (originalVersionInRecoveryScope admittedScope owner)
     bytes <- readAdmittedCore admission
     original <- case previous of
-      Just (oldVersion,old) | oldVersion == version -> pure (admittedOriginalModule old)
+      Just (oldVersion,old) | oldVersion == version -> pure old
       _ -> decodeFinalizedCore env home location bytes >>= either (throwIO . CandidateCoreDecodeFailure) pure
     pure (Just (version,AdmittedFinalizedOriginal original proof row location))
   _ -> pure Nothing
