@@ -28,6 +28,9 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   Published originals retain their issuer's immutable artifact/group selection
   separately from later executable demand. Reopening and recovery validate that
   proof against exact retained custody; a broader inventory cannot recreate it.
+  Recovery records interface edges and executable group demand; native edges
+  derive from original certificates. A completed source-compilation instance
+  proof remains transaction-owned rather than reconstructed from durable bytes.
 - Pure activation previews preserve the original instance graph separately from
   native availability. Authored dictionary bodies use retained originals matching
   that capture's canonical interfaces; type custody alone cannot replace native

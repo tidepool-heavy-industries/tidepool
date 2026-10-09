@@ -155,7 +155,8 @@ fn property_config() -> proptest::test_runner::Config {
 #[test]
 fn generated_publication_support_and_recovery_preserve_issuer_selection() {
     let mut config = proptest::test_runner::contextualize_config(property_config());
-    config.source_file = Some(file!());
+    config.source_file =
+        Some("tidepool/toolchain/src/declaration_context/published_source/history_properties.rs");
     config.test_name = Some(concat!(
         module_path!(),
         "::generated_publication_support_and_recovery_preserve_issuer_selection"
@@ -225,13 +226,17 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 }
                 Operation::Recover => {
                     observed[2].set(observed[2].get() + 1);
-                    let before = context.semantic_sha256();
+                    let before = context.artifact_view().clone();
                     let roles: Vec<CompilerInputRole> = serde_json::from_slice(
                         &serde_json::to_vec(&context.compiler_input_roles()).unwrap(),
                     )
                     .unwrap();
                     context = restored(&context, &roles).unwrap();
-                    prop_assert_eq!(context.semantic_sha256(), before);
+                    prop_assert_eq!(context.artifact_view(), &before);
+                    prop_assert_eq!(
+                        context.original_instance_environment(),
+                        &OriginalInstanceEnvironment::Unknown
+                    );
                 }
                 Operation::Reopen => {
                     observed[3].set(observed[3].get() + 1);
@@ -274,6 +279,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 }
             }
             prop_assert_eq!(context.compiler_input_roles(), expected_roles.clone());
+            prop_assert_eq!(context.lexical_graph(), original.lexical_graph());
             prop_assert_eq!(
                 context.artifact_view().artifact_ids(),
                 expected_artifacts.clone()

@@ -705,7 +705,7 @@ mod tests {
                     &[],
                     &[],
                     &snapshot.artifact_view().descriptors(),
-                    &snapshot.artifact_view().dependencies(),
+                    &snapshot.artifact_view().interface_dependencies(),
                     &snapshot
                         .artifact_view()
                         .selected_native_groups()
@@ -715,7 +715,17 @@ mod tests {
                     snapshot.lexical.clone(),
                 )
                 .unwrap();
-                assert_eq!(durable.semantic_sha256(), snapshot.semantic_sha256());
+                assert_eq!(durable.artifact_view(), snapshot.artifact_view());
+                assert_eq!(
+                    durable.compiler_input_roles(),
+                    snapshot.compiler_input_roles()
+                );
+                assert_eq!(durable.lexical_graph(), snapshot.lexical_graph());
+                assert_eq!(
+                    durable.original_instance_environment(),
+                    &OriginalInstanceEnvironment::Unknown,
+                    "native recovery does not reconstruct a completed source-compilation proof"
+                );
                 assert_eq!(
                     durable.published_source_original_selections().unwrap()[0]
                         .context()
