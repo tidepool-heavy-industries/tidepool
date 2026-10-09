@@ -2151,12 +2151,6 @@ mod authored_tests {
             }));
         }
         let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
-        crate::declaration_context::assert_selected_authored_private_inputs(
-            &baseline,
-            baseline_module.gen.0,
-            root.path(),
-            endpoint.identity().producer_bytes(),
-        );
         let context = Arc::new(
             ExactDeclarationContext::new(
                 std::slice::from_ref(&baseline),
@@ -2208,10 +2202,59 @@ mod authored_tests {
             .recovery_products()
             .iter()
             .any(|product| product.owner() == baseline.product().owner()));
+        crate::declaration_context::assert_selected_authored_private_inputs(
+            &baseline,
+            &result,
+            baseline_module.gen.0,
+            root.path(),
+            endpoint.identity().producer_bytes(),
+        );
+        let result_owner = result.product().owner().clone();
+        let result_interface = crate::artifact_inventory::ArtifactEntry::canonical(
+            result.product().module_interface().unwrap().clone(),
+        )
+        .descriptor
+        .id;
+        // Retain the issued native roots while withdrawing source lexical
+        // owners, so exact preparation must supply their private inputs.
         let context =
             ExactDeclarationContext::new(&[baseline, Arc::new(result)], &[], Vec::new()).unwrap();
         assert!(context.authored_native_root(1).is_ok());
         assert!(context.authored_native_root(2).is_ok());
+        assert!(context
+            .compiler_input_roles()
+            .iter()
+            .any(|role| role.interface() == result_interface && role.original().is_none()));
+        let selected_before = context.artifact_view().selected_native_groups();
+        std::fs::remove_file(baseline_path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let context = Arc::new(context);
+        let compiled = crate::artifacts::compile_invocation_in_context(
+            &crate::artifacts::CompileInvocation {
+                source: "module ExactAuthoredConsumer where\nimport Tidepool.Session.Lib.G2 (answer)\nresult = answer\n{-# NOINLINE result #-}\n",
+                targets: &["result"],
+                include: &[root.path().to_path_buf()],
+                fallback_module_name: "ExactAuthoredConsumer",
+            },
+            context.clone(),
+            |_, _, _| {},
+        )
+        .expect("exact executable invocation retains selected originals without source replay");
+        assert_eq!(
+            context.artifact_view().selected_native_groups(),
+            selected_before
+        );
+        assert!(compiled.targets["result"]
+            .pending_imports
+            .iter()
+            .any(|import| {
+                matches!(import, crate::certified_products::PendingImportOwner::Source { owner, .. }
+                if owner == &result_owner)
+            }));
+        assert!(compiled.certified_groups.iter().any(|group| {
+            group.owner() == &result_owner
+                && group.origin() == crate::certified_products::ProductOrigin::Cached
+        }));
     }
 
     #[test]

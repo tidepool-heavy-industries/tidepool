@@ -788,16 +788,11 @@ fn private_native_availability(
     producer: &[u8],
     selected: Option<&module_candidates::CandidateSet>,
 ) -> Result<Option<crate::declaration_context::OriginalCompilerInputs>, CompileError> {
-    let Some(selected) = selected.filter(|selected| !selected.native_availability.is_empty())
-    else {
-        return Ok(None);
-    };
-    crate::declaration_context::OriginalCompilerInputs::from_native_availability(
+    crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
         context,
         crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
-        &selected.native_availability,
+        selected.map_or(&[], |selected| selected.native_availability.as_slice()),
     )
-    .map(Some)
 }
 
 fn checked_candidate_reservations(
@@ -984,13 +979,27 @@ impl ModuleCandidateOffer {
         scratch: &Path,
         context: Arc<crate::declaration_context::ExactCompileContext>,
     ) -> Result<Self, CompileError> {
+        let selected = immutable_candidates_in_context(
+            context.declarations(),
+            producer,
+            include,
+            scratch,
+            BTreeSet::new(),
+        )?;
+        let private =
+            private_native_availability(context.declarations(), producer, selected.as_deref())?;
         Ok(Self {
             selected: None,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(
                 context
-                    .prepare_compilation(&scratch.join("exact-scope"), producer)?
+                    .prepare_compilation_with_private_input(
+                        &scratch.join("exact-scope"),
+                        producer,
+                        None,
+                        private,
+                    )?
                     .with_source_search_context(include),
             ),
             checked_cell: None,
@@ -1239,11 +1248,7 @@ impl ModuleCandidateOffer {
             scratch,
             checked_candidate_reservations(&specification, Some(&planned)),
         )?;
-        let private = crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
-            &context,
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
-            selected.as_ref().map_or(&[], |selected| selected.native_availability.as_slice()),
-        )?;
+        let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {
             selected,
             producer: producer.to_vec(),
@@ -4064,36 +4069,28 @@ fn compile_invocation_inner(
         crate::toolchain::admit_bound_endpoint(&endpoint)
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
         let producer = endpoint.identity().producer_bytes();
-        let request = match &policy {
-            CompilationPolicy::Authored { admission, .. } => {
-                // A lexical join can hide an already selected authored body.
-                // Its complete native closure remains a private compiler input.
-                let selected = immutable_candidates_in_context(
-                    context,
-                    producer,
-                    inv.include,
-                    output_owner.path(),
-                    BTreeSet::from([admission.owner().module.clone()]),
-                )?;
-                let private = crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
-                    context,
-                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
-                    selected.as_ref().map_or(&[], |selected| selected.native_availability.as_slice()),
-                )?;
-                crate::declaration_context::ExactCompileContext::new(Arc::clone(context))
-                    .prepare_compilation_with_private_input(
-                        &output_owner.path().join("exact-scope"),
-                        producer,
-                        None,
-                        private,
-                    )?
-            }
-            _ => context.prepare_compilation(
+        let reserved = match &policy {
+            CompilationPolicy::Authored { admission, .. } => admission.owner().module.clone(),
+            _ => module.clone(),
+        };
+        // A lexical join can hide an already selected authored body. Every
+        // exact executable request retains that native closure privately.
+        let selected = immutable_candidates_in_context(
+            context,
+            producer,
+            inv.include,
+            output_owner.path(),
+            BTreeSet::from([reserved]),
+        )?;
+        let private = private_native_availability(context, producer, selected.as_deref())?;
+        let request = crate::declaration_context::ExactCompileContext::new(Arc::clone(context))
+            .prepare_compilation_with_private_input(
                 &output_owner.path().join("exact-scope"),
                 producer,
-            )?,
-        }
-        .with_source_search_context(inv.include);
+                None,
+                private,
+            )?;
+        let request = request.with_source_search_context(inv.include);
         request.apply_to(
             &mut cmd,
             crate::declaration_context::RetainedGenerationPolicy::PreserveCertifiedDemand,

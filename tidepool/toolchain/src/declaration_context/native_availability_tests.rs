@@ -513,6 +513,132 @@ fn private_native_offer_refuses_core_drift_and_retained_resume_ambiguity() {
 }
 
 #[test]
+fn private_native_availability_distinguishes_exact_canonical_histories() {
+    let current = product("CanonicalHistory", 1);
+    let competitor = product("CanonicalHistory", 250);
+    assert_eq!(current.module_interface(), competitor.module_interface());
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    for length in 1..=4 {
+        let mut context = type_context(std::slice::from_ref(&current))
+            .as_ref()
+            .clone();
+        let mut products = vec![current.clone()];
+        for version in 2..=length + 1 {
+            let historical = fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    "CanonicalHistory",
+                    vec![(7, vec![]), (9001, vec![])],
+                    version,
+                    &BTreeMap::new(),
+                    vec![version],
+                ),
+                producer.sha256(),
+            );
+            assert_ne!(historical.module_interface(), current.module_interface());
+            products.push(historical);
+        }
+        let entries = products
+            .into_iter()
+            .map(|product| Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap()))
+            .collect::<Vec<_>>();
+        context.inventory = context
+            .inventory
+            .inventory()
+            .admit_shared_with_demand(
+                &context.inventory,
+                entries,
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        assert!(context
+            .inventory
+            .metadata_snapshot()
+            .ambiguous_native_owners
+            .contains(&identity("fixture", "CanonicalHistory")));
+        let before = context.inventory.selected_native_groups();
+        assert!(
+            before.is_empty(),
+            "historical custody selects no executable groups"
+        );
+        let private = OriginalCompilerInputs::from_native_availability(
+            &context,
+            producer,
+            std::slice::from_ref(&current),
+        )
+        .expect("different exact historical interfaces cannot obscure the current issuer");
+        let root = tempfile::tempdir().unwrap();
+        let request = ExactCompileContext::new(Arc::new(context.clone()))
+            .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private))
+            .unwrap();
+        assert_eq!(
+            request.compiler_original_products().unwrap(),
+            vec![current.clone()]
+        );
+        assert_eq!(
+            request.compiler_inputs().metadata.selected_native_groups,
+            before
+        );
+        let wire = scope(&request);
+        let rows = wire[6].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].as_array().unwrap()[4],
+            text(hex(&current.owner().product_sha256))
+        );
+
+        let mut unissued = context.clone();
+        unissued.compiler_projection = CompilerInputProjection::default();
+        assert!(
+            OriginalCompilerInputs::from_native_availability(
+                &unissued,
+                producer,
+                std::slice::from_ref(&current),
+            )
+            .is_err(),
+            "absence of an issuing canonical role retains strict ambiguity refusal"
+        );
+        let competing =
+            Arc::new(ArtifactEntry::original(producer.sha256(), competitor.clone()).unwrap());
+        context.inventory = context
+            .inventory
+            .inventory()
+            .admit_shared_with_demand(
+                &context.inventory,
+                vec![competing.clone()],
+                crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        assert!(
+            OriginalCompilerInputs::from_native_availability(
+                &context,
+                producer,
+                std::slice::from_ref(&current),
+            )
+            .is_err(),
+            "two native bodies for the same exact canonical interface remain ambiguous"
+        );
+        context.compiler_projection =
+            CompilerInputProjection::from_issued_entries(&[competing]).unwrap();
+        assert!(
+            OriginalCompilerInputs::from_native_availability(
+                &context,
+                producer,
+                std::slice::from_ref(&current),
+            )
+            .is_err(),
+            "an issued native winner cannot be replaced by a canonical-equal competitor"
+        );
+        assert!(OriginalCompilerInputs::from_native_availability(
+            &context,
+            producer,
+            std::slice::from_ref(&competitor),
+        )
+        .is_ok());
+        assert_eq!(context.inventory.selected_native_groups(), before);
+    }
+}
+
+#[test]
 fn availability_refuses_wrong_external_group_before_advertising_binders() {
     use crate::certified_products::{
         certify_candidate_original_with_validation, OriginalNativeCandidate, PendingImportOwner,
@@ -561,10 +687,11 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
     .is_err());
 }
 
-// Called by the existing genuinely compiled native-origin fixture. The same
-// immutable certificate supplies every narrowed history; none recompiles it.
+// The existing native-origin fixture supplies genuine certificates for narrowed
+// selections and an old dependency island beside a newer same-module issuer.
 pub(crate) fn assert_selected_authored_private_inputs(
     certificate: &Arc<CertifiedAuthoredDeclaration>,
+    dependent: &CertifiedAuthoredDeclaration,
     generation: u64,
     root: &Path,
     producer_bytes: &[u8],
@@ -574,6 +701,50 @@ pub(crate) fn assert_selected_authored_private_inputs(
     let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
     let authored_root = native_context.authored_native_root(generation).unwrap();
     let selected_before = native_context.inventory.selected_native_groups();
+    let assert_exact_offer = |context: &ExactDeclarationContext, name: &str, expected: bool| {
+        let before = context.inventory.selected_native_groups();
+        let offer = crate::artifacts::ModuleCandidateOffer::select_in_context(
+            producer_bytes,
+            &[root.to_path_buf()],
+            &root.join(name),
+            Arc::new(ExactCompileContext::new(Arc::new(context.clone()))),
+        )
+        .expect("actual exact offer preserves the issued canonical context");
+        let scope: Value = ciborium::de::from_reader(
+            std::fs::read(offer.exact_scope_path().unwrap())
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        let owner = certificate.product().owner();
+        let originals = scope.as_array().unwrap()[6].as_array().unwrap();
+        let offered = originals
+            .iter()
+            .map(|row| row.as_array().unwrap())
+            .filter(|row| row[0] == text(&owner.unit) && row[1] == text(&owner.module))
+            .collect::<Vec<_>>();
+        if expected {
+            let [row] = offered.as_slice() else {
+                panic!("complete selected authored original must have one private offer");
+            };
+            assert_eq!(
+                &row[..5],
+                &[
+                    text(&owner.unit),
+                    text(&owner.module),
+                    text(hex(&owner.module_version.0)),
+                    text(hex(&owner.skinny_iface_sha256)),
+                    text(hex(&owner.product_sha256)),
+                ]
+            );
+        } else {
+            assert!(
+                offered.is_empty(),
+                "custody or partial demand grants no full original offer"
+            );
+        }
+        assert_eq!(context.inventory.selected_native_groups(), before);
+    };
     let authored_groups = selected_before
         .iter()
         .filter(|group| group.artifact == authored_root)
@@ -616,11 +787,15 @@ pub(crate) fn assert_selected_authored_private_inputs(
             .selected_native_groups,
         selected_before
     );
+    assert_exact_offer(&native_context, "full-authored-exact-offer", true);
     // Reuse the genuine certificate and independently remove execution
     // roots. Neither type custody nor an incomplete group selection can
     // supply the complete authored original to another compiler request.
     let mut valid_sparse_refusals = 0;
-    for omitted in std::iter::once(None).chain(authored_groups.iter().map(Some)) {
+    for (selection_index, omitted) in std::iter::once(None)
+        .chain(authored_groups.iter().map(Some))
+        .enumerate()
+    {
         let selected = match omitted {
             None => BTreeSet::new(),
             Some(omitted) => selected_before
@@ -654,6 +829,11 @@ pub(crate) fn assert_selected_authored_private_inputs(
             .roles()
             .iter()
             .all(|role| role.original() != Some(authored_root))));
+        assert_exact_offer(
+            &partial,
+            &format!("partial-authored-exact-offer-{selection_index}"),
+            false,
+        );
         if omitted.is_some()
             && partial
                 .inventory
@@ -668,4 +848,141 @@ pub(crate) fn assert_selected_authored_private_inputs(
         valid_sparse_refusals > 0,
         "a valid nonempty sparse selection must reach private offer refusal"
     );
+
+    let current_root = tempfile::tempdir().unwrap();
+    let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation));
+    let source = "module Tidepool.Session.Lib.G1 where\nbaseline = (80 :: Int)\n{-# NOINLINE baseline #-}\ncurrentOnly = (81 :: Int)\n{-# NOINLINE currentOnly #-}\n";
+    let path = current_root.path().join(module.relative_hs_path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, source).unwrap();
+    let current = Arc::new(
+        crate::declaration_join::certify_authored_declaration(
+            module,
+            &path,
+            source,
+            &[current_root.path().to_path_buf()],
+            current_root.path(),
+        )
+        .expect("the replacement interface and native body need the real issuing compiler"),
+    );
+    let mut history =
+        ExactDeclarationContext::new(std::slice::from_ref(&current), &[], vec![]).unwrap();
+    let current_native = history.authored_native_root(generation).unwrap();
+    let current_interface =
+        ArtifactEntry::canonical(current.product().module_interface().unwrap().clone())
+            .descriptor
+            .id;
+    let old_interface =
+        ArtifactEntry::canonical(certificate.product().module_interface().unwrap().clone())
+            .descriptor
+            .id;
+    assert_ne!(current_interface, old_interface);
+    assert_ne!(current_native, authored_root);
+    let dependent_native = ArtifactEntry::original(producer.sha256(), dependent.product().clone())
+        .unwrap()
+        .descriptor
+        .id;
+    assert!(
+        dependent
+            .artifact_view()
+            .dependencies()
+            .iter()
+            .any(|(from, to, edge)| {
+                *from == dependent_native
+                    && *to == authored_root
+                    && matches!(
+                        edge,
+                        crate::artifact_inventory::ArtifactDependency::NativeGroup { .. }
+                    )
+            }),
+        "the historical child must be a compiler-authenticated exact dependency"
+    );
+    let before_merge = history.inventory.selected_native_groups();
+    history.inventory = history
+        .inventory
+        .merge(certificate.artifact_view())
+        .unwrap()
+        .merge(dependent.artifact_view())
+        .unwrap();
+    let selected_history = history.inventory.selected_native_groups();
+    assert!(before_merge.is_subset(&selected_history));
+    assert!(selected_before.is_subset(&selected_history));
+    assert!(selected_history
+        .iter()
+        .any(|group| group.artifact == dependent_native));
+    let metadata = history.compiler_metadata_snapshot().unwrap();
+    assert_eq!(
+        metadata.entries[&identity(
+            &current.product().owner().unit,
+            &current.product().owner().module
+        )]
+            .descriptor
+            .id,
+        current_interface
+    );
+    assert!(history
+        .compiler_projection
+        .roles()
+        .iter()
+        .all(|role| role.interface() != old_interface));
+    let private =
+        OriginalCompilerInputs::from_selected_authored_declarations(&history, producer, &[])
+            .unwrap()
+            .expect("current issued authored body remains privately available");
+    assert_eq!(
+        private
+            .projection
+            .roles()
+            .iter()
+            .filter_map(|role| role.original())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([current_native])
+    );
+    let request = ExactCompileContext::new(Arc::new(history.clone()))
+        .prepare_compilation_with_private_input(
+            &root.join("historical-authored-scope"),
+            producer_bytes,
+            None,
+            Some(private),
+        )
+        .unwrap();
+    assert_eq!(
+        request
+            .compiler_original_products()
+            .unwrap()
+            .iter()
+            .map(|product| product.owner().clone())
+            .collect::<Vec<_>>(),
+        vec![current.product().owner().clone()]
+    );
+    assert_eq!(
+        request.compiler_inputs().metadata.selected_native_groups,
+        selected_history
+    );
+    let offer = crate::artifacts::ModuleCandidateOffer::select_in_context(
+        producer_bytes,
+        &[root.to_path_buf()],
+        &root.join("historical-authored-exact-offer"),
+        Arc::new(ExactCompileContext::new(Arc::new(history.clone()))),
+    )
+    .expect("public exact preparation must keep historical children out of its namespace");
+    let wire: Value = ciborium::de::from_reader(
+        std::fs::read(offer.exact_scope_path().unwrap())
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    let originals = wire.as_array().unwrap()[6].as_array().unwrap();
+    assert_eq!(originals.len(), 1);
+    assert_eq!(
+        &originals[0].as_array().unwrap()[..5],
+        &[
+            text(&current.product().owner().unit),
+            text(&current.product().owner().module),
+            text(hex(&current.product().owner().module_version.0)),
+            text(hex(&current.product().owner().skinny_iface_sha256)),
+            text(hex(&current.product().owner().product_sha256)),
+        ]
+    );
+    assert_eq!(history.inventory.selected_native_groups(), selected_history);
 }
