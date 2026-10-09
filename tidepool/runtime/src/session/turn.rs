@@ -7865,6 +7865,43 @@ mod tests {
             .matches_target(&expression_compiled.prepared));
         assert!(!original_path.exists());
         assert!(view.is_current_for(&session.compile_view_in(public).unwrap()));
+        let before_refusal = session.public_visibility_snapshot_in(public).unwrap();
+        let mut hidden_specification = admission_specification.clone();
+        hidden_specification.cell_source = format!(
+            "import qualified {} as HiddenOriginal\nlet leaked = HiddenOriginal.answer (41 :: Int)",
+            original.product().owner().module
+        );
+        let hidden_execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let hidden_scope = hidden_execution.private_scope();
+        let hidden_plan = tidepool_toolchain::artifacts::parse_cell_plan(
+            Arc::new(hidden_specification.clone()),
+            &include
+                .iter()
+                .map(|path| path.to_path_buf())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let hidden_admission = session
+            .admit_planned_cell_for_execution(
+                hidden_execution,
+                hidden_plan,
+                Arc::new(hidden_specification.clone()),
+                hidden_specification.specification_digest(),
+                [0; 32],
+                include.iter().map(|path| path.to_path_buf()).collect(),
+                None,
+            )
+            .unwrap();
+        assert!(
+            compile_cell_program_admitted(hidden_admission).is_err(),
+            "private original code availability must not authorize an authored import of its hidden owner"
+        );
+        session.retire_scope(hidden_scope);
+        assert_eq!(
+            session.public_visibility_snapshot_in(public).unwrap(),
+            before_refusal
+        );
+        assert_eq!(context.semantic_sha256(), published_context_digest);
         #[derive(Clone)]
         struct QuietOutput;
         impl crate::session::OutputSink for QuietOutput {

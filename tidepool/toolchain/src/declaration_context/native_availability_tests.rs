@@ -74,7 +74,7 @@ fn selected_authored_availability_refuses_source_original_spelling_with_full_gro
         vec![7, 9001]
     );
     assert!(
-        OriginalCompilerInputs::from_selected_authored_declarations(&context, producer)
+        OriginalCompilerInputs::from_selected_authored_declarations(&context, producer, &[])
             .unwrap()
             .is_none()
     );
@@ -335,7 +335,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         ArtifactPayload::Canonical(_)
     ));
     let native =
-        OriginalCompilerInputs::from_selected_authored_declarations(&native_context, producer)
+        OriginalCompilerInputs::from_selected_authored_declarations(&native_context, producer, &[])
             .unwrap()
             .expect("actual authored selection supplies private native availability");
     let native_request = ExactCompileContext::new(Arc::new(native_context.clone()))
@@ -390,7 +390,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         partial.inventory = view;
         assert_eq!(partial.inventory.selected_native_groups(), selected);
         let private =
-            OriginalCompilerInputs::from_selected_authored_declarations(&partial, producer)
+            OriginalCompilerInputs::from_selected_authored_declarations(&partial, producer, &[])
                 .unwrap();
         assert!(private.as_ref().is_none_or(|private| private
             .projection

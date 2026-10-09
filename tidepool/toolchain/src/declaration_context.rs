@@ -138,6 +138,7 @@ impl OriginalCompilerInputs {
     pub(crate) fn from_selected_authored_declarations(
         context: &ExactDeclarationContext,
         producer: CanonicalProducerIdentity,
+        configured: &[CertifiedRecoveryProduct],
     ) -> Result<Option<Self>, CompileError> {
         let metadata = context.inventory.metadata_snapshot();
         let selected = metadata
@@ -176,6 +177,10 @@ impl OriginalCompilerInputs {
                 products.push(product.clone());
             }
         }
+        // Validate the complete issued private namespace together: an authored
+        // original can depend on a configured original with only a public type
+        // role. Independent validation would reject that legitimate closure.
+        products.extend_from_slice(configured);
         if products.is_empty() {
             Ok(None)
         } else {
@@ -301,7 +306,7 @@ impl OriginalCompilerInputs {
         })
     }
 
-    pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
+    fn merge(&self, other: &Self) -> Result<Self, CompileError> {
         let projection = self.projection.merge(&other.projection)?;
         let artifacts = self.artifacts.merge(&other.artifacts)?;
         projection.validate(&artifacts)?;
@@ -10836,6 +10841,81 @@ mod tests {
         )
         .expect("actual compiler issues the changed original proof");
         std::fs::write(&support_path, support).unwrap();
+        let dependent_context =
+            ExactDeclarationContext::new(&[Arc::new(changed.clone())], &[], vec![]).unwrap();
+        let producer = CanonicalProducerIdentity::from_compiler(endpoint.identity());
+        let configured_support = changed
+            .recovery_products()
+            .into_iter()
+            .filter(|product| {
+                product.owner().unit == owner.unit && product.owner().module == owner.module
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(configured_support.len(), 1);
+        let wrong_support = persisted
+            .recovery_products()
+            .into_iter()
+            .filter(|product| {
+                product.owner().unit == owner.unit && product.owner().module == owner.module
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(wrong_support.len(), 1);
+        assert_ne!(configured_support[0].owner(), wrong_support[0].owner());
+        assert!(dependent_context
+            .compiler_input_roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        // The protected support offer is valid independently; the authored
+        // original requires that exact owner in the same private namespace.
+        OriginalCompilerInputs::from_native_availability(
+            &dependent_context,
+            producer,
+            &configured_support,
+        )
+        .unwrap();
+        assert!(OriginalCompilerInputs::from_selected_authored_declarations(
+            &dependent_context,
+            producer,
+            &[]
+        )
+        .is_err());
+        assert!(OriginalCompilerInputs::from_selected_authored_declarations(
+            &dependent_context,
+            producer,
+            &wrong_support
+        )
+        .is_err());
+        let private = OriginalCompilerInputs::from_selected_authored_declarations(
+            &dependent_context,
+            producer,
+            &configured_support,
+        )
+        .unwrap()
+        .unwrap();
+        let private_request = ExactCompileContext::new(Arc::new(dependent_context.clone()))
+            .prepare_compilation_with_private_input(
+                &root.join("configured-authored-scope"),
+                endpoint.identity().producer_bytes(),
+                None,
+                Some(private),
+            )
+            .unwrap();
+        assert_eq!(private_request.context().as_ref(), &dependent_context);
+        assert_eq!(
+            private_request
+                .compiler_original_products()
+                .unwrap()
+                .iter()
+                .map(|product| identity(&product.owner().unit, &product.owner().module))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                identity(
+                    &changed.product().owner().unit,
+                    &changed.product().owner().module
+                ),
+                owner.clone(),
+            ])
+        );
         let changed_interfaces = changed
             .artifact_view()
             .interface_projection(&[owner])

@@ -1183,15 +1183,11 @@ impl ModuleCandidateOffer {
             scratch,
             checked_candidate_reservations(&specification, Some(&planned)),
         )?;
-        let private = private_native_availability(&context, producer, selected.as_deref())?;
-        let authored = crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
+        let private = crate::declaration_context::OriginalCompilerInputs::from_selected_authored_declarations(
             &context,
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer),
+            selected.as_ref().map_or(&[], |selected| selected.native_availability.as_slice()),
         )?;
-        let private = match (private, authored) {
-            (Some(configured), Some(authored)) => Some(configured.merge(&authored)?),
-            (private, None) | (None, private) => private,
-        };
         Ok(Self {
             selected,
             producer: producer.to_vec(),
