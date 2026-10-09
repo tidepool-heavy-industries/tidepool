@@ -39,6 +39,83 @@ class IsolatedLibtestTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_concurrent_cases_keep_candidate_sources_and_cache_reuse_in_their_own_scope(self):
+        for diagnostic in (False, True):
+            with self.subTest(diagnostic=diagnostic):
+                rendezvous = Path(self.tmp.name) / f'cache-race-{diagnostic}'
+                rendezvous.mkdir()
+                ambient = rendezvous / 'ambient-cache'
+                ambient.mkdir()
+                (ambient / 'candidate').write_text('ambient must remain untouched')
+                self.binary.write_text('#!' + sys.executable + '\n' +
+                    'import os, pathlib, subprocess, sys, time\n' +
+                    f'root = pathlib.Path({str(rendezvous)!r})\n' +
+                    'name = sys.argv[2]\n' +
+                    'cache = pathlib.Path(os.environ["TIDEPOOL_COMPILE_CACHE_DIR"])\n' +
+                    'source = root / (name + ".hs")\n' +
+                    'source.write_text(name)\n' +
+                    '(cache / "candidate").write_text(str(source))\n' +
+                    '(root / (name + ".ready")).touch()\n' +
+                    'deadline = time.monotonic() + 3\n' +
+                    'while len(list(root.glob("*.ready"))) != 2:\n' +
+                    '    assert time.monotonic() < deadline, "other case did not arrive"\n' +
+                    '    time.sleep(0.005)\n' +
+                    'assert (cache / "candidate").read_text() == str(source)\n' +
+                    'if name == "suite::first":\n' +
+                    '    source.unlink()\n' +
+                    '    (root / "first-released").touch()\n' +
+                    'else:\n' +
+                    '    while not (root / "first-released").exists():\n' +
+                    '        assert time.monotonic() < deadline, "first case did not release"\n' +
+                    '        time.sleep(0.005)\n' +
+                    '    assert pathlib.Path((cache / "candidate").read_text()).read_text() == name\n' +
+                    'observed = subprocess.check_output([sys.executable, "-c",\n' +
+                    '    "import os,pathlib;print((pathlib.Path(os.environ[\\\"TIDEPOOL_COMPILE_CACHE_DIR\\\"])/\\\"candidate\\\").read_text())"], text=True)\n' +
+                    'assert observed.strip() == str(source), "same case lost its cache reuse"\n' +
+                    'print("test result: ok. 1 passed; 0 failed; 0 ignored;")\n')
+                self.binary.chmod(0o700)
+                records = [{}, {}]
+                def run(index):
+                    root = rendezvous / f'artifacts-{index}' if diagnostic else None
+                    return runner.run_one(str(self.binary), ('suite::first', 'suite::second')[index],
+                        False, 5, records[index], artifact_root=root, retain_artifacts=diagnostic)
+                with patch.dict(os.environ, {'TIDEPOOL_COMPILE_CACHE_DIR': str(ambient)}), \
+                     runner.concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    outcomes = list(pool.map(run, range(2)))
+                for outcome in outcomes:
+                    self.assertTrue(outcome[0], outcome[1:])
+                caches = [Path(record['compile_cache_root']) for record in records]
+                self.assertNotEqual(caches[0], caches[1])
+                self.assertNotIn(ambient, caches)
+                self.assertEqual((ambient / 'candidate').read_text(), 'ambient must remain untouched')
+                for cache, record in zip(caches, records):
+                    self.assertEqual(cache.is_dir(), diagnostic)
+                    self.assertEqual(record['compile_cache_disposition'],
+                                     'retained' if diagnostic else 'removed')
+
+    def test_case_cache_selection_crosses_delegation_exactly(self):
+        selected = '/case/artifacts/compile-cache'
+        record = {}
+        command, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', record,
+            environment={'TIDEPOOL_COMPILE_CACHE_DIR': selected, 'UNDECLARED_CACHE': '/ambient'})
+        self.assertIn(f'--setenv=TIDEPOOL_COMPILE_CACHE_DIR={selected}', command)
+        self.assertIn('TIDEPOOL_COMPILE_CACHE_DIR', record['environment_names'])
+        self.assertFalse(any('UNDECLARED_CACHE' in word for word in command))
+
+    def test_missing_case_cache_is_not_reported_as_runner_cleanup(self):
+        root = Path(self.tmp.name) / 'missing-cache-artifacts'
+        record = {}
+        def run(args, timeout, environment=None):
+            Path(environment['TIDEPOOL_COMPILE_CACHE_DIR']).rmdir()
+            return completed_process(args, 101,
+                'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n', '')
+        with patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::failure', False,
+                5, record, artifact_root=root)
+        self.assertFalse(passed)
+        self.assertTrue(root.is_dir())
+        self.assertEqual(record['compile_cache_disposition'], 'missing')
+
     def test_failure_and_timeout_preserve_preexecution_case_evidence(self):
         for timed_out in (False, True):
             with self.subTest(timed_out=timed_out):
@@ -47,6 +124,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                     'import os, pathlib, time\n' +
                     'root = pathlib.Path(os.environ["TIDEPOOL_TEST_ARTIFACT_ROOT"])\n' +
                     'assert os.environ["TIDEPOOL_TEST_DIAGNOSTIC_SCOPE"] == "1"\n' +
+                    'cache = pathlib.Path(os.environ["TIDEPOOL_COMPILE_CACHE_DIR"])\n' +
+                    '(cache / "candidate").write_text("retained failed input")\n' +
                     '(root / "completed-compile.txt").write_text("retained before execution")\n' +
                     ('time.sleep(30)\n' if timed_out else
                      'print("test result: FAILED. 0 passed; 1 failed; 0 ignored;")\nraise SystemExit(101)\n'))
@@ -57,6 +136,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                 self.assertFalse(passed)
                 self.assertTrue((root / 'case.json').is_file())
                 self.assertEqual((root / 'completed-compile.txt').read_text(), 'retained before execution')
+                self.assertEqual((root / 'compile-cache/candidate').read_text(), 'retained failed input')
+                self.assertEqual(record['compile_cache_disposition'], 'retained')
                 self.assertEqual(record['status'], 'timeout' if timed_out else 'finished')
                 self.assertEqual(record['executed_test_count'], None if timed_out else 1)
                 self.assertEqual(record['process_cleanup_status'], 'confirmed')
@@ -528,7 +609,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         frontend.write_bytes(b'frontend at launch')
         worker.write_bytes(b'worker at launch')
         record = {}
-        def run(args, timeout):
+        def run(args, timeout, environment=None):
             captured = record['launch_inputs']
             self.assertEqual(captured['executable']['sha256'], hashlib.sha256(self.binary.read_bytes()).hexdigest())
             self.assertEqual(captured['resources']['TIDEPOOL_EXTRACT']['sha256'], hashlib.sha256(frontend.read_bytes()).hexdigest())
@@ -1298,7 +1379,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertFalse(record['cleanup_confirmed'])
 
     def test_delegated_cleanup_failure_refuses_pass_without_erasing_actual_count(self):
-        def result(args, timeout, service_slice, service_record):
+        def result(args, timeout, service_slice, service_record, environment=None):
             self.assertEqual(service_slice, 'app.slice')
             service_record.update(cleanup_confirmed=False, cleanup_error='service still active')
             return completed_process(args, 0,
@@ -1360,7 +1441,7 @@ class IsolatedLibtestTests(unittest.TestCase):
                 spawn.assert_not_called()
 
     def test_delegated_launch_failure_keeps_test_execution_unknown(self):
-        def refused(args, timeout, service_slice, service_record):
+        def refused(args, timeout, service_slice, service_record, environment=None):
             service_record.update(cleanup_confirmed=True)
             return completed_process(args, 1, '', 'service admission refused')
         record = {}
@@ -2050,7 +2131,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('FAIL suite::works', output)
 
     def test_test_failure_and_timeout_are_counted(self):
-        def fail(argv, timeout):
+        def fail(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
@@ -2065,7 +2146,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('FAIL suite::works', output)
         self.assertIn('panic', errors)
 
-        def timeout(argv, timeout):
+        def timeout(argv, timeout, environment=None):
             discovered = self.discover(argv)
             if discovered is not None:
                 return discovered
