@@ -30,6 +30,15 @@ TRACE_QUEUE_LIMIT = 256
 TRACE_QUEUE_BYTE_LIMIT = 64 << 10
 TRANSACTION_DIRECTORY_LIMIT = 4096
 TRANSACTION_CAPTURE_LIMIT = 256
+COMPILER_SELECTION_RESOURCES = (
+    'TIDEPOOL_COMPILER_MODULES',
+    'TIDEPOOL_PREPARED_ROOT_ENTRY',
+    'TIDEPOOL_EXTRACT_DAEMON_SOCKET',
+)
+COMPILER_SELECTION_FLAGS = (
+    'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT',
+    'TIDEPOOL_EXTRACT_NO_DAEMON',
+)
 RESULT = re.compile(
     r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;.*$",
     re.MULTILINE,
@@ -358,7 +367,7 @@ def names(binary, *args):
 
 
 def resolve_resource_environment(names):
-    """Bind declared single-path resources to this Buck launch directory."""
+    """Bind declared paths after clearing ambient compiler selections."""
     selected = {}
     for name in names:
         value = os.environ.get(name)
@@ -370,6 +379,11 @@ def resolve_resource_environment(names):
         if not path.exists():
             raise RuntimeError(f'declared resource does not exist: {name}={path}')
         selected[name] = str(path)
+    # Source-backed libtests may inherit caller variables even when Buck did
+    # not declare them. Clear these selectors before either direct or delegated
+    # execution, then restore only paths explicitly bound as runner resources.
+    for name in (*COMPILER_SELECTION_RESOURCES, *COMPILER_SELECTION_FLAGS):
+        os.environ.pop(name, None)
     os.environ.update(selected)
 
 

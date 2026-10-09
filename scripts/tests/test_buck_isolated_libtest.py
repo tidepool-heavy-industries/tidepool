@@ -1164,6 +1164,93 @@ class IsolatedLibtestTests(unittest.TestCase):
                 execute.assert_not_called()
                 self.assertIn('declared resource', errors.getvalue())
 
+    def test_compiler_selection_is_equal_for_direct_and_delegated_libtest(self):
+        catalog = Path(self.tmp.name) / 'declared-catalog.json'
+        catalog.write_text('{}')
+        root_entry = Path(self.tmp.name) / 'declared-root-entry'
+        root_entry.mkdir()
+        daemon = Path(self.tmp.name) / 'declared-daemon.sock'
+        daemon.touch()
+        declared = {
+            'TIDEPOOL_COMPILER_MODULES': str(catalog),
+            'TIDEPOOL_PREPARED_ROOT_ENTRY': str(root_entry),
+            'TIDEPOOL_EXTRACT_DAEMON_SOCKET': str(daemon),
+        }
+        poisoned = {
+            'TIDEPOOL_COMPILER_MODULES': '/ambient/catalog',
+            'TIDEPOOL_PREPARED_ROOT_ENTRY': '/ambient/root-entry',
+            'TIDEPOOL_EXTRACT_DAEMON_SOCKET': '/ambient/daemon.sock',
+            'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT': 'ambient-endpoint',
+            'TIDEPOOL_EXTRACT_NO_DAEMON': '1',
+        }
+        self.binary.write_text(
+            '#!' + sys.executable + '\n'
+            'import json, os, pathlib, sys\n'
+            'if "--list" in sys.argv:\n'
+            '    print("suite::ignored: test" if "--ignored" in sys.argv else "suite::works: test\\nsuite::ignored: test")\n'
+            'elif "--exact" in sys.argv:\n'
+            '    keys = ' + repr(sorted(poisoned)) + '\n'
+            '    output = pathlib.Path(os.environ["TIDEPOOL_TEST_ARTIFACT_ROOT"])\n'
+            '    (output / "compiler-selection.json").write_text(json.dumps({key: os.environ.get(key) for key in keys}))\n'
+            '    print("test result: ok. 1 passed; 0 failed; 0 ignored;")\n'
+        )
+        self.binary.chmod(0o700)
+        outputs = {}
+        original_execute = runner.execute
+
+        def execute(args, timeout, service_slice=None, service_record=None,
+                    environment=None, declared_resources=()):
+            if service_slice is None:
+                return original_execute(args, timeout, environment=environment)
+            command, _ = runner.delegated_command(
+                args, timeout, service_slice, service_record,
+                environment=environment, declared_resources=declared_resources)
+            child_environment = {}
+            for value in command:
+                if value.startswith('--setenv='):
+                    key, selected = value[len('--setenv='):].split('=', 1)
+                    child_environment[key] = selected
+            result = subprocess.run(args, capture_output=True, text=True,
+                                    errors='replace', env=child_environment, check=False)
+            result.cleanup_confirmed = True
+            service_record.update(cleanup_confirmed=True, manager_wait_success=True,
+                                  admission_observer_stopped=True)
+            return result
+
+        for bind_resources in (False, True):
+            for delegated in (False, True):
+                with self.subTest(bind_resources=bind_resources, delegated=delegated), \
+                     tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory) / 'runner-output'
+                    arguments = [str(self.binary), '--exact', 'suite::works',
+                                 '--expected-count', '1', '--output-dir', str(output),
+                                 '--retain-artifacts']
+                    selected_resources = declared if bind_resources else {}
+                    for name in selected_resources:
+                        arguments.extend(['--resource-env', name])
+                    if delegated:
+                        arguments.append('--delegated-service')
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with patch.dict(os.environ, clear=True):
+                        os.environ.update({'PATH': os.environ.get('PATH', ''),
+                                           **poisoned, **selected_resources})
+                        with patch.object(runner, 'execute', side_effect=execute), \
+                             contextlib.redirect_stdout(stdout), \
+                             contextlib.redirect_stderr(stderr):
+                            result = runner.main(arguments)
+                    self.assertEqual(result, 0, stderr.getvalue() + stdout.getvalue())
+                    key = hashlib.sha256(b'suite::works').hexdigest()
+                    captured = output / key / 'artifacts/compiler-selection.json'
+                    outputs[(bind_resources, delegated)] = json.loads(captured.read_text())
+
+        self.assertEqual(outputs[(False, False)], outputs[(False, True)])
+        self.assertEqual(outputs[(False, False)], {name: None for name in poisoned})
+        self.assertEqual(outputs[(True, False)], outputs[(True, True)])
+        self.assertEqual(outputs[(True, False)], declared | {
+            'TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT': None,
+            'TIDEPOOL_EXTRACT_NO_DAEMON': None,
+        })
+
     def test_delegated_command_forwards_bounded_startup_and_existing_compiler_diagnostics(self):
         environment = {
             'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS': '600',
