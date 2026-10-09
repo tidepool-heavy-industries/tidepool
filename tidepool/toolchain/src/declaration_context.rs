@@ -7135,6 +7135,12 @@ mod tests {
         .unwrap()
     }
 
+    /// Share immutable authenticated artifacts while generated history remains case-local.
+    fn published_original_history_fixture() -> &'static ExactDeclarationContext {
+        static FIXTURE: std::sync::OnceLock<ExactDeclarationContext> = std::sync::OnceLock::new();
+        FIXTURE.get_or_init(published_original_fixture)
+    }
+
     #[test]
     fn published_original_projection_keeps_checked_template_custody_in_its_parent() {
         let owners = [identity("fixture", "Alpha"), identity("fixture", "Beta")];
@@ -7489,7 +7495,7 @@ mod tests {
         fn published_original_composition_recovery_history(
             revision in "[a-z]{1,12}", history in proptest::collection::vec(0u8..4, 1..24),
         ) {
-            let issued = published_original_fixture();
+            let issued = published_original_history_fixture();
             let root = identity("fixture", "Alpha");
             let selection = issued.issue_published_source_original(&revision, "input", &root).unwrap();
             let mut context = ExactDeclarationContext::new(&[], &[], vec![]).unwrap().with_published_source_originals(&selection).unwrap();
