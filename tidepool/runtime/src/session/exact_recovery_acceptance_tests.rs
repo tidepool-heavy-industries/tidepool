@@ -82,6 +82,7 @@ fn adopt_recovery_declaration(
     effects: &TestEffectSurface,
     source: &str,
 ) -> Generation {
+    use crate::session::turn::compile_cell_program_admitted;
     use tidepool_toolchain::checked_cell::{CheckedCellSpecification, CheckedItemKind};
 
     let view = session.compile_view_for_execution(&execution).unwrap();
