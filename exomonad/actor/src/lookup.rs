@@ -477,22 +477,34 @@ pub(crate) fn execute(
     // Request their facts with the primary queries so ordinary browsing shares
     // one PreserveSource environment; type searches keep their own transform.
     let plan = LookupInspectionPlan::new(&prepared, imports, &request.references);
-    let mut inspected = if plan.queries.is_empty() {
-        vec![]
+    let InspectionAnswers {
+        results: mut inspected,
+        unavailable,
+    } = if plan.queries.is_empty() {
+        InspectionAnswers {
+            results: vec![],
+            unavailable: None,
+        }
     } else {
-        match inspect(&plan.queries) {
-            Ok(results) if results.len() == plan.queries.len() => results,
-            // Retry only after a failed or malformed batch. Supplemental facts
-            // receive the same failure isolation as the primary queries.
-            Ok(_) | Err(_) => {
-                let mut results = isolate(&prepared, imports, &inspect);
-                for query in &plan.queries[plan.primary_len..] {
-                    results.extend(inspect_isolated(std::slice::from_ref(query), &inspect));
-                }
-                results
-            }
+        match inspect_checked(&plan.queries, &inspect) {
+            Ok(results) => InspectionAnswers {
+                results,
+                unavailable: None,
+            },
+            Err(InspectionFailure::SourceRejected(diagnostic)) => isolate(
+                &prepared,
+                imports,
+                &plan.queries[plan.primary_len..],
+                &inspect,
+                &diagnostic,
+            ),
+            Err(InspectionFailure::Unavailable(diagnostic)) => InspectionAnswers {
+                results: rejected(plan.queries.len(), &diagnostic),
+                unavailable: Some(diagnostic),
+            },
         }
     };
+    batch.issue = unavailable;
     // Public exports are valid read-only lookup targets even without a source import.
     for index in 0..plan.primary_len.saturating_sub(1) {
         if let (
@@ -689,7 +701,7 @@ pub(crate) fn execute(
                         | lookup_tool::PreparedLookupKind::Qualified(_)
                 )
         });
-        let exports = if misses {
+        let exports = if misses && batch.issue.is_none() {
             let mut discovery_queries = discovery_modules
                 .iter()
                 .map(|module| InspectionQuery::Browse {
@@ -701,13 +713,13 @@ pub(crate) fn execute(
                 named_count.min(discovery_queries.len()),
                 InspectionQuery::ScopeBrowse,
             );
-            match inspect(&discovery_queries) {
+            match inspect_checked(&discovery_queries, &inspect) {
                 Ok(results) => results,
                 Err(error) => {
                     batch.issue = Some(bound_diagnostic(
                         &format!(
                             "lookup candidate discovery unavailable: {}",
-                            render_lookup_inspection_error(&error)
+                            error.diagnostic()
                         ),
                         DIAGNOSTIC_BOUND,
                     ));
@@ -950,52 +962,103 @@ fn bound_diagnostic(diagnostic: &str, limit: usize) -> String {
     }
 }
 
-/// One combined compiler-worker request answers a whole query batch: every
-/// query's generated module is compiled in the same invocation, so one
-/// query's own compile failure (a malformed generated `Expr.hs`, most often
-/// a type search whose signature doesn't parse or typecheck) turns
-/// `inspect` into a single batch-wide `Err`, discarding every other query's
-/// perfectly good answer along with it. Retrying each prepared query on its
-/// own isolates that failure to the query that actually caused it — a
-/// neighbor that compiles alone gets its real result; a query that fails
-/// alone too keeps its own diagnostic instead of the whole batch's.
 const DIAGNOSTIC_BOUND: usize = 2_000;
+
+enum InspectionFailure {
+    SourceRejected(String),
+    Unavailable(String),
+}
+
+impl InspectionFailure {
+    fn diagnostic(&self) -> &str {
+        match self {
+            Self::SourceRejected(diagnostic) | Self::Unavailable(diagnostic) => diagnostic,
+        }
+    }
+}
+
+struct InspectionAnswers {
+    results: Vec<InspectionResult>,
+    unavailable: Option<String>,
+}
+
+fn rejected(count: usize, diagnostic: &str) -> Vec<InspectionResult> {
+    let diagnostic = bound_diagnostic(diagnostic, DIAGNOSTIC_BOUND);
+    (0..count)
+        .map(|_| InspectionResult::Rejected {
+            diagnostic: diagnostic.clone(),
+        })
+        .collect()
+}
+
+fn inspect_checked(
+    queries: &[InspectionQuery],
+    inspect: &impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
+) -> Result<Vec<InspectionResult>, InspectionFailure> {
+    match inspect(queries) {
+        Ok(values) if values.len() == queries.len() => Ok(values),
+        Ok(values) => Err(InspectionFailure::Unavailable(format!(
+            "lookup compiler returned {} results for {} queries",
+            values.len(),
+            queries.len()
+        ))),
+        Err(error) => {
+            let diagnostic =
+                bound_diagnostic(&render_lookup_inspection_error(&error), DIAGNOSTIC_BOUND);
+            // Only GHC source rejection can be narrowed by partitioning queries.
+            // Worker, admission, cancellation and receipt failures apply to the
+            // inspection service; submitting more queries cannot isolate them.
+            match error {
+                LookupInspectionError::Compiler(tidepool_runtime::CompileError::Diagnostics(_)) => {
+                    Err(InspectionFailure::SourceRejected(diagnostic))
+                }
+                _ => Err(InspectionFailure::Unavailable(diagnostic)),
+            }
+        }
+    }
+}
 
 fn isolate(
     prepared: &[lookup_tool::PreparedLookup],
     imports: &str,
+    supplemental: &[InspectionQuery],
     inspect: &impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
-) -> Vec<InspectionResult> {
+    original_diagnostic: &str,
+) -> InspectionAnswers {
+    let parts = prepared
+        .iter()
+        .map(|query| queries(std::slice::from_ref(query), imports))
+        .filter(|queries| !queries.is_empty())
+        .chain(supplemental.iter().map(|query| vec![query.clone()]))
+        .collect::<Vec<_>>();
+    if parts.len() == 1 {
+        // Repeating the identical request would provide no narrower evidence.
+        return InspectionAnswers {
+            results: rejected(parts[0].len(), original_diagnostic),
+            unavailable: None,
+        };
+    }
     let mut results = Vec::new();
-    for query in prepared {
-        let own = queries(std::slice::from_ref(query), imports);
-        if own.is_empty() {
-            // Doc and already-Rejected queries never reach the compiler.
+    let mut unavailable: Option<String> = None;
+    for queries in parts {
+        if let Some(diagnostic) = &unavailable {
+            results.extend(rejected(queries.len(), diagnostic));
             continue;
         }
-        results.extend(inspect_isolated(&own, inspect));
-    }
-    results
-}
-
-fn inspect_isolated(
-    queries: &[InspectionQuery],
-    inspect: &impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
-) -> Vec<InspectionResult> {
-    match inspect(queries) {
-        Ok(values) if values.len() == queries.len() => values,
-        result => {
-            let diagnostic = match result {
-                Ok(_) => "lookup compiler returned a mismatched result for this query".into(),
-                Err(error) => render_lookup_inspection_error(&error),
-            };
-            queries
-                .iter()
-                .map(|_| InspectionResult::Rejected {
-                    diagnostic: bound_diagnostic(&diagnostic, DIAGNOSTIC_BOUND),
-                })
-                .collect()
+        match inspect_checked(&queries, inspect) {
+            Ok(values) => results.extend(values),
+            Err(InspectionFailure::SourceRejected(diagnostic)) => {
+                results.extend(rejected(queries.len(), &diagnostic))
+            }
+            Err(InspectionFailure::Unavailable(diagnostic)) => {
+                results.extend(rejected(queries.len(), &diagnostic));
+                unavailable = Some(diagnostic);
+            }
         }
+    }
+    InspectionAnswers {
+        results,
+        unavailable,
     }
 }
 
@@ -1064,6 +1127,16 @@ mod tests {
             ]));
         assert!(render_lookup_inspection_error(&source_error)
             .contains("src/Query.hs:57:9-57:21: error: source-level type error"));
+    }
+
+    fn source_error(message: &str) -> LookupInspectionError {
+        LookupInspectionError::Compiler(tidepool_runtime::CompileError::Diagnostics(vec![
+            tidepool_toolchain::diag::ExtractDiag {
+                span: None,
+                severity: tidepool_toolchain::diag::DiagnosticSeverity::Error,
+                message: message.into(),
+            },
+        ]))
     }
 
     fn entry(name: &str) -> InfoEntry {
@@ -1175,7 +1248,7 @@ mod tests {
             crate::UsagePointerTable::default(),
             |queries| {
                 if queries.len() > 2 {
-                    return Err("combined request failed".into());
+                    return Err(source_error("combined source rejected"));
                 }
                 queries
                     .iter()
@@ -1197,10 +1270,10 @@ mod tests {
                             })
                         }
                         InspectionQuery::Browse { module, .. } if module == "Broken.Reference" => {
-                            Err("reference compiler input unavailable".into())
+                            Err(source_error("reference source rejected"))
                         }
                         InspectionQuery::Browse { .. } => {
-                            Err("parent compiler input unavailable".into())
+                            Err(source_error("parent source rejected"))
                         }
                         _ => panic!("unexpected query {query:?}"),
                     })
@@ -1217,7 +1290,7 @@ mod tests {
         ));
         assert!(
             matches!(&result.results[2].outcome, LookupOutcome::Rejected(diagnostic)
-            if diagnostic == "reference compiler input unavailable")
+            if diagnostic.contains("reference source rejected"))
         );
     }
 
@@ -1603,13 +1676,7 @@ mod tests {
         assert!(result.candidates.is_empty());
         assert_eq!(calls.get(), 1);
     }
-    /// The batch a live root actually hit: a valid name, an unknown name,
-    /// and a type-signature query, sent together. The combined compile
-    /// fails (the shape of a real compiler-worker failure), but every query
-    /// still resolves on its own — the good name is `Found`, the unknown
-    /// name is `Missing`, and only the signature query, which alone fails
-    /// again, is `Rejected` with its own diagnostic. No neighbor is taken
-    /// down by another query's failure.
+    /// A query-local GHC source failure preserves independently valid neighbors.
     #[test]
     fn mixed_batch_isolates_one_failing_query_from_its_neighbors() {
         let calls = Cell::new(0);
@@ -1623,9 +1690,7 @@ mod tests {
             |queries| {
                 calls.set(calls.get() + 1);
                 if queries.len() != 1 {
-                    // The whole-batch attempt: a real compiler-worker
-                    // failure discards every query in the same invocation.
-                    return Err("compiler worker failed (2 diagnostic(s))".into());
+                    return Err(source_error("combined source rejected"));
                 }
                 match &queries[0] {
                     InspectionQuery::Info(name) if name == "validName" => {
@@ -1639,9 +1704,9 @@ mod tests {
                             query: name.clone(),
                         }])
                     }
-                    InspectionQuery::TypeSearch(_) => {
-                        Err("Not in scope: type constructor or class `Bool'".into())
-                    }
+                    InspectionQuery::TypeSearch(_) => Err(source_error(
+                        "Not in scope: type constructor or class `Bool'",
+                    )),
                     other => panic!("unexpected retried query: {other:?}"),
                 }
             },
@@ -1767,3 +1832,7 @@ mod reference_tests {
         assert!(matches!(entries[0].kind, LookupKind::Constructor));
     }
 }
+
+#[cfg(test)]
+#[path = "lookup/inspection_failure_tests.rs"]
+mod inspection_failure_tests;
