@@ -9871,7 +9871,32 @@ mod tests {
     #[test]
     fn program_support_completion_keeps_unrelated_publication_out_of_transient_offer() {
         let directory = tempfile::tempdir().unwrap();
-        let issued = published_original_fixture();
+        let mut issued = published_original_fixture();
+        // The decoder/capture consumer also authenticates native witnesses.
+        // Recover the fixture's existing products without changing any issued identity.
+        let inventory = ArtifactInventory::default();
+        let entries = issued
+            .artifact_view()
+            .entries()
+            .into_iter()
+            .map(|entry| {
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    return entry;
+                };
+                let recovered = crate::certified_products::tests::recovered_witness_fixtures(
+                    std::slice::from_ref(product),
+                )
+                .remove(0)
+                .product;
+                let recovered = ArtifactEntry::original(issued.producer, recovered).unwrap();
+                assert_eq!(recovered.descriptor, entry.descriptor);
+                Arc::new(recovered)
+            })
+            .collect();
+        issued.inventory = inventory
+            .admit_shared(&inventory.empty_view(), entries)
+            .unwrap();
+        issued.normalize().unwrap();
         let publication = issued
             .issue_published_source_original("revision", "input", &identity("fixture", "Alpha"))
             .unwrap();
