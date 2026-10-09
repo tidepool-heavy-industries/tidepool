@@ -1992,11 +1992,14 @@ fn serve_workers(
     std::thread::scope(|scope| -> Result<u8, FrontendError> {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let mut slots = Vec::with_capacity(worker_count);
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
         for (slot, job_rx) in job_rxs.into_iter().enumerate() {
             let retire = &retire;
             let ready_tx = ready_tx.clone();
             let resources = std::sync::Arc::clone(&resources);
+            let dispatch = dispatch.clone();
             slots.push(scope.spawn(move || -> Result<(), FrontendError> {
+                let _dispatch = tracing::dispatcher::set_default(&dispatch);
                 let _resident = ResidentSlot { resources: std::sync::Arc::clone(&resources), slot };
                 let mut worker = Worker::spawn_in_slot(prepared, epoch, slot)?;
                 tracing::info!(
@@ -6813,6 +6816,191 @@ fn main() {{
         request_stop(&socket).unwrap();
         assert_eq!(server.join().unwrap().unwrap(), 0);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Characterize the accepted connection's lease independently of compiler
+    /// activity. The ready-worker FIFO comparison is a proposed policy, not the
+    /// daemon's current contract.
+    #[test]
+    fn completed_transaction_host_barrier_exposes_fixed_slot_overtaking_and_cancel_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = vec![OsString::from("Expr.hs")];
+        let worker_bin = compile_sleepy_fake_worker(dir.path(), &argv, 0);
+        for cancel_pending in [false, true] {
+            let socket = dir.path().join(if cancel_pending {
+                "cancel.sock"
+            } else {
+                "close.sock"
+            });
+            let prepared = PreparedWorker::for_test(worker_bin.clone()).unwrap();
+            let config = DaemonConfig {
+                socket: socket.clone(),
+                rotate_after: None,
+                rss_ceiling_mb: None,
+                request_deadline_secs: Some(10),
+                watch_stamp: None,
+                persistent: true,
+                run_id: Some("queue-host-barrier".into()),
+                log_path: None,
+                workers: Some(2),
+                foreground_jobs: Some(1),
+                preparation_jobs: Some(1),
+            };
+            let trace = CapturedWriter::default();
+            let subscriber = tracing_subscriber(
+                CapturedWriter::default(),
+                CapturedWriter::default(),
+                trace.clone(),
+                tracing_subscriber::EnvFilter::new("info"),
+            );
+            let server = std::thread::spawn(move || {
+                tracing::subscriber::with_default(subscriber, || serve(&config, prepared))
+            });
+            struct OwnedServer {
+                socket: std::path::PathBuf,
+                thread: Option<std::thread::JoinHandle<Result<u8, FrontendError>>>,
+            }
+            impl Drop for OwnedServer {
+                fn drop(&mut self) {
+                    request_stop(&self.socket).unwrap();
+                    assert_eq!(self.thread.take().unwrap().join().unwrap().unwrap(), 0);
+                }
+            }
+            // Declared before connections so unwind drops their leases first.
+            let _server = OwnedServer {
+                socket: socket.clone(),
+                thread: Some(server),
+            };
+            let ready_deadline = Instant::now() + Duration::from_secs(10);
+            let binding = loop {
+                if let Ok(binding) = preflight(&socket) {
+                    break binding;
+                }
+                assert!(Instant::now() < ready_deadline, "daemon readiness deadline");
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "bounded test-owned daemon readiness polling"
+                )]
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let mut host = begin_transaction(&socket, &binding.epoch).unwrap();
+            let host_reply = execute_transaction_request(&mut host, dir.path(), &argv).unwrap();
+            assert!(host_reply.status.success());
+            let mut spill = begin_transaction(&socket, &binding.epoch).unwrap();
+            assert!(execute_transaction_request(&mut spill, dir.path(), &argv)
+                .unwrap()
+                .status
+                .success());
+            let mut pending = begin_transaction(&socket, &binding.epoch).unwrap();
+            let oldest = pending.admission_id.0;
+            // Accepted on slot 0, but no physical request can execute there
+            // until the completed predecessor sends END after its host work.
+            pending.stream.write_all(&[TRANSACTION_REQUEST]).unwrap();
+            pending
+                .stream
+                .write_all(&encode_request(dir.path(), &argv))
+                .unwrap();
+            pending.stream.flush().unwrap();
+            end_transaction(&mut spill).unwrap();
+            drop(spill);
+            let mut newer = Vec::new();
+            for _ in 0..4 {
+                let mut transaction = begin_transaction(&socket, &binding.epoch).unwrap();
+                newer.push(transaction.admission_id.0);
+                assert!(
+                    execute_transaction_request(&mut transaction, dir.path(), &argv)
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                end_transaction(&mut transaction).unwrap();
+            }
+            pending.stream.set_nonblocking(true).unwrap();
+            assert_eq!(
+                pending.stream.read(&mut [0]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            pending.stream.set_nonblocking(false).unwrap();
+            let rows: Vec<serde_json::Value> = trace
+                .text()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let reserved = rows
+                .iter()
+                .find(|row| {
+                    row["fields"]["message"] == "compiler resources reserved"
+                        && row["fields"]["admission_id"] == oldest
+                })
+                .unwrap();
+            assert_eq!(reserved["fields"]["worker_slot"], 0);
+            let dequeued: Vec<_> = rows
+                .iter()
+                .filter(|row| row["fields"]["message"] == "compiler job dequeued")
+                .map(|row| row["fields"]["admission_id"].as_u64().unwrap())
+                .collect();
+            assert!(!dequeued.contains(&oldest));
+            assert!(newer.iter().all(|admission| dequeued.contains(admission)));
+            // Independent oldest-ready countermodel: no actor affinity has
+            // been declared, so the oldest accepted foreground connection
+            // would take the first worker released by `spill`.
+            let fifo_first = std::iter::once(oldest)
+                .chain(newer.iter().copied())
+                .min()
+                .unwrap();
+            assert_eq!(fifo_first, oldest);
+            assert_ne!(fifo_first, newer[0]);
+            if cancel_pending {
+                pending.stream.shutdown(std::net::Shutdown::Both).unwrap();
+                drop(pending);
+                end_transaction(&mut host).unwrap();
+            } else {
+                end_transaction(&mut host).unwrap();
+                assert!(decode_output(&mut pending.stream).unwrap().status.success());
+                end_transaction(&mut pending).unwrap();
+                drop(pending);
+            }
+            // END neither replaces a completed body nor changes the epoch.
+            assert!(host_reply.status.success());
+            assert_eq!(preflight(&socket).unwrap().epoch, binding.epoch);
+            drop(host);
+            drop(_server);
+            let rows: Vec<serde_json::Value> = trace
+                .text()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let served = rows
+                .iter()
+                .filter(|row| {
+                    row["fields"]["message"] == "compiler request started"
+                        && row["span"]["admission_id"] == oldest
+                })
+                .count();
+            assert_eq!(
+                served,
+                usize::from(!cancel_pending),
+                "cancelled pending work must not execute"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row["fields"]["phase"] == "compiler_capacity_release"
+                        && row["fields"]["admission_id"] == oldest)
+                    .count(),
+                1
+            );
+            if let Some(root) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+                std::fs::write(
+                    std::path::Path::new(&root).join(if cancel_pending {
+                        "queue-cancel.jsonl"
+                    } else {
+                        "queue-close.jsonl"
+                    }),
+                    trace.text(),
+                )
+                .unwrap();
+            }
+        }
     }
 
     /// Two clients, two worker slots: each request is served by its own OS

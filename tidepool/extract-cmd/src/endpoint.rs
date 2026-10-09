@@ -3058,6 +3058,110 @@ mod tests {
     }
 
     #[test]
+    fn host_after_response_and_projection_histories_preserve_owned_transaction_until_close() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+        #[derive(Clone, Debug)]
+        enum Step {
+            HostRead,
+            Request,
+        }
+        let mut config = Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        let strategy = (
+            proptest::collection::vec(
+                prop_oneof![Just(Step::HostRead), Just(Step::Request)],
+                0..24,
+            ),
+            any::<bool>(),
+        );
+        TestRunner::new(config)
+            .run(&strategy, |(history, cancel)| {
+                let cancellation = CompilerTransactionCancellation::new();
+                let mut fixture =
+                    DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, cancellation.clone());
+                let command = fixture.command();
+                let mut projection = fixture.command();
+                projection.declaration_join(Path::new("projection-input.cbor"));
+                projection.declaration_join_out(Path::new("projection-output.cbor"));
+                assert_eq!(
+                    projection.request.mode(),
+                    crate::request::RequestMode::DeclarationInterface
+                );
+                let mut bodies = Vec::new();
+                let retained_close = RefCell::new(None);
+                let outcome = with_compiler_transaction_cancellable(
+                    cancellation.clone(),
+                    |close| *retained_close.borrow_mut() = Some(close),
+                    || {
+                        let endpoint = fixture.bind(&command).unwrap();
+                        let identity = endpoint.identity().clone();
+                        bodies.push(endpoint.execute(&command).unwrap().output.stdout);
+                        // Host reads precede a required later declaration-interface
+                        // request. The first response is not the sequence's end.
+                        compiler_host_checkpoint().unwrap();
+                        assert_eq!(fixture.counts.lock().unwrap().active, 1);
+                        for step in history {
+                            match step {
+                                Step::HostRead => {
+                                    compiler_host_checkpoint().unwrap();
+                                    assert_eq!(fixture.counts.lock().unwrap().active, 1);
+                                }
+                                Step::Request => {
+                                    let bound = fixture.bind(&command).unwrap();
+                                    assert_eq!(bound.identity(), &identity);
+                                    bodies.push(bound.execute(&command).unwrap().output.stdout);
+                                }
+                            }
+                        }
+                        let bound = fixture.bind(&projection).unwrap();
+                        assert_eq!(bound.identity(), &identity);
+                        bodies.push(bound.execute(&projection).unwrap().output.stdout);
+                        compiler_host_checkpoint().unwrap();
+                        assert_eq!(fixture.counts.lock().unwrap().active, 1);
+                        if cancel {
+                            cancellation.cancel();
+                            assert_eq!(
+                                compiler_host_checkpoint().unwrap_err().kind(),
+                                io::ErrorKind::Interrupted
+                            );
+                        }
+                    },
+                );
+                prop_assert_eq!(retained_close.into_inner(), Some(outcome.close.clone()));
+                if cancel {
+                    let CompilerTransactionClose::Unconfirmed(evidence) = outcome.close else {
+                        return Err(TestCaseError::fail(
+                            "cancelled host work cannot acknowledge END",
+                        ));
+                    };
+                    prop_assert_eq!(evidence.reason, CompilerTransactionCloseReason::Cancelled);
+                } else {
+                    prop_assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+                }
+                fixture.settle();
+                let counts = fixture.counts.lock().unwrap();
+                prop_assert_eq!(counts.preflights, 1);
+                prop_assert_eq!(counts.begins, 1);
+                prop_assert_eq!(counts.admissions, 1);
+                prop_assert_eq!(counts.requests, bodies.len());
+                prop_assert_eq!(counts.ends, usize::from(!cancel));
+                prop_assert_eq!(counts.active, 0);
+                // The independent response sequence detects replay, dropped later
+                // requests, and loss of completed bodies after host cancellation.
+                for (index, body) in bodies.iter().enumerate() {
+                    prop_assert_eq!(body, &vec![(index + 1) as u8]);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn scoped_daemon_cancelled_after_response_preserves_body_and_prevents_further_work() {
         let cancellation = CompilerTransactionCancellation::new();
         let mut fixture =
