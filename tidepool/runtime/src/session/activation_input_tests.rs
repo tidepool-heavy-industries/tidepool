@@ -2152,20 +2152,42 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
         }
     }
 
-    // Existing native exports are warmed by the original certified program;
-    // running its unchanged graph without the compiler seal does not retain
-    // authenticated type evidence for a subsequent host capture.
+    // Public site observations cannot issue input authority. Reuse the real
+    // installed native closure and retain its custody, but carry only the
+    // public sidecar across the value-to-code boundary.
     let mut unsealed = fixture.fresh();
-    let warm = fixture.start(&mut unsealed);
-    let mut code = fixture.producer.code();
-    code.certification = Cow::Owned(None);
-    let reservation = suspended(
+    let reservation = fixture.start(&mut unsealed);
+    let submission = settle_request_reservation(&mut unsealed, reservation, 1);
+    let mut payload = unsealed
+        .live_payload_handle(submission.cont_id())
+        .unwrap()
+        .expect("real original request payload");
+    assert!(!payload.provenance.authenticated_inputs.is_empty());
+    payload.provenance = Arc::new(ProgramProvenance::from_sites(&fixture.producer.asks).unwrap());
+    assert!(payload.provenance.authenticated_inputs.is_empty());
+    assert!(payload.provenance.native_sites.ids().next().is_none());
+    let receiver = unsealed
+        .retain_binding_custody("activationReceiver")
+        .unwrap()
+        .expect("real compiled request receiver");
+    let hole = suspended(
         unsealed
-            .run_with_sites("unsealedOriginalSiteGraph", code)
-            .expect("generic graph execution can retain unsealed site observations"),
+            .run_rooted_application(
+                "observedRequestWithoutInputAuthority",
+                &receiver,
+                &payload,
+                RealmId::ROOT,
+                None,
+            )
+            .expect("native custody survives carrying public site observations"),
     );
-    let (submission, hole) = fixture.deliver(&mut unsealed, reservation, 1);
     let site = parked_site(&mut unsealed, &hole);
+    let provenance = unsealed.parked_program_provenance(&hole).unwrap();
+    assert!(provenance.sites.contains_key(&site));
+    assert!(!provenance.authenticated_inputs.contains_key(&site));
+    drop(provenance);
+    drop(receiver);
+    drop(payload);
     let realm = unsealed.parked_realm(&hole).unwrap();
     let custody = unsealed.outstanding_custody();
     let before = unsealed
@@ -2183,7 +2205,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
             .unwrap(),
         before
     );
-    let mut owned_holes = [warm, submission, hole]
+    let mut owned_holes = [submission, hole]
         .into_iter()
         .map(|hole| hole.cont_id().to_owned())
         .collect::<std::collections::BTreeSet<_>>();
