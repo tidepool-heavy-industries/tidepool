@@ -53,9 +53,10 @@ requestInputHistories = do
       fresh <- capturedRequestInput independent path (digest bytes)
       unless (fresh == bytes) (fail "independent request inherited another request's snapshot")
       pure (updated,admitted,next)
-    historyFlags steps = let (_,_,extended,changed,restored) = foldl observe
-          (Map.empty,Map.empty,False,False,False) steps
-        in (extended,changed,restored)
+    historyFlags steps =
+      let (_,_,extended,changed,restored) =
+            foldl observe (Map.empty,Map.empty,False,False,False) steps
+      in (extended,changed,restored)
       where
         observe (first,current,extended,changed,restored) (NonNegative key,bits) =
           let index = key `mod` 5

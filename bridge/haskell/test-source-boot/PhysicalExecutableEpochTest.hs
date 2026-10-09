@@ -28,7 +28,7 @@ import GHC.Unit.Env (UnitEnv(..))
 import GHC.Unit.External (ExternalUnitCache(..), ExternalPackageState(..))
 import GHC.Unit.Module (Module, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.Env (moduleEnvElts)
-import GHC.Unit.Module.ModIface (ModIface, mi_module)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_final_exts, mi_iface_hash)
 import GHC.Unit.Module.Graph (mgModSummaries', mkModuleGraph, ModuleGraphNode(..))
 import GHC.Unit.Types (unitString)
 import SourceBootFixtureSupport (captureDiagnostics, withScratch, withTiming)
@@ -338,8 +338,10 @@ sourceSummaryContinuation = withTiming $ withScratch $ \work -> do
         first <- parse
         liftIO (requireBinders "next" first)
         after <- getSession
-        unless (isJust (lookupHpt (hsc_HPT after) (mkModuleName "RetainedSummaryProvider")))
-          (liftIO (fail "source-only downsweep discarded the retained home interface"))
+        let sameOriginal retained = mi_module (hm_iface retained) == mi_module (hm_iface home)
+              && mi_iface_hash (mi_final_exts (hm_iface retained)) == mi_iface_hash (mi_final_exts (hm_iface home))
+        unless (maybe False sameOriginal (lookupHpt (hsc_HPT after) (mkModuleName "RetainedSummaryProvider")))
+          (liftIO (fail "source-only downsweep changed the retained original interface identity"))
         liftIO (writeFile header "#define BINDER continued\n")
         second <- parse
         liftIO (requireBinders "continued" second)
