@@ -53,6 +53,263 @@ fn scope(request: &ExactCompilationRequest) -> Vec<Value> {
     fields
 }
 
+fn dependent_product(
+    module: &str,
+    version: u8,
+    imports: Vec<(u32, Vec<crate::certified_products::PendingImportOwner>)>,
+) -> CertifiedRecoveryProduct {
+    fixture_finalized_product(
+        original_groups_fixture_with_interface(
+            module,
+            imports,
+            version,
+            &BTreeMap::new(),
+            module.as_bytes().to_vec(),
+        ),
+        CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+    )
+}
+
+fn source_import(
+    product: &CertifiedRecoveryProduct,
+    ordinal: u32,
+) -> crate::certified_products::PendingImportOwner {
+    crate::certified_products::PendingImportOwner::Source {
+        owner: product.owner().clone(),
+        original_ordinal: ordinal,
+        binder: tidepool_repr::execution_schema::testing::identity(
+            &product.owner().module,
+            &format!("entry_{ordinal}"),
+        ),
+    }
+}
+
+fn partial_context(
+    baseline: &CertifiedRecoveryProduct,
+    required: &CertifiedRecoveryProduct,
+    unused: &CertifiedRecoveryProduct,
+    required_group: Option<u32>,
+) -> Arc<ExactDeclarationContext> {
+    use crate::artifact_inventory::NativeGroupKey;
+    let inventory = ArtifactInventory::default();
+    let original = |product: &CertifiedRecoveryProduct| {
+        Arc::new(
+            ArtifactEntry::original_with_validation(
+                CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+                product.clone(),
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap(),
+        )
+    };
+    let baseline_entry = original(baseline);
+    let required_entry = original(required);
+    let required_role = if required_group.is_some() {
+        Arc::clone(&required_entry)
+    } else {
+        Arc::new(ArtifactEntry::canonical(
+            required.module_interface().unwrap().clone(),
+        ))
+    };
+    let unused_role = Arc::new(ArtifactEntry::canonical(
+        unused.module_interface().unwrap().clone(),
+    ));
+    let projection = CompilerInputProjection::from_issued_entries(&[
+        Arc::clone(&baseline_entry),
+        Arc::clone(&required_role),
+        Arc::clone(&unused_role),
+    ])
+    .unwrap();
+    let mut groups = BTreeSet::from([NativeGroupKey {
+        artifact: baseline_entry.descriptor.id,
+        original_ordinal: 7,
+    }]);
+    if let Some(ordinal) = required_group {
+        groups.insert(NativeGroupKey {
+            artifact: required_entry.descriptor.id,
+            original_ordinal: ordinal,
+        });
+    }
+    let mut entries = vec![baseline_entry, required_entry, unused_role];
+    if required_group.is_none() {
+        entries.push(required_role);
+    }
+    let view = inventory
+        .admit_recovery_selection(&inventory.empty_view(), entries, &groups)
+        .unwrap();
+    Arc::new(ExactDeclarationContext {
+        producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
+        inventory: view,
+        compiler_projection: projection,
+        lexical: vec![],
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    })
+}
+
+fn wire_groups(request: &ExactCompilationRequest) -> BTreeMap<String, Vec<u32>> {
+    scope(request)[6]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let row = row.as_array().unwrap();
+            let module = row[1].as_text().unwrap().to_owned();
+            let ordinals = row[6]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|group| {
+                    let ordinal = group.as_array().unwrap()[0].as_integer().unwrap();
+                    u32::try_from(ordinal).unwrap()
+                })
+                .collect();
+            (module, ordinals)
+        })
+        .collect()
+}
+
+#[test]
+fn private_native_availability_preserves_partial_baseline_and_exact_advertised_closure() {
+    let unused = product("UnusedNative", 40);
+    let required = product("RequiredNative", 41);
+    let baseline = dependent_product(
+        "BaselineNative",
+        42,
+        vec![(7, vec![]), (9001, vec![source_import(&unused, 7)])],
+    );
+    let extra = product("ExtraNative", 43);
+    let root = tempfile::tempdir().unwrap();
+    let mut histories = 0;
+    for demanded in [7, 9001] {
+        let added = dependent_product(
+            "AddedNative",
+            44,
+            vec![
+                (7, vec![source_import(&baseline, 7)]),
+                (9001, vec![source_import(&required, demanded)]),
+            ],
+        );
+        let recovered = recovered_witness_fixtures(&[
+            unused.clone(),
+            required.clone(),
+            baseline.clone(),
+            added,
+            extra.clone(),
+        ]);
+        let get = |module: &str| {
+            recovered
+                .iter()
+                .find(|row| row.product.owner().module == module)
+                .unwrap()
+                .product
+                .clone()
+        };
+        let baseline = get("BaselineNative");
+        let required = get("RequiredNative");
+        let added = get("AddedNative");
+        for selected in [None, Some(7), Some(9001)] {
+            for explicit_required in [false, true] {
+                for unrelated in [false, true] {
+                    histories += 1;
+                    let context = partial_context(&baseline, &required, &unused, selected);
+                    let before = context.as_ref().clone();
+                    let mut offers = vec![added.clone()];
+                    if explicit_required {
+                        offers.push(required.clone());
+                    }
+                    if unrelated {
+                        offers.push(extra.clone());
+                    }
+                    let input = OriginalCompilerInputs::from_native_availability(
+                        &context,
+                        CanonicalProducerIdentity::from_producer_bytes(PRODUCER),
+                        &offers,
+                    );
+                    // Expected membership comes from the explicit history inputs,
+                    // independently of the production projection/group maps.
+                    let expected = explicit_required || selected == Some(demanded);
+                    assert_eq!(input.is_ok(), expected,
+                        "demanded={demanded}, selected={selected:?}, private={explicit_required}, extra={unrelated}");
+                    if let Ok(input) = input {
+                        let request = ExactCompileContext::new(context.clone())
+                            .prepare_compilation_with_private_input(
+                                &root.path().join(histories.to_string()),
+                                PRODUCER,
+                                None,
+                                Some(input),
+                            )
+                            .unwrap();
+                        let rows = wire_groups(&request);
+                        assert_eq!(rows["BaselineNative"], vec![7]);
+                        assert_eq!(rows["AddedNative"], vec![7, 9001]);
+                        if explicit_required {
+                            assert_eq!(rows["RequiredNative"], vec![7, 9001]);
+                        } else {
+                            assert_eq!(rows["RequiredNative"], vec![demanded]);
+                        }
+                        assert_eq!(rows.contains_key("ExtraNative"), unrelated);
+                        assert!(!rows.contains_key("UnusedNative"));
+                        assert_eq!(
+                            request.compiler_inputs().metadata.selected_native_groups,
+                            before.inventory.metadata_snapshot().selected_native_groups
+                        );
+                        assert_eq!(request.context().as_ref(), &before);
+                    }
+                    assert_eq!(context.as_ref(), &before);
+                }
+            }
+        }
+    }
+    assert_eq!(histories, 24);
+}
+
+#[test]
+fn private_native_availability_requires_complete_explicit_same_owner_upgrade() {
+    let unused = product("UnusedNative", 50);
+    let required = product("RequiredNative", 51);
+    let baseline = dependent_product(
+        "BaselineNative",
+        52,
+        vec![(7, vec![]), (9001, vec![source_import(&unused, 7)])],
+    );
+    let recovered = recovered_witness_fixtures(&[unused, required, baseline]);
+    let get = |module: &str| {
+        recovered
+            .iter()
+            .find(|row| row.product.owner().module == module)
+            .unwrap()
+            .product
+            .clone()
+    };
+    let baseline = get("BaselineNative");
+    let unused = get("UnusedNative");
+    let context = partial_context(&baseline, &get("RequiredNative"), &unused, None);
+    let before = context.as_ref().clone();
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
+    assert!(OriginalCompilerInputs::from_native_availability(
+        &context,
+        producer,
+        std::slice::from_ref(&baseline),
+    )
+    .is_err());
+    let input =
+        OriginalCompilerInputs::from_native_availability(&context, producer, &[baseline, unused])
+            .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(context.clone())
+        .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(input))
+        .unwrap();
+    let rows = wire_groups(&request);
+    assert_eq!(rows["BaselineNative"], vec![7, 9001]);
+    assert_eq!(rows["UnusedNative"], vec![7, 9001]);
+    assert_eq!(context.as_ref(), &before);
+    assert_eq!(
+        request.compiler_inputs().metadata.selected_native_groups,
+        before.inventory.metadata_snapshot().selected_native_groups
+    );
+}
+
 #[test]
 fn selected_authored_availability_refuses_source_original_spelling_with_full_groups() {
     let native = product("Tidepool.Session.Lib.G1", 23);

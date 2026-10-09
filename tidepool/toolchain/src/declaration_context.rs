@@ -256,15 +256,33 @@ impl OriginalCompilerInputs {
         let effective = context.compiler_projection.merge(&projection)?;
         let metadata = effective.project_metadata(artifacts.metadata_snapshot())?;
         let originals = metadata
-            .entries
-            .values()
-            .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Original(product) => Some(product),
+            .artifacts
+            .iter()
+            .filter_map(|(id, entry)| match &entry.payload {
+                ArtifactPayload::Original(product) => Some((*id, product)),
                 _ => None,
             })
-            .collect::<Vec<_>>();
+            .collect::<BTreeMap<_, _>>();
+        // The baseline exposes its issued selection. Only this private offer
+        // advertises complete native censuses; custody alone exposes no binder.
+        let mut advertised = metadata.selected_native_groups.clone();
+        for role in projection.roles() {
+            let Some(id) = role.original() else { continue };
+            let product = originals
+                .get(&id)
+                .ok_or_else(|| failure("private original is outside retained custody"))?;
+            advertised.extend(
+                crate::certified_products::original_available_groups(product)
+                    .map_err(compiler_evidence_failure)?
+                    .map(|group| crate::artifact_inventory::NativeGroupKey {
+                        artifact: id,
+                        original_ordinal: group.original_ordinal(),
+                    }),
+            );
+        }
         crate::certified_products::validate_available_originals_with_validation(
             &originals,
+            &advertised,
             &mut validation,
         )
         .map_err(compiler_evidence_failure)?;
