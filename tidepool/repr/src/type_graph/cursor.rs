@@ -409,6 +409,19 @@ impl TypeGraph {
         })
     }
 
+    /// Exact scoped identity after validating both serialized root references.
+    pub fn rooted_wire_identity_eq(
+        self: &Arc<Self>,
+        root: WireTypeNodeId,
+        other: &Arc<Self>,
+        other_root: WireTypeNodeId,
+        budget: &mut TypeWorkBudget,
+    ) -> Result<bool, TypeGraphError> {
+        let first = self.open_root(root, budget)?;
+        let second = other.open_root(other_root, budget)?;
+        self.rooted_identity_eq(first.root, other, second.root, budget)
+    }
+
     pub fn rooted_compatible(
         self: &Arc<Self>,
         root: WireTypeNodeId,
@@ -1023,6 +1036,28 @@ fn compatible(
 #[cfg(test)]
 mod tests {
     use super::super::tests::{identity, physical};
+    #[test]
+    fn exact_wire_identity_checks_missing_and_nonroot_references() {
+        let mut storage = GraphStorage::new();
+        let text = declaration(&mut storage, "Text", 0, DeclarationForm::Text);
+        let expression = application(&mut storage, text, &[]);
+        let wire_root = root(&mut storage, expression, 0);
+        let graph = publish(storage, &[]);
+        let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+        assert!(graph
+            .rooted_wire_identity_eq(wire_root, &graph, wire_root, &mut budget)
+            .unwrap());
+        for invalid in [
+            WireTypeNodeId(u32::MAX),
+            WireTypeNodeId(expression.index() as u32),
+        ] {
+            let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+            assert!(matches!(
+                graph.rooted_wire_identity_eq(wire_root, &graph, invalid, &mut budget),
+                Err(TypeGraphError::NotRoot(_))
+            ));
+        }
+    }
     use super::super::{
         ForAllFlag, FunctionFlag, GraphLimits, GraphStorage, NominalHeadKind, ParameterFlag,
         RootDomain, SourceBinderFlag, TypeLiteral,

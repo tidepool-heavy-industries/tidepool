@@ -2514,7 +2514,7 @@ impl IssuedNativeSite {
         {
             if !self
                 .types
-                .rooted_identity_eq(*left, &other.types, *right, &mut budget)
+                .rooted_wire_identity_eq(*left, &other.types, *right, &mut budget)
                 .map_err(failure)?
             {
                 return Ok(false);
@@ -4433,8 +4433,8 @@ mod tests {
     fn selected_native_sites_compose_semantically_and_refuse_conflicts_atomically() {
         use super::*;
         use proptest::prelude::*;
-        use tidepool_repr::execution_schema::{testing, SiteDelivery, SiteRow};
-        use tidepool_repr::type_graph::{DeclarationForm, TypeNodeId};
+        use tidepool_repr::execution_schema::{testing, SiteDelivery, SiteRow, TypeNodeId};
+        use tidepool_repr::type_graph::DeclarationForm;
         let shape = (
             testing::identity("Fixture", "Completion"),
             DeclarationForm::Data,
@@ -4449,7 +4449,7 @@ mod tests {
             origin: format!("Fixture.completion_{site}"),
             ordinal: 0,
             delivery: SiteDelivery::HostAnswer,
-            wire: TypeNodeId::new(wire),
+            wire: TypeNodeId(wire),
             inputs: vec![],
         };
         let mut pool = Vec::new();
@@ -4513,8 +4513,8 @@ mod tests {
                 0 => incoming.origin = "another owner".into(),
                 1 => incoming.ordinal = 1,
                 2 => incoming.delivery = SiteDelivery::LiveReentry,
-                3 => incoming.inputs.push(TypeNodeId::new(0)),
-                4 => incoming.wire = TypeNodeId::new(0),
+                3 => incoming.inputs.push(TypeNodeId(0)),
+                4 => incoming.wire = TypeNodeId(0),
                 _ => unreachable!(),
             }
             let mut other = pool[2].clone();
@@ -4577,7 +4577,7 @@ mod tests {
                     origin: format!("{module}.entry_{ordinal}"),
                     ordinal: 0,
                     delivery: tidepool_repr::execution_schema::SiteDelivery::HostAnswer,
-                    wire: tidepool_repr::type_graph::TypeNodeId::new(0),
+                    wire: tidepool_repr::execution_schema::TypeNodeId(0),
                     inputs: vec![],
                 };
                 let native = certified_products::fixture_finalized_product(
