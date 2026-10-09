@@ -3123,8 +3123,10 @@ mod tests {
         assert!(!unavailable.artifact_ids().contains(&old.descriptor.id));
         assert!(!unavailable.artifact_ids().contains(&new.descriptor.id));
         assert!(matches!(
-            unavailable_inventory.admit_recovery_selection(
-                &unavailable, Vec::new(), &BTreeSet::from([early, late]),
+            unavailable_inventory.admit_shared_with_demand(
+                &unavailable,
+                vec![Arc::new(root.clone())],
+                NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&root, 29)]),
             ),
             Err(CompileError::ArtifactInventory(error))
                 if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { .. })
@@ -3192,7 +3194,11 @@ mod tests {
                 .unwrap();
             let demanded = branch
                 .inventory()
-                .admit_recovery_selection(&branch, Vec::new(), &BTreeSet::from([early, late]))
+                .admit_shared_with_demand(
+                    &branch,
+                    vec![Arc::new(root.clone())],
+                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&root, 29)]),
+                )
                 .unwrap();
             assert_eq!(
                 demanded.selected_native_groups(),
