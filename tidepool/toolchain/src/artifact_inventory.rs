@@ -193,7 +193,7 @@ impl ExactArtifactSelection {
     }
 
     pub(crate) fn capture(view: &ArtifactView) -> Self {
-        Self::from_recovered_graph_selection(view.capture_graph_selection())
+        Self::from_snapshot(view.selection_snapshot().clone())
     }
 
     pub(crate) fn from_snapshot(
