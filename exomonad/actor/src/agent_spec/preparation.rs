@@ -364,7 +364,7 @@ impl ToolsetPreparation {
             tokio::spawn(
                 async move {
                     let outcome = tidepool_runtime::spawn_blocking_in_span(move || {
-                        compiler_work.run_for_workload(workload, || {
+                        compiler_work.run_for_workload(workload, |settlement| {
                             tidepool_extract_cmd::compiler_host_checkpoint()
                                 .map_err(preparation_io_failure)?;
                             let completed_original = selected_original_present(&recipe, &source)?;
@@ -385,7 +385,14 @@ impl ToolsetPreparation {
                                     observer();
                                 }
                             }
-                            compile_installer(recipe, resolved, source, registry, acquisition)
+                            compile_installer(
+                                recipe,
+                                resolved,
+                                source,
+                                registry,
+                                acquisition,
+                                settlement,
+                            )
                         })
                     })
                     .await
@@ -1096,6 +1103,7 @@ fn compile_installer(
     source: crate::CheckpointSourceLayer,
     registry: Arc<ImageRegistry>,
     acquisition: OriginalAcquisition,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<Arc<PreparedToolset>, PreparationFailure> {
     if let Some(program) = &recipe.builtin {
         let compiled = load_builtin_installer(program)?;
@@ -1145,10 +1153,16 @@ fn compile_installer(
             &wrapper,
             acquisition,
             &source.catalog_selection(),
+            settlement,
         )?
     } else {
         (
-            compile_unprepared_installer(&recipe, &templates, &installation.expression)?,
+            compile_unprepared_installer(
+                &recipe,
+                &templates,
+                &installation.expression,
+                settlement,
+            )?,
             ToolsetAcquisition::UnretainedCompilation {
                 recipe: durable_recipe_key(&recipe)?,
             },
@@ -1280,6 +1294,7 @@ fn compile_unprepared_installer(
     recipe: &InstallerRecipe,
     templates: &[tidepool_runtime::session::TurnTemplate],
     expression: &str,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<CompiledTurn, PreparationFailure> {
     let scratch =
         tempfile::tempdir().map_err(|error| PreparationFailure::Source(error.to_string()))?;
@@ -1288,23 +1303,26 @@ fn compile_unprepared_installer(
         .iter()
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
-    let result = run_turn(TurnRequest {
-        exact_context: None,
-        session_id: None,
-        turn_text: expression,
-        templates,
-        include: &include,
-        session_root: scratch.path(),
-        inject_modules: &[],
-        gen: 1,
-        verdict: Some(TurnClassification {
-            kind: TurnKind::Bind,
-            binders: Vec::new(),
-            items: Vec::new(),
-        }),
-        target: None,
-        retained_imports: &[],
-    })
+    let result = run_turn(
+        TurnRequest {
+            exact_context: None,
+            session_id: None,
+            turn_text: expression,
+            templates,
+            include: &include,
+            session_root: scratch.path(),
+            inject_modules: &[],
+            gen: 1,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Bind,
+                binders: Vec::new(),
+                items: Vec::new(),
+            }),
+            target: None,
+            retained_imports: &[],
+        },
+        settlement,
+    )
     .map_err(|failure| {
         let mut diagnostic = tidepool_runtime::classify_compile(&failure.error);
         diagnostic.message = tidepool_runtime::session::render_turn_compile_error(
@@ -1354,6 +1372,7 @@ fn retained_installer(
     wrapper: &str,
     acquisition: OriginalAcquisition,
     catalog: &tidepool_toolchain::toolchain::CatalogSelection,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<(CompiledTurn, ToolsetAcquisition), PreparationFailure> {
     use tidepool_toolchain::artifacts::{
         load_selected_production_entry_with_catalog, prepare_frozen_production_entry_with_catalog,
@@ -1458,10 +1477,12 @@ fn retained_installer(
     let fresh =
         if !completed && matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
             Some(
-                prepare_frozen_production_entry_with_catalog(&sources, &original, &output, catalog)
-                    .map_err(|error| {
-                        PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error))
-                    })?,
+                prepare_frozen_production_entry_with_catalog(
+                    &sources, &original, &output, catalog, settlement,
+                )
+                .map_err(|error| {
+                    PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error))
+                })?,
             )
         } else {
             None

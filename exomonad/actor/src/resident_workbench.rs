@@ -122,11 +122,7 @@ impl CompilerCloseOwner {
             .try_with(Clone::clone)
             .ok()
             .or_else(|| execution_control().map(Self::Hosted))
-            .ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "compiler work requires an invocation or initialization cleanup owner".into(),
-                )
-            })
+            .ok_or(ResidentActorWorkbenchError::CompilerCleanupOwnerUnavailable)
     }
 
     /// Admit before spawning native work. The affine ticket retains this exact
@@ -193,9 +189,7 @@ impl CompilerCloseOwner {
             action: (),
             close: tidepool_runtime::CompilerTransactionClose::NotStarted,
         });
-        Err(ResidentActorWorkbenchError::ActorProtocol(
-            "compiler cleanup owner has closed native work admission".into(),
-        ))
+        Err(ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
     }
 }
 
@@ -1684,7 +1678,11 @@ impl<H, O> ResidentMachineAccess<H, O> {
 /// fixed source layer. `Fn`, not `FnOnce`: called once per eligible child for
 /// the life of the host.
 pub type ChildSessionFactory<H, O> = Arc<
-    dyn Fn(tidepool_repr::SessionId, &[PathBuf]) -> Result<Box<ResidentSession<H, O>>, String>
+    dyn Fn(
+            tidepool_repr::SessionId,
+            &[PathBuf],
+            &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) -> Result<Box<ResidentSession<H, O>>, String>
         + Send
         + Sync,
 >;
@@ -3663,6 +3661,7 @@ impl<H, O> ResidentActorRunner<H, O> {
     pub(crate) fn spawn_child_session(
         &self,
         session_id: tidepool_repr::SessionId,
+        settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
     ) -> Result<(), String>
     where
         H: DispatchEffect<O> + Send,
@@ -3673,7 +3672,7 @@ impl<H, O> ResidentActorRunner<H, O> {
             .child_session_factory
             .clone()
             .ok_or_else(|| "no child-session factory installed".to_string())?;
-        let machine = factory(session_id, &[])?;
+        let machine = factory(session_id, &[], settlement)?;
         self.access
             .machines
             .try_insert_idle(session_id, machine)
@@ -3754,57 +3753,68 @@ impl<H, O> ResidentActorRunner<H, O> {
         // The blocking task owns only an unregistered session. Cancellation
         // drops its eventual result, so it cannot register an orphan after the
         // awaiting launch's cleanup has already run.
+        let compiler_work = register_compiler_work().map_err(|error| error.to_string())?;
+        let mut cancel_on_drop =
+            CancelCompilerTransactionOnDrop(Some(compiler_work.cancellation()));
         let (machine, lexical_scope) = spawn_blocking_in_span(move || {
-            let mut machine = factory(session_id, &source_layer)?;
-            let lexical_scope = machine.mint_isolated_scope();
-            machine
-                .set_actor_execution(
-                    tidepool_runtime::session::SessionRunContext {
-                        resource_scope,
-                        lexical_scope,
-                        ..tidepool_runtime::session::SessionRunContext::ROOT
-                    },
-                    tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-                    tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-                )
-                .map_err(|error| format!("child session bootstrap context: {error}"))?;
-            if let Some((facade, val_generation, declaration_high_water)) = seed {
-                let root = machine
-                    .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
-                    .ok_or_else(|| {
-                        "child session has no compile view for inherited source seeding".to_string()
-                    })?
-                    .session_root()
-                    .to_path_buf();
-                if let Some(facade) = facade {
-                    if let Some((_, source)) = facade.source_artifact() {
-                        write_seed_source(
-                            &root.join(facade.identity().relative_hs_path()),
-                            source,
-                        )?;
+            compiler_work.run(|settlement| {
+                let mut machine = factory(session_id, &source_layer, settlement)?;
+                let lexical_scope = machine.mint_isolated_scope();
+                machine
+                    .set_actor_execution(
+                        tidepool_runtime::session::SessionRunContext {
+                            resource_scope,
+                            lexical_scope,
+                            ..tidepool_runtime::session::SessionRunContext::ROOT
+                        },
+                        tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                        tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                    )
+                    .map_err(|error| format!("child session bootstrap context: {error}"))?;
+                if let Some((facade, val_generation, declaration_high_water)) = seed {
+                    let root = machine
+                        .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
+                        .ok_or_else(|| {
+                            "child session has no compile view for inherited source seeding"
+                                .to_string()
+                        })?
+                        .session_root()
+                        .to_path_buf();
+                    if let Some(facade) = facade {
+                        if let Some((_, source)) = facade.source_artifact() {
+                            write_seed_source(
+                                &root.join(facade.identity().relative_hs_path()),
+                                source,
+                            )?;
+                        }
+                    }
+                    machine.set_val_gen(val_generation);
+                    if let Some(high_water) = declaration_high_water {
+                        machine
+                            .initialize_captured_declaration_high_water(high_water)
+                            .map_err(|error| {
+                                format!("child declaration identity reservation: {error}")
+                            })?;
                     }
                 }
-                machine.set_val_gen(val_generation);
-                if let Some(high_water) = declaration_high_water {
-                    machine
-                        .initialize_captured_declaration_high_water(high_water)
-                        .map_err(|error| {
-                            format!("child declaration identity reservation: {error}")
-                        })?;
+                if let Some(registry) = &image_registry {
+                    // Before the bootstrap, so the child's first install is the
+                    // run's shared driver image rather than a second compile of it.
+                    machine.set_image_registry(Arc::clone(registry));
                 }
-            }
-            if let Some(registry) = &image_registry {
-                // Before the bootstrap, so the child's first install is the
-                // run's shared driver image rather than a second compile of it.
-                machine.set_image_registry(Arc::clone(registry));
-            }
-            machine
-                .run_with_sites("child_session_bootstrap", bootstrap_program.code())
-                .map_err(|error| format!("child session bootstrap install: {error}"))?;
-            Ok::<_, String>((machine, lexical_scope))
+                machine
+                    .run_with_sites(
+                        "child_session_bootstrap",
+                        bootstrap_program.code(),
+                        settlement,
+                    )
+                    .map_err(|error| format!("child session bootstrap install: {error}"))?;
+                Ok::<_, String>((machine, lexical_scope))
+            })
         })
         .await
         .map_err(|error| format!("child session preparation task: {error}"))??;
+        cancel_on_drop.0 = None;
         // Atomic check-and-insert (`try_insert_idle`, not `insert_idle`):
         // the collision check must happen before any registry mutation, not
         // after — `insert_idle` would already have replaced whatever was at
@@ -4204,6 +4214,10 @@ fn activation_compile_diagnostic(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error("compiler work requires an invocation or initialization cleanup owner")]
+    CompilerCleanupOwnerUnavailable,
+    #[error("compiler cleanup owner has closed native work admission")]
+    CompilerCleanupAdmissionClosed,
     #[error(
         "actor {actor:?} public scope {scope:?} publication failed during {phase:?}: {source}"
     )]
@@ -4427,6 +4441,55 @@ where
         ResultValue: Send + 'static,
     {
         self.with_machine_wait(context, None, operation).await
+    }
+
+    async fn with_compiler_machine<ResultValue>(
+        &self,
+        context: crate::ActorSessionContext,
+        operation: impl FnOnce(
+                &mut ResidentSession<H, O>,
+                &crate::ActorSessionContext,
+                &ActorWorkbenchSource,
+                &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+            ) -> Result<ResultValue, ResidentActorWorkbenchError>
+            + Send
+            + 'static,
+    ) -> Result<ResultValue, ResidentActorWorkbenchError>
+    where
+        ResultValue: Send + 'static,
+    {
+        let owner = CompilerCloseOwner::current()?;
+        self.with_machine(context, move |session, context, source| {
+            Ok(owner
+                .register_work()?
+                .run(|settlement| operation(session, context, source, settlement))?)
+        })
+        .await
+    }
+
+    async fn with_compiler_machine_wait<ResultValue>(
+        &self,
+        context: crate::ActorSessionContext,
+        admission: impl Into<MachineCheckoutAdmission>,
+        operation: impl FnOnce(
+                &mut ResidentSession<H, O>,
+                &crate::ActorSessionContext,
+                &ActorWorkbenchSource,
+                &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+            ) -> Result<ResultValue, ResidentActorWorkbenchError>
+            + Send
+            + 'static,
+    ) -> Result<ResultValue, ResidentActorWorkbenchError>
+    where
+        ResultValue: Send + 'static,
+    {
+        let owner = CompilerCloseOwner::current()?;
+        self.with_machine_wait(context, admission, move |session, context, source| {
+            owner
+                .register_work()?
+                .run(|settlement| operation(session, context, source, settlement))
+        })
+        .await
     }
 
     /// Log the ordered include-root search path a session's compiles run
@@ -5157,13 +5220,13 @@ where
         let installed_effect_support = self.access.source.installed_effect_support().to_vec();
         let handler_effect_support = self.access.handler_effect_support.clone();
         let (step, pending_originals, source_original) = registration
-            .scope(self.access.with_machine(compile_context.clone(), {
+            .scope(self.access.with_compiler_machine(compile_context.clone(), {
                 let prepared = code.prepared().cloned();
                 let installer = match &code {
                     InstalledToolCode::ExplicitLive(installer) => Some(Arc::clone(installer)),
                     InstalledToolCode::SourcePrepared(_) => None,
                 };
-                move |session, context, _| {
+                move |session, context, _, settlement| {
                     let (outcome, warnings, pending_originals) = match (prepared, installer) {
                         (Some(prepared), None) => {
                             session.set_image_registry(Arc::clone(prepared.entry.image_registry()));
@@ -5183,7 +5246,7 @@ where
                                 | ToolInstallationPurpose::SpawnApplication => None,
                             };
                             (
-                                session.run_startup_entry(entry),
+                                session.run_startup_entry(entry, settlement),
                                 prepared.entry.compiled().warnings.warnings.clone(),
                                 pending,
                             )
@@ -5195,6 +5258,7 @@ where
                                 0,
                                 context.placement.resource_scope,
                                 None,
+                                settlement,
                             ),
                             Vec::new(),
                             None,
@@ -5231,7 +5295,7 @@ where
         let resumption_registration = registration.clone();
         let publication = registration.scope(self
                 .access
-                .with_machine(compile_context, move |session, context, _| {
+                .with_compiler_machine(compile_context, move |session, context, _, settlement| {
                     let (hole, request) = tool_installation_request(
                         session, &resumption_registration, *outcome)?;
                     let publication = (|| {
@@ -5312,7 +5376,7 @@ where
                         }
                     };
                     let settled = session
-                        .resume_classified(hole, ())
+                        .resume_classified(hole, (), settlement)
                         .map_err(classify_resumption)?;
                     resumption_registration.replace_in_checkout(session, &settled);
                     let (settled, receiver) = match purpose {
@@ -5332,7 +5396,7 @@ where
                             };
                             let entry = capture_request_receiver_entry(session, &hole, site, context.placement.resource_scope)?;
                             let receiver = PreparedRequestReceiver { entry, scope: Arc::clone(&installation_scope) };
-                            let settled = session.resume_classified(hole, ()).map_err(classify_resumption)?;
+                            let settled = session.resume_classified(hole, (), settlement).map_err(classify_resumption)?;
                             resumption_registration.replace_in_checkout(session, &settled);
                             (settled, Some(receiver))
                         }
@@ -5380,7 +5444,7 @@ where
         arguments: serde_json::Value,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_compiler_machine(context, move |session, context, _, settlement| {
                 let outcome = session
                     .run_rooted_entry_borrowed(
                         "hosted_tool",
@@ -5388,6 +5452,7 @@ where
                         0,
                         context.placement.resource_scope,
                         None,
+                        settlement,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
@@ -5423,7 +5488,7 @@ where
                         return Err(error);
                     }
                 };
-                let outcome = session.resume(hole, answer);
+                let outcome = session.resume(hole, answer, settlement);
                 start_fragment_settlement(
                     session,
                     context,
@@ -5453,7 +5518,7 @@ where
         payload: serde_json::Value,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_compiler_machine(context, move |session, context, _, settlement| {
                 let outcome = session
                     .run_rooted_entry_borrowed(
                         "after_tool_slot",
@@ -5461,6 +5526,7 @@ where
                         crate::after_tool::AFTER_TOOL_ENTRY,
                         context.placement.resource_scope,
                         None,
+                        settlement,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
@@ -5496,7 +5562,7 @@ where
                         return Err(error);
                     }
                 };
-                let outcome = session.resume(hole, answer);
+                let outcome = session.resume(hole, answer, settlement);
                 start_fragment_settlement(
                     session,
                     context,
@@ -5593,7 +5659,7 @@ where
         let preview_observer = self.activation_preview_observer.clone();
         let (input_binding, admission, includes) = self
             .access
-            .with_machine(context.clone(), move |session, context, _| {
+            .with_compiler_machine(context.clone(), move |session, context, _, settlement| {
                 let _private_owner = private_owner;
                 session
                     .compile_view_for_execution(&_private_owner.admission)
@@ -5609,6 +5675,7 @@ where
                     reservation.generation().0,
                     reservation.binding(),
                     &source.base_include,
+                    settlement,
                 )
                 .map_err(|error| {
                     ResidentActorWorkbenchError::InputCompilation {
@@ -5617,7 +5684,7 @@ where
                     }
                 })?;
                 let mounted = session
-                    .mount_activation_input(owner, interface)
+                    .mount_activation_input(owner, interface, settlement)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let binding = mounted.binding();
                 let committed = |source| ResidentActorWorkbenchError::ActivationBindingCommitted {
@@ -5682,7 +5749,7 @@ where
                     let compiled =
                         crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                             producer.begin_native();
-                            let result = compiler_work.run_with_close(|| {
+                            let result = compiler_work.run_with_close(|settlement| {
                                 #[cfg(test)]
                                 if let Some(observer) = &producer_observer {
                                     observer(ActivationPublicationObservation::RendererProducer)
@@ -5694,8 +5761,7 @@ where
                                     &compiler_admission,
                                     &compiler_template,
                                     budget,
-                                    &compiler_includes,
-                                )
+                                    &compiler_includes, settlement)
                             });
                             // The affine compiler ticket has closed before Ready or
                             // Empty is published, even if the async waiter vanished.
@@ -5730,7 +5796,7 @@ where
                 .map_err(committed)?;
             }
         }
-        let preview = self.access.with_machine(context.clone(), move |session, _, _| {
+        let preview = self.access.with_compiler_machine(context.clone(), move |session, _, _, settlement| {
             session.validate_activation_preview_admission(&admission)
                 .map_err(|error| committed(ResidentActorWorkbenchError::Resident(error)))?;
             let compiled = match specialized {
@@ -5750,7 +5816,7 @@ where
             if compiled.proof().disposition() == tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Opaque {
                 return Ok((ActivationPreviewOutcome::Opaque, input_binding, admission));
             }
-                let preview = match session.run_activation_preview(compiled) {
+                let preview = match session.run_activation_preview(compiled, settlement) {
                     Ok(
                         ResidentOutcome::Suspended { hole, .. }
                         | ResidentOutcome::Deferred { hole, .. },
@@ -5880,7 +5946,7 @@ where
             .as_ref()
             .map(|scope| scope.admission.clone());
         self.access
-            .with_machine(context.clone(), move |session, context, _| {
+            .with_compiler_machine(context.clone(), move |session, context, _, settlement| {
                 let original_binder = carrier
                     .binding()
                     .map_err(ResidentActorWorkbenchError::Resident)?;
@@ -5897,6 +5963,7 @@ where
                             OwnedHostPayload::Text(value) => HostPayload::Text(value),
                             OwnedHostPayload::Job(value) => HostPayload::Job(value),
                         },
+                        settlement,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let scope = context.placement.lexical_scope;
@@ -5987,7 +6054,7 @@ where
             let compiler_work = register_compiler_work()?;
             cancel_on_drop.0 = Some(compiler_work.cancellation());
             let interface = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                compiler_work.run(|| {
+                compiler_work.run(|settlement| {
                     let prototype = original_admission.prototype();
                     tidepool_toolchain::artifacts::issue_host_binding_interface(
                         prototype.compiler().clone(),
@@ -5995,6 +6062,7 @@ where
                         original_admission.generation().0,
                         original_admission.binding(),
                         prototype.include_paths(),
+                        settlement,
                     )
                     .map_err(ResidentActorWorkbenchError::Compile)
                 })
@@ -6209,10 +6277,11 @@ where
         let compiler_work = register_compiler_work()?;
         cancel_on_drop.0 = Some(compiler_work.cancellation());
         let plan = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-            compiler_work.run(|| {
+            compiler_work.run(|settlement| {
                 tidepool_toolchain::artifacts::parse_cell_plan(
                     Arc::new(parser_specification.cell.clone()),
                     &parser_specification.include,
+                    settlement,
                 )
                 .map_err(|error| {
                     cell_check_error(error.into(), &parser_specification.cell.cell_source)
@@ -6260,11 +6329,14 @@ where
         cancel_on_drop.0 = Some(compiler_work.cancellation());
         let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                compiler_work.run(|| {
-                    tidepool_runtime::session::turn::compile_cell_program_admitted(check_admission)
-                        .map_err(|failure| {
-                            cell_check_error(failure, &check_specification.cell.cell_source)
-                        })
+                compiler_work.run(|settlement| {
+                    tidepool_runtime::session::turn::compile_cell_program_admitted(
+                        check_admission,
+                        settlement,
+                    )
+                    .map_err(|failure| {
+                        cell_check_error(failure, &check_specification.cell.cell_source)
+                    })
                 })
             }))
             .await
@@ -6327,9 +6399,9 @@ where
 
         let source = self.access.source.clone();
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_compiler_machine(context, move |session, context, _, settlement| {
                 let source = source.for_workbench(context, request_scope.as_ref());
-                run_status_discovery(session, context, &source, discovery)?
+                run_status_discovery(session, context, &source, discovery, settlement)?
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)
             })
             .await
@@ -6376,7 +6448,7 @@ where
         if !crate::lookup::has_inspection_work(&request, "") {
             return self
                 .access
-                .with_machine(context, move |session, context, _| {
+                .with_compiler_machine(context, move |session, context, _, settlement| {
                     let view = actor_compile_view(session, context, &source)?;
                     let provenance = structured_provenance(
                         &view,
@@ -6392,24 +6464,22 @@ where
                         &source.workspace_modules,
                         usage,
                         |queries| {
-                            inspect_lookup_queries(
-                                &view,
-                                None,
-                                &prepared.preamble,
-                                &prepared.imports,
-                                &prepared.include,
-                                &prepared.injected,
-                                &context.haskell_effects_alias,
-                                queries,
-                                None,
-                            )
+                            if queries.is_empty() {
+                                Ok(Vec::new())
+                            } else {
+                                Err(crate::lookup::LookupInspectionError::Compiler(
+                                    CompileError::ExtractFailed(
+                                        "lookup inspection was not admitted".into(),
+                                    ),
+                                ))
+                            }
                         },
                     );
                     if !request_pending {
                         crate::lookup::note_request_only_bindings(&mut answer);
                     }
                     session
-                        .resume_classified(hole, answer)
+                        .resume_classified(hole, answer, settlement)
                         .map_err(classify_resumption)
                 })
                 .await;
@@ -6464,7 +6534,7 @@ where
             let spawn = {
                 let _entered = compile_span.enter();
                 spawn_blocking_in_span(move || {
-                    let answer = compiler_work.run(|| {
+                    let answer = compiler_work.run(|settlement| {
                         crate::lookup::execute(
                             request,
                             request_view,
@@ -6483,6 +6553,7 @@ where
                                     &effects,
                                     queries,
                                     timing.as_ref(),
+                                    settlement,
                                 )
                             },
                         )
@@ -6521,17 +6592,15 @@ where
                 &source.workspace_modules,
                 usage,
                 |queries| {
-                    inspect_lookup_queries(
-                        &view,
-                        Some(&inspection_values),
-                        &prepared.preamble,
-                        &prepared.imports,
-                        &prepared.include,
-                        &prepared.injected,
-                        &effects_alias,
-                        queries,
-                        None,
-                    )
+                    if queries.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        Err(crate::lookup::LookupInspectionError::Compiler(
+                            CompileError::ExtractFailed(
+                                "lookup inspection was not admitted".into(),
+                            ),
+                        ))
+                    }
                 },
             )
         };
@@ -6543,7 +6612,7 @@ where
         let revalidate_source = source.clone();
 
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_compiler_machine(context, move |session, context, _, settlement| {
                 let fresh_view = actor_compile_view(session, context, &revalidate_source)?;
                 let fresh_prepared = revalidate_source.prepare(&fresh_view);
                 let source_revision_unchanged =
@@ -6562,7 +6631,7 @@ where
                     answer.issue = Some("lookup compile view changed".into());
                 }
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -6712,40 +6781,46 @@ where
         // Enter the span only for the synchronous call that captures it —
         // an `Entered` guard is not `Send` and must not live across the
         // `.await` below.
+        let compiler_work = register_compiler_work()?;
+        let mut cancel_on_drop =
+            CancelCompilerTransactionOnDrop(Some(compiler_work.cancellation()));
         let spawn = {
             let _entered = inspection_span.enter();
             spawn_blocking_in_span(move || {
-                let inputs = inputs?;
-                let prepared = compiler_source.prepare(&compile_view);
-                let include = prepared
-                    .include
-                    .iter()
-                    .map(PathBuf::as_path)
-                    .collect::<Vec<_>>();
-                run_admitted_inspections(
-                    InspectionRequest {
-                        exact_context: compile_view.exact_compile_context(),
-                        preamble: &prepared.preamble,
-                        imports: &prepared.imports,
-                        include: &include,
-                        session_root: compile_view.session_root(),
-                        inject_modules: &prepared.injected,
-                        queries: &[request_query],
-                        effects: Some(&effects),
-                    },
-                    compile_view.session_view(),
-                    &inputs,
-                )
-                .map_err(|error| error.to_string())
-                .and_then(|mut results| {
-                    if results.len() == 1 {
-                        Ok(results.remove(0))
-                    } else {
-                        Err(format!(
-                            "inspection returned {} results for one query",
-                            results.len()
-                        ))
-                    }
+                compiler_work.run(|settlement| {
+                    let inputs = inputs?;
+                    let prepared = compiler_source.prepare(&compile_view);
+                    let include = prepared
+                        .include
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .collect::<Vec<_>>();
+                    run_admitted_inspections(
+                        InspectionRequest {
+                            exact_context: compile_view.exact_compile_context(),
+                            preamble: &prepared.preamble,
+                            imports: &prepared.imports,
+                            include: &include,
+                            session_root: compile_view.session_root(),
+                            inject_modules: &prepared.injected,
+                            queries: &[request_query],
+                            effects: Some(&effects),
+                        },
+                        compile_view.session_view(),
+                        &inputs,
+                        settlement,
+                    )
+                    .map_err(|error| error.to_string())
+                    .and_then(|mut results| {
+                        if results.len() == 1 {
+                            Ok(results.remove(0))
+                        } else {
+                            Err(format!(
+                                "inspection returned {} results for one query",
+                                results.len()
+                            ))
+                        }
+                    })
                 })
             })
         };
@@ -6753,13 +6828,14 @@ where
             .await
             .map_err(ResidentActorWorkbenchError::Join)?;
 
+        cancel_on_drop.0 = None;
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_compiler_machine(context, move |session, context, _, settlement| {
                 let current_view = actor_compile_view(session, context, &source)?;
                 let current = structured_provenance(&current_view, &source, query.scope.clone());
                 let answer = structured_introspection_answer(kind, inspected, provenance, current);
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -6948,9 +7024,9 @@ where
         let finish_warnings = warnings.clone();
         let captured = observation.is_some();
         let finish_block = block.clone();
-        let install_future = access.with_machine(context.clone(), move |session, context, _| {
+        let install_future = access.with_compiler_machine(context.clone(), move |session, context, _, settlement| {
                 tracing::info!(target: "exomonad_actor::workbench_phase", install_attempt, phase = "native_item_run_started", "workbench phase");
-                match session.revalidate_and_run_prepared(compiled_program) {
+                match session.revalidate_and_run_prepared(compiled_program, settlement) {
                     Ok(Some(outcome)) => finish_bind_step(
                         session,
                         context,
@@ -6977,7 +7053,7 @@ where
     }
 
     access
-        .with_machine(context, move |session, context, _| {
+        .with_compiler_machine(context, move |session, context, _, settlement| {
             begin_ready_bind_in_checkout(
                 session,
                 context,
@@ -6986,6 +7062,7 @@ where
                 compiled_turn,
                 generation,
                 observation,
+                settlement,
             )
         })
         .await
@@ -6999,6 +7076,7 @@ fn begin_ready_bind_in_checkout<H, O>(
     compiled: CompiledTurn,
     generation: tidepool_repr::Generation,
     observation: Option<(String, Option<bool>)>,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -7007,7 +7085,11 @@ where
     tracing::info!(target: "exomonad_actor::workbench_phase", phase = "native_item_bootstrap_started", "workbench phase");
     let warnings = compiled.warnings.warnings.clone();
     let outcome = match bound.as_slice() {
-        [] => session.run_with_sites("actor_interactive_discard_bind", compiled.into_code()),
+        [] => session.run_with_sites(
+            "actor_interactive_discard_bind",
+            compiled.into_code(),
+            settlement,
+        ),
         [binder] if observation.is_some() => session.run_observation_with_sites(
             compiled.into_code(),
             binder,
@@ -7016,18 +7098,21 @@ where
                 .as_ref()
                 .and_then(|(_, effectful)| *effectful)
                 .unwrap_or(false),
+            settlement,
         ),
         [binder] => session.run_bind_with_sites(
             "actor_interactive_bind",
             compiled.into_code(),
             binder,
             generation,
+            settlement,
         ),
         binders => session.run_projected_bind_with_sites(
             "actor_interactive_pattern_bind",
             compiled.into_code(),
             binders,
             generation,
+            settlement,
         ),
     };
     tracing::info!(target: "exomonad_actor::workbench_phase", phase = "native_item_bootstrap_completed", "workbench phase");
@@ -7941,12 +8026,12 @@ where
             cancel_on_drop.0 = Some(compiler_work.cancellation());
             let prepared = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
                 compiler_work.run(
-                    || match baseline {
+                    |settlement| match baseline {
                         tidepool_runtime::session::ExecutionPublication::Bindings(base) => {
                             base.stage().map(PreparedExecutionPublication::Manifest)
                         }
                         tidepool_runtime::session::ExecutionPublication::Declarations(base) => {
-                            match base.certify()? {
+                            match base.certify(settlement)? {
                                 tidepool_runtime::session::CertifiedDeclarationPublication::Accepted(accepted) => {
                                     accepted.stage().map(PreparedExecutionPublication::Manifest)
                                 }
@@ -8089,9 +8174,9 @@ where
         let allowance = allowance.clamp(0, 8192);
         let mut context = context;
         context.effect_policy = tidepool_effect::EffectRunPolicy::SuspendAll;
-        self.access.with_machine(context, move |session, context, _| {
+        self.access.with_compiler_machine(context, move |session, context, _, settlement| {
             let scope = context.placement.resource_scope;
-            let mut outcome = session.run_rooted_entry_borrowed("display_expansion", &callback, 0, scope, None)?;
+            let mut outcome = session.run_rooted_entry_borrowed("display_expansion", &callback, 0, scope, None, settlement)?;
             let mut input_received = false;
             let mut published = None;
             loop {
@@ -8102,7 +8187,7 @@ where
                             match ResidentRequest::decode(&request, session.data_con_table())? {
                                 ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayExpansionInputWith) if !input_received => {
                                     input_received = true;
-                                    Ok(session.resume(hole.clone(), (identity, key, allowance)))
+                                    Ok(session.resume(hole.clone(), (identity, key, allowance), settlement))
                                 }
                                 ResidentRequest::Console(crate::generated::console::ConsoleReq::DisplayWith((issued, text, expansions, unavailable), _)) if input_received && published.is_none() && issued == identity => {
                                     let output = tidepool_runtime::session::WorkbenchDisplayPage { identity, text, expansions, unavailable };
@@ -8110,7 +8195,7 @@ where
                                     crate::resident_actor::validate_display_metadata(&output)?;
                                     let callback = session.live_payload_handle_owned_by(hole.cont_id(), scope)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("display update has no retained callback".into()))?;
                                     published = Some((output, callback));
-                                    Ok(session.resume(hole.clone(), identity))
+                                    Ok(session.resume(hole.clone(), identity, settlement))
                                 }
                                 _ => Err(ResidentActorWorkbenchError::ActorProtocol("display callback crossed an unauthorized boundary".into())),
                             }
@@ -8266,7 +8351,7 @@ where
         };
 
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_compiler_machine(context, move |session, context, _, settlement| {
                 let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
                 if matches!(mode, BoundaryCapture::Replacement)
                     && !matches!(&decoded, ResidentRequest::ActorLocal(
@@ -8353,8 +8438,7 @@ where
                         ),
                     ) => crate::ResidentActorStart::capture_spawn(
                         session, hole, spawn_context, workspace, effects, label, model,
-                        effort, instructions, lifetime, limits, context.placement.session, context.actor,
-                    ).map(ResidentActorBoundary::Start)
+                        effort, instructions, lifetime, limits, context.placement.session, context.actor, settlement).map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(name)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { continuation: hole, name })),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::CheckCheckpoint { continuation: hole, token })),
@@ -8485,8 +8569,7 @@ where
                             &request,
                             &table,
                             context.placement.session,
-                            context.actor,
-                        )
+                            context.actor, settlement)
                         .map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }
@@ -8542,8 +8625,7 @@ where
                             &request,
                             &table,
                             context.placement.session,
-                            context.actor,
-                        )
+                            context.actor, settlement)
                         .map(|candidate| ResidentActorBoundary::Replace { target, candidate })
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }
@@ -8922,9 +9004,9 @@ where
         entry: tidepool_runtime::session::PreparedStartupEntry,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .run_startup_entry(entry)
+                    .run_startup_entry(entry, settlement)
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
@@ -8937,9 +9019,9 @@ where
         realm: RealmId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _context, _| {
+            .with_compiler_machine(context, move |session, _context, _, settlement| {
                 session
-                    .run_rooted_entry("actor_program", entry, 0, realm, None)
+                    .run_rooted_entry("actor_program", entry, 0, realm, None, settlement)
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
@@ -8954,10 +9036,17 @@ where
         work: Arc<crate::resident_actor::invocation_work::InvocationWork>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 work.with_admission(|| {
                     session
-                        .run_rooted_entry("scope_callback", callback, token, realm, None)
+                        .run_rooted_entry(
+                            "scope_callback",
+                            callback,
+                            token,
+                            realm,
+                            None,
+                            settlement,
+                        )
                         .map_err(ResidentActorWorkbenchError::Resident)
                 })
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?
@@ -9062,12 +9151,12 @@ where
         };
         let mut outcome = self
             .access
-            .with_machine_wait(
+            .with_compiler_machine_wait(
                 context.clone(),
                 Some(admission_timeout),
-                move |session, _context, _| {
+                move |session, _context, _, settlement| {
                     session
-                        .run_rooted_entry("actor_shutdown", hook, argument, realm, None)
+                        .run_rooted_entry("actor_shutdown", hook, argument, realm, None, settlement)
                         .map_err(ResidentActorWorkbenchError::Resident)
                 },
             )
@@ -9107,9 +9196,9 @@ where
         readiness: ResidentActorReadiness,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(readiness.hole, ())
+                    .resume_classified(readiness.hole, (), settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9143,7 +9232,7 @@ where
         handler_realm: RealmId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _context, _| {
+            .with_compiler_machine(context, move |session, _context, _, settlement| {
                 session
                     .run_rooted_application(
                         "actor_application",
@@ -9151,6 +9240,7 @@ where
                         &request,
                         handler_realm,
                         None,
+                        settlement,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
@@ -9168,9 +9258,9 @@ where
         let realm = RealmId::fresh();
         let (hole, input) = self
             .access
-            .with_machine(context.clone(), move |session, _, _| {
+            .with_compiler_machine(context.clone(), move |session, _, _, settlement| {
                 let outcome = session
-                    .run_rooted_entry_borrowed("actor_source", &entry, 0, realm, None)
+                    .run_rooted_entry_borrowed("actor_source", &entry, 0, realm, None, settlement)
                     .map_err(ResidentActorWorkbenchError::Resident)?;
                 let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -9219,7 +9309,7 @@ where
             SourceEvent::Command(event) => self.resume_value(context.clone(), hole, event).await?,
             SourceEvent::Lifecycle(event) => {
                 self.access
-                    .with_machine(context.clone(), move |session, _, _| {
+                    .with_compiler_machine(context.clone(), move |session, _, _, settlement| {
                         let value = match event {
                             crate::ActorLifecycle::Live => LifecycleAnswer::Live,
                             crate::ActorLifecycle::Paused(detail) => {
@@ -9230,7 +9320,7 @@ where
                             }
                         };
                         session
-                            .resume_classified(hole, value)
+                            .resume_classified(hole, value, settlement)
                             .map_err(classify_resumption)
                     })
                     .await?
@@ -9427,9 +9517,9 @@ where
         hole: ResidentHole,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, ())
+                    .resume_classified(hole, (), settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9465,14 +9555,14 @@ where
         value: u64,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let value = i64::try_from(value).map_err(|_| {
                     ResidentActorWorkbenchError::ActorProtocol(
                         "runtime identity exceeds Haskell Int".into(),
                     )
                 })?;
                 session
-                    .resume_classified(hole, value)
+                    .resume_classified(hole, value, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9493,9 +9583,9 @@ where
             runtime,
         };
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9508,9 +9598,9 @@ where
         roster: Vec<AgentRosterProjection>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, roster)
+                    .resume_classified(hole, roster, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9523,9 +9613,9 @@ where
         observation: Option<AgentRosterProjection>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, observation)
+                    .resume_classified(hole, observation, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9538,9 +9628,9 @@ where
         outcome: AgentForgetProjection,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, outcome)
+                    .resume_classified(hole, outcome, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9581,10 +9671,10 @@ where
         };
         let settled = self
             .access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let outcome = match result {
                     Ok(response) => session
-                        .resume_response_classified(hole, response)
+                        .resume_response_classified(hole, response, settlement)
                         .map_err(classify_resumption),
                     Err(error) => session
                         .abort(hole.cont_id(), error.to_string())
@@ -9645,9 +9735,9 @@ where
         outcome: T,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, outcome)
+                    .resume_classified(hole, outcome, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9660,9 +9750,9 @@ where
         outcome: AgentStopProjection,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, outcome)
+                    .resume_classified(hole, outcome, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9675,10 +9765,10 @@ where
         error: crate::ReplyError,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let answer = crate::request_effect::ReplyResult::<()>(Err(error));
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9697,7 +9787,7 @@ where
         )>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let refusal = match (access_site, current) {
                     (Some(access_site), Some((request, request_types, scope, input_binding))) => {
                         if !session
@@ -9729,6 +9819,7 @@ where
                                     input_binding,
                                     constructor,
                                     vec![request],
+                                    settlement,
                                 )
                                 .map_err(classify_resumption)?
                             {
@@ -9743,7 +9834,7 @@ where
                     (_, None) => crate::request_effect::RequestScopeRefusal::NoCurrentRequest,
                 };
                 session
-                    .resume_classified(hole, refusal)
+                    .resume_classified(hole, refusal, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9756,10 +9847,10 @@ where
         observation: Result<crate::ResponseObservation, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let answer = crate::request_effect::RequestAnswer::Response(observation);
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9772,9 +9863,13 @@ where
         outcome: Result<T, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, crate::request_effect::ReplyResult(outcome))
+                    .resume_classified(
+                        hole,
+                        crate::request_effect::ReplyResult(outcome),
+                        settlement,
+                    )
                     .map_err(classify_resumption)
             })
             .await
@@ -9787,11 +9882,12 @@ where
         outcome: Result<u64, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
                     .resume_classified(
                         hole,
                         crate::request_effect::ReplyResult(outcome.map(|_| ())),
+                        settlement,
                     )
                     .map_err(classify_resumption)
             })
@@ -9805,9 +9901,9 @@ where
         result: Result<(), SpecReplacementError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(continuation, result)
+                    .resume_classified(continuation, result, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9902,7 +9998,7 @@ where
             other => other,
         };
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let table = session.data_con_table();
                 let answer = match observation {
                     Ok((Some(snapshot), _)) => {
@@ -9928,6 +10024,7 @@ where
                                 &snapshot.value,
                                 constructor,
                                 prefix,
+                                settlement,
                             )
                             .map_err(classify_resumption);
                     }
@@ -9936,7 +10033,7 @@ where
                     Err(error) => ProgressAnswer::Rejected(error),
                 };
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9949,10 +10046,10 @@ where
         outcome: Result<crate::CancelRequestOutcome, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let answer = crate::request_effect::RequestAnswer::Cancel(outcome);
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9965,10 +10062,10 @@ where
         outcome: Result<crate::AbandonResponseOutcome, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let answer = crate::request_effect::RequestAnswer::Abandon(outcome);
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9981,10 +10078,10 @@ where
         outcome: Result<crate::ForgetResponseOutcome, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let answer = crate::request_effect::RequestAnswer::ForgetResponse(outcome);
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -9997,10 +10094,10 @@ where
         observation: Result<crate::ReplyObservation, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let answer = crate::request_effect::RequestAnswer::Reply(observation);
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10013,9 +10110,9 @@ where
         handler_realm: RealmId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let outcome = session
-                    .resume_classified(receiver_continuation, true)
+                    .resume_classified(receiver_continuation, true, settlement)
                     .map_err(classify_resumption)?;
                 let _ = session.close_realm(handler_realm);
                 Ok(outcome)
@@ -10030,10 +10127,10 @@ where
         observation: Result<crate::WatchObservation, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let answer = crate::request_effect::RequestAnswer::Watch(observation);
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10046,9 +10143,9 @@ where
         observation: Result<crate::request::routes::RouteState, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, RouteStateAnswer(observation))
+                    .resume_classified(hole, RouteStateAnswer(observation), settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10061,7 +10158,7 @@ where
         watch: crate::WatchId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_compiler_machine(context, move |session, context, _, settlement| {
                 let argument = i64::try_from(watch.0).map_err(|_| {
                     ResidentActorWorkbenchError::ActorProtocol(
                         "route ID exceeds Haskell Int".into(),
@@ -10074,6 +10171,7 @@ where
                         argument,
                         context.placement.resource_scope,
                         None,
+                        settlement,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
@@ -10087,10 +10185,10 @@ where
         outcome: Result<crate::ForgetWatchOutcome, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 let answer = crate::request_effect::RequestAnswer::ForgetWatch(outcome);
                 session
-                    .resume_classified(hole, answer)
+                    .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10104,9 +10202,9 @@ where
         arguments: serde_json::Value,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, (name, arguments))
+                    .resume_classified(hole, (name, arguments), settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10119,9 +10217,9 @@ where
         value: RootCustody,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_handle_classified(hole, value)
+                    .resume_handle_classified(hole, value, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10134,9 +10232,9 @@ where
         terminal: crate::ActorTerminal,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, terminal)
+                    .resume_classified(hole, terminal, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10149,9 +10247,9 @@ where
         failure: Option<String>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, CallStatus(failure))
+                    .resume_classified(hole, CallStatus(failure), settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10164,9 +10262,9 @@ where
         terminal: Option<crate::ActorTerminal>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, terminal)
+                    .resume_classified(hole, terminal, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10302,39 +10400,42 @@ where
         session_id: tidepool_repr::SessionId,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
     ) -> Result<(crate::ActorPlacement, ResidentOutcome), ResidentActorWorkbenchError> {
+        let owner = CompilerCloseOwner::current()?;
         self.access
             .with_host_machine("root", session_id, None, move |session, _| {
-                let placement = crate::ActorPlacement {
-                    session: session_id,
-                    resource_scope: RealmId::fresh(),
-                    lexical_scope: session.mint_isolated_scope(),
-                };
-                let prepared = (|| {
-                    session
-                        .set_actor_execution(
-                            tidepool_runtime::session::SessionRunContext {
-                                resource_scope: placement.resource_scope,
-                                lexical_scope: placement.lexical_scope,
-                                ..tidepool_runtime::session::SessionRunContext::ROOT
-                            },
-                            tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-                            tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-                        )
-                        .map_err(ResidentActorWorkbenchError::Resident)?;
-                    let outcome = session
-                        .run_with_sites("forest-root", compiled.code())
-                        .map_err(ResidentActorWorkbenchError::Resident)?;
-                    Ok::<_, ResidentActorWorkbenchError>(outcome)
-                })();
-                let outcome = match prepared {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        session.close_realm(placement.resource_scope);
-                        session.retire_scope(placement.lexical_scope);
-                        return Err(error);
-                    }
-                };
-                Ok((placement, outcome))
+                owner.register_work()?.run(|settlement| {
+                    let placement = crate::ActorPlacement {
+                        session: session_id,
+                        resource_scope: RealmId::fresh(),
+                        lexical_scope: session.mint_isolated_scope(),
+                    };
+                    let prepared = (|| {
+                        session
+                            .set_actor_execution(
+                                tidepool_runtime::session::SessionRunContext {
+                                    resource_scope: placement.resource_scope,
+                                    lexical_scope: placement.lexical_scope,
+                                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                                },
+                                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                            )
+                            .map_err(ResidentActorWorkbenchError::Resident)?;
+                        let outcome = session
+                            .run_with_sites("forest-root", compiled.code(), settlement)
+                            .map_err(ResidentActorWorkbenchError::Resident)?;
+                        Ok::<_, ResidentActorWorkbenchError>(outcome)
+                    })();
+                    let outcome = match prepared {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            session.close_realm(placement.resource_scope);
+                            session.retire_scope(placement.lexical_scope);
+                            return Err(error);
+                        }
+                    };
+                    Ok((placement, outcome))
+                })
             })
             .await
     }
@@ -10440,9 +10541,9 @@ where
         >,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
-                    .resume_classified(hole, result)
+                    .resume_classified(hole, result, settlement)
                     .map_err(classify_resumption)
             })
             .await
@@ -10456,7 +10557,7 @@ where
         allocated_label: String,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_compiler_machine(context, move |session, _, _, settlement| {
                 session
                     .resume_classified(
                         hole,
@@ -10465,6 +10566,7 @@ where
                             actor.incarnation.0 as i64,
                             allocated_label,
                         ),
+                        settlement,
                     )
                     .map_err(classify_resumption)
             })
@@ -11276,6 +11378,7 @@ fn run_status_discovery<H, O>(
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     command: crate::status_tool::StatusDiscovery,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<Result<String, String>, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -11292,7 +11395,7 @@ where
             let inspected = if queries.is_empty() {
                 Vec::new()
             } else {
-                inspect_actor_batch(session, context, source, &queries)?
+                inspect_actor_batch(session, context, source, &queries, settlement)?
             };
             let retained = bindings
                 .iter()
@@ -11370,6 +11473,7 @@ fn inspect_actor_batch<H, O>(
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     queries: &[InspectionQuery],
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<
     Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
     ResidentActorWorkbenchError,
@@ -11391,6 +11495,7 @@ where
         source,
         queries,
         &context.haskell_effects_alias,
+        settlement,
     )
 }
 
@@ -11400,6 +11505,7 @@ fn inspect_compile_view(
     source: &ActorWorkbenchSource,
     queries: &[InspectionQuery],
     effects: &tidepool_runtime::session::HaskellTypeSource,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<
     Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
     ResidentActorWorkbenchError,
@@ -11423,6 +11529,7 @@ fn inspect_compile_view(
         },
         compile_view.session_view(),
         inputs,
+        settlement,
     ) {
         Ok(results) if results.len() == queries.len() => Ok(results
             .into_iter()
@@ -11496,13 +11603,14 @@ fn inspect_lookup_queries(
     effects: &tidepool_runtime::session::HaskellTypeSource,
     queries: &[InspectionQuery],
     timing: Option<&crate::call_timing::CallTimingRegistration>,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<Vec<tidepool_runtime::session::InspectionResult>, crate::lookup::LookupInspectionError>
 {
     if queries.is_empty() {
         return Ok(vec![]);
     }
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    let inspect = || {
+    let mut inspect = || {
         let request = InspectionRequest {
             exact_context: view.exact_compile_context(),
             preamble,
@@ -11514,8 +11622,10 @@ fn inspect_lookup_queries(
             effects: Some(effects),
         };
         match values {
-            Some(inputs) => run_admitted_inspections(request, view.session_view(), inputs),
-            None => run_inspections(request),
+            Some(inputs) => {
+                run_admitted_inspections(request, view.session_view(), inputs, settlement)
+            }
+            None => run_inspections(request, settlement),
         }
         .map_err(crate::lookup::LookupInspectionError::Compiler)
     };

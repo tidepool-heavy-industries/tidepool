@@ -136,24 +136,37 @@ impl ModelFreeSession {
             worktrees.clone(),
             crate::exomonad::source::SourceRootOwner::Temporary(Arc::clone(&session_root)),
         )?;
-        let (source, root, program, child_session_factory, image_registry) = compile_root(
-            config,
-            &session_directory,
-            &worktree_directory,
-            worktrees.clone(),
-            authority.clone(),
-            source_layers.as_ref(),
-            Arc::clone(&host_incarnation),
-            super::JournalOpenMode::Create,
-            None,
-        )?;
-        let (descriptor, mut machine, entry) = root.into_parts();
-        let outcome = match entry {
-            exomonad_actor::ResidentRootEntry::Prepared(outcome) => outcome,
-            exomonad_actor::ResidentRootEntry::Startup(entry) => {
-                machine.run_startup_entry(entry)?
-            }
-        };
+        let (source, descriptor, machine, outcome, program, child_session_factory, image_registry) =
+            super::run_compiler_preparation(|settlement| {
+                let (source, root, program, child_session_factory, image_registry) = compile_root(
+                    config,
+                    &session_directory,
+                    &worktree_directory,
+                    worktrees.clone(),
+                    authority.clone(),
+                    source_layers.as_ref(),
+                    Arc::clone(&host_incarnation),
+                    super::JournalOpenMode::Create,
+                    None,
+                    settlement,
+                )?;
+                let (descriptor, mut machine, entry) = root.into_parts();
+                let outcome = match entry {
+                    exomonad_actor::ResidentRootEntry::Prepared(outcome) => outcome,
+                    exomonad_actor::ResidentRootEntry::Startup(entry) => {
+                        machine.run_startup_entry(entry, settlement)?
+                    }
+                };
+                Ok((
+                    source,
+                    descriptor,
+                    machine,
+                    outcome,
+                    program,
+                    child_session_factory,
+                    image_registry,
+                ))
+            })?;
         let (forest, mut deployments) = ResidentForest::new(
             source,
             descriptor.placement().session,

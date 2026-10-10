@@ -1962,17 +1962,21 @@ async fn run_owned(
         root_binding_path: config.root_binding_path.clone(),
         manifest: None,
     };
-    let (source, root, program, child_session_factory, image_registry) = compile_root(
-        &config,
-        &config.run_directory,
-        &worktree_directory,
-        worktrees.clone(),
-        worktree_authority.clone(),
-        source_layers.as_ref(),
-        Arc::clone(&host_incarnation),
-        run_journal_mode,
-        Some(&mut embedded_startup),
-    )?;
+    let (source, root, program, child_session_factory, image_registry) =
+        run_compiler_preparation(|settlement| {
+            compile_root(
+                &config,
+                &config.run_directory,
+                &worktree_directory,
+                worktrees.clone(),
+                worktree_authority.clone(),
+                source_layers.as_ref(),
+                Arc::clone(&host_incarnation),
+                run_journal_mode,
+                Some(&mut embedded_startup),
+                settlement,
+            )
+        })?;
     let prior_actor_records = actor_recovery.records();
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, entry) = root.into_parts();
@@ -2859,12 +2863,110 @@ struct CompiledExomonadDriver {
     prepared: Arc<tidepool_runtime::session::PreparedSourceEntry>,
 }
 
+/// Explicit preparation boundary used before invocation admission.
+pub(crate) fn run_compiler_preparation<T: 'static>(
+    action: impl FnOnce(
+        &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+    ) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let mut owner = exomonad_actor::CompilerPreparationOwner::new();
+    let outcome = owner.run(action);
+    if !outcome.cleanup.observation().is_confirmed() {
+        return Err(Box::new(PreparationCleanupUnconfirmed { outcome }));
+    }
+    outcome.action?
+}
+
+struct PreparationCleanupUnconfirmed<T> {
+    outcome: exomonad_actor::CompilerPreparationOutcome<
+        Result<Result<T, Box<dyn std::error::Error>>, exomonad_actor::ResidentActorWorkbenchError>,
+    >,
+}
+impl<T> fmt::Debug for PreparationCleanupUnconfirmed<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparationCleanupUnconfirmed")
+            .field("cleanup", &self.outcome.cleanup.observation())
+            .finish()
+    }
+}
+impl<T> fmt::Display for PreparationCleanupUnconfirmed<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "compiler preparation cleanup is unconfirmed: {:?}",
+            self.outcome.cleanup.observation()
+        )
+    }
+}
+impl<T> std::error::Error for PreparationCleanupUnconfirmed<T> {}
+
+/// Invoke a source check under the exact current actor cleanup authority.
+pub(crate) fn typecheck_candidate_revision_owned(
+    inputs: &crate::exomonad::workspace::FrozenWorkspace,
+    run_root: &Path,
+    haskell_root: &Path,
+    candidate_paths: &[PathBuf],
+    replaces_run_layer: bool,
+    also_check: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let owner = exomonad_actor::ActorCompilerCloseOwner::current()?;
+    let outcome = owner.run(|settlement| {
+        typecheck_candidate_revision(
+            inputs,
+            run_root,
+            haskell_root,
+            candidate_paths,
+            replaces_run_layer,
+            also_check,
+            settlement,
+        )
+    })?;
+    if matches!(
+        &outcome.close,
+        tidepool_runtime::CompilerTransactionClose::Unconfirmed(_)
+    ) {
+        return Err(Box::new(ActorCompilerCheckUnconfirmed { outcome }));
+    }
+    outcome.action
+}
+struct ActorCompilerCheckUnconfirmed {
+    outcome: tidepool_runtime::CompilerTransactionOutcome<Result<(), Box<dyn std::error::Error>>>,
+}
+impl fmt::Debug for ActorCompilerCheckUnconfirmed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ActorCompilerCheckUnconfirmed")
+            .field("close", &self.outcome.close)
+            .finish()
+    }
+}
+impl fmt::Display for ActorCompilerCheckUnconfirmed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "source check compiler close is unconfirmed: {:?}",
+            self.outcome.close
+        )
+    }
+}
+impl std::error::Error for ActorCompilerCheckUnconfirmed {}
+
 /// Typecheck the frozen workspace without producing or discarding native code.
 pub(crate) fn validate_workspace_program(
     inputs: &crate::exomonad::workspace::FrozenWorkspace,
     run_root: &Path,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    typecheck_candidate_revision(inputs, run_root, &inputs.runtime_actors(), &[], false, &[])
+    typecheck_candidate_revision(
+        inputs,
+        run_root,
+        &inputs.runtime_actors(),
+        &[],
+        false,
+        &[],
+        settlement,
+    )
 }
 
 /// Typecheck the exact selected spec installation for each static launchable
@@ -2875,6 +2977,7 @@ pub(crate) fn validate_workspace_program(
 pub(crate) fn spec_effect_preflight(
     workspace: &crate::exomonad::workspace::FrozenWorkspace,
     run_root: &Path,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let roots = workspace.captured_source_roots().to_vec();
     let resolved = exomonad_actor::agent_spec::resolve(roots, workspace.spec.as_deref());
@@ -2930,6 +3033,7 @@ pub(crate) fn spec_effect_preflight(
                 include: &include,
                 fallback_module_name: "Expr",
             },
+            settlement,
         ) {
             Ok(()) => {}
             Err(tidepool_toolchain::CompileError::Diagnostics(diagnostics)) => {
@@ -2974,6 +3078,7 @@ pub(crate) fn typecheck_candidate_revision(
     candidate: &[PathBuf],
     replaces_run_layer: bool,
     extra_modules: &[String],
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let DriverSources {
         workbench_preamble: mut preamble,
@@ -3021,6 +3126,7 @@ pub(crate) fn typecheck_candidate_revision(
             include: &include,
             fallback_module_name: "Expr",
         },
+        settlement,
     );
     checked.map_err(|error| {
         render_root_compile_failure(tidepool_runtime::session::TurnFailure {
@@ -3195,6 +3301,7 @@ fn compile_driver(
     run_root: &Path,
     candidate: Option<CandidateSources<'_>>,
     purpose: DriverCompilePurpose,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<CompiledExomonadDriver, Box<dyn std::error::Error>> {
     let DriverSources {
         bootstrap_preamble,
@@ -3229,21 +3336,24 @@ fn compile_driver(
         )?;
         tidepool_runtime::session::CompiledTurn::from_production_entry(&entry)?
     } else {
-        match run_turn(HaskellTurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: DRIVER_ENTRY,
-            templates: &templates,
-            include: &include_refs,
-            session_root: &session_root,
-            inject_modules: &[],
-            gen: 1,
-            verdict: None,
-            target: None,
-            // The driver is the session's first turn, so there is nothing
-            // retained to link against yet.
-            retained_imports: &[],
-        })
+        match run_turn(
+            HaskellTurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: DRIVER_ENTRY,
+                templates: &templates,
+                include: &include_refs,
+                session_root: &session_root,
+                inject_modules: &[],
+                gen: 1,
+                verdict: None,
+                target: None,
+                // The driver is the session's first turn, so there is nothing
+                // retained to link against yet.
+                retained_imports: &[],
+            },
+            settlement,
+        )
         .map_err(render_root_compile_failure)?
         {
             TurnResult::Expr { compiled, .. } => compiled,
@@ -3301,6 +3411,7 @@ fn compile_root(
     host_incarnation: Arc<HostIncarnationLease>,
     run_journal_mode: JournalOpenMode,
     embedded_startup: Option<&mut embedded_recovery::EmbeddedStartupRecovery>,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
     let run_root = run_directory.path();
     let CompiledExomonadDriver {
@@ -3315,6 +3426,7 @@ fn compile_root(
         run_root,
         None,
         DriverCompilePurpose::Bootstrap,
+        settlement,
     )?;
     let declarations = exomonad_effect_declarations();
     let session_root = run_root.join("haskell-session");
@@ -3330,7 +3442,12 @@ fn compile_root(
     }
     let mut library = SessionLib::open(session, &session_root, module_env)?
         .with_validation_include(include.clone());
-    root_declaration_recovery::attach(&mut library, run_root, Arc::clone(&host_incarnation))?;
+    root_declaration_recovery::attach(
+        &mut library,
+        run_root,
+        Arc::clone(&host_incarnation),
+        settlement,
+    )?;
     if let Some(startup) = embedded_startup {
         startup.observe_manifest(
             &library,
@@ -3394,7 +3511,7 @@ fn compile_root(
     let child_session_factory: exomonad_actor::ChildSessionFactory<
         ExomonadHandlerStack,
         CapturedOutput,
-    > = Arc::new(move |child_session_id, source_layer| {
+    > = Arc::new(move |child_session_id, source_layer, settlement| {
         // The source owner retains native images between fresh child installs;
         // the registry itself continues to hold only weak references.
         let _native_driver = &child_prepared_driver;
@@ -3420,6 +3537,7 @@ fn compile_root(
             &mut library,
             &child_run_root,
             Arc::clone(&child_run_lease),
+            settlement,
         )
         .map_err(|error| format!("child session declaration recovery: {error}"))?;
         let child_event_handler =
@@ -3783,9 +3901,27 @@ fn render_root_compile_failure(
         }
         _ => failure.to_string(),
     };
-    runtime_error(format!(
-        "root interactive driver compilation failed:\n{detail}"
-    ))
+    Box::new(RootCompilationFailure { failure, detail })
+}
+
+#[derive(Debug)]
+struct RootCompilationFailure {
+    failure: tidepool_runtime::session::TurnFailure,
+    detail: String,
+}
+impl fmt::Display for RootCompilationFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "root interactive driver compilation failed:\n{}",
+            self.detail
+        )
+    }
+}
+impl std::error::Error for RootCompilationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.failure)
+    }
 }
 
 fn embedded_resource_release(
