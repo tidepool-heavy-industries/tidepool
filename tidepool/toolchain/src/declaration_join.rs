@@ -518,6 +518,7 @@ pub fn certify_authored_declaration(
     exact_source: &str,
     includes: &[PathBuf],
     session_root: &Path,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     certify_authored_declaration_inner(
         module,
@@ -526,6 +527,7 @@ pub fn certify_authored_declaration(
         includes,
         session_root,
         None,
+        settlement,
     )
 }
 
@@ -539,6 +541,7 @@ pub fn certify_authored_declaration_in_context(
     includes: &[PathBuf],
     session_root: &Path,
     context: Arc<ExactDeclarationContext>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     certify_authored_declaration_inner(
         module,
@@ -547,6 +550,7 @@ pub fn certify_authored_declaration_in_context(
         includes,
         session_root,
         Some(context),
+        settlement,
     )
 }
 
@@ -557,6 +561,7 @@ fn certify_authored_declaration_inner(
     includes: &[PathBuf],
     session_root: &Path,
     context: Option<Arc<ExactDeclarationContext>>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     if module.kind != SessionModuleKind::Lib
         || module.gen.0 == 0
@@ -592,6 +597,7 @@ fn certify_authored_declaration_inner(
         session_root,
         context.clone(),
         &authored,
+        settlement,
     )?;
     if std::fs::read(source_path)? != exact_source.as_bytes() {
         return Err(contract("authored source changed during certification"));

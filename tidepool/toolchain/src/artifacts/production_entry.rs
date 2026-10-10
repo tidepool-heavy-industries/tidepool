@@ -248,12 +248,14 @@ pub fn prepare_frozen_production_entry(
     sources: &FrozenEntrySources,
     scratch: &Path,
     output: &Path,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<ProductionEntryOutput, CompileError> {
     prepare_frozen_production_entry_with_catalog(
         sources,
         scratch,
         output,
         &crate::toolchain::CatalogSelection::FreshConfigured,
+        settlement,
     )
 }
 
@@ -262,6 +264,7 @@ pub fn prepare_frozen_production_entry_with_catalog(
     scratch: &Path,
     output: &Path,
     catalog: &crate::toolchain::CatalogSelection,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<ProductionEntryOutput, CompileError> {
     sources.revalidate()?;
     if output.exists() || !scratch.is_dir() {
@@ -286,6 +289,7 @@ pub fn prepare_frozen_production_entry_with_catalog(
             sources: &ProductionEntrySources::FrozenWorkspace(sources.clone()),
             catalog: catalog.acquire()?,
         },
+        Some(settlement),
     )?;
     output
         .original_entry

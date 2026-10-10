@@ -63,6 +63,7 @@ pub fn issue_host_binding_interface(
     generation: u64,
     binding: &str,
     includes: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<Arc<crate::checked_cell::ExactHostBindingInterface>, CompileError> {
     let _span = tracing::debug_span!("host_binding_interface", generation, binding).entered();
     let mut command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
@@ -96,8 +97,9 @@ pub fn issue_host_binding_interface(
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
     HOST_BINDING_INTERFACE_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let run = endpoint
-        .execute(&command)
-        .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+        .execute_with_input_files(&command, offer.request.input_transport_files(), |close| {
+            settlement(close)
+        })?;
     crate::diag::decode_extract_result(
         run.output.status.success(),
         &run.output.stdout,
@@ -130,7 +132,10 @@ pub struct SourceCheckRequest<'a> {
 ///
 /// This operation emits no prepared or native artifacts and grants no authority
 /// to publish a mutable source graph. Diagnostics retain the selected inputs.
-pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError> {
+pub fn check_source(
+    request: &SourceCheckRequest<'_>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+) -> Result<(), CompileError> {
     let directory = compiler_scratch_directory()?;
     let module = extract_module_name(request.source)
         .unwrap_or_else(|| request.fallback_module_name.to_owned());
@@ -153,11 +158,13 @@ pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError
         command.module_candidates(manifest);
     }
     let diagnostics = CompilerDiagnosticCapture::start(directory.path(), &command);
-    let run = endpoint.execute(&command).map_err(|error| {
+    let run = endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| {
+        settlement(close)
+    }).map_err(|error| {
         offer.retain_execution_failure(
             directory.path(),
             &command,
-            CompileError::Io(extract_spawn_error(error.source)),
+            error,
         )
     })?;
     diagnostics.completed(
@@ -903,6 +910,7 @@ impl ModuleCandidateOffer {
         &self,
         endpoint: crate::toolchain::AdmittedCompilerEndpoint,
         command: &mut ExtractCmd,
+        settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
     ) -> Result<AdmittedTurnOutput, CompileError> {
         let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
@@ -927,11 +935,13 @@ impl ModuleCandidateOffer {
         let directory = compiler_scratch_directory()?;
         command.relocate_turn_outputs(directory.path());
         let diagnostics = CompilerDiagnosticCapture::start(directory.path(), command);
-        let run = endpoint.execute(command).map_err(|error| {
+        let run = endpoint.execute_with_input_files(command, self.input_transport_files(), |close| {
+            settlement(close)
+        }).map_err(|error| {
             self.retain_execution_failure(
                 directory.path(),
                 command,
-                CompileError::ExtractFailed(error.to_string()),
+                error,
             )
         })?;
         diagnostics.completed(directory.path(), command, run.success(), &run.output.stderr);
@@ -3706,11 +3716,17 @@ pub struct CompileInvocation<'a> {
 /// through its own collector without this crate needing to know what a
 /// "node" or "round" is. A caller with no use for timing passes `|_, _, _|
 /// {}`.
+///
+/// `settlement` belongs to the calling operation and must retain uncertain
+/// close evidence through operation unwind. Each standalone attempt reports
+/// its independent close; scoped calls keep the existing transaction owner.
+/// The recipient is borrowed across known-unsubmitted retries.
 pub fn compile_invocation(
     inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Runtime)
+    compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Runtime, Some(settlement))
         .map(|output| output.artifacts)
 }
 
@@ -3721,8 +3737,9 @@ pub fn compile_invocation_in_context(
     inv: &CompileInvocation<'_>,
     context: Arc<crate::declaration_join::ExactDeclarationContext>,
     mut on_stage: impl FnMut(&str, Duration, u64),
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Exact { context })
+    compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Exact { context }, Some(settlement))
         .map(|output| output.artifacts)
 }
 
@@ -3737,6 +3754,7 @@ pub(crate) fn compile_authored_products(
     session_root: &Path,
     context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
     authored: &crate::declaration_join::NativeAuthoredDeclarationAdmission,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CompiledArtifacts, CompileError> {
     let inv = CompileInvocation {
         source,
@@ -3752,6 +3770,7 @@ pub(crate) fn compile_authored_products(
             context,
             admission: authored,
         },
+        Some(settlement),
     )
     .map(|output| output.artifacts)
 }
@@ -4022,6 +4041,7 @@ fn compile_build_action(
             scratch,
             export,
         },
+        None,
     )
     .map(|_| ())
 }
@@ -4130,6 +4150,7 @@ fn compile_invocation_inner(
     inv: &CompileInvocation<'_>,
     mut on_stage: &mut impl FnMut(&str, Duration, u64),
     policy: CompilationPolicy<'_>,
+    mut settlement: Option<&mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose)>,
 ) -> Result<CompilationOutput, CompileError> {
     assert!(
         !inv.targets.is_empty(),
@@ -4424,9 +4445,26 @@ fn compile_invocation_inner(
             crate::host_work::checkpoint()
                 .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?;
             let previous_submission = output_owner.begin_execution();
-            let execution = endpoint.execute(&cmd).map_err(|error| {
-                output_owner.endpoint_failure(&error, previous_submission);
-                CompileAttemptError::Endpoint(error)
+            let execution = if let Some(recipient) = settlement.as_mut() {
+                let mut files = exact_request.as_ref().map_or_else(Vec::new, |request| request.input_transport_files());
+                if let Some(selected) = &candidate_set {
+                    files.extend(selected.input_transport.iter().map(|slice| slice.compiler_file_lease()));
+                }
+                CompileError::compiler_invocation_result(endpoint.execute_with_input_files(&cmd, files, |close| recipient(close)))
+            } else {
+                debug_assert!(matches!(policy, CompilationPolicy::BuildAction { .. }));
+                endpoint.execute(&cmd).map_err(CompileError::CompilerEndpoint)
+            }.map_err(|error| match error {
+                CompileError::CompilerEndpoint(error) => {
+                    output_owner.endpoint_failure(&error, previous_submission);
+                    CompileAttemptError::Endpoint(error)
+                }
+                error => {
+                    if let CompilationOutputOwner::Original(preparation) = &mut output_owner {
+                        preparation.mark_uncertain_submission();
+                    }
+                    CompileAttemptError::Diagnostic(error)
+                }
             });
             execution.map(|run| {
                 diagnostics.completed(output_owner.path(), &cmd, run.success(), &run.output.stderr);
@@ -5336,7 +5374,7 @@ enum CompileAttemptError {
 impl CompileAttemptError {
     fn into_compile_error(self) -> CompileError {
         match self {
-            Self::Endpoint(error) => CompileError::Io(extract_spawn_error(error.source)),
+            Self::Endpoint(error) => CompileError::CompilerEndpoint(error),
             Self::Deployment(error) => CompileError::ExtractFailed(error.to_string()),
             Self::ModulePackage(error) => CompileError::ModulePackage(error),
             Self::Diagnostic(error) => error,
@@ -5370,6 +5408,7 @@ pub fn compile_targets(
     targets: &[&str],
     include: &[PathBuf],
     on_stage: impl FnMut(&str, Duration, u64),
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CompiledArtifacts, CompileError> {
     assert!(
         !targets.is_empty(),
@@ -5381,7 +5420,7 @@ pub fn compile_targets(
         include,
         fallback_module_name: "Expr",
     };
-    compile_invocation(&inv, on_stage)
+    compile_invocation(&inv, on_stage, settlement)
 }
 
 // ---------------------------------------------------------------------------
