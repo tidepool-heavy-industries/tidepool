@@ -5,8 +5,8 @@ use super::{CompileError, CompiledProgram, DemandedImage, GlobalRefusalPhase, So
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tidepool_repr::execution_schema::{
-    CachedHomeOwner, CertifiedGroup, DefinitionsView, GlobalId, Group, HeapRhs, ImportOwner,
-    RuntimeRep, SymbolIdentity, ValueId,
+    CachedHomeOwner, CertifiedGroup, CertifiedGroupCode, DefinitionsView, GlobalId, Group, HeapRhs,
+    ImportOwner, RuntimeRep, SymbolIdentity, ValueId,
 };
 
 #[cfg(test)]
@@ -44,7 +44,7 @@ pub(crate) struct SourceLiteralOwner {
 }
 
 impl SourceLiteralOwner {
-    pub(super) fn from_group(group: &CertifiedGroup) -> Option<(ValueId, Self)> {
+    pub(super) fn from_code(group: &CertifiedGroupCode) -> Option<(ValueId, Self)> {
         let definitions = group.definitions();
         let [Group::NonRecursive(top)] = definitions.bindings() else {
             return None;
@@ -54,7 +54,6 @@ impl SourceLiteralOwner {
         };
         if binder != &top.identity
             || !matches!(top.binding.rhs, HeapRhs::Bytes(_))
-            || !group.imports().is_empty()
             || !definitions.globals().is_empty()
         {
             return None;
@@ -100,6 +99,44 @@ impl LiteralImport {
     }
 }
 
+/// Immutable storage selection facts, never machine-local binding authority.
+#[derive(Clone, Debug)]
+pub enum LiteralOwner {
+    Source {
+        version: tidepool_repr::execution_schema::ModuleVersion,
+        binder: SymbolIdentity,
+    },
+    Package {
+        unit: String,
+        module: String,
+        binder: SymbolIdentity,
+        interface_digest: [u8; 32],
+    },
+}
+
+impl LiteralOwner {
+    fn from_import(owner: &ImportOwner) -> Option<Self> {
+        match owner {
+            ImportOwner::Source { version, binder } => Some(Self::Source {
+                version: version.clone(),
+                binder: binder.clone(),
+            }),
+            ImportOwner::Package {
+                unit,
+                module,
+                binder,
+                interface_digest,
+            } => Some(Self::Package {
+                unit: unit.clone(),
+                module: module.clone(),
+                binder: binder.clone(),
+                interface_digest: *interface_digest,
+            }),
+            ImportOwner::Retained { .. } | ImportOwner::CodeExport { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub(super) struct GroupPackageLiterals(BTreeMap<GlobalId, LiteralImport>);
 
@@ -115,6 +152,19 @@ impl GroupPackageLiterals {
     pub(super) fn select_definitions(
         definitions: &DefinitionsView<'_>,
         owners: &[ImportOwner],
+        supplied: &BTreeMap<SymbolIdentity, PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+    ) -> Result<Self, CompileError> {
+        let owners = owners
+            .iter()
+            .map(LiteralOwner::from_import)
+            .collect::<Vec<_>>();
+        Self::select_immutable(definitions, &owners, supplied, sources)
+    }
+
+    pub(super) fn select_immutable(
+        definitions: &DefinitionsView<'_>,
+        owners: &[Option<LiteralOwner>],
         supplied: &BTreeMap<SymbolIdentity, PackageLiteral>,
         sources: &BTreeMap<SourceBinder, SourceLiteral>,
     ) -> Result<Self, CompileError> {
@@ -137,7 +187,7 @@ impl GroupPackageLiterals {
                     GlobalRefusalPhase::NonReferenceRepresentation,
                 )
             };
-            if let ImportOwner::Source { version, binder } = owner {
+            if let Some(LiteralOwner::Source { version, binder }) = owner {
                 let key = SourceBinder {
                     version: version.clone(),
                     binder: binder.clone(),
@@ -158,12 +208,12 @@ impl GroupPackageLiterals {
                 continue;
             }
             let literal = supplied.get(&declaration.identity).ok_or_else(missing)?;
-            let ImportOwner::Package {
+            let Some(LiteralOwner::Package {
                 unit,
                 module,
                 binder,
                 interface_digest,
-            } = owner
+            }) = owner
             else {
                 return Err(missing().into());
             };
@@ -200,17 +250,27 @@ impl DemandedImage {
     /// group. Mixed groups need their live managed instance, never a recompile
     /// of its mutable CAFs to recover an address.
     pub fn source_literals(&self) -> BTreeMap<SourceBinder, SourceLiteral> {
-        let group = self.group();
-        let image = self.image();
-        let Some((value, source)) = image.source_literal_producer.as_ref() else {
-            return BTreeMap::new();
-        };
-        if &source.owner != group.owner()
-            || source.original_ordinal != group.original_ordinal()
-            || group.binders() != [source.binder.binder.clone()]
+        if self
+            .image()
+            .certified_source
+            .as_ref()
+            .is_none_or(|(owner, ordinal)| {
+                owner != self.group().owner() || *ordinal != self.group().original_ordinal()
+            })
         {
             return BTreeMap::new();
         }
+        self.image().source_literals()
+    }
+}
+
+impl CompiledProgram {
+    /// Literal storage issued by compilation of a validated original Bytes group.
+    pub fn source_literals(&self) -> BTreeMap<SourceBinder, SourceLiteral> {
+        let image = self;
+        let Some((value, source)) = image.source_literal_producer.as_ref() else {
+            return BTreeMap::new();
+        };
         let Some(export) = image.top_exports.get(value) else {
             return BTreeMap::new();
         };

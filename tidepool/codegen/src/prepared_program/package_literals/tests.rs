@@ -993,3 +993,54 @@ fn source_literal_target_registry_keys_keep_exact_producer_ordinal_version_and_b
         .unwrap();
     assert!(Arc::ptr_eq(&first, &ordinary));
 }
+
+#[test]
+fn code_only_literal_preparation_matches_scoped_native_keys() {
+    for (ordinal, bytes) in [
+        (1, b"".as_slice()),
+        (2, b"plain".as_slice()),
+        (3, b"embedded\0byte".as_slice()),
+        (31, b"\xff\x80".as_slice()),
+    ] {
+        let registry = ImageRegistry::new();
+        let producer = source_literal_producer(literal_owner(), ordinal, &bytes, &registry);
+        let code = producer.group().code_identity();
+        let native = CompiledProgram::prepare_group_code(
+            &code,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &registry,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&native, producer.image()));
+        let prepared = source_literal_target(false);
+        let owners = [ImportOwner::Source {
+            version: code.owner().module_version.clone(),
+            binder: source_literal_identity(),
+        }];
+        let literals = native.source_literals();
+        let scoped = CompiledProgram::compile_prepared_with_source_literals(
+            &prepared, &owners, &literals, &registry,
+        )
+        .unwrap();
+        let offline = CompiledProgram::prepare_target_code(
+            &prepared,
+            &[Some(super::LiteralOwner::Source {
+                version: code.owner().module_version.clone(),
+                binder: source_literal_identity(),
+            })],
+            &literals,
+            &registry,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&offline, &scoped));
+        let weak = Arc::downgrade(&offline);
+        drop(offline);
+        drop(scoped);
+        assert!(
+            weak.upgrade().is_none(),
+            "weak registry cannot retain target storage after last code owner"
+        );
+    }
+}
