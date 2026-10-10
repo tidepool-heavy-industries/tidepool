@@ -967,8 +967,8 @@ impl CompiledProgram {
                     wide_words::prepared_quot_rem_word2 as *const u8,
                 ),
                 (
-                    "prepared_data_to_tag_small",
-                    data_tag::prepared_data_to_tag_small as *const u8,
+                    "prepared_data_to_tag",
+                    data_tag::prepared_data_to_tag as *const u8,
                 ),
                 (
                     floating::DECODE_DOUBLE_INT64_HOST,

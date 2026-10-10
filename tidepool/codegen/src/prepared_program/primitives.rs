@@ -819,6 +819,12 @@ pub(super) fn recognize_operation(
     {
         return Some(PrimitiveOperation::DataToTagSmall);
     }
+    if matches!(&declaration.identity, OperationIdentity::PrimOp(name) if name == "dataToTagLarge#")
+        && signature.arguments == [RuntimeRep::LiftedRef]
+        && returns_exact(signature, &[RuntimeRep::Int(64)])
+    {
+        return Some(PrimitiveOperation::DataToTagLarge);
+    }
     if let OperationIdentity::WiredInError { kind } = &declaration.identity {
         let arguments =
             if *kind == tidepool_repr::execution_schema::WiredInErrorKind::AbsentSumField {
@@ -892,6 +898,7 @@ pub(super) enum PrimitiveOperation {
     CStringLen,
     Raise,
     DataToTagSmall,
+    DataToTagLarge,
     WiredInError(tidepool_repr::execution_schema::WiredInErrorKind),
     NoDuplicate,
     PrimitiveFailure(super::fallible::PrimitiveFailure),
@@ -967,7 +974,7 @@ pub(super) fn emit_operation(
             super::capabilities::emit_unsupported(builder, pipeline, vmctx, capability)?;
             Ok(None)
         }
-        PrimitiveOperation::DataToTagSmall => {
+        PrimitiveOperation::DataToTagSmall | PrimitiveOperation::DataToTagLarge => {
             super::data_tag::emit(builder, pipeline, vmctx, prepared_enter, arguments[0]).map(Some)
         }
         PrimitiveOperation::WiredInError(kind) => {

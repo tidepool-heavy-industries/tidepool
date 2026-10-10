@@ -1,7 +1,8 @@
-//! `dataToTagSmall#` admits exactly LiftedRef -> Int64. Generated Tail entry
-//! forces the argument, and its status dominates all uses of the managed
-//! result. A noncollecting host returns the descriptor's zero-based family tag
-//! through a caller-owned scalar slot; pointer low bits are only evidence.
+//! Both data-to-tag primops admit exactly LiftedRef -> Int64. Generated Tail
+//! entry forces the argument, and its status dominates all uses of the managed
+//! result. The descriptor supplies the full zero-based family tag, including
+//! large constructors whose pointer tag saturates. This implements Large's
+//! fallback and Small's narrower valid domain through the same operation.
 
 use crate::prepared_control::CallStatus;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
@@ -14,7 +15,7 @@ use cranelift_module::{FuncId, Module};
 /// # Safety
 /// `vmctx` belongs to this prepared invocation, `reference` is its live
 /// generated managed result, and `output` points to writable `i64` storage.
-pub(super) unsafe extern "C" fn prepared_data_to_tag_small(
+pub(super) unsafe extern "C" fn prepared_data_to_tag(
     vmctx: *mut crate::context::VMContext,
     reference: usize,
     output: *mut i64,
@@ -58,7 +59,7 @@ pub(super) fn emit(
     let evaluated = returned[1];
     builder.declare_value_needs_stack_map(evaluated);
 
-    let host = super::arrays::declare_host(builder, pipeline, "prepared_data_to_tag_small", 3)?;
+    let host = super::arrays::declare_host(builder, pipeline, "prepared_data_to_tag", 3)?;
     let output = super::arrays::output_slot(builder);
     let call = builder.ins().call(host, &[vmctx, evaluated, output]);
     let status = builder.inst_results(call)[0];
@@ -78,14 +79,14 @@ mod tests {
     use std::sync::{atomic::AtomicBool, Arc};
     use tidepool_repr::{execution_schema::*, Literal};
 
-    fn constructor(tag: u8) -> ConstructorDecl {
+    fn constructor(tag: u32, family_size: u32) -> ConstructorDecl {
         ConstructorDecl {
             identity: testing::identity("DataTag", &format!("C{tag}")),
-            family: testing::identity("DataTag", "Seven"),
+            family: testing::identity("DataTag", "Family"),
             host_id: tidepool_repr::DataConId(990 + u64::from(tag)),
             result_rep: RuntimeRep::LiftedRef,
-            tag: u32::from(tag),
-            family_size: 7,
+            tag,
+            family_size,
             field_reps: vec![],
             strict_fields: vec![],
             layout: CheckedLayout {
@@ -98,6 +99,16 @@ mod tests {
     }
 
     fn wire(lazy: bool, garbage: usize) -> WireProgram {
+        tagged_wire("dataToTagSmall#", 7, 7, lazy, garbage)
+    }
+
+    fn tagged_wire(
+        operation: &str,
+        family_size: u32,
+        tag: u32,
+        lazy: bool,
+        garbage: usize,
+    ) -> WireProgram {
         let mut wire = testing::wire_program();
         wire.signatures.push(Signature {
             arguments: vec![RuntimeRep::LiftedRef],
@@ -108,17 +119,18 @@ mod tests {
             results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
         });
         wire.operations.push(OperationDecl {
-            identity: OperationIdentity::PrimOp("dataToTagSmall#".into()),
+            identity: OperationIdentity::PrimOp(operation.into()),
             signature: SignatureId(1),
         });
-        wire.constructors.extend((1..=7).map(constructor));
+        wire.constructors
+            .extend((1..=family_size).map(|tag| constructor(tag, family_size)));
         wire.expressions.nodes = vec![ExprFrame::Operation {
             operation: OperationId(0),
             arguments: vec![Atom::Ref(ValueRef::Local(ValueId(1)))],
         }];
         let rhs = if lazy {
             wire.expressions.nodes.push(ExprFrame::Construct {
-                constructor: ConstructorId(6),
+                constructor: ConstructorId(tag - 1),
                 fields: vec![],
             });
             let mut body = 1;
@@ -143,7 +155,7 @@ mod tests {
             }
         } else {
             HeapRhs::Constructor {
-                constructor: ConstructorId(6),
+                constructor: ConstructorId(tag - 1),
                 fields: vec![],
             }
         };
@@ -197,18 +209,55 @@ mod tests {
     }
 
     #[test]
+    fn large_tags_cross_pointer_saturation_before_and_after_collection() {
+        for tag in [1, 6, 7, 8, 31, 64] {
+            for lazy in [false, true] {
+                let program = compile(tagged_wire("dataToTagLarge#", 64, tag, lazy, 48));
+                let result = run(&program, if lazy { 64 } else { 4096 }, false).unwrap();
+                if lazy {
+                    assert!(result.collections > 0);
+                }
+                assert!(
+                    matches!(result.values.as_slice(),
+                    [tidepool_bridge::HaskellValue::Lit(Literal::LitInt(value))]
+                    if *value == i64::from(tag - 1)),
+                    "tag {tag}, lazy {lazy}"
+                );
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn large_family_indices_match_declared_order(
+            family in 8u32..=96,
+            selection in 0u32..=192,
+            lazy in proptest::bool::ANY,
+        ) {
+            let index = selection % family;
+            let program = compile(tagged_wire("dataToTagLarge#", family, index + 1, lazy, 16));
+            let result = run(&program, 64, false).unwrap();
+            proptest::prop_assert!(matches!(result.values.as_slice(),
+                [tidepool_bridge::HaskellValue::Lit(Literal::LitInt(value))]
+                if *value == i64::from(index)));
+        }
+    }
+
+    #[test]
     fn exact_signature_is_required() {
-        let mut wire = wire(false, 0);
-        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Word(64)]);
-        wire.signatures[1].results = ResultContract::Returns(vec![RuntimeRep::Word(64)]);
-        let linked =
-            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
-        assert!(matches!(
-            CompiledProgram::compile(&linked),
-            Err(super::super::CompileError::Unsupported(
-                Unsupported::Operation { .. }
-            ))
-        ));
+        for operation in ["dataToTagSmall#", "dataToTagLarge#"] {
+            let mut wire = tagged_wire(operation, 7, 7, false, 0);
+            wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Word(64)]);
+            wire.signatures[1].results = ResultContract::Returns(vec![RuntimeRep::Word(64)]);
+            let linked =
+                link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+            assert!(matches!(
+                CompiledProgram::compile(&linked),
+                Err(super::super::CompileError::Unsupported(
+                    Unsupported::Operation { .. }
+                ))
+            ));
+        }
     }
 
     #[test]
