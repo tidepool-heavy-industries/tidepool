@@ -66,6 +66,34 @@ fn typed_result_matches(item: &harness::item::Item, call_id: &str, expected: &st
         })
 }
 
+fn validate_completed_replies(input: &[harness::item::Item]) -> Result<(), String> {
+    for item in input {
+        let Some(call_id) = item.0["call_id"].as_str() else {
+            continue;
+        };
+        let matches = match (item.0["type"].as_str(), call_id) {
+            (Some("custom_tool_call_output"), "browser-real-cell") => real_cell_returned_42(item),
+            (Some("function_call_output"), "browser-typed-first") => {
+                typed_result_matches(item, call_id, "42")
+            }
+            (Some("function_call_output"), "browser-typed-second") => {
+                typed_result_matches(item, call_id, "43")
+            }
+            _ => continue,
+        };
+        // A delivered tool result is terminal. Waiting for another result on
+        // this call hides a settled failure behind the browser's phase timeout.
+        if !matches {
+            let output = item.0["output"].as_str().unwrap_or("<missing text output>");
+            return Err(format!(
+                "browser call {call_id} settled without its expected result: {}",
+                output.chars().take(1024).collect::<String>(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn probe_call(call_id: &str, number: i64) -> harness::item::Item {
     harness::item::Item(json!({
         "type":"function_call", "name":"probe", "call_id":call_id,
@@ -477,6 +505,7 @@ async fn drive_browser(
                 }
                 barrier = barriers.recv(), if started && waiting.is_none() => {
                     let barrier = barrier.ok_or("scripted provider closed before browser completion")?;
+                    validate_completed_replies(&barrier.request.input)?;
                     last_phase = barrier.phase;
                     eprintln!("browser gate phase={last_phase} elapsed={:?}", journey_started.elapsed());
                     if barrier.phase == "typed_first" {
@@ -694,4 +723,52 @@ pub(super) async fn production_browser_journey() {
     );
     let state = transport.state.lock();
     assert!(state.raw_completed && state.typed_completed && state.cancel_issued && state.continued);
+}
+
+#[test]
+fn completed_browser_replies_report_failures_and_wrong_results() {
+    for (kind, call_id) in [
+        ("custom_tool_call_output", "browser-real-cell"),
+        ("function_call_output", "browser-typed-first"),
+        ("function_call_output", "browser-typed-second"),
+    ] {
+        for output in [
+            json!({"error":"native custody requires identical certified inputs", "failure":{"phase":"compile"}}).to_string(),
+            json!({"status":"completed", "total":1, "nextIndex":1, "items":[{"status":"committed", "output":"41"}]}).to_string(),
+            "not a JSON response".to_owned(),
+        ] {
+            let input = [harness::item::Item(json!({
+                "type":kind, "call_id":call_id, "output":output,
+            }))];
+            let failure = validate_completed_replies(&input).unwrap_err();
+            assert!(failure.contains(call_id));
+            assert!(failure.contains(&output));
+        }
+    }
+}
+
+#[test]
+fn browser_reply_observation_allows_pending_and_successful_calls() {
+    let mut input = vec![
+        final_answer("Waiting for the resident cell."),
+        harness::item::Item(json!({
+            "type":"custom_tool_call", "call_id":"browser-real-cell", "input":"pending",
+        })),
+        harness::item::Item(json!({
+            "type":"custom_tool_call_output", "call_id":"browser-cancellable-cell", "output":"cancelled",
+        })),
+    ];
+    assert!(validate_completed_replies(&input).is_ok());
+    for (kind, call_id, expected) in [
+        ("custom_tool_call_output", "browser-real-cell", "42"),
+        ("function_call_output", "browser-typed-first", "42"),
+        ("function_call_output", "browser-typed-second", "43"),
+    ] {
+        input.push(harness::item::Item(json!({
+            "type":kind, "call_id":call_id,
+            "output":json!({"status":"completed", "total":1, "nextIndex":1,
+                "items":[{"status":"committed", "output":expected}]}).to_string(),
+        })));
+        assert!(validate_completed_replies(&input).is_ok());
+    }
 }
