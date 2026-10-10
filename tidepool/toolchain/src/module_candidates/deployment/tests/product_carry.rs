@@ -227,7 +227,12 @@ fn deployment_evidence_same_digest_at_distinct_paths_is_authenticated_per_path()
         package.revalidate(&fixture.output.join("catalog.json"), RootPolicy::Fixture),
         Err(ModulePackageError::ArtifactChanged(path)) if path == alternate_path
     ));
+    assert!(matches!(
+        fixture.load(),
+        Err(ModulePackageError::ArtifactChanged(path)) if path == alternate_path
+    ));
     fs::write(alternate_path, original_bytes).unwrap();
+    assert!(fixture.load().is_ok(), "fresh acquisition succeeds after restore");
     assert!(
         package
             .revalidate(&fixture.output.join("catalog.json"), RootPolicy::Fixture)
