@@ -224,16 +224,32 @@ fn construction_history(
             "delayed output must remain cold until its first checked read"
         );
     }
-    let retired = inventory.0.lock().unwrap().indices
-        [&InventoryNodeKey::Artifact(catalog.entries[OWNERS - 1].descriptor.id)];
+    let retired = {
+        let state = inventory.0.lock().unwrap();
+        let binding = all
+            .resolve_binding(
+                catalog.entries[OWNERS - 1].descriptor.id,
+                &all.read_projection(&state).nodes,
+            )
+            .unwrap();
+        state.indices[&InventoryNodeKey::Artifact(binding)]
+    };
     drop(all);
     drop(branch);
     drop(alias);
     let unrelated = inventory
         .admit(&peer, vec![catalog.entries[OWNERS + 1].clone()])
         .unwrap();
-    let reused = inventory.0.lock().unwrap().indices
-        [&InventoryNodeKey::Artifact(catalog.entries[OWNERS + 1].descriptor.id)];
+    let reused = {
+        let state = inventory.0.lock().unwrap();
+        let binding = unrelated
+            .resolve_binding(
+                catalog.entries[OWNERS + 1].descriptor.id,
+                &unrelated.read_projection(&state).nodes,
+            )
+            .unwrap();
+        state.indices[&InventoryNodeKey::Artifact(binding)]
+    };
     prop_assert_eq!(
         reused,
         retired,
@@ -389,7 +405,7 @@ fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
         .closure
         .iter()
         .filter_map(|key| match key {
-            InventoryNodeKey::Artifact(id) => Some(*id),
+            InventoryNodeKey::Artifact(binding) => Some(binding.artifact),
             InventoryNodeKey::Group(_) => None,
         })
         .collect::<BTreeSet<_>>();
@@ -408,7 +424,7 @@ fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
                 return None;
             }
             // The group-to-carrier edge only represents graph custody.
-            if matches!(source, InventoryNodeKey::Group(group) if target == InventoryNodeKey::Artifact(group.artifact))
+            if matches!(source, InventoryNodeKey::Group(group) if target == InventoryNodeKey::Artifact(group.binding))
                 && matches!(&edge, ArtifactDependency::Interface)
             {
                 None
@@ -439,7 +455,10 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
         .closure
         .iter()
         .filter_map(|key| match key {
-            InventoryNodeKey::Group(group) => Some(*group),
+            InventoryNodeKey::Group(group) => Some(NativeGroupKey {
+                artifact: group.binding.artifact,
+                original_ordinal: group.original_ordinal,
+            }),
             InventoryNodeKey::Artifact(_) => None,
         })
         .collect::<BTreeSet<_>>();
@@ -447,7 +466,7 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
         .roots
         .iter()
         .filter_map(|key| match key {
-            InventoryNodeKey::Artifact(id) => Some(*id),
+            InventoryNodeKey::Artifact(binding) => Some(binding.artifact),
             InventoryNodeKey::Group(_) => None,
         })
         .collect::<BTreeSet<_>>();
@@ -668,11 +687,14 @@ proptest! {
         let reused = left
             .admit(&peer, vec![catalog.entries[OWNERS + 1].clone()])
             .unwrap();
-        let reused_index = left
-            .0
-            .lock()
-            .unwrap()
-            .indices[&InventoryNodeKey::Artifact(catalog.entries[OWNERS + 1].descriptor.id)];
+        let reused_index = {
+            let state = left.0.lock().unwrap();
+            let binding = reused.resolve_binding(
+                catalog.entries[OWNERS + 1].descriptor.id,
+                &reused.read_projection(&state).nodes,
+            ).unwrap();
+            state.indices[&InventoryNodeKey::Artifact(binding)]
+        };
         prop_assert!(removed_indices.contains(&reused_index), "new admission should reuse a reclaimed graph slot");
         check_read_projection(&peer)?;
         check_read_projection(&reused)?;
