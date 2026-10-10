@@ -18,7 +18,7 @@ module Tidepool.ExactScope
   , canonicalProofMatchesOwner
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
-  , readExactScope, revalidateExactScope, validateExactScopeEnvironment, scopeValueInterfaces
+  , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, scopeValueInterfaces
   , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes
   , writeExactCompilation, writeCheckedExactCompilation, writeRetainedExactCompilation, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
@@ -38,7 +38,7 @@ import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isHexDigit)
-import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef', writeIORef)
 import Data.List (isPrefixOf)
 import Data.Maybe (isJust)
 import qualified Data.Text as T
@@ -55,14 +55,14 @@ import Data.Word (Word64)
 import Numeric (showHex)
 import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute, doesFileExist)
 import System.FilePath (isAbsolute, takeDirectory, (</>))
-import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(..), withFileObservations, observeFile)
+import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(..), withFileObservations, observeFile, fileObservationTotals)
 import System.IO.Error (isAlreadyExistsError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
-import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
+import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -94,7 +94,7 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, finalizedValueInterfaceSeals, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedCoreBody
   , revalidateLocalFinalizedAdmission, revalidateLocalFinalizedAdmissionWith )
-import Tidepool.Timing (readTimingEnabled, timeDetailPhase, emitCount)
+import Tidepool.Timing (readTimingEnabled, readSummaryTimingEnabled, timeDetailPhase, emitCount, withValidationTiming)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyModule(..), DependencyImport(..), DependencyResolution(..), renderDependencyEvidence
   , DependencyQualifier(..), renderDependencyQualifier, parseDependencyQualifier, revalidateDependencyEvidence )
@@ -1679,34 +1679,66 @@ isCanonicalDigest value = length value == 64 && value /= replicate 64 '0'
 
 -- Recheck the entire producer-owned closure in the consuming transaction;
 -- no source file is a substitute for an admitted original interface.
+data ExactScopeValidationReason
+  = ExplicitScopeValidation
+  | CheckedReceiptPublication
+  | RetainedReceiptPublication
+  | RetainedProductsPublication
+  deriving (Eq, Show)
+
+validationReasonName :: ExactScopeValidationReason -> String
+validationReasonName reason = case reason of
+  ExplicitScopeValidation -> "explicit_scope_validation"
+  CheckedReceiptPublication -> "checked_receipt_publication"
+  RetainedReceiptPublication -> "retained_receipt_publication"
+  RetainedProductsPublication -> "retained_products_publication"
+
 revalidateExactScope :: HscEnv -> ExactScope -> IO (Either String ())
-revalidateExactScope env scope = revalidateExactScopes env [scope]
+revalidateExactScope env scope = revalidateExactScopesAt ExplicitScopeValidation env [scope]
 
 -- A terminal operation can own several scopes with shared paths. These checks
 -- only observe inputs; their observations end before publication or any further
 -- compiler work. Every scope still checks its own seals, bounds and selection.
-revalidateExactScopes :: HscEnv -> [ExactScope] -> IO (Either String ())
-revalidateExactScopes env scopes = do
+revalidateExactScopesAt :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> IO (Either String ())
+revalidateExactScopesAt reason env scopes = do
   timing <- readTimingEnabled
-  timeDetailPhase timing "exact_scope" "revalidate" $ do
-    result <- try (withFileObservations $ \observations -> forM_ scopes $ \scope -> do
-      observeSeal observations (scopeManifestPath scope) (Just (4 * 1024 * 1024))
-        (scopeRequestSha256 scope) "exact scope request changed"
-      forM_ (scopeCapturedInputs scope) $ \inputs ->
-        revalidateRequestInputsWith observations inputs >>= either fail pure
-      validateInputClosure (scopeProducerSha256 scope) (scopeInputs scope) (scopeProducts scope)
-      revalidateScopeInputs observations (scopeInputs scope)
-      validatePreviewOriginalTarget scope (scopeInterfaceEvidence scope)
-      let AdmittedScopeInputs _ _ roots _ _ = scopeInputs scope
-      revalidateAdmittedPackageImports observations env roots >>= either fail pure
-      manifest <- observeFile observations (scopeManifestPath scope) (Just (4 * 1024 * 1024))
-      -- Preserve the proof marker; observed_file alone counts actual reads.
-      emitCount timing ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 scope)
-        (fromIntegral (observedByteCount manifest))
-      mapM_ (checkProduct observations) (scopeProducts scope)
-      mapM_ (checkValue observations) (scopeValueInterfaces scope))
-      :: IO (Either IOException ())
-    pure $ either (Left . show) Right result
+  summary <- readSummaryTimingEnabled
+  totals <- newIORef Nothing
+  let inputCount = sum [requestInputCount inputs
+        | scope <- scopes, Just inputs <- [scopeCapturedInputs scope]]
+      readCounts = do
+        observed <- readIORef totals
+        pure ([ ("scope_count",fromIntegral (length scopes))
+          ,("input_count",fromIntegral inputCount)]
+          ++ case observed of
+            Nothing -> []
+            Just (observations,bytes) ->
+              [("observed_file_count",fromIntegral observations),("observed_bytes",bytes)])
+      validate = timeDetailPhase timing "exact_scope" "revalidate" $ do
+        result <- try (withFileObservations $ \observations -> do
+          outcome <- try (forM_ scopes $ \scope -> do
+            observeSeal observations (scopeManifestPath scope) (Just (4 * 1024 * 1024))
+              (scopeRequestSha256 scope) "exact scope request changed"
+            forM_ (scopeCapturedInputs scope) $ \inputs ->
+              revalidateRequestInputsWith observations inputs >>= either fail pure
+            validateInputClosure (scopeProducerSha256 scope) (scopeInputs scope) (scopeProducts scope)
+            revalidateScopeInputs observations (scopeInputs scope)
+            validatePreviewOriginalTarget scope (scopeInterfaceEvidence scope)
+            let AdmittedScopeInputs _ _ roots _ _ = scopeInputs scope
+            revalidateAdmittedPackageImports observations env roots >>= either fail pure
+            manifest <- observeFile observations (scopeManifestPath scope) (Just (4 * 1024 * 1024))
+            -- Preserve the proof marker; observed_file alone counts actual reads.
+            emitCount timing ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 scope)
+              (fromIntegral (observedByteCount manifest))
+            mapM_ (checkProduct observations) (scopeProducts scope)
+            mapM_ (checkValue observations) (scopeValueInterfaces scope))
+            :: IO (Either IOException ())
+          observed <- fileObservationTotals observations
+          writeIORef totals (Just observed)
+          either throwIO pure outcome)
+          :: IO (Either IOException ())
+        pure $ either (Left . show) Right result
+  withValidationTiming summary "exact_scope" (validationReasonName reason) readCounts validate
   where
     checkValue observations value = observeSeal observations (exactPath value) Nothing
       (exactSha256 value) "checked value interface changed"
@@ -1726,22 +1758,24 @@ writeExactCompilation compilation evidence =
 -- proof; publishing the receipt afterwards consumes only captured bytes.
 writeCheckedExactCompilation
   :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO ()
-writeCheckedExactCompilation env = writeCheckedExactCompilationWithScopes env []
+writeCheckedExactCompilation env = writeCheckedExactCompilationWithScopes
+  CheckedReceiptPublication env []
 
 -- Retention and the checked receipt share this final publication boundary.
 -- Capture source evidence first, then check both original and retained paths in
 -- one fresh proof. No observation or validation token reaches the publisher.
 writeRetainedExactCompilation
   :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO ()
-writeRetainedExactCompilation env retained = writeCheckedExactCompilationWithScopes env [retained]
+writeRetainedExactCompilation env retained = writeCheckedExactCompilationWithScopes
+  RetainedReceiptPublication env [retained]
 
 writeCheckedExactCompilationWithScopes
-  :: HscEnv -> [ExactScope] -> ExactCompilation -> DependencyEvidence -> IO ()
-writeCheckedExactCompilationWithScopes env retained compilation evidence = do
+  :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> ExactCompilation -> DependencyEvidence -> IO ()
+writeCheckedExactCompilationWithScopes reason env retained compilation evidence = do
   selected <- either fail pure (extendSourceSelectedOriginals
     (compilationSourceSelection compilation) (compilationScope compilation))
   receipt <- captureExactCompilationReceipt compilation evidence
-  revalidateExactScopes env (retained ++ [selected]) >>= either fail pure
+  revalidateExactScopesAt reason env (retained ++ [selected]) >>= either fail pure
   publishExactCompilationReceipt receipt
 
 -- Kept private so a receipt cannot be constructed from unobserved inputs.

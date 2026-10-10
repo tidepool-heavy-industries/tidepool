@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl) where
 
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -9,7 +9,7 @@ import Control.Monad (foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.List (isInfixOf, isPrefixOf, nub, stripPrefix)
+import Data.List (isInfixOf, isPrefixOf, nub, stripPrefix, tails)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -56,6 +56,7 @@ import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCa
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer)
+import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming)
 import Codec.CBOR.Term (Term(..), encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
@@ -201,6 +202,7 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
     _ -> fail "genuine scope has another envelope"
   unless (length imageSizes == 2 && all (> 0) imageSizes)
     (fail "positive eviction fixture lacks two separately retainable images")
+
   let positiveLimit = maximum imageSizes
   unless (positiveLimit < sum imageSizes)
     (fail "positive eviction fixture lacks two separately retainable images")
@@ -268,6 +270,51 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
   unless (total "original_inputs.certificate.misses" afterReplacement == 2)
     (fail "replacement owner inherited cancelled physical-worker facts")
   putStrLn ("owned exact inputs: A/B/A reuse, deleted manifests, rotation, positive/live and zero-budget eviction, cancelled admission and replacement passed\n" ++ warm)
+
+validationTimingControl :: IO ()
+validationTimingControl = do
+  (minimalResult,minimalLog) <- bracket
+    ((,) <$> lookupEnv "TIDEPOOL_TIMING_SUMMARY" <*> lookupEnv "TIDEPOOL_TIMING")
+    (\(summary,detail) -> maybe (unsetEnv "TIDEPOOL_TIMING_SUMMARY") (setEnv "TIDEPOOL_TIMING_SUMMARY") summary
+      >> maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") detail)
+    $ \_ -> do
+      setEnv "TIDEPOOL_TIMING_SUMMARY" "1"
+      unsetEnv "TIDEPOOL_TIMING"
+      enabled <- readSummaryTimingEnabled
+      captureDiagnostics (withValidationTiming enabled "exact_scope" "explicit_scope_validation"
+        (pure [("scope_count",1)]) (pure (Right ())))
+  unless (minimalResult == Right () && length [() | line <- lines minimalLog
+      , "tidepool-validation " `isPrefixOf` line] == 1
+      && not ("tidepool-timing-detail " `isInfixOf` minimalLog))
+    (fail "minimal timing summary omitted its validation row or enabled detailed events")
+  withTiming $ do
+    let run :: IO (Either String ()) -> IO (Either String (),String)
+        run action = captureDiagnostics
+          (withValidationTiming True "exact_scope" "checked_receipt_publication"
+            (pure [("scope_count",1),("input_count",2),("observed_file_count",3),("observed_bytes",17)]) action)
+    (accepted,acceptedLog) <- run (pure (Right ()))
+    (refused,refusedLog) <- run (pure (Left "controlled refusal"))
+    (thrown,exceptionLog) <- captureDiagnostics
+      (try (withValidationTiming True "exact_scope" "checked_receipt_publication"
+        (pure []) (throwIO ThreadKilled)) :: IO (Either AsyncException (Either String ())))
+    unless (accepted == Right () && refused == Left "controlled refusal"
+        && either (const True) (const False) thrown)
+      (fail "validation timing changed a validation result or swallowed its exception")
+    let rows logText = filter ("tidepool-validation " `isPrefixOf`) (lines logText)
+        allRows = concatMap rows [acceptedLog,refusedLog,exceptionLog]
+        has outcome row = ("\"outcome\":\"" ++ outcome ++ "\"") `isInfixOf` row
+    unless (length allRows == 3
+        && length (filter (has "success") allRows) == 1
+        && length (filter (has "refused") allRows) == 1
+        && length (filter (has "exception") allRows) == 1
+        && all ("\"clock_domain\":\"ghc_monotonic_ns\"" `isInfixOf`) allRows
+        && all ("\"start_ns\":" `isInfixOf`) allRows
+        && all ("\"end_ns\":" `isInfixOf`) allRows
+        && all (\row -> "\"allocated_bytes\":" `isInfixOf` row
+            || "\"rts_scope\":\"unavailable\"" `isInfixOf` row) allRows
+        && all ("\"invocation_id\":" `isInfixOf`) allRows
+        && "\"observed_file_count\":3" `isInfixOf` acceptedLog)
+      (fail ("validation timing summary lost a bounded field or terminal outcome: " ++ show allRows))
 
 -- This fault injector invokes the actual libtest binary. It never derives
 -- success from rendered test output; receipt mutations use independently known
@@ -517,6 +564,22 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
       changed value = Just (maybe (BS.singleton 0) (<> BS.singleton 0) value)
       proofRows diagnostics = [line | line <- lines diagnostics
         , "tidepool-timing-detail parent=exact_scope phase=revalidate " `isPrefixOf` line]
+      validationRows diagnostics = [line | line <- lines diagnostics
+        , "tidepool-validation " `isPrefixOf` line]
+      validationLine diagnostics = case validationRows diagnostics of
+        [line] -> line
+        _ -> ""
+      jsonNumber key line = case
+          [value | suffix <- tails line, ("\"" ++ key ++ "\":") `isPrefixOf` suffix
+            , (value,_) <- reads (drop (length key + 3) suffix)] of
+        [value] -> value
+        _ -> error ("validation summary lacks numeric " ++ key ++ " field: " ++ line)
+      observedCounterRows diagnostics = [line | line <- lines diagnostics
+        , "tidepool-count name=hash_bytes.observed_file." `isPrefixOf` line]
+      counterNumber line = case [value | field <- words line
+          , Just raw <- [stripPrefix "count=" field], (value,_) <- reads raw] of
+        [value] -> value
+        _ -> error ("invalid observed-file counter: " ++ line)
       measurement variant diagnostics = putStrLn ("publication-proof variant=" ++ variant
         ++ " proofs=" ++ show (length (proofRows diagnostics))
         ++ " wall_ns=" ++ show (sum [read value :: Integer | line <- proofRows diagnostics
@@ -541,6 +604,14 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
             receipt <- BS.readFile (output </> "receipt.cbor")
             unless (snapshot == sourceBytes && not (BS.null receipt)) (fail "publication lost its captured source or receipt")
             unless (length (proofRows diagnostics) == 1
+                && length (validationRows diagnostics) == 1
+                && "\"owner\":\"exact_scope\"" `isInfixOf` validationLine diagnostics
+                && "\"reason\":\"retained_receipt_publication\"" `isInfixOf` validationLine diagnostics
+                && "\"outcome\":\"success\"" `isInfixOf` validationLine diagnostics
+                && jsonNumber "observed_file_count" (validationLine diagnostics)
+                    == fromIntegral (length (observedCounterRows diagnostics))
+                && jsonNumber "observed_bytes" (validationLine diagnostics)
+                    == sum (map counterNumber (observedCounterRows diagnostics))
                 && length (counterValues ("hash_bytes.observed_file." ++ exactSha256 (fst shared)) diagnostics) == 1
                 && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 retained) diagnostics) == 1
                 && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 checked) diagnostics) == 1)

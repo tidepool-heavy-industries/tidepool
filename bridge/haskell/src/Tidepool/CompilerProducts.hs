@@ -57,7 +57,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
-  , revalidateExactScope, writeCheckedExactCompilation, writeRetainedExactCompilation, scopeCanonicalInterfaces, scopeInterfaceToken, scopeOriginalBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
+  , ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, writeCheckedExactCompilation, writeRetainedExactCompilation, scopeCanonicalInterfaces, scopeInterfaceToken, scopeOriginalBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
   , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalSourceSha256 )
@@ -972,7 +972,7 @@ retainProgramProducts directory prepared certified target initial = do
   revalidatePreparedCandidateInputs prepared
   let env = prHscEnv (pprPipelineResult prepared)
   case preparedExactCompilation prepared of
-    Nothing -> revalidateExactScope env retained >>= either fail pure
+    Nothing -> revalidateExactScopesAt RetainedProductsPublication env [retained] >>= either fail pure
     Just compilation -> writeRetainedExactCompilation env retained compilation
       (preparedFreshDependencies prepared)
   pure retained

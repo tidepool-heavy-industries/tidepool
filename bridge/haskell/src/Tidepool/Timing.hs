@@ -1,9 +1,13 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 -- | Opt-in compiler measurements. Flat phases use @tidepool-timing@;
 -- nested breakdowns use @tidepool-timing-detail parent=...@ and must not
 -- be added to their parent. Counts use @tidepool-count@, never milliseconds.
 -- The frontend retains these lines within each request's diagnostic output.
 module Tidepool.Timing
   ( readTimingEnabled
+  , readSummaryTimingEnabled
+  , withValidationTiming
   , timePhase
   , timeDetailPhase
   , timeModuleDetailPhase
@@ -33,6 +37,7 @@ module Tidepool.Timing
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Exception (SomeException, evaluate, try, throwIO)
 import Data.List (intercalate)
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTime, getMonotonicTimeNSec)
@@ -40,9 +45,10 @@ import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module (Module, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
 import qualified GHC.Stats as RTS
-import System.Environment (lookupEnv)
 import System.IO (hPutStrLn, stderr)
 import System.CPUTime (getCPUTime)
+import System.Environment (lookupEnv)
+import System.Posix.Process (getProcessID)
 import Tidepool.Json (jsonString)
 
 -- These events describe one owner's decision, never a whole-compile hit.
@@ -126,6 +132,68 @@ emitCheckOnlyReuseApplicability enabled context =
 -- other value is off.
 readTimingEnabled :: IO Bool
 readTimingEnabled = (== Just "1") <$> lookupEnv "TIDEPOOL_TIMING"
+
+-- Summary records remain enabled in minimal profile, independently of detailed
+-- per-file and per-module diagnostics.
+readSummaryTimingEnabled :: IO Bool
+readSummaryTimingEnabled = do
+  summary <- (== Just "1") <$> lookupEnv "TIDEPOOL_TIMING_SUMMARY"
+  detailed <- readTimingEnabled
+  pure (summary || detailed)
+
+-- One bounded owner validation interval. The counts action runs after the work,
+-- so observation totals come from the same fresh map and never escape it.
+-- Exceptions are recorded and rethrown unchanged, including cancellation.
+withValidationTiming
+  :: forall a. Bool -> String -> String -> IO [(String,Integer)]
+  -> IO (Either String a) -> IO (Either String a)
+withValidationTiming False _ _ _ action = action
+withValidationTiming True owner reason counts action = do
+  invocation <- newTimingRequestIdentity
+  pid <- getProcessID
+  start <- getMonotonicTimeNSec
+  cpu0 <- getCPUTime
+  rts0 <- readRtsStats
+  result <- try action :: IO (Either SomeException (Either String a))
+  end <- getMonotonicTimeNSec
+  cpu1 <- getCPUTime
+  rts1 <- readRtsStats
+  measuredCounts <- try counts :: IO (Either SomeException [(String,Integer)])
+  let outcome = case result of
+        Left _ -> "exception"
+        Right (Left _) -> "refused"
+        Right (Right _) -> "success"
+      countFields = case measuredCounts of
+        Right values -> [jsonString key ++ ":" ++ show value | (key,value) <- values
+          , key `elem` ["scope_count","input_count","observed_file_count","observed_bytes"]]
+        Left _ -> []
+      fixedFields =
+        [ "\"schema\":1"
+        , "\"invocation_id\":" ++ show invocation
+        , "\"worker_pid\":" ++ show pid
+        , "\"owner\":" ++ jsonString owner
+        , "\"reason\":" ++ jsonString reason
+        , "\"clock_domain\":\"ghc_monotonic_ns\""
+        , "\"start_ns\":" ++ show start
+        , "\"end_ns\":" ++ show end
+        , "\"wall_ns\":" ++ show (delta start end)
+        , "\"cpu_ns\":" ++ show ((cpu1 - cpu0) `div` 1000)
+        , "\"outcome\":" ++ jsonString outcome
+        , "\"counts\":{" ++ intercalate "," countFields ++ "}"
+        ] ++ validationRtsFields rts0 rts1
+      row = "tidepool-validation {" ++ intercalate "," fixedFields ++ "}"
+  _ <- evaluate (length row)
+  hPutStrLn stderr row
+  either throwIO pure result
+
+validationRtsFields :: Maybe RTS.RTSStats -> Maybe RTS.RTSStats -> [String]
+validationRtsFields (Just before) (Just after) =
+  [ "\"rts_scope\":\"process_delta\""
+  , "\"allocated_bytes\":" ++ show (delta (RTS.allocated_bytes before) (RTS.allocated_bytes after))
+  , "\"gc_cpu_ns\":" ++ show (delta (RTS.gc_cpu_ns before) (RTS.gc_cpu_ns after))
+  , "\"gc_elapsed_ns\":" ++ show (delta (RTS.gc_elapsed_ns before) (RTS.gc_elapsed_ns after))
+  ]
+validationRtsFields _ _ = ["\"rts_scope\":\"unavailable\""]
 
 -- | Run @act@ and, when @enabled@, write one
 -- @tidepool-timing phase=\<name\> ms=\<int\>@ line to stderr AFTER @act@
