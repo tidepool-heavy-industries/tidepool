@@ -1,7 +1,6 @@
 //! Immutable recovery rows, shared by exact publication snapshots.
 use super::*;
 use rpds::RedBlackTreeMapSync;
-use serde::ser::{SerializeSeq, SerializeStruct};
 
 type EdgeKey = (ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency);
 
@@ -112,48 +111,13 @@ impl GraphRead for RecoveryGraph {
     }
 }
 
-// These serializers borrow rows directly. They neither build historical Vecs
-// nor clone row payloads. Each v8 node includes its exact native selection.
-macro_rules! row_serializer {
-    ($name:ident, $method:ident) => {
-        struct $name<'a, T: GraphRead>(&'a T);
-        impl<T: GraphRead> Serialize for $name<'_, T> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                let mut sequence = serializer.serialize_seq(None)?;
-                for row in self.0.$method() {
-                    sequence.serialize_element(row)?;
-                }
-                sequence.end()
-            }
-        }
-    };
-}
-row_serializer!(Nodes, nodes);
-row_serializer!(Artifacts, artifacts);
-row_serializer!(Surfaces, public_surfaces);
-row_serializer!(Edges, artifact_dependencies);
-row_serializer!(Bindings, artifact_bindings);
-
 pub(super) struct GraphEncoding<'a, T: GraphRead> {
     pub graph: &'a T,
     pub checksum: &'a str,
 }
 impl<T: GraphRead> Serialize for GraphEncoding<'_, T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let graph = self.graph;
-        let mut fields = serializer.serialize_struct("RecoveryGraph", 11)?;
-        fields.serialize_field("version", &graph.version())?;
-        fields.serialize_field("public_schema", graph.public_schema())?;
-        fields.serialize_field("source_session", &graph.source_session())?;
-        fields.serialize_field("lineage", &graph.lineage())?;
-        fields.serialize_field("high_water", &graph.high_water().0)?;
-        fields.serialize_field("public_surfaces", &Surfaces(graph))?;
-        fields.serialize_field("nodes", &Nodes(graph))?;
-        fields.serialize_field("artifacts", &Artifacts(graph))?;
-        fields.serialize_field("artifact_bindings", &Bindings(graph))?;
-        fields.serialize_field("artifact_dependencies", &Edges(graph))?;
-        fields.serialize_field("checksum", self.checksum)?;
-        fields.end()
+        witness_codec::encode(self.graph, self.checksum, serializer)
     }
 }
 impl Serialize for RecoveryGraph {

@@ -7,10 +7,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use tidepool_repr::Generation;
 use tidepool_toolchain::artifact_inventory::{
     ArtifactBinding, ArtifactBindingNode, ArtifactDependency, ArtifactDescriptor,
-    ArtifactGraphSelection, ArtifactId,
+    ArtifactGraphSelection, ArtifactId, ArtifactSelectionId, ArtifactSelectionPlan,
+    CompilerInputRole, ExactArtifactSelection, NativeGroupBinding,
 };
 use tidepool_toolchain::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use tidepool_toolchain::recovery_artifacts::{
@@ -21,21 +23,21 @@ use tidepool_toolchain::recovery_artifacts::{
 
 #[path = "newrecovery_v2/snapshots.rs"]
 mod snapshots;
+#[path = "newrecovery_v2/witness_codec.rs"]
+mod witness_codec;
 use snapshots::{GraphEncoding, GraphRead};
 pub(crate) use snapshots::{RecoveryGraph, RecoveryGraphCandidate};
 
-const VERSION: u32 = 10;
-const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v10";
+const VERSION: u32 = 11;
+const PAIRED_PUBLIC_SCHEMA: &str = "paired-public-v11";
 const MAX_MANIFEST_BYTES: usize = 64 << 20;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecoveryGraphWire {
     pub version: u32,
     pub public_schema: String,
     pub source_session: u64,
     pub lineage: u64,
-    #[serde(with = "generation_serde")]
     pub high_water: Generation,
     /// Several inherited-context actors can publish distinct lexical views
     /// from the same session's declaration/artifact DAG.
@@ -78,7 +80,7 @@ impl RecoveryPublicOwner {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecoveryPublicSurface {
+pub(crate) struct RecoveryPublicSurface<S = ArtifactGraphSelection, R = CompilerInputRole> {
     pub owner: RecoveryPublicOwner,
     #[serde(with = "option_generation_serde")]
     pub declaration_root: Option<Generation>,
@@ -91,16 +93,16 @@ pub(crate) struct RecoveryPublicSurface {
     pub source_instances: Vec<RecoveryPublicSourceInstance>,
     /// Exact published compiler selection, including a source-only Generation0
     /// surface. Immutable artifact authentication precedes role reissuance.
-    pub compiler_context: RecoveryCompilerContext,
+    pub compiler_context: RecoveryCompilerContext<S, R>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecoveryCompilerContext {
-    pub graph_selection: ArtifactGraphSelection,
+pub(crate) struct RecoveryCompilerContext<S = ArtifactGraphSelection, R = CompilerInputRole> {
+    pub graph_selection: S,
     pub artifact_refs: Vec<ArtifactId>,
     pub native_groups: Vec<tidepool_toolchain::artifact_inventory::NativeGroupKey>,
-    pub compiler_roles: Vec<tidepool_toolchain::artifact_inventory::CompilerInputRole>,
+    pub compiler_roles: Vec<R>,
     pub lexical: Vec<ExactLexicalNode>,
 }
 
@@ -212,8 +214,8 @@ pub(crate) struct RecoveryPublicSourceInstance {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecoveryNode {
-    pub graph_selection: ArtifactGraphSelection,
+pub(crate) struct RecoveryNode<S = ArtifactGraphSelection, R = CompilerInputRole> {
+    pub graph_selection: S,
     #[serde(with = "generation_serde")]
     pub id: Generation,
     /// Lexical visibility ancestry. A Join's implementation dependencies are
@@ -234,7 +236,7 @@ pub(crate) struct RecoveryNode {
     pub native_groups: Vec<tidepool_toolchain::artifact_inventory::NativeGroupKey>,
     /// Authenticated compiler namespace roles, independent of native custody.
     /// This field is required even when no original is offered for reuse.
-    pub compiler_roles: Vec<tidepool_toolchain::artifact_inventory::CompilerInputRole>,
+    pub compiler_roles: Vec<R>,
     pub exports: Vec<RecoveryExport>,
     pub retracts: Vec<RecoverySymbolIdentity>,
     /// GHC-normalized import specifications introduced by this turn. These
@@ -496,14 +498,7 @@ impl RetainedRecoveryGraph {
         if self.graph.checksum() != graph.checksum() {
             return Ok(false);
         }
-        let file = fs::File::open(path).map_err(|error| at(path, error.to_string()))?;
-        let mut bytes = Vec::new();
-        file.take(MAX_MANIFEST_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| at(path, error.to_string()))?;
-        if bytes.len() > MAX_MANIFEST_BYTES {
-            return Err(at(path, "recovery manifest exceeds the bounded size"));
-        }
+        let bytes = read_manifest_bytes(path)?;
         if blake3::hash(&bytes) != self.manifest_digest {
             return Ok(false);
         }
@@ -731,7 +726,7 @@ fn stage_metadata_v2(
     let bytes = serde_json::to_vec(&graph)
         .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
     if bytes.len() > MAX_MANIFEST_BYTES {
-        return Err(error("recovery manifest exceeds the bounded size"));
+        return Err(at(path, format!("recovery manifest exceeds the bounded size: serialized_bytes={}, limit_bytes={MAX_MANIFEST_BYTES}", bytes.len())));
     }
     let staged = tidepool_atomic_write::stage_durable(path, &bytes).map_err(|e| {
         at(
@@ -885,21 +880,46 @@ fn high_water_candidate(
     ValidatedRecoveryGraph::seal(candidate)
 }
 
+fn read_manifest_bytes(path: &Path) -> Result<Vec<u8>, RecoveryError> {
+    let file = fs::File::open(path)
+        .map_err(|error| at(path, format!("could not read recovery manifest: {error}")))?;
+    read_open_manifest_bytes(path, file)
+}
+
+fn read_open_manifest_bytes(path: &Path, file: fs::File) -> Result<Vec<u8>, RecoveryError> {
+    let file_bytes = file
+        .metadata()
+        .map_err(|error| at(path, error.to_string()))?
+        .len();
+    if file_bytes > MAX_MANIFEST_BYTES as u64 {
+        return Err(at(path, format!("recovery manifest exceeds the bounded size: observed_bytes={file_bytes}, limit_bytes={MAX_MANIFEST_BYTES}")));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| at(path, error.to_string()))?;
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(at(path, format!("recovery manifest exceeds the bounded size: observed_bytes={}, limit_bytes={MAX_MANIFEST_BYTES}", bytes.len())));
+    }
+    Ok(bytes)
+}
+
 /// Read the current graph. Unsupported formats are refused without rewriting them.
 pub(crate) fn read_v2(
     path: &Path,
     recovery_root: &Path,
 ) -> Result<Option<RecoveryV2Read>, RecoveryError> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(at(
                 path,
                 format!("could not read recovery manifest: {error}"),
-            ));
+            ))
         }
     };
+    let bytes = read_open_manifest_bytes(path, file)?;
     read_v2_bytes(path, recovery_root, &bytes, RecoveryReadPurpose::Metadata)
 }
 
@@ -911,14 +931,16 @@ pub(crate) fn read_v2_bytes(
     purpose: RecoveryReadPurpose,
 ) -> Result<Option<RecoveryV2Read>, RecoveryError> {
     if bytes.len() > MAX_MANIFEST_BYTES {
-        return Err(at(path, "recovery manifest exceeds the bounded size"));
+        return Err(at(path, format!("recovery manifest exceeds the bounded size: observed_bytes={}, limit_bytes={MAX_MANIFEST_BYTES}", bytes.len())));
     }
-    let value: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|e| at(path, format!("invalid recovery manifest JSON: {e}")))?;
-    let version = value
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| at(path, "recovery manifest has no integer version"))?;
+    #[derive(Deserialize)]
+    struct Header {
+        version: u64,
+        public_schema: Option<String>,
+    }
+    let header: Header = serde_json::from_slice(bytes)
+        .map_err(|e| at(path, format!("invalid recovery manifest header: {e}")))?;
+    let version = header.version;
     if version < u64::from(VERSION) {
         return Err(refusal_at(
             path,
@@ -931,18 +953,14 @@ pub(crate) fn read_v2_bytes(
             RecoveryRefusal::UnsupportedFutureFormat { version },
         ));
     }
-    if value
-        .get("public_schema")
-        .and_then(serde_json::Value::as_str)
-        != Some(PAIRED_PUBLIC_SCHEMA)
-    {
+    if header.public_schema.as_deref() != Some(PAIRED_PUBLIC_SCHEMA) {
         return Err(at(
             path,
-            "v10 recovery graph lacks the supported paired-public-v10 schema",
+            "v11 recovery graph lacks the supported paired-public-v11 schema",
         ));
     }
-    let graph: RecoveryGraph = serde_json::from_value(value)
-        .map_err(|e| at(path, format!("invalid v10 recovery graph: {e}")))?;
+    let graph: RecoveryGraph = serde_json::from_slice(bytes)
+        .map_err(|e| at(path, format!("invalid v11 recovery graph: {e}")))?;
     graph.validate().map_err(|mut error| {
         error.path = Some(path.to_path_buf());
         error
@@ -1345,10 +1363,6 @@ fn normalize_graph_selection(selection: &mut ArtifactGraphSelection) {
     selection.native_groups.sort();
     selection.native_custody.sort();
     selection.selections.sort_by_key(|plan| plan.selection);
-    for plan in &mut selection.selections {
-        plan.nodes.sort();
-        plan.dependencies.sort();
-    }
 }
 
 fn normalize_node(node: &mut RecoveryNode) {
@@ -2055,7 +2069,7 @@ fn checksum_with_encoded_bytes(graph: &impl GraphRead) -> Result<(String, u64), 
         checksum: "",
     })
     .map_err(|e| error(format!("could not encode recovery graph: {e}")))?;
-    let mut domain = b"tidepool-recovery-graph-v10\0".to_vec();
+    let mut domain = b"tidepool-recovery-graph-v11\0".to_vec();
     domain.extend_from_slice(&bytes);
     Ok((
         blake3::hash(&domain).to_hex().to_string(),
@@ -2645,7 +2659,7 @@ mod tests {
 
     // Graph records describe custody and content identities; they issue no compiler
     // authority and deliberately have no materialized bytes behind these paths.
-    fn fixture() -> RecoveryGraphWire {
+    pub(super) fn fixture() -> RecoveryGraphWire {
         use tidepool_toolchain::recovery_artifacts::RecoveryCoreRef;
 
         let interface = RecoveryJoinRef {
@@ -2767,7 +2781,7 @@ mod tests {
     // Only the production compiler creates the certified bundles used by recovery
     // acceptance tests. Repeated installations retain immutable compiled bytes
     // while each test has its own mutable recovery directory.
-    fn compiled_fixture(root: &Path) -> RecoveryGraphWire {
+    pub(super) fn compiled_fixture(root: &Path) -> RecoveryGraphWire {
         use std::sync::OnceLock;
         use tidepool_toolchain::recovery_artifacts::{
             materialize_certified_products, CertifiedRecoveryProduct,
@@ -4385,7 +4399,7 @@ mod tests {
         if let Some(evidence) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
             fs::copy(
                 &producer_manifest,
-                PathBuf::from(evidence).join("native-marker-success-v10.json"),
+                PathBuf::from(evidence).join("native-marker-success-v11.json"),
             )
             .expect("retain the actual successful recovery manifest");
         }
@@ -5834,7 +5848,7 @@ mod tests {
         let mut unsigned = graph.clone();
         unsigned.checksum.clear();
         let bytes = serde_json::to_vec(&unsigned).unwrap();
-        let mut domain = b"tidepool-recovery-graph-v10\0".to_vec();
+        let mut domain = b"tidepool-recovery-graph-v11\0".to_vec();
         domain.extend_from_slice(&bytes);
         assert_eq!(
             checksum(&graph).unwrap(),
