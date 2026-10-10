@@ -644,6 +644,22 @@ impl AdmittedCompilerEndpoint {
     ) -> Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError> {
         self.endpoint.execute(command)
     }
+    /// Retain exact input descriptors with the existing compiler owner. Local
+    /// uncertainty preserves the completed action and close evidence together.
+    /// The sink must outlive an unwinding standalone invocation; scoped work
+    /// retains evidence through its enclosing transaction's existing sink.
+    pub fn execute_with_input_files(
+        self,
+        command: &tidepool_extract_cmd::ExtractCmd,
+        input_files: Vec<std::sync::Arc<std::fs::File>>,
+        close_sink: impl FnOnce(tidepool_extract_cmd::CompilerTransactionClose),
+    ) -> Result<tidepool_extract_cmd::ExtractRun, crate::CompileError> {
+        crate::CompileError::compiler_invocation_result(self.endpoint.execute_with_input_files(
+            command,
+            input_files,
+            close_sink,
+        ))
+    }
     pub fn transaction(
         self,
     ) -> Result<tidepool_extract_cmd::CompilerTransaction, tidepool_extract_cmd::SpawnError> {
