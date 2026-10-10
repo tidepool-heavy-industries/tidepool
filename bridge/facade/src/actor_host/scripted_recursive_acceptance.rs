@@ -2,9 +2,9 @@
 
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
-    commit_workspace, explicit_display_text, hosted_script_provider, hosted_test_settings,
-    next_hosted_script_round, require_ghc_compile_rejection, HostedScriptRound,
-    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    commit_workspace, explicit_display_text, hosted_script_provider_with_envelopes,
+    hosted_test_settings, next_hosted_script_round, require_ghc_compile_rejection,
+    HostedScriptRound, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use super::*;
 use harness::embedding::HostIdentity;
@@ -75,7 +75,18 @@ async fn next_descendant(
                     loop {
                         tokio::select! {
                             round = requests.recv() => break round,
-                            _ = poll.tick() => pending_claim(host, parent_operation),
+                            _ = poll.tick() => {
+                                pending_claim(host, parent_operation);
+                                for node in host.context.forest.inspect_host_graph() {
+                                    if node.context_parent == Some(parent) {
+                                        let installation = host.context.observer.installation(node.actor).await;
+                                        if let Some(terminal) = installation.actor.terminal().get() {
+                                            panic!("captured descendant {} retired before its provider turn: {:?}: {}",
+                                                node.actor, terminal.kind, terminal.summary);
+                                        }
+                                    }
+                                }
+                            },
                         }
                     }
                 }),
@@ -117,19 +128,42 @@ fn transcript(round: &HostedScriptRound) -> Vec<harness::item::Item> {
 
 fn captured(round: &HostedScriptRound, prefix: &[harness::item::Item], excluded_call: &str) {
     let retained = transcript(round);
-    assert!(
-        retained.starts_with(prefix),
-        "the exact parent provider prefix survives capture"
-    );
-    assert!(
-        !retained
-            .iter()
-            .any(|item| item.0["call_id"] == excluded_call),
-        "BeforeCall capture excludes the unfinished parent invocation"
-    );
-    assert!(retained
+    let text = serde_json::to_string(&retained).unwrap();
+    let cross_model = prefix
         .iter()
-        .any(|item| item.0["call_id"] == "recursive-setup"));
+        .any(|item| item.0["encrypted_content"] == "synthetic-opaque-gpt-6.1-sol");
+    if cross_model {
+        assert_eq!(round.request.model, "gpt-6-luna");
+        let parent_users = prefix
+            .iter()
+            .filter(|item| item.0["role"] == "user")
+            .collect::<Vec<_>>();
+        let child_users = retained
+            .iter()
+            .filter(|item| item.0["role"] == "user")
+            .collect::<Vec<_>>();
+        assert!(
+            child_users.starts_with(&parent_users),
+            "original user history survives capture"
+        );
+        assert!(text.contains("Store-generated model portability note"));
+        assert!(text.contains("Source origin/hash"));
+        assert!(text.contains("visible-provider-history-gpt-6.1-sol"));
+        assert!(!text.contains("synthetic-opaque-gpt-6.1-sol"));
+        assert!(!text.contains("encrypted_content"));
+        assert!(!text.contains("logprobs"));
+    } else {
+        assert!(
+            retained.starts_with(prefix),
+            "same-model native parent prefix survives capture"
+        );
+    }
+    assert!(
+        !text.contains(excluded_call),
+        "BeforeCall excludes the unfinished invocation"
+    );
+    assert!(text.contains("recursive-setup"));
+    assert!(text.contains("recursiveSeed"));
 }
 
 fn pending_claim(host: &HostedTestRuntime, operation: &OperationId) {
@@ -331,15 +365,15 @@ async fn stopped(host: &HostedTestRuntime, actor: ActorRef, parent: ActorRef) {
 async fn production_harness_recursive_captured_helper_and_typed_replies() {
     let files = tempfile::TempDir::new().unwrap();
     let settings = hosted_test_settings(&files, 3);
-    let authored_settings = settings.clone();
-    let (provider, mut requests) = hosted_script_provider();
+    let (provider, mut requests) = hosted_script_provider_with_envelopes();
     let host = HostedTestRuntime::start_prepared_configured(&settings, &provider, |config| {
+        super::scaffold_admission_tests::prepared_scaffold(config);
         config.model = "gpt-6.1-sol".into();
-        crate::exomonad::write_fixture_project_config(
+        config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
+        crate::exomonad::edit_fixture_project_config(
             &config.workspace.join(".exomonad"),
-            "gpt-6.1-sol",
             |project| {
-                project.launch.embedded = Some(authored_settings);
+                project.defaults.model = "gpt-6.1-sol".into();
                 project.models.insert("luna".into(), "gpt-6-luna".into());
                 project.defaults.effort = crate::exomonad::ExomonadEffort::Low;
             },
@@ -350,6 +384,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
     .expect("production preparation and host startup succeed");
     host.run_scenario(|host| {
         Box::pin(async move {
+            host.assert_fresh_prepared_workspace_original().await;
             let root_actor = host.context.actor.identity();
             let root_path = AgentPath("/root".into());
             let mut pending = VecDeque::new();
@@ -365,7 +400,9 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 Some(coverage[0].program.clone()),
                 "root installs its exact prepared program"
             );
-            host.http_input("Run the recursive captured-helper scenario.").await.unwrap();
+            host.http_input("Run the recursive captured-helper scenario.")
+                .await
+                .unwrap();
             let mut root = next(host, &mut requests, &mut pending, &root_path).await;
             assert_eq!(root.request.model, "gpt-6.1-sol");
             root.call("recursive-setup", SETUP);
@@ -376,7 +413,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             root.async_call(ROOT_CALL, ROOT);
             let root_wait = next(host, &mut requests, &mut pending, &root_path).await;
             unsettled(&root_wait, ROOT_CALL);
-            let (child_actor, child) = next_descendant(
+            let (child_actor, mut child) = next_descendant(
                 host,
                 &mut requests,
                 &mut pending,
@@ -385,7 +422,37 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             )
             .await;
             captured(&child, &root_prefix, ROOT_CALL);
+            assert_eq!(transcript(&root_wait)[..root_prefix.len()], root_prefix);
+            let native_turns = host
+                .runtime
+                .store()
+                .replay_turns(&root_operation.request)
+                .unwrap();
+            assert!(
+                native_turns
+                    .iter()
+                    .flat_map(|turn| &turn.model_response.items)
+                    .any(|item| item.0["encrypted_content"] == "synthetic-opaque-gpt-6.1-sol"),
+                "portability leaves the original native response envelope in Store"
+            );
             let child_path = identity(&child).actor;
+            child.function(
+                "recursive-default-bash",
+                "bash",
+                json!({
+                    "cmd": "printf captured-default-shell", "workdir": null,
+                    "environment": null, "memory_mib": null, "tty": null, "stdin": null,
+                    "yield_time_ms": 30000, "max_output_bytes": 2048,
+                    "intent": "exercise the shipped workspace shell before the typed reply",
+                }),
+            );
+            child = next(host, &mut requests, &mut pending, &child_path).await;
+            let shell = child.settled_output("recursive-default-bash");
+            assert_eq!(shell["status"], "committed", "{shell}");
+            assert!(
+                shell.to_string().contains("captured-default-shell"),
+                "{shell}"
+            );
             let child_prefix = transcript(&child);
             let child_operation = operation(host, &child, CHILD_CALL);
             child.async_call(CHILD_CALL, CHILD);

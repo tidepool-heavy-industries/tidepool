@@ -1393,7 +1393,57 @@ impl HostedScriptRound {
     }
 }
 
-struct HostedScriptProvider(tokio::sync::mpsc::UnboundedSender<HostedScriptRound>);
+struct HostedScriptProvider {
+    requests: tokio::sync::mpsc::UnboundedSender<HostedScriptRound>,
+    provider_envelopes: bool,
+}
+
+// The fields match the live Responses provider shape; all content is synthetic.
+// Decode through the production SSE assembly before Store sees the envelope.
+fn provider_envelope(
+    model: &str,
+    mut turn: harness::transport::ResponsesTurn,
+) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+    use harness::item::Item;
+    use harness::transport::sse::ResponseAssembly;
+    let mut items = vec![
+        Item(serde_json::json!({
+            "type": "reasoning", "id": format!("reasoning-{}", turn.response_id),
+            "summary": [], "content": [],
+            "encrypted_content": format!("synthetic-opaque-{model}"),
+        })),
+        Item(serde_json::json!({
+            "type": "message", "id": format!("message-{}", turn.response_id),
+            "status": "completed", "role": "assistant", "phase": "commentary",
+            "content": [{"type": "output_text", "text": format!("visible-provider-history-{model}"),
+                "annotations": [], "logprobs": []}],
+        })),
+    ];
+    for item in &mut turn.items {
+        item.0["id"] = serde_json::json!(format!("item-{}", turn.response_id));
+        item.0["status"] = serde_json::json!("completed");
+    }
+    items.extend(turn.items);
+    let mut assembly = ResponseAssembly::default();
+    for (index, item) in items.iter().enumerate() {
+        assembly.accept(
+            &serde_json::json!({
+                "type": "response.output_item.done", "output_index": index, "item": item,
+            })
+            .to_string(),
+        )?;
+    }
+    assembly.accept(
+        &serde_json::json!({
+            "type": "response.completed", "response": {
+                "id": turn.response_id, "output": [],
+                "usage": {"input_tokens": 17, "output_tokens": 3},
+            },
+        })
+        .to_string(),
+    )?;
+    assembly.finish()
+}
 
 impl HostedScriptProvider {
     async fn round(
@@ -1403,7 +1453,8 @@ impl HostedScriptProvider {
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         let request_started_at = std::time::Instant::now();
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.0
+        let model = request.model.clone();
+        self.requests
             .send(HostedScriptRound {
                 request,
                 request_id,
@@ -1413,9 +1464,14 @@ impl HostedScriptProvider {
             .map_err(|_| {
                 harness::transport::TransportError::Stream("script observer closed".into())
             })?;
-        response.await.map_err(|_| {
+        let turn = response.await.map_err(|_| {
             harness::transport::TransportError::Stream("script abandoned the provider reply".into())
-        })
+        })?;
+        if self.provider_envelopes {
+            provider_envelope(&model, turn)
+        } else {
+            Ok(turn)
+        }
     }
 }
 
@@ -1449,7 +1505,29 @@ pub(super) fn hosted_script_provider() -> (
     tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
 ) {
     let (requests, receiver) = tokio::sync::mpsc::unbounded_channel();
-    (Arc::new(HostedScriptProvider(requests)), receiver)
+    (
+        Arc::new(HostedScriptProvider {
+            requests,
+            provider_envelopes: false,
+        }),
+        receiver,
+    )
+}
+
+/// Keep the existing scripted coordination while exercising native provider
+/// envelopes, the production SSE decoder and model portability at capture.
+pub(super) fn hosted_script_provider_with_envelopes() -> (
+    Arc<dyn harness::engine::ResponsesTransport>,
+    tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
+) {
+    let (requests, receiver) = tokio::sync::mpsc::unbounded_channel();
+    (
+        Arc::new(HostedScriptProvider {
+            requests,
+            provider_envelopes: true,
+        }),
+        receiver,
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1552,6 +1630,43 @@ pub(super) fn hosted_test_settings(
 mod tests {
     use super::*;
     use std::future::Future;
+
+    #[test]
+    fn native_provider_envelope_sse_preserves_source_metadata_and_tool_execution() {
+        let source = harness::item::Item(serde_json::json!({
+            "type": "custom_tool_call", "name": "haskell", "call_id": "native-envelope",
+            "input": "display True", "async": true,
+        }));
+        let turn = provider_envelope(
+            "gpt-6.1-sol",
+            harness::transport::ResponsesTurn {
+                response_id: "native-envelope-response".into(),
+                items: vec![source],
+                usage: Default::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(turn.response_id, "native-envelope-response");
+        assert_eq!(turn.items.len(), 3);
+        assert_eq!(turn.items[0].0["type"], "reasoning");
+        assert_eq!(turn.items[0].0["content"], serde_json::json!([]));
+        assert_eq!(turn.items[0].0["summary"], serde_json::json!([]));
+        assert_eq!(
+            turn.items[0].0["encrypted_content"],
+            "synthetic-opaque-gpt-6.1-sol"
+        );
+        assert_eq!(
+            turn.items[1].0["content"][0]["logprobs"],
+            serde_json::json!([])
+        );
+        assert_eq!(turn.items[1].0["phase"], "commentary");
+        assert_eq!(turn.items[2].0["status"], "completed");
+        assert_eq!(
+            turn.items[2].tool_call().unwrap().unwrap().execution,
+            harness::item::ToolExecution::Asynchronous
+        );
+        assert!(turn.usage.reported);
+    }
 
     #[test]
     fn scoped_trace_filter_retains_campaign_metadata_and_excludes_content() {
