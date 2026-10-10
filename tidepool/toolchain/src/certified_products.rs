@@ -16,6 +16,8 @@ use tidepool_repr::execution_schema::{
 };
 
 mod finalized_module;
+mod entry_dependencies;
+pub(crate) use entry_dependencies::EntryDependencySelection;
 mod retained_core;
 pub(crate) use finalized_module::{
     CanonicalOrigin, CanonicalSourceImport, CertifiedModuleInterface,

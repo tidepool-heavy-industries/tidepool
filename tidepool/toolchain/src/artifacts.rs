@@ -41,7 +41,8 @@ mod production_entry;
 pub use execution_diagnostics::{compiler_scratch_directory, CompilerDiagnosticCapture};
 pub use production_entry::{
     build_production_entry, load_production_entry, load_selected_production_entry,
-    prepare_frozen_production_entry, FrozenEntrySources, ProductionEntryOutput,
+    load_selected_production_entry_with_catalog, prepare_frozen_production_entry,
+    prepare_frozen_production_entry_with_catalog, FrozenEntrySources, ProductionEntryOutput,
     ProductionEntrySources,
 };
 
@@ -3855,6 +3856,7 @@ enum CompilationPolicy<'a> {
         source_path: &'a Path,
         output: &'a Path,
         sources: &'a ProductionEntrySources,
+        catalog: Option<Arc<crate::toolchain::DeploymentModulePackage>>,
     },
     Exact {
         context: Arc<crate::declaration_join::ExactDeclarationContext>,
@@ -4313,6 +4315,18 @@ fn compile_invocation_inner(
 
             let candidate_set = if allow_candidates {
                 module_candidates::select_configured(
+                    endpoint.identity().producer_bytes(),
+                    inv.include,
+                    output_owner.path(),
+                )
+                .map_err(CompileAttemptError::ModulePackage)?
+            } else if let CompilationPolicy::RetainedEntry {
+                catalog: Some(package),
+                ..
+            } = &policy
+            {
+                module_candidates::select_acquired_catalog(
+                    package,
                     endpoint.identity().producer_bytes(),
                     inv.include,
                     output_owner.path(),
@@ -4934,9 +4948,22 @@ fn compile_invocation_inner(
             CompilationPolicy::RetainedEntry {
                 source_path,
                 sources,
+                catalog,
                 ..
+            } => {
+                let selection = match (&catalog, &candidate_set) {
+                    (Some(_), Some(candidates)) => Some(
+                        artifacts.source_selection.as_ref()
+                            .ok_or_else(|| CompileError::ExtractFailed("entry source selection unavailable".into()))?
+                            .entry_dependency_selection(&artifacts.artifact_view, candidates)
+                            .map_err(compiler_evidence_failure)?
+                    ),
+                    (None, None) => None,
+                    _ => return Err(CompileError::ExtractFailed("entry catalog selection unavailable".into())),
+                };
+                Some(preparation.seal(source_path, sources, &deployment, inv.targets, catalog.as_ref(), selection)?)
             }
-            | CompilationPolicy::BuildAction {
+            CompilationPolicy::BuildAction {
                 source_path,
                 export:
                     BuildActionExport::ProductionEntry {
@@ -4944,7 +4971,7 @@ fn compile_invocation_inner(
                         ..
                     },
                 ..
-            } => Some(preparation.seal(source_path, sources, &deployment, inv.targets)?),
+            } => Some(preparation.seal(source_path, sources, &deployment, inv.targets, None, None)?),
             _ => {
                 return Err(CompileError::ExtractFailed(
                     "original output owner has a different compilation policy".into(),

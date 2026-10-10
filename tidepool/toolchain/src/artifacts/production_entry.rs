@@ -196,6 +196,18 @@ struct EntryManifest {
     source: PathBuf,
     sources: ProductionEntrySources,
     files: BTreeMap<PathBuf, String>,
+    dependencies: Option<CatalogDependencies>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogDependencies {
+    catalog_path: PathBuf,
+    catalog_identity: String,
+    producer_identity: [u8; 32],
+    source_identity: String,
+    sources: NativeCatalogSourceSelection,
+    selection: certified_products::EntryDependencySelection,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,7 +217,7 @@ enum EntryPurpose {
 }
 
 const MANIFEST: &str = "entry.json";
-const ENTRY_SCHEMA: u32 = 2;
+const ENTRY_SCHEMA: u32 = 3;
 const MAX_FILES: usize = 32_768;
 const MAX_FILE_BYTES: u64 = 256 << 20;
 const MAX_CONTAINER_BYTES: u64 = 2 << 30;
@@ -225,7 +237,8 @@ fn hex_sha256(bytes: &[u8]) -> String {
 }
 
 /// Execute fresh source into one complete retained entry through the runtime
-/// compiler endpoint. Source replay and module candidate caches are unavailable.
+/// compiler endpoint. Matched catalog originals can supply exact dependencies;
+/// source replay and ordinary mutable module candidates are unavailable.
 /// The caller durably establishes the output parent before requesting publication.
 /// An existing unfinished reservation refuses another execution of that identity.
 /// The validated output is handed off only after the complete entry and its
@@ -235,6 +248,20 @@ pub fn prepare_frozen_production_entry(
     sources: &FrozenEntrySources,
     scratch: &Path,
     output: &Path,
+) -> Result<ProductionEntryOutput, CompileError> {
+    prepare_frozen_production_entry_with_catalog(
+        sources,
+        scratch,
+        output,
+        &crate::toolchain::CatalogSelection::FreshConfigured,
+    )
+}
+
+pub fn prepare_frozen_production_entry_with_catalog(
+    sources: &FrozenEntrySources,
+    scratch: &Path,
+    output: &Path,
+    catalog: &crate::toolchain::CatalogSelection,
 ) -> Result<ProductionEntryOutput, CompileError> {
     sources.revalidate()?;
     if output.exists() || !scratch.is_dir() {
@@ -257,6 +284,7 @@ pub fn prepare_frozen_production_entry(
             source_path: sources.source(),
             output,
             sources: &ProductionEntrySources::FrozenWorkspace(sources.clone()),
+            catalog: catalog.acquire()?,
         },
     )?;
     output
@@ -408,6 +436,8 @@ impl EntryPreparation {
         sources: &ProductionEntrySources,
         deployment: &AdmittedCompilerDeployment,
         targets: &[&str],
+        catalog: Option<&Arc<crate::toolchain::DeploymentModulePackage>>,
+        dependency_selection: Option<certified_products::EntryDependencySelection>,
     ) -> Result<ProductionEntryOutput, CompileError> {
         if targets != ["__prepared"] {
             return Err(invalid(
@@ -424,6 +454,18 @@ impl EntryPreparation {
             source: source.to_owned(),
             sources: sources.clone(),
             files: inventory(self.raw())?,
+            dependencies: match (catalog, dependency_selection) {
+                (Some(catalog), Some(selection)) => Some(CatalogDependencies {
+                    catalog_path: catalog.catalog_path(),
+                    catalog_identity: catalog.catalog_identity().to_owned(),
+                    producer_identity: *catalog.producer_identity(),
+                    source_identity: catalog.source_identity().to_owned(),
+                    sources: catalog.source_selection().clone(),
+                    selection,
+                }),
+                (None, None) => None,
+                _ => return Err(invalid("linked entry selection has no catalog owner")),
+            },
         };
         checkpoint(EntryCheckpoint::ManifestWrite)?;
         std::fs::write(
@@ -435,7 +477,12 @@ impl EntryPreparation {
         else {
             return Err(invalid("configured compiler deployment unavailable"));
         };
-        let validated = load_selected_production_entry(&self.staging, &authority, sources)?;
+        let validated = load_selected_production_entry_with_catalog(
+            &self.staging,
+            &authority,
+            sources,
+            &crate::toolchain::CatalogSelection::Acquired(catalog.cloned()),
+        )?;
         checkpoint(EntryCheckpoint::TreeSync)?;
         sync_entry_tree(&self.staging)?;
         checkpoint(EntryCheckpoint::ReadyRename)?;
@@ -584,6 +631,20 @@ pub fn load_selected_production_entry(
     authority: &CompilerDeploymentAuthority,
     sources: &ProductionEntrySources,
 ) -> Result<ProductionEntryOutput, CompileError> {
+    load_selected_production_entry_with_catalog(
+        directory,
+        authority,
+        sources,
+        &crate::toolchain::CatalogSelection::FreshConfigured,
+    )
+}
+
+pub fn load_selected_production_entry_with_catalog(
+    directory: &Path,
+    authority: &CompilerDeploymentAuthority,
+    sources: &ProductionEntrySources,
+    catalog: &crate::toolchain::CatalogSelection,
+) -> Result<ProductionEntryOutput, CompileError> {
     #[cfg(test)]
     ENTRY_LOADS.with(|loads| loads.set(loads.get() + 1));
     crate::host_work::checkpoint()?;
@@ -602,6 +663,33 @@ pub fn load_selected_production_entry(
         .admit(manifest.producer, manifest.worker)
         .map_err(invalid)?;
     sources.revalidate(&manifest.source)?;
+    let selection_scratch = tempfile::tempdir()?;
+    let selected = if let Some(dependencies) = &manifest.dependencies {
+        let package = catalog
+            .acquire()?
+            .ok_or_else(|| invalid("linked entry catalog is unavailable"))?;
+        if package.catalog_path() != dependencies.catalog_path
+            || package.catalog_identity() != dependencies.catalog_identity
+            || package.producer_identity() != &dependencies.producer_identity
+            || package.source_identity() != dependencies.source_identity
+            || package.source_selection() != &dependencies.sources
+            || dependencies.producer_identity != manifest.producer
+        {
+            return Err(invalid("linked entry catalog selection differs"));
+        }
+        let candidates = module_candidates::select_acquired_catalog(
+            &package,
+            &manifest.producer,
+            &sources.include_roots(),
+            selection_scratch.path(),
+        )?
+        .ok_or_else(|| invalid("linked entry catalog has no candidate selection"))?;
+        Some(Arc::new(
+            dependencies.selection.restrict_candidates(candidates)?,
+        ))
+    } else {
+        None
+    };
     let raw = directory.join("raw");
     if inventory(&raw)? != manifest.files {
         return Err(invalid("complete original container differs"));
@@ -617,7 +705,7 @@ pub fn load_selected_production_entry(
     let (table, warnings) = read_metadata(&metadata)?;
     let sites = parse_asks(&crate::checked_cell::read(raw.join("asks.json"), 16 << 20)?)?.sites();
     let offer = ModuleCandidateOffer {
-        selected: None,
+        selected,
         producer: manifest.producer.to_vec(),
         include: sources.include_roots(),
         exact: None,
@@ -642,6 +730,21 @@ pub fn load_selected_production_entry(
     .ok_or_else(|| invalid("original native custody unavailable"))?;
     if products.checked.is_some() || products.original_compile_input.is_none() {
         return Err(invalid("entry has no complete original source custody"));
+    }
+    if let Some(dependencies) = &manifest.dependencies {
+        let issued = products
+            .source_selection
+            .entry_dependency_selection(
+                &products.artifact_view,
+                offer
+                    .selected
+                    .as_deref()
+                    .expect("linked selection was admitted"),
+            )
+            .map_err(compiler_evidence_failure)?;
+        if issued != dependencies.selection {
+            return Err(invalid("linked entry issued dependency closure differs"));
+        }
     }
     crate::host_work::checkpoint()?;
     Ok(ProductionEntryOutput {
