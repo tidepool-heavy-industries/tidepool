@@ -134,13 +134,19 @@ fn transitive_oracle(
 }
 
 fn joined(module: &str, requirements: &[&str], producer: u8) -> ArtifactEntry {
+    let interface = crate::certified_products::fixture_module_interface(
+        [producer; 32],
+        "fixture",
+        module,
+        BTreeMap::new(),
+    );
     ArtifactEntry::interface(
         CertifiedJoinedInterface::from_certification(
             [producer; 32],
             "fixture".into(),
             module.into(),
-            module.as_bytes().to_vec(),
-            Vec::new(),
+            interface.interface_bytes().to_vec(),
+            interface.package_imports_bytes().to_vec(),
         )
         .unwrap(),
         JoinedInterfaceRole::LexicalJoin,
