@@ -1455,10 +1455,10 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     assert!(remaining_holes.remove(activation.cont_id()));
     let parked_count = destination.parked_count();
     assert!(matches!(
-        tidepool_testing::with_settlement(|settlement| destination.abort(
+        destination.abort(
             activation.cont_id(),
             "transfer qualification complete".into(),
-         settlement)),
+        ),
         Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(reason))))
             if reason == "ask aborted by caller: transfer qualification complete"
     ));
@@ -2284,11 +2284,7 @@ fn activation_function_input_preserves_value_across_repeated_checked_mounts() {
     assert_eq!(unsealed.close_realm(RealmId::ROOT), (0, 0));
     for id in owned_holes.clone() {
         assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| unsealed.abort(
-                &id,
-                "release fixture-owned request".into(),
-                settlement
-            )),
+            unsealed.abort(&id, "release fixture-owned request".into(),),
             Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
                 _
             ))))

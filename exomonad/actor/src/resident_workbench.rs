@@ -18869,14 +18869,9 @@ pub(crate) mod request_tests {
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
             .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            publisher.abort(
-                hole.cont_id(),
-                "publication fixture captured".into(),
-                settlement,
-            )
-        })
-        .unwrap();
+        publisher
+            .abort(hole.cont_id(), "publication fixture captured".into())
+            .unwrap();
         assert_eq!(
             registry
                 .publish_progress(target, request, token, publisher_id)
@@ -18909,14 +18904,9 @@ pub(crate) mod request_tests {
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
             .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            publisher.abort(
-                hole.cont_id(),
-                "publication fixture captured".into(),
-                settlement,
-            )
-        })
-        .unwrap();
+        publisher
+            .abort(hole.cont_id(), "publication fixture captured".into())
+            .unwrap();
         let (revision, notifications) = registry
             .publish_progress(target, request, token, publisher_id)
             .unwrap();
@@ -18947,14 +18937,9 @@ pub(crate) mod request_tests {
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
             .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            publisher.abort(
-                hole.cont_id(),
-                "publication fixture captured".into(),
-                settlement,
-            )
-        })
-        .unwrap();
+        publisher
+            .abort(hole.cont_id(), "publication fixture captured".into())
+            .unwrap();
         assert_eq!(
             registry
                 .publish_progress(target, request, token, publisher_id)
@@ -18994,14 +18979,9 @@ pub(crate) mod request_tests {
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
             .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            publisher.abort(
-                hole.cont_id(),
-                "publication fixture captured".into(),
-                settlement,
-            )
-        })
-        .unwrap();
+        publisher
+            .abort(hole.cont_id(), "publication fixture captured".into())
+            .unwrap();
         assert_eq!(
             no_progress
                 .publish_progress(target, request_without_progress, token, publisher_id)
@@ -19019,14 +18999,12 @@ pub(crate) mod request_tests {
             })
             .unwrap(),
         );
-        tidepool_testing::with_settlement(|settlement| {
-            observer.abort(
+        observer
+            .abort(
                 warm.cont_id(),
                 "observer installed original publication image".into(),
-                settlement,
             )
-        })
-        .unwrap();
+            .unwrap();
         let observer_handles = observer.value_handle_count();
         let observer_hole = suspend(
             tidepool_testing::with_settlement(|settlement| {
@@ -19098,14 +19076,9 @@ pub(crate) mod request_tests {
             runner
                 .access
                 .with_machine(context.clone(), move |session, _, _| {
-                    tidepool_testing::with_settlement(|settlement| {
-                        session.abort(
-                            continuation.cont_id(),
-                            "source fixture captured".into(),
-                            settlement,
-                        )
-                    })
-                    .map_err(Into::into)
+                    session
+                        .abort(continuation.cont_id(), "source fixture captured".into())
+                        .map_err(Into::into)
                 })
                 .await
                 .unwrap();
@@ -19246,13 +19219,7 @@ pub(crate) mod request_tests {
                         panic!("later publication must suspend")
                     };
                     let token = session.capture_progress_publication(&hole, RealmId::ROOT)?;
-                    tidepool_testing::with_settlement(|settlement| {
-                        session.abort(
-                            hole.cont_id(),
-                            "later publication captured".into(),
-                            settlement,
-                        )
-                    })?;
+                    session.abort(hole.cont_id(), "later publication captured".into())?;
                     Ok(token)
                 },
             )
@@ -20721,7 +20688,7 @@ pub(crate) mod request_tests {
             .map(|(hole, input)| {
                 let activation_id = hole.cont_id().to_owned();
                 assert!(matches!(
-                    tidepool_testing::with_settlement(|settlement| session.abort(&activation_id, "fixture retained original input".into(), settlement)),
+                    session.abort(&activation_id, "fixture retained original input".into()),
                     Err(ResidentError::Run(tidepool_runtime::RuntimeError::Jit(
                         tidepool_effect::EffectError::Handler(reason)
                     ))) if reason == "ask aborted by caller: fixture retained original input"
@@ -21682,13 +21649,10 @@ pub(crate) mod request_tests {
         let inputs = parked
             .into_iter()
             .map(|(hole, input)| {
-                let _ = tidepool_testing::with_settlement(|settlement| {
-                    session.abort(
-                        hole.cont_id(),
-                        "original parent failed after capture".into(),
-                        settlement,
-                    )
-                });
+                let _ = session.abort(
+                    hole.cont_id(),
+                    "original parent failed after capture".into(),
+                );
                 input
             })
             .collect();

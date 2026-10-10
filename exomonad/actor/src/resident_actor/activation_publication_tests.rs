@@ -89,13 +89,7 @@ async fn interrupt_during_preview(
     let second =
         (durable && matches!(interruption, Interruption::Cancellation)).then(|| parked.remove(0));
     for (unused_hole, unused_input) in parked {
-        let _ = tidepool_testing::with_settlement(|settlement| {
-            resident.abort(
-                unused_hole.cont_id(),
-                "unused activation".into(),
-                settlement,
-            )
-        });
+        let _ = resident.abort(unused_hole.cont_id(), "unused activation".into());
         drop(unused_input);
     }
     let handles = resident.value_handle_count();
@@ -645,13 +639,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         });
     let (hole, input) = parked.remove(0);
     for (hole, input) in parked {
-        let _ = tidepool_testing::with_settlement(|settlement| {
-            resident.abort(
-                hole.cont_id(),
-                "unused native fixture input".into(),
-                settlement,
-            )
-        });
+        let _ = resident.abort(hole.cont_id(), "unused native fixture input".into());
         drop(input);
     }
     context.actor = fixture.actor.identity();
