@@ -9,7 +9,8 @@
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
     commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
-    prepare_performance_traces, record_phase, HostedScriptRound, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    prepare_performance_traces, record_phase, select_hosted_script_round, HostedScriptRound,
+    HostedScriptSelection, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use super::*;
 use harness::model::{AgentPath, CallId, OperationId, RequestId};
@@ -181,44 +182,6 @@ fn assert_replied(round: &HostedScriptRound, call_id: &str) {
     );
 }
 
-async fn admit_http_input(host: &HostedTestRuntime) {
-    let origin = format!("https://{}", host.address);
-    let api = format!("http://{}/api", host.address);
-    let client = reqwest::Client::builder()
-        .timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
-        .build()
-        .unwrap();
-    let login = client
-        .post(format!("{api}/session"))
-        .header("Origin", &origin)
-        .json(&json!({"secret": "hosted-script-test-secret-32-bytes"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(login.status(), reqwest::StatusCode::OK);
-    let cookie = login.headers()[reqwest::header::SET_COOKIE]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap();
-    let input = client
-        .post(format!("{api}/commands"))
-        .header("Origin", &origin)
-        .header(reqwest::header::COOKIE, cookie)
-        .json(&harness::server::ClientCommand::Host {
-            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
-            command: harness::server::HostCommand::Input {
-                target: root_identity(host),
-                text: "Exercise the real three-actor capture workload.".into(),
-            },
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(input.status(), reqwest::StatusCode::ACCEPTED);
-}
-
 async fn wait_parent_parked(host: &HostedTestRuntime, operation: &OperationId) {
     let invocation = exomonad_tool::ToolInvocationContext {
         origin: exomonad_tool::ToolInvocationOrigin::Model(
@@ -313,7 +276,7 @@ async fn production_harness_three_actor_capture_phases() {
         let installation = host.context.observer.installation(root).await;
         assert_eq!(installation.acquisition.as_ref().and_then(exomonad_actor::ToolsetAcquisition::selection),
             Some(coverage[0].program.clone()), "root installs its exact prepared program");
-        admit_http_input(host).await;
+        host.http_input("Exercise the real three-actor capture workload.").await.unwrap();
         let mut pending = VecDeque::new();
         let mut round = next_root(host, &mut requests, &mut pending).await;
         assert_eq!(round.request.model, "gpt-6.1-sol");
@@ -343,13 +306,13 @@ async fn production_harness_three_actor_capture_phases() {
             && item.0["type"] == "custom_tool_call_output"), "held child replies prevent parent completion");
         let mut children: Vec<(String, ActorRef, HostedScriptRound)> = Vec::new();
         while children.len() < 2 {
-            let child_round = match pending.pop_front() {
-                Some(round) => round,
-                None => host.context.while_root_live("three-actor held worker provider requests",
-                    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, requests.recv()))
-                    .await.unwrap_or_else(|error| panic!("{error}"))
-                    .expect("both actual children request the provider").expect("provider observer remains live"),
-            };
+            let child_round = host.context.while_root_live(
+                "three-actor held worker provider requests",
+                select_hosted_script_round(
+                    &mut requests, &mut pending,
+                    HostedScriptSelection::OtherThan(&AgentPath("/root".into())),
+                ),
+            ).await.unwrap_or_else(|error| panic!("{error}"));
             assert_ne!(child_round.origin().actor(), &AgentPath("/root".into()));
             assert_capture(&child_round, &prefix, effort);
             let graph = host.context.forest.inspect_host_graph();

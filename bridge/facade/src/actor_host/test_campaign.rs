@@ -1279,39 +1279,75 @@ pub(super) fn hosted_script_provider() -> (
     (Arc::new(HostedScriptProvider(requests)), receiver)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HostedScriptSelection<'a> {
+    Actor(&'a harness::model::AgentPath),
+    OtherThan(&'a harness::model::AgentPath),
+}
+
+impl HostedScriptSelection<'_> {
+    fn matches(self, round: &HostedScriptRound) -> bool {
+        let origin = round.origin();
+        match self {
+            Self::Actor(actor) => origin.actor() == actor,
+            Self::OtherThan(actor) => origin.actor() != actor,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HostedScriptWaitFailure {
+    Deadline,
+    ProviderClosed,
+}
+
+async fn select_hosted_script_round_with_budget(
+    requests: &mut tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
+    pending: &mut std::collections::VecDeque<HostedScriptRound>,
+    selection: HostedScriptSelection<'_>,
+    budget: Duration,
+) -> Result<HostedScriptRound, HostedScriptWaitFailure> {
+    if let Some(index) = pending.iter().position(|round| selection.matches(round)) {
+        return Ok(pending.remove(index).unwrap());
+    }
+    tokio::time::timeout(budget, async {
+        loop {
+            let round = requests
+                .recv()
+                .await
+                .ok_or(HostedScriptWaitFailure::ProviderClosed)?;
+            if selection.matches(&round) {
+                return Ok(round);
+            }
+            pending.push_back(round);
+        }
+    })
+    .await
+    .map_err(|_| HostedScriptWaitFailure::Deadline)?
+}
+
+/// Select the oldest matching round and retain every nonmatch in arrival order.
+/// Deadline and EOF diagnostics name the selection and all retained origins.
+pub(super) async fn select_hosted_script_round(
+    requests: &mut tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
+    pending: &mut std::collections::VecDeque<HostedScriptRound>,
+    selection: HostedScriptSelection<'_>,
+) -> HostedScriptRound {
+    select_hosted_script_round_with_budget(
+        requests, pending, selection, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    ).await.unwrap_or_else(|failure| {
+        let retained_origins: Vec<_> = pending.iter().map(HostedScriptRound::origin).collect();
+        panic!("production provider selection {selection:?} failed: {failure:?}; retained provider request origins: {retained_origins:?}")
+    })
+}
+
 /// Preserve interleaved provider requests while one actor's reply is awaited.
 pub(super) async fn next_hosted_script_round(
     requests: &mut tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
     pending: &mut std::collections::VecDeque<HostedScriptRound>,
     actor: &harness::model::AgentPath,
 ) -> HostedScriptRound {
-    let matches = |round: &HostedScriptRound| match round.origin() {
-        harness::model::ConversationIdentity::Embedded { actor: path, .. } => &path == actor,
-        _ => false,
-    };
-    if let Some(index) = pending.iter().position(matches) {
-        return pending.remove(index).unwrap();
-    }
-    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
-        loop {
-            let round = requests
-                .recv()
-                .await
-                .expect("production provider requests closed");
-            if matches(&round) {
-                return round;
-            }
-            pending.push_back(round);
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        let retained_origins: Vec<_> = pending.iter().map(HostedScriptRound::origin).collect();
-        panic!(
-            "production actor {actor:?} did not request its next scripted reply; \
-             retained provider request origins: {retained_origins:?}"
-        )
-    })
+    select_hosted_script_round(requests, pending, HostedScriptSelection::Actor(actor)).await
 }
 
 pub(super) fn hosted_test_settings(
@@ -1396,6 +1432,210 @@ mod tests {
             pinned_effort: harness::model::Effort::Low,
             session_id: "test-run:/root:1".into(),
         }
+    }
+
+    fn numbered_round(
+        actor: &harness::model::AgentPath,
+        ordinal: usize,
+    ) -> (
+        HostedScriptRound,
+        tokio::sync::oneshot::Receiver<harness::transport::ResponsesTurn>,
+    ) {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let mut request = request();
+        request.session_id = format!("test-run:{}:1", actor.0);
+        request.instructions = ordinal.to_string();
+        (
+            HostedScriptRound {
+                request,
+                reply,
+                request_started_at: std::time::Instant::now(),
+            },
+            response,
+        )
+    }
+
+    #[test]
+    fn hosted_round_selection_histories_preserve_arrival_order_and_exact_reply_custody() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let actors = ["/root", "/root/a2_i1", "/root/a3_i1"]
+            .map(|actor| harness::model::AgentPath(actor.into()));
+        let mut config = Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        // The full arrival history plus selected ordinals is an independent
+        // oracle: recompute the oldest unconsumed matching request each time.
+        TestRunner::new(config)
+            .run(
+                &(
+                    proptest::collection::vec(0usize..3, 0..40),
+                    proptest::collection::vec(0usize..4, 0..40),
+                ),
+                |(arrivals, mut selections)| {
+                    runtime.block_on(async {
+                        let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+                        let mut replies = Vec::new();
+                        for (ordinal, actor) in arrivals.iter().enumerate() {
+                            let (round, reply) = numbered_round(&actors[*actor], ordinal);
+                            sender.send(round).unwrap();
+                            replies.push(reply);
+                        }
+                        drop(sender);
+                        let mut pending = std::collections::VecDeque::new();
+                        let mut consumed = std::collections::HashSet::new();
+                        // Drain every remaining origin, including repeated matches,
+                        // after the generated operation sequence.
+                        for actor in 0..3 {
+                            selections.extend(std::iter::repeat_n(actor, arrivals.len() + 1));
+                        }
+                        for selected in selections {
+                            let selection = if selected == 3 {
+                                HostedScriptSelection::OtherThan(&actors[0])
+                            } else {
+                                HostedScriptSelection::Actor(&actors[selected])
+                            };
+                            let expected = arrivals
+                                .iter()
+                                .enumerate()
+                                .find(|(ordinal, actor)| {
+                                    !consumed.contains(ordinal)
+                                        && if selected == 3 {
+                                            **actor != 0
+                                        } else {
+                                            **actor == selected
+                                        }
+                                })
+                                .map(|(ordinal, _)| ordinal);
+                            let actual = select_hosted_script_round_with_budget(
+                                &mut requests,
+                                &mut pending,
+                                selection,
+                                Duration::from_secs(1),
+                            )
+                            .await;
+                            match (expected, actual) {
+                                (Some(expected), Ok(round)) => {
+                                    let ordinal =
+                                        round.request.instructions.parse::<usize>().unwrap();
+                                    prop_assert_eq!(ordinal, expected);
+                                    prop_assert!(
+                                        consumed.insert(ordinal),
+                                        "a request cannot be selected twice"
+                                    );
+                                    let origin = round.origin();
+                                    prop_assert_eq!(origin.actor(), &actors[arrivals[ordinal]]);
+                                    round.finish();
+                                    prop_assert!(
+                                        replies[ordinal].try_recv().is_ok(),
+                                        "selection retains the original reply channel"
+                                    );
+                                }
+                                (None, Err(HostedScriptWaitFailure::ProviderClosed)) => {
+                                    let actual: Vec<_> = pending
+                                        .iter()
+                                        .map(|round| {
+                                            round.request.instructions.parse::<usize>().unwrap()
+                                        })
+                                        .collect();
+                                    let expected: Vec<_> = (0..arrivals.len())
+                                        .filter(|ordinal| !consumed.contains(ordinal))
+                                        .collect();
+                                    prop_assert_eq!(
+                                        actual,
+                                        expected,
+                                        "EOF must retain all unmatched requests in order"
+                                    );
+                                }
+                                _ => {
+                                    return Err(TestCaseError::fail(
+                                        "selection differed from recomputed arrival history",
+                                    ))
+                                }
+                            }
+                            let retained: Vec<_> = pending
+                                .iter()
+                                .map(|round| round.request.instructions.parse::<usize>().unwrap())
+                                .collect();
+                            prop_assert!(
+                                retained.windows(2).all(|pair| pair[0] < pair[1]),
+                                "nonmatches retain arrival order"
+                            );
+                            prop_assert!(
+                                retained.iter().all(|ordinal| !consumed.contains(ordinal)),
+                                "completed requests cannot remain pending"
+                            );
+                        }
+                        prop_assert_eq!(consumed.len(), arrivals.len());
+                        prop_assert!(pending.is_empty());
+                        Ok(())
+                    })
+                },
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hosted_round_selection_deadline_and_eof_preserve_interleaved_nonmatches() {
+        use futures_util::FutureExt;
+        let root = harness::model::AgentPath("/root".into());
+        let child = harness::model::AgentPath("/root/a2_i1".into());
+        let absent = harness::model::AgentPath("/root/a3_i1".into());
+        let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let (round, mut root_reply) = numbered_round(&root, 0);
+        sender.send(round).unwrap();
+        let mut pending = std::collections::VecDeque::new();
+        let result = select_hosted_script_round_with_budget(
+            &mut requests,
+            &mut pending,
+            HostedScriptSelection::OtherThan(&root),
+            Duration::from_millis(1),
+        )
+        .await;
+        assert!(matches!(result, Err(HostedScriptWaitFailure::Deadline)));
+        assert_eq!(pending.len(), 1);
+        let (round, mut child_reply) = numbered_round(&child, 1);
+        sender.send(round).unwrap();
+        let round = select_hosted_script_round(
+            &mut requests,
+            &mut pending,
+            HostedScriptSelection::OtherThan(&root),
+        )
+        .await;
+        assert_eq!(round.origin().actor(), &child);
+        round.finish();
+        assert!(child_reply.try_recv().is_ok());
+        drop(sender);
+        let failure = std::panic::AssertUnwindSafe(select_hosted_script_round(
+            &mut requests,
+            &mut pending,
+            HostedScriptSelection::Actor(&absent),
+        ))
+        .catch_unwind()
+        .await
+        .err()
+        .expect("EOF refuses an absent origin");
+        let message = failure.downcast_ref::<String>().unwrap();
+        for fragment in [
+            "ProviderClosed",
+            "/root/a3_i1",
+            "retained provider request origins",
+            "/root",
+        ] {
+            assert!(message.contains(fragment), "{message}");
+        }
+        next_hosted_script_round(&mut requests, &mut pending, &root)
+            .await
+            .finish();
+        assert!(root_reply.try_recv().is_ok());
+        assert!(pending.is_empty());
     }
 
     #[tokio::test]

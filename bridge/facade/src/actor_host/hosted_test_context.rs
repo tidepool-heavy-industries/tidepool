@@ -809,6 +809,68 @@ impl HostedTestRuntime {
         Ok(receipt)
     }
 
+    /// Exercise browser session login and root input admission through real HTTP.
+    pub(super) async fn http_input(&self, text: &str) -> Result<(), String> {
+        let settings = self
+            .context
+            .config
+            .embedded
+            .as_ref()
+            .ok_or_else(|| "hosted HTTP input has no embedded settings".to_owned())?;
+        let secret_file = settings
+            .session_secret_file
+            .as_ref()
+            .ok_or_else(|| "hosted HTTP input requires a session secret file".to_owned())?;
+        let secret = std::fs::read_to_string(secret_file).map_err(|error| error.to_string())?;
+        let origin = format!("https://{}", self.address);
+        let api = format!("http://{}/api", self.address);
+        let client = reqwest::Client::builder()
+            .timeout(super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
+            .build()
+            .map_err(|error| error.to_string())?;
+        let login = client
+            .post(format!("{api}/session"))
+            .header(reqwest::header::ORIGIN, &origin)
+            .json(&json!({"secret": secret.trim()}))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if login.status() != reqwest::StatusCode::OK {
+            return Err(format!("hosted session login returned {}", login.status()));
+        }
+        let cookie = login
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .ok_or_else(|| "hosted session login did not issue a cookie".to_owned())?
+            .to_str()
+            .map_err(|error| error.to_string())?
+            .split(';')
+            .next()
+            .expect("cookie split has a first field");
+        let receipt = client
+            .post(format!("{api}/commands"))
+            .header(reqwest::header::ORIGIN, &origin)
+            .header(reqwest::header::COOKIE, cookie)
+            .json(&harness::server::ClientCommand::Host {
+                operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+                command: harness::server::HostCommand::Input {
+                    target: harness::embedding::HostIdentity {
+                        run: runtime_namespace(&self.context.config.run_directory.path()),
+                        actor: harness::model::AgentPath("/root".into()),
+                        incarnation: self.context.actor.identity().incarnation.0.to_string(),
+                    },
+                    text: text.into(),
+                },
+            })
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if receipt.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(format!("hosted root input returned {}", receipt.status()));
+        }
+        Ok(())
+    }
+
     pub(super) async fn cell_settlement_diagnostic(&self, call_id: &str) -> String {
         let call = harness::model::CallId(call_id.into());
         let store = self.runtime.store();
@@ -1958,6 +2020,38 @@ mod tests {
             &std::fs::read(directory.path().join("hosted-outcome.json")).unwrap(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn hosted_http_input_follows_real_session_login_and_root_command_admission() {
+        use super::super::test_campaign::{
+            hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+        };
+        let files = tempfile::tempdir().unwrap();
+        let settings = hosted_test_settings(&files, 1);
+        let (provider, mut requests) = hosted_script_provider();
+        let host = HostedTestRuntime::start(&settings, &provider)
+            .await
+            .unwrap();
+        host.run_scenario(|host| {
+            Box::pin(async move {
+                let text = "Admit this input through the browser session and command owners.";
+                host.http_input(text).await.unwrap();
+                let root = harness::model::AgentPath("/root".into());
+                let mut pending = std::collections::VecDeque::new();
+                let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+                assert!(
+                    round
+                        .request
+                        .input
+                        .iter()
+                        .any(|item| item.0["content"] == text),
+                    "the actual root provider request must contain the admitted user input"
+                );
+                round.finish();
+            })
+        })
+        .await;
     }
 
     #[tokio::test]

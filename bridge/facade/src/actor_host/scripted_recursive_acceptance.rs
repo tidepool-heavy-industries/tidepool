@@ -38,48 +38,6 @@ fn identity(round: &HostedScriptRound) -> HostIdentity {
     }
 }
 
-pub(super) async fn admit_http_input(host: &HostedTestRuntime) {
-    let origin = format!("https://{}", host.address);
-    let api = format!("http://{}/api", host.address);
-    let client = reqwest::Client::builder()
-        .timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
-        .build()
-        .unwrap();
-    let login = client
-        .post(format!("{api}/session"))
-        .header("Origin", &origin)
-        .json(&json!({"secret": "hosted-script-test-secret-32-bytes"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(login.status(), reqwest::StatusCode::OK);
-    let cookie = login.headers()[reqwest::header::SET_COOKIE]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap();
-    let receipt = client
-        .post(format!("{api}/commands"))
-        .header("Origin", &origin)
-        .header(reqwest::header::COOKIE, cookie)
-        .json(&harness::server::ClientCommand::Host {
-            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
-            command: harness::server::HostCommand::Input {
-                target: HostIdentity {
-                    run: runtime_namespace(&host.context.config.run_directory.path()),
-                    actor: AgentPath("/root".into()),
-                    incarnation: host.context.actor.identity().incarnation.0.to_string(),
-                },
-                text: "Run the recursive captured-helper scenario.".into(),
-            },
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(receipt.status(), reqwest::StatusCode::ACCEPTED);
-}
-
 fn operation(host: &HostedTestRuntime, round: &HostedScriptRound, call: &str) -> OperationId {
     OperationId {
         origin: round.origin(),
@@ -419,7 +377,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 Some(coverage[0].program.clone()),
                 "root installs its exact prepared program"
             );
-            admit_http_input(host).await;
+            host.http_input("Run the recursive captured-helper scenario.").await.unwrap();
             let mut root = next(host, &mut requests, &mut pending, &root_path).await;
             assert_eq!(root.request.model, "gpt-6.1-sol");
             root.call("recursive-setup", SETUP);

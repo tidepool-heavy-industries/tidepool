@@ -9,6 +9,7 @@ use futures_util::FutureExt;
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
     hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    select_hosted_script_round, HostedScriptSelection,
 };
 use std::collections::VecDeque;
 
@@ -96,15 +97,10 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
                     "bridge/facade/src/actor_host/scaffold_prepared_child.hs",
                 ),
             );
-            let child_round =
-                tokio::time::timeout(std::time::Duration::from_secs(300), requests.recv())
-                    .await
-                    .expect("the prepared default spec must admit its child")
-                    .expect("the child's native provider request");
-            if child_round.origin().actor() == &root {
-                child_round.assert_value("prepared-default-child", "42");
-                panic!("the typed reply must come from the forked child");
-            }
+            let child_round = select_hosted_script_round(
+                &mut requests, &mut pending, HostedScriptSelection::OtherThan(&root),
+            ).await;
+            assert_ne!(child_round.origin().actor(), &root, "the typed reply must come from the forked child");
             let child = child_round.origin().actor().clone();
             child_round.call("prepared-default-reply", "respond (trialSeed + 1 :: Int)");
             let child_round = next_hosted_script_round(&mut requests, &mut pending, &child).await;

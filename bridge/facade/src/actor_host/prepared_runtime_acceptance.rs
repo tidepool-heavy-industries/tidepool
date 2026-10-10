@@ -3,6 +3,7 @@
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
     commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    select_hosted_script_round, HostedScriptSelection,
 };
 use super::*;
 use std::collections::{HashSet, VecDeque};
@@ -347,7 +348,7 @@ async fn production_builtin_toolset_immediate_and_durable_launches_are_fresh() {
                 Some(frozen.prepared_toolset_coverage().unwrap()[0].program.clone()));
             assert!(matches!(installation.acquisition,
                 Some(exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. })));
-            super::scripted_recursive_acceptance::admit_http_input(host).await;
+            host.http_input("Run the recursive captured-helper scenario.").await.unwrap();
             let root = AgentPath("/root".into());
             let mut pending = VecDeque::new();
             if !immediate {
@@ -507,15 +508,10 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         let mut rows = Vec::new();
         for ordinal in 1..=expected_children {
             let label = format!("prepared-child-{ordinal}");
-            let round = match pending.pop_front() {
-                Some(round) => round,
-                None => tokio::time::timeout(std::time::Duration::from_secs(300), requests.recv())
-                    .await.unwrap().expect("the actual admitted child requests its provider"),
-            };
+            let round = select_hosted_script_round(
+                &mut requests, &mut pending, HostedScriptSelection::OtherThan(&root),
+            ).await;
             let origin = round.origin();
-            if origin.actor() == &root {
-                round.assert_committed("prepared-children");
-            }
             assert_ne!(origin.actor(), &root, "parent waits for this actual child reply");
             let nodes = host.context.forest.inspect_host_graph();
             let matching = nodes.iter().filter(|node| node.label == label).collect::<Vec<_>>();
@@ -607,6 +603,7 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             rows.push(row);
         }
         let completed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        completed.assert_committed("prepared-children");
         completed.assert_value("prepared-children", "True");
         progress.parent_result_verified = true;
         completed.finish();
