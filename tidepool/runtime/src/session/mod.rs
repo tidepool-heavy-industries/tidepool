@@ -842,6 +842,7 @@ pub(crate) struct ScopeDeclarationState {
 
 struct DurableDeclarationGraph {
     owner: Option<Arc<recovery_hydration::OwnedRecoveryManifest>>,
+    readiness_lifetime: Arc<()>,
     store: Arc<RunRecoveryStore>,
     domain_id: RecoveryDomainId,
     store_revision: StoreRevision,

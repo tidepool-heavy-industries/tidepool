@@ -12,7 +12,8 @@ use tidepool_repr::Generation;
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
 
 /// Read-only native readiness for one originally admitted durable public owner.
-/// The graph owns the confirmation state; losing that graph revokes readiness.
+/// The attachment owns its lifetime. A surviving shared run store does not
+/// keep a dropped or replaced machine attachment ready.
 pub struct RuntimeDurablePublicReadiness {
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
@@ -20,17 +21,21 @@ pub struct RuntimeDurablePublicReadiness {
     durable: super::RecoveryPublicOwner,
     scope: ScopeId,
     store: std::sync::Weak<super::RunRecoveryStore>,
+    attachment: std::sync::Weak<()>,
 }
 
 impl RuntimeDurablePublicReadiness {
-    /// Confirmation can temporarily block an otherwise current owner. Currency
-    /// alone permits retaining its original placement, never executing work.
+    /// A run fence blocks execution while a committed placement can remain
+    /// current. Currency alone never authorizes executing work.
     pub fn is_current(&self) -> bool {
-        self.owner.epoch() == self.owner_epoch && self.store.upgrade().is_some()
+        self.owner.epoch() == self.owner_epoch
+            && self.attachment.upgrade().is_some()
+            && self.store.upgrade().is_some()
     }
 
     pub fn is_ready(&self) -> bool {
         self.owner.epoch() == self.owner_epoch
+            && self.attachment.upgrade().is_some()
             && self
                 .store
                 .upgrade()
@@ -2120,6 +2125,7 @@ impl PersistentSession {
             durable: owner.clone(),
             scope: public_scope,
             store: Arc::downgrade(&state.store),
+            attachment: Arc::downgrade(&state.readiness_lifetime),
         }))
     }
 

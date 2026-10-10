@@ -397,6 +397,7 @@ impl SessionLib {
         self.local_generation_issued = false;
         self.durable_graph = Some(DurableDeclarationGraph {
             owner: Some(owner),
+            readiness_lifetime: Arc::new(()),
             path,
             store,
             domain_id: domain,
