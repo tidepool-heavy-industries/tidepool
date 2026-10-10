@@ -106,16 +106,23 @@ pub(crate) struct RecoveryCompilerContext {
 
 fn empty_graph_selection() -> ArtifactGraphSelection {
     ArtifactGraphSelection {
-        bindings: Vec::new(), namespace: Vec::new(), roots: Vec::new(),
-        native_groups: Vec::new(), native_custody: Vec::new(),
+        selections: Vec::new(),
+        bindings: Vec::new(),
+        namespace: Vec::new(),
+        roots: Vec::new(),
+        native_groups: Vec::new(),
+        native_custody: Vec::new(),
     }
 }
 
 impl Default for RecoveryCompilerContext {
     fn default() -> Self {
         Self {
-            graph_selection: empty_graph_selection(), artifact_refs: Vec::new(),
-            native_groups: Vec::new(), compiler_roles: Vec::new(), lexical: Vec::new(),
+            graph_selection: empty_graph_selection(),
+            artifact_refs: Vec::new(),
+            native_groups: Vec::new(),
+            compiler_roles: Vec::new(),
+            lexical: Vec::new(),
         }
     }
 }
@@ -1272,8 +1279,10 @@ fn normalize_surface(surface: &mut RecoveryPublicSurface) {
     });
 }
 fn node_binding(node: ArtifactBindingNode) -> ArtifactBinding {
-    match node { ArtifactBindingNode::Artifact(binding) => binding,
-        ArtifactBindingNode::Group(group) => group.binding }
+    match node {
+        ArtifactBindingNode::Artifact(binding) => binding,
+        ArtifactBindingNode::Group(group) => group.binding,
+    }
 }
 
 fn validate_graph_selection<'a>(
@@ -1285,31 +1294,51 @@ fn validate_graph_selection<'a>(
     if bindings.len() != selection.bindings.len() || !bindings.is_subset(available) {
         return Err(error("duplicate selection binding or missing exact scope"));
     }
-    for rows in [&selection.namespace, &selection.roots, &selection.native_custody] {
+    for rows in [
+        &selection.namespace,
+        &selection.roots,
+        &selection.native_custody,
+    ] {
         let unique = rows.iter().copied().collect::<BTreeSet<_>>();
         if unique.len() != rows.len() || !unique.is_subset(&bindings) {
-            return Err(error("selection root, namespace or custody has another binding scope"));
+            return Err(error(
+                "selection root, namespace or custody has another binding scope",
+            ));
         }
     }
-    let groups = selection.native_groups.iter().copied().collect::<BTreeSet<_>>();
+    let groups = selection
+        .native_groups
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     if groups.len() != selection.native_groups.len()
-        || groups.iter().any(|group| !bindings.contains(&group.binding))
+        || groups
+            .iter()
+            .any(|group| !bindings.contains(&group.binding))
     {
         return Err(error("native group has duplicate or missing exact binding"));
     }
     for edge in edges {
-        if !bindings.contains(&node_binding(edge.source)) { continue; }
+        if !bindings.contains(&node_binding(edge.source)) {
+            continue;
+        }
         if matches!(edge.source, ArtifactBindingNode::Group(source) if !groups.contains(&source)) {
             continue;
         }
         if !bindings.contains(&node_binding(edge.target)) {
-            return Err(error("selected binding has an incomplete exact dependency closure"));
+            return Err(error(
+                "selected binding has an incomplete exact dependency closure",
+            ));
         }
         if let ArtifactBindingNode::Group(source) = edge.source {
-            if !groups.contains(&source) { continue; }
+            if !groups.contains(&source) {
+                continue;
+            }
             if let ArtifactBindingNode::Group(target) = edge.target {
                 if !groups.contains(&target) {
-                    return Err(error("selected native group has an incomplete bound group closure"));
+                    return Err(error(
+                        "selected native group has an incomplete bound group closure",
+                    ));
                 }
             }
         }
@@ -1318,8 +1347,16 @@ fn validate_graph_selection<'a>(
 }
 
 fn normalize_graph_selection(selection: &mut ArtifactGraphSelection) {
-    selection.bindings.sort(); selection.namespace.sort(); selection.roots.sort();
-    selection.native_groups.sort(); selection.native_custody.sort();
+    selection.bindings.sort();
+    selection.namespace.sort();
+    selection.roots.sort();
+    selection.native_groups.sort();
+    selection.native_custody.sort();
+    selection.selections.sort_by_key(|plan| plan.selection);
+    for plan in &mut selection.selections {
+        plan.nodes.sort();
+        plan.dependencies.sort();
+    }
 }
 
 fn normalize_node(node: &mut RecoveryNode) {
@@ -1701,9 +1738,13 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
     }
     let bindings = graph.artifact_bindings().copied().collect::<BTreeSet<_>>();
     if bindings.len() != graph.artifact_bindings().count()
-        || bindings.iter().any(|binding| !artifacts.contains_key(&binding.artifact))
+        || bindings
+            .iter()
+            .any(|binding| !artifacts.contains_key(&binding.artifact))
     {
-        return Err(error("duplicate binding or missing certified binding payload"));
+        return Err(error(
+            "duplicate binding or missing certified binding payload",
+        ));
     }
     let mut unique_edges = BTreeSet::new();
     for edge in graph.artifact_dependencies() {
@@ -1713,21 +1754,45 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
         if !bindings.contains(&node_binding(edge.source))
             || !bindings.contains(&node_binding(edge.target))
         {
-            return Err(error("recovery dependency references a missing exact binding"));
+            return Err(error(
+                "recovery dependency references a missing exact binding",
+            ));
         }
         let valid_shape = match (&edge.source, &edge.target, &edge.dependency) {
-            (ArtifactBindingNode::Artifact(_), ArtifactBindingNode::Artifact(_), ArtifactDependency::Interface) => true,
-            (ArtifactBindingNode::Group(group), ArtifactBindingNode::Artifact(target), ArtifactDependency::Interface) =>
-                group.binding == *target,
-            (ArtifactBindingNode::Group(from), ArtifactBindingNode::Group(to), ArtifactDependency::NativeGroup {
-                dependent_ordinal, required_ordinal }) =>
-                from.original_ordinal == *dependent_ordinal && to.original_ordinal == *required_ordinal,
-            (ArtifactBindingNode::Group(from), ArtifactBindingNode::Artifact(_), ArtifactDependency::NativeBinding {
-                dependent_ordinal, .. }) => from.original_ordinal == *dependent_ordinal,
+            (
+                ArtifactBindingNode::Artifact(_),
+                ArtifactBindingNode::Artifact(_),
+                ArtifactDependency::Interface,
+            ) => true,
+            (
+                ArtifactBindingNode::Group(group),
+                ArtifactBindingNode::Artifact(target),
+                ArtifactDependency::Interface,
+            ) => group.binding == *target,
+            (
+                ArtifactBindingNode::Group(from),
+                ArtifactBindingNode::Group(to),
+                ArtifactDependency::NativeGroup {
+                    dependent_ordinal,
+                    required_ordinal,
+                },
+            ) => {
+                from.original_ordinal == *dependent_ordinal
+                    && to.original_ordinal == *required_ordinal
+            }
+            (
+                ArtifactBindingNode::Group(from),
+                ArtifactBindingNode::Artifact(_),
+                ArtifactDependency::NativeBinding {
+                    dependent_ordinal, ..
+                },
+            ) => from.original_ordinal == *dependent_ordinal,
             _ => false,
         };
         if !valid_shape {
-            return Err(error("recovery dependency kind differs from its exact bound endpoints"));
+            return Err(error(
+                "recovery dependency kind differs from its exact bound endpoints",
+            ));
         }
     }
     let selections = graph
@@ -1752,7 +1817,8 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                 format!("public source surface {:?}", surface.owner),
             )
         }));
-    for (node, graph_selection, artifact_refs, selected_groups, compiler_roles, label) in selections {
+    for (node, graph_selection, artifact_refs, selected_groups, compiler_roles, label) in selections
+    {
         validate_graph_selection(graph_selection, &bindings, graph.artifact_dependencies())?;
         let node_artifacts = artifact_refs.iter().copied().collect::<BTreeSet<_>>();
         let mut native_groups = BTreeSet::new();
@@ -1777,10 +1843,9 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
         for id in &node_artifacts {
             if let RecoveryArtifactClosure::Home(reference) = artifacts[id] {
                 let canonical = ArtifactDescriptor::from_recovery_module_interface(
-                    reference
-                        .module_interface
-                        .as_ref()
-                        .ok_or_else(|| error("native recovery artifact lacks canonical reference"))?,
+                    reference.module_interface.as_ref().ok_or_else(|| {
+                        error("native recovery artifact lacks canonical reference")
+                    })?,
                 )
                 .id;
                 if !node_artifacts.contains(&canonical) {
@@ -1791,25 +1856,51 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                 }
             }
         }
-        if graph_selection.native_custody.iter().any(|binding|
-            !matches!(artifacts.get(&binding.artifact), Some(RecoveryArtifactClosure::Home(_)))) {
-            return Err(error("bound native custody or demanded group lacks its original payload"));
+        if graph_selection.native_custody.iter().any(|binding| {
+            !matches!(
+                artifacts.get(&binding.artifact),
+                Some(RecoveryArtifactClosure::Home(_))
+            )
+        }) {
+            return Err(error(
+                "bound native custody or demanded group lacks its original payload",
+            ));
         }
-        let bound_artifacts = graph_selection.bindings.iter().map(|binding| binding.artifact)
+        let bound_artifacts = graph_selection
+            .bindings
+            .iter()
+            .map(|binding| binding.artifact)
             .collect::<BTreeSet<_>>();
-        let bound_groups = graph_selection.native_groups.iter().map(|group|
-            tidepool_toolchain::artifact_inventory::NativeGroupKey {
-                artifact: group.binding.artifact, original_ordinal: group.original_ordinal,
-            }).collect::<BTreeSet<_>>();
+        let bound_groups = graph_selection
+            .native_groups
+            .iter()
+            .map(
+                |group| tidepool_toolchain::artifact_inventory::NativeGroupKey {
+                    artifact: group.binding.artifact,
+                    original_ordinal: group.original_ordinal,
+                },
+            )
+            .collect::<BTreeSet<_>>();
         if bound_artifacts != node_artifacts || bound_groups != native_groups {
-            return Err(error("legacy selection facts differ from exact graph bindings"));
+            return Err(error(
+                "legacy selection facts differ from exact graph bindings",
+            ));
         }
-        let namespace = graph_selection.namespace.iter().map(|binding| binding.artifact)
+        let namespace = graph_selection
+            .namespace
+            .iter()
+            .map(|binding| binding.artifact)
             .collect::<BTreeSet<_>>();
         if namespace.len() != graph_selection.namespace.len()
-            || namespace != compiler_roles.iter().flat_map(|role|
-                std::iter::once(role.interface()).chain(role.original())).collect::<BTreeSet<_>>() {
-            return Err(error("selected namespace differs from exact compiler roles"));
+            || namespace
+                != compiler_roles
+                    .iter()
+                    .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+                    .collect::<BTreeSet<_>>()
+        {
+            return Err(error(
+                "selected namespace differs from exact compiler roles",
+            ));
         }
         let mut compiler_owners = BTreeSet::new();
         for role in compiler_roles {
@@ -1831,9 +1922,9 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                 };
                 if !namespace.contains(&original)
                     || ArtifactDescriptor::from_recovery_module_interface(
-                        home.module_interface
-                            .as_ref()
-                            .ok_or_else(|| error("native recovery artifact lacks canonical reference"))?,
+                        home.module_interface.as_ref().ok_or_else(|| {
+                            error("native recovery artifact lacks canonical reference")
+                        })?,
                     )
                     .id != interface
                 {
@@ -1871,8 +1962,11 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
             let id = binding.artifact;
             if let RecoveryArtifactClosure::Home(reference) = artifacts[&id] {
                 let canonical = ArtifactDescriptor::from_recovery_module_interface(
-                    reference.module_interface.as_ref().ok_or_else(|| error("native recovery artifact lacks canonical reference"))?
-                ).id;
+                    reference.module_interface.as_ref().ok_or_else(|| {
+                        error("native recovery artifact lacks canonical reference")
+                    })?,
+                )
+                .id;
                 if !graph.artifact_dependencies().any(|edge|
                     edge.source == ArtifactBindingNode::Artifact(*binding)
                     && matches!(edge.target, ArtifactBindingNode::Artifact(target) if target.artifact == canonical)
@@ -1881,14 +1975,16 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                     return Err(error("native binding lacks its exact canonical companion edge"));
                 }
             }
-            let RecoveryArtifactClosure::ValueInterface(reference) = artifacts[&id] else { continue };
+            let RecoveryArtifactClosure::ValueInterface(reference) = artifacts[&id] else {
+                continue;
+            };
             for requirement in &reference.requirements {
-                if !graph.artifact_dependencies().any(|edge|
+                if !graph.artifact_dependencies().any(|edge| {
                     edge.source == ArtifactBindingNode::Artifact(*binding)
-                    && edge.dependency == ArtifactDependency::Interface
-                    && matches!(edge.target, ArtifactBindingNode::Artifact(target)
-                        if artifacts[&target.artifact].owner() == *requirement))
-                {
+                        && edge.dependency == ArtifactDependency::Interface
+                        && matches!(edge.target, ArtifactBindingNode::Artifact(target)
+                        if artifacts[&target.artifact].owner() == *requirement)
+                }) {
                     return Err(error("value binding lacks its exact required module edge"));
                 }
             }
@@ -2314,8 +2410,10 @@ mod tests {
     }
 
     fn metadata_binding(id: ArtifactId) -> ArtifactBinding {
-        ArtifactBinding { artifact: id,
-            selection: tidepool_toolchain::artifact_inventory::ArtifactSelectionId([0x5a; 32]) }
+        ArtifactBinding {
+            artifact: id,
+            selection: tidepool_toolchain::artifact_inventory::ArtifactSelectionId([0x5a; 32]),
+        }
     }
     fn metadata_node(id: ArtifactId) -> ArtifactBindingNode {
         ArtifactBindingNode::Artifact(metadata_binding(id))
@@ -2446,19 +2544,60 @@ mod tests {
     }
 
     fn install_metadata_bindings(wire: &mut RecoveryGraphWire) {
-        wire.artifact_bindings = wire.artifacts.iter().map(|row| metadata_binding(row.artifact_id())).collect();
+        wire.artifact_bindings = wire
+            .artifacts
+            .iter()
+            .map(|row| metadata_binding(row.artifact_id()))
+            .collect();
         for node in &mut wire.nodes {
             node.graph_selection = ArtifactGraphSelection {
-                bindings: node.artifact_refs.iter().copied().map(metadata_binding).collect(),
-                namespace: node.compiler_roles.iter().flat_map(|role|
-                    std::iter::once(role.interface()).chain(role.original())).map(metadata_binding).collect(),
-                roots: node.artifact_refs.iter().copied().map(metadata_binding).collect(),
-                native_groups: node.native_groups.iter().map(|group|
-                    tidepool_toolchain::artifact_inventory::NativeGroupBinding {
-                        binding: metadata_binding(group.artifact), original_ordinal: group.original_ordinal }).collect(),
-                native_custody: node.artifact_refs.iter().filter(|id| wire.artifacts.iter().any(|row|
-                    row.artifact_id() == **id && matches!(row, RecoveryArtifactClosure::Home(_))))
-                    .copied().map(metadata_binding).collect(),
+                selections: vec![],
+                bindings: node
+                    .artifact_refs
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(metadata_binding)
+                    .collect(),
+                namespace: node
+                    .compiler_roles
+                    .iter()
+                    .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+                    .map(metadata_binding)
+                    .collect(),
+                roots: node
+                    .artifact_refs
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(metadata_binding)
+                    .collect(),
+                native_groups: node
+                    .native_groups
+                    .iter()
+                    .map(
+                        |group| tidepool_toolchain::artifact_inventory::NativeGroupBinding {
+                            binding: metadata_binding(group.artifact),
+                            original_ordinal: group.original_ordinal,
+                        },
+                    )
+                    .collect(),
+                native_custody: node
+                    .artifact_refs
+                    .iter()
+                    .filter(|id| {
+                        wire.artifacts.iter().any(|row| {
+                            row.artifact_id() == **id
+                                && matches!(row, RecoveryArtifactClosure::Home(_))
+                        })
+                    })
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(metadata_binding)
+                    .collect(),
             };
         }
     }
@@ -2552,13 +2691,21 @@ mod tests {
         groups: &[tidepool_toolchain::artifact_inventory::NativeGroupKey],
     ) -> ArtifactGraphSelection {
         let mut projected = selection.clone();
-        projected.native_groups = groups.iter().map(|group| {
-            let binding = selection.bindings.iter().find(|binding|
-                binding.artifact == group.artifact).copied().unwrap_or_else(|| metadata_binding(group.artifact));
-            tidepool_toolchain::artifact_inventory::NativeGroupBinding {
-                binding, original_ordinal: group.original_ordinal,
-            }
-        }).collect();
+        projected.native_groups = groups
+            .iter()
+            .map(|group| {
+                let binding = selection
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.artifact == group.artifact)
+                    .copied()
+                    .unwrap_or_else(|| metadata_binding(group.artifact));
+                tidepool_toolchain::artifact_inventory::NativeGroupBinding {
+                    binding,
+                    original_ordinal: group.original_ordinal,
+                }
+            })
+            .collect();
         projected
     }
 
@@ -2567,15 +2714,36 @@ mod tests {
         selection: &ArtifactGraphSelection,
         edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
     ) {
-        assert_eq!(selection.bindings.iter().map(|binding| binding.artifact).collect::<BTreeSet<_>>(),
-            wire.artifacts.iter().map(RecoveryArtifactClosure::artifact_id).collect::<BTreeSet<_>>(),
-            "fixture retains the complete compiler-issued payload closure");
+        assert_eq!(
+            selection
+                .bindings
+                .iter()
+                .map(|binding| binding.artifact)
+                .collect::<BTreeSet<_>>(),
+            wire.artifacts
+                .iter()
+                .map(RecoveryArtifactClosure::artifact_id)
+                .collect::<BTreeSet<_>>(),
+            "fixture retains the complete compiler-issued payload closure"
+        );
         wire.artifact_bindings = selection.bindings.clone();
-        wire.artifact_dependencies = edges.iter().cloned().map(|(source, target, dependency)|
-            RecoveryArtifactDependency { source, target, dependency }).collect();
+        wire.artifact_dependencies = edges
+            .iter()
+            .cloned()
+            .map(|(source, target, dependency)| RecoveryArtifactDependency {
+                source,
+                target,
+                dependency,
+            })
+            .collect();
         wire.nodes[0].graph_selection = selection.clone();
-        wire.nodes[0].artifact_refs = selection.bindings.iter().map(|binding| binding.artifact)
-            .collect::<BTreeSet<_>>().into_iter().collect();
+        wire.nodes[0].artifact_refs = selection
+            .bindings
+            .iter()
+            .map(|binding| binding.artifact)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
     }
 
     // Only the production compiler creates the certified bundles used by recovery
@@ -2628,9 +2796,13 @@ mod tests {
                 .filter(|product| product.owner().unit == "main" && product.owner().module == "Lib")
                 .collect::<Vec<_>>();
             assert_eq!(products.len(), 1, "compiler-issued Lib native product");
-            (producer, products, native_groups,
+            (
+                producer,
+                products,
+                native_groups,
                 compiled.artifact_view.capture_graph_selection(),
-                compiled.artifact_view.binding_dependencies())
+                compiled.artifact_view.binding_dependencies(),
+            )
         });
         let mut materialized = materialize_certified_products(root, *producer, products)
             .expect("materialize compiler-issued recovery control");
@@ -2789,9 +2961,14 @@ mod tests {
         wire.nodes[0].exports[0].identity = identity("late");
         wire.nodes[0].native_groups = fixture.late_closure.iter().copied().collect();
         let mut selection = fixture.selection.clone();
-        selection.native_groups.retain(|group| fixture.late_closure.contains(
-            &tidepool_toolchain::artifact_inventory::NativeGroupKey {
-                artifact: group.binding.artifact, original_ordinal: group.original_ordinal }));
+        selection.native_groups.retain(|group| {
+            fixture
+                .late_closure
+                .contains(&tidepool_toolchain::artifact_inventory::NativeGroupKey {
+                    artifact: group.binding.artifact,
+                    original_ordinal: group.original_ordinal,
+                })
+        });
         install_issued_fixture_graph(&mut wire, &selection, &fixture.edges);
         wire.seal().unwrap();
         (wire, fixture)
@@ -2845,7 +3022,9 @@ mod tests {
         let mut extended = wire.clone();
         extended.nodes[0].native_groups.push(fixture.zero_edge);
         extended.nodes[0].graph_selection = selection_with_groups(
-            &extended.nodes[0].graph_selection, &extended.nodes[0].native_groups);
+            &extended.nodes[0].graph_selection,
+            &extended.nodes[0].native_groups,
+        );
         extended.seal().unwrap();
         let extended = snapshot(&extended);
         let added = extended.node(Generation(1)).unwrap();
@@ -2922,7 +3101,7 @@ mod tests {
         assert!(
             inventory
                 .context_with_graph_selection(
-                &selection_with_groups(&node.graph_selection, &node.native_groups),
+                    &selection_with_groups(&node.graph_selection, &node.native_groups),
                     &node.compiler_roles,
                     node.lexical.clone()
                 )
@@ -3030,6 +3209,10 @@ mod tests {
             RecoveryGraph::from_wire(changed.clone()).is_err(),
             "checksum binds roles independently of custody"
         );
+        changed.nodes[0]
+            .graph_selection
+            .namespace
+            .retain(|binding| binding.artifact == interface);
         changed.seal().unwrap();
         assert_eq!(changed.nodes[0].artifact_refs, wire.nodes[0].artifact_refs);
         let mut duplicate = wire.clone();
@@ -3346,21 +3529,36 @@ mod tests {
         for mutation in 0..5 {
             let mut altered = baseline.clone();
             match mutation {
-                0 => { altered["version"] = serde_json::json!(9);
-                    altered["public_schema"] = serde_json::json!("paired-public-v9"); }
-                1 => { altered.as_object_mut().unwrap().remove("artifact_bindings"); }
-                2 => { altered["nodes"][0].as_object_mut().unwrap().remove("graph_selection"); }
-                3 => { altered["nodes"][0]["graph_selection"]["bindings"][0]["selection"] =
-                    serde_json::to_value([0xffu8; 32]).unwrap(); }
-                _ => { altered["artifact_dependencies"][0]["target"]["artifact"]["selection"] =
-                    serde_json::to_value([0xfeu8; 32]).unwrap(); }
+                0 => {
+                    altered["version"] = serde_json::json!(9);
+                    altered["public_schema"] = serde_json::json!("paired-public-v9");
+                }
+                1 => {
+                    altered.as_object_mut().unwrap().remove("artifact_bindings");
+                }
+                2 => {
+                    altered["nodes"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("graph_selection");
+                }
+                3 => {
+                    altered["nodes"][0]["graph_selection"]["bindings"][0]["selection"] =
+                        serde_json::to_value([0xffu8; 32]).unwrap();
+                }
+                _ => {
+                    altered["artifact_dependencies"][0]["target"]["artifact"]["selection"] =
+                        serde_json::to_value([0xfeu8; 32]).unwrap();
+                }
             }
             let bytes = serde_json::to_vec(&altered).unwrap();
             fs::write(&manifest, &bytes).unwrap();
             let refusal = read_v2(&manifest, directory.path()).err().unwrap();
             if mutation == 0 {
-                assert_eq!(refusal.kind, RecoveryErrorKind::Format(
-                    RecoveryRefusal::UnsupportedOldFormat { version: 9 }));
+                assert_eq!(
+                    refusal.kind,
+                    RecoveryErrorKind::Format(RecoveryRefusal::UnsupportedOldFormat { version: 9 })
+                );
             }
             assert_eq!(fs::read(&manifest).unwrap(), bytes);
         }
@@ -3425,6 +3623,7 @@ mod tests {
         untouched_surface.owner = owner("untouched");
         untouched_surface.declaration_root = None;
         wire.public_surfaces.push(untouched_surface);
+        install_metadata_bindings(&mut wire);
         let template = wire.nodes[0].clone();
         wire.nodes = (1..=128)
             .map(|id| RecoveryNode {
@@ -3434,6 +3633,7 @@ mod tests {
             .collect();
         wire.public_surfaces[0].declaration_root = None;
         wire.high_water = Generation(128);
+        install_metadata_bindings(&mut wire);
         wire.seal().unwrap();
         let original = snapshot(&wire);
         let baseline = original.clone();
@@ -3573,17 +3773,21 @@ mod tests {
             RecoveryArtifactClosure::ValueInterface(value.clone()),
         ]);
         install_fixture_canonical_interfaces(&mut wire);
+        install_metadata_bindings(&mut wire);
         wire.seal().unwrap();
         let mut wrong_target = wire.clone();
         wrong_target
             .artifact_dependencies
             .iter_mut()
-            .find(|edge| edge.source == metadata_node(value.artifact_id) && edge.target == metadata_node(canonical_id))
+            .find(|edge| {
+                edge.source == metadata_node(value.artifact_id)
+                    && edge.target == metadata_node(canonical_id)
+            })
             .unwrap()
             .target = metadata_node(home_id);
         assert_eq!(
             wrong_target.seal().unwrap_err().detail,
-            "recovery node 1 has a value interface requirement without its direct artifact edge"
+            "value binding lacks its exact required module edge"
         );
         let mut native_id_orders = [false; 2];
         // These product digests place the fixture's native descriptor on each
@@ -3621,6 +3825,7 @@ mod tests {
                     edge.source = metadata_node(native_id);
                 }
             }
+            install_metadata_bindings(&mut ordered);
             ordered.seal().unwrap();
             snapshot(&ordered).validate().unwrap();
             native_id_orders[order] = true;
@@ -3856,6 +4061,7 @@ mod tests {
                 },
             });
         graph.public_surfaces[0].epoch = 1;
+        install_metadata_bindings(&mut graph);
         graph.seal().unwrap();
         let before = graph.clone();
         assert!(matches!(
@@ -4149,7 +4355,10 @@ mod tests {
         assert_eq!(original_join.live_dependencies, vec![exact.clone()]);
         assert!(!original_join.native_groups.is_empty());
         join_graph.nodes[join_index].native_groups.clear();
-        join_graph.nodes[join_index].graph_selection.native_groups.clear();
+        join_graph.nodes[join_index]
+            .graph_selection
+            .native_groups
+            .clear();
         assert_eq!(join_graph.artifacts, graph.artifacts);
         join_graph.seal().unwrap();
         let join_snapshot = snapshot(&join_graph);
@@ -4163,7 +4372,10 @@ mod tests {
         );
         let projected_context = join_inventory
             .context_with_graph_selection(
-                &selection_with_groups(&projected_join.graph_selection, &projected_join.native_groups),
+                &selection_with_groups(
+                    &projected_join.graph_selection,
+                    &projected_join.native_groups,
+                ),
                 &projected_join.compiler_roles,
                 projected_join.lexical.clone(),
             )
@@ -4514,7 +4726,7 @@ mod tests {
                 });
             assert_eq!(
                 graph.seal().unwrap_err().detail,
-                "native recovery edges must derive from original certification"
+                "recovery dependency kind differs from its exact bound endpoints"
             );
         }
     }
@@ -4906,6 +5118,16 @@ mod tests {
             },
         ];
         wire.nodes[0].native_groups.clear();
+        let canonical_id = canonical.artifact_id();
+        let selection = &mut wire.nodes[0].graph_selection;
+        selection
+            .bindings
+            .retain(|binding| binding.artifact == canonical_id);
+        selection.namespace = selection.bindings.clone();
+        selection.roots = selection.bindings.clone();
+        selection.native_groups.clear();
+        selection.native_custody.clear();
+        wire.artifact_bindings = selection.bindings.clone();
         wire.artifacts = vec![canonical];
         wire.artifact_dependencies.clear();
         wire.seal().unwrap();
@@ -4970,6 +5192,7 @@ mod tests {
                     },
                 ];
             }
+            install_metadata_bindings(&mut safe);
             safe.seal().unwrap();
             for (component, path) in original.component_paths() {
                 for unsafe_path in [
@@ -5150,20 +5373,23 @@ mod tests {
             .artifacts
             .push(RecoveryArtifactClosure::ValueInterface(value.clone()));
         graph.nodes[0].artifact_refs.push(value_id);
+        install_metadata_bindings(&mut graph);
         assert!(graph
             .seal()
             .unwrap_err()
             .detail
-            .contains("without its direct artifact edge"));
+            .contains("value binding lacks its exact required module edge"));
 
         graph
             .artifact_dependencies
             .push(RecoveryArtifactDependency {
                 source: metadata_node(value_id),
-                target: metadata_node(ArtifactDescriptor::from_recovery_module_interface(
-                    home.module_interface.as_ref().unwrap(),
-                )
-                .id),
+                target: metadata_node(
+                    ArtifactDescriptor::from_recovery_module_interface(
+                        home.module_interface.as_ref().unwrap(),
+                    )
+                    .id,
+                ),
                 dependency: ArtifactDependency::Interface,
             });
         graph.seal().unwrap();
@@ -5329,6 +5555,7 @@ mod tests {
                 imports: vec![],
             },
         ];
+        install_metadata_bindings(&mut graph);
         graph.seal().unwrap();
         graph.validate().unwrap();
 
@@ -5414,6 +5641,7 @@ mod tests {
         ];
         wire.nodes[1].state = RecoveryNodeState::ExactArtifactClosure;
         wire.artifacts.push(join);
+        install_metadata_bindings(&mut wire);
         wire.seal().unwrap();
         let graph = snapshot(&wire);
         let mut batched = RecoveryArtifactWork::default();
@@ -5575,13 +5803,13 @@ mod tests {
         let manifest_path = dir.path().join("recovery.json");
         fs::write(&manifest_path, b"previous manifest").unwrap();
 
-        let staged = stage_high_water_v2(&manifest_path, &snapshot(&graph), Generation(3)).unwrap();
-        assert_eq!(staged.candidate_graph().high_water(), Generation(3));
+        let staged = stage_high_water_v2(&manifest_path, &snapshot(&graph), Generation(1)).unwrap();
+        assert_eq!(staged.candidate_graph().high_water(), Generation(1));
         assert_eq!(fs::read(&manifest_path).unwrap(), b"previous manifest");
         drop(staged);
         assert_eq!(fs::read(&manifest_path).unwrap(), b"previous manifest");
 
-        match stage_high_water_v2(&manifest_path, &snapshot(&graph), Generation(3))
+        match stage_high_water_v2(&manifest_path, &snapshot(&graph), Generation(1))
             .unwrap()
             .publish()
         {
@@ -5590,7 +5818,7 @@ mod tests {
                 publication,
             } => {
                 assert_eq!(publication.path(), manifest_path);
-                assert_eq!(published.high_water(), Generation(3));
+                assert_eq!(published.high_water(), Generation(1));
                 assert_eq!(
                     published
                         .public_surfaces()
@@ -5618,7 +5846,7 @@ mod tests {
         }
 
         let restored = read_v2(&manifest_path, dir.path()).unwrap().unwrap();
-        assert_eq!(restored.graph.high_water(), Generation(3));
+        assert_eq!(restored.graph.high_water(), Generation(1));
         assert_eq!(
             restored
                 .graph
@@ -5692,6 +5920,7 @@ mod tests {
         graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
         graph.nodes[1].native_groups = graph.nodes[0].native_groups.clone();
         graph.nodes[1].compiler_roles = graph.nodes[0].compiler_roles.clone();
+        graph.nodes[1].graph_selection = graph.nodes[0].graph_selection.clone();
         graph.seal().unwrap();
         let product = match home_artifact(&graph) {
             RecoveryArtifactClosure::Home(reference) => reference.product_path.clone(),
@@ -5721,6 +5950,7 @@ mod tests {
         graph.nodes[1].artifact_refs = graph.nodes[0].artifact_refs.clone();
         graph.nodes[1].native_groups = graph.nodes[0].native_groups.clone();
         graph.nodes[1].compiler_roles = graph.nodes[0].compiler_roles.clone();
+        graph.nodes[1].graph_selection = graph.nodes[0].graph_selection.clone();
         graph.seal().unwrap();
         let manifest_path = dir.path().join("recovery.json");
         match stage_v2(&manifest_path, dir.path(), snapshot(&graph))

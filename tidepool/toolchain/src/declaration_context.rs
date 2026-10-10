@@ -955,13 +955,17 @@ impl RecoveredArtifactInventory {
         bindings: &[ArtifactBinding],
         edges: &[(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)],
     ) -> Result<Self, RecoveryInventoryError> {
-        let mut captured = Self::capture_inputs(
-            root, products, module_interfaces, joins, values, None,
-        )?;
-        let actual = captured.entries.iter().map(|(id, entry)|
-            (*id, entry.descriptor.clone())).collect::<BTreeMap<_, _>>();
-        let supplied = descriptors.iter().map(|entry|
-            (entry.id, entry.clone())).collect::<BTreeMap<_, _>>();
+        let mut captured =
+            Self::capture_inputs(root, products, module_interfaces, joins, values, None)?;
+        let actual = captured
+            .entries
+            .iter()
+            .map(|(id, entry)| (*id, entry.descriptor.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let supplied = descriptors
+            .iter()
+            .map(|entry| (entry.id, entry.clone()))
+            .collect::<BTreeMap<_, _>>();
         if supplied.len() != descriptors.len() || supplied != actual {
             return Err(failure("bound recovery descriptors differ from certified bytes").into());
         }
@@ -971,33 +975,55 @@ impl RecoveredArtifactInventory {
             ArtifactBindingNode::Group(group) => group.binding,
         };
         if available.len() != bindings.len()
-            || available.iter().any(|binding| !actual.contains_key(&binding.artifact))
-            || available.iter().map(|binding| binding.artifact).collect::<BTreeSet<_>>()
+            || available
+                .iter()
+                .any(|binding| !actual.contains_key(&binding.artifact))
+            || available
+                .iter()
+                .map(|binding| binding.artifact)
+                .collect::<BTreeSet<_>>()
                 != actual.keys().copied().collect()
             || edges.iter().cloned().collect::<BTreeSet<_>>().len() != edges.len()
-            || edges.iter().any(|(from, to, _)|
-                !available.contains(&binding_of(*from)) || !available.contains(&binding_of(*to)))
+            || edges.iter().any(|(from, to, _)| {
+                !available.contains(&binding_of(*from)) || !available.contains(&binding_of(*to))
+            })
         {
             return Err(failure("bound recovery has duplicate or missing exact endpoints").into());
         }
         // Lexical joins carry no original certificate. Their recorded interface
         // owner requirements must agree across every binding of the same bytes.
         for (id, entry) in &mut captured.entries {
-            if !matches!(entry.descriptor.kind,
-                crate::artifact_inventory::ArtifactKind::LexicalJoin) {
+            if !matches!(
+                entry.descriptor.kind,
+                crate::artifact_inventory::ArtifactKind::LexicalJoin
+            ) {
                 continue;
             }
             let mut expected = None;
             for binding in available.iter().filter(|binding| binding.artifact == *id) {
-                let requirements = edges.iter().filter_map(|(from, to, dependency)| {
-                    if *from != ArtifactBindingNode::Artifact(*binding)
-                        || *dependency != ArtifactDependency::Interface { return None; }
-                    let ArtifactBindingNode::Artifact(target) = to else { return None; };
-                    let owner = &actual[&target.artifact].owner;
-                    (owner != &entry.descriptor.owner).then(|| owner.clone())
-                }).collect::<BTreeSet<_>>();
-                if expected.as_ref().is_some_and(|previous| previous != &requirements) {
-                    return Err(failure("lexical recovery bindings disagree on owner requirements").into());
+                let requirements = edges
+                    .iter()
+                    .filter_map(|(from, to, dependency)| {
+                        if *from != ArtifactBindingNode::Artifact(*binding)
+                            || *dependency != ArtifactDependency::Interface
+                        {
+                            return None;
+                        }
+                        let ArtifactBindingNode::Artifact(target) = to else {
+                            return None;
+                        };
+                        let owner = &actual[&target.artifact].owner;
+                        (owner != &entry.descriptor.owner).then(|| owner.clone())
+                    })
+                    .collect::<BTreeSet<_>>();
+                if expected
+                    .as_ref()
+                    .is_some_and(|previous| previous != &requirements)
+                {
+                    return Err(failure(
+                        "lexical recovery bindings disagree on owner requirements",
+                    )
+                    .into());
                 }
                 expected = Some(requirements);
             }
@@ -1020,26 +1046,48 @@ impl RecoveredArtifactInventory {
         if selected.len() != selection.bindings.len() || !selected.is_subset(&self.bindings) {
             return Err(failure("missing or duplicate recovered selection binding"));
         }
-        let ids = selected.iter().map(|binding| binding.artifact).collect::<BTreeSet<_>>();
-        let entries = ids.iter().map(|id| self.entries.get(id).cloned()
-            .ok_or_else(|| failure("missing bound recovery payload")))
+        let ids = selected
+            .iter()
+            .map(|binding| binding.artifact)
+            .collect::<BTreeSet<_>>();
+        let entries = ids
+            .iter()
+            .map(|id| {
+                self.entries
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| failure("missing bound recovery payload"))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let binding_of = |node: ArtifactBindingNode| match node {
             ArtifactBindingNode::Artifact(binding) => binding,
             ArtifactBindingNode::Group(group) => group.binding,
         };
-        let groups = selection.native_groups.iter().copied().collect::<BTreeSet<_>>();
-        let edges = self.binding_edges.iter().filter(|(from, _, _)| match from {
-            ArtifactBindingNode::Artifact(binding) => selected.contains(binding),
-            ArtifactBindingNode::Group(group) => groups.contains(group),
-        }).cloned().collect::<Vec<_>>();
-        if edges.iter().any(|(_, to, _)| !selected.contains(&binding_of(*to))) {
-            return Err(failure("bound recovery selection omits exact dependency scope"));
+        let groups = selection
+            .native_groups
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let edges = self
+            .binding_edges
+            .iter()
+            .filter(|(from, _, _)| match from {
+                ArtifactBindingNode::Artifact(binding) => selected.contains(binding),
+                ArtifactBindingNode::Group(group) => groups.contains(group),
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if edges
+            .iter()
+            .any(|(_, to, _)| !selected.contains(&binding_of(*to)))
+        {
+            return Err(failure(
+                "bound recovery selection omits exact dependency scope",
+            ));
         }
         let inventory = ArtifactInventory::default();
-        let restored = inventory.recover_selection(
-            &inventory.empty_view(), entries, selection, &edges,
-        )?;
+        let restored =
+            inventory.recover_selection(&inventory.empty_view(), entries, selection, &edges)?;
         let compiler_projection = CompilerInputProjection::restore(&restored, roles)?;
         let context = ExactDeclarationContext {
             producer: self.producer,
@@ -6673,51 +6721,113 @@ mod tests {
         use crate::certified_products::{fixture_module_core, fixture_module_interface};
         use crate::recovery_artifacts::materialize_module_interface;
         let child_old = fixture_module_interface([2; 32], "unit", "Child", BTreeMap::new());
-        let child_new = fixture_module_core(&child_old, b"independently issued child Core".to_vec());
+        let child_new =
+            fixture_module_core(&child_old, b"independently issued child Core".to_vec());
         assert_eq!(child_old.interface_sha256(), child_new.interface_sha256());
         assert_ne!(child_old.certificate_bytes(), child_new.certificate_bytes());
-        let root = fixture_module_interface([2; 32], "unit", "Root", BTreeMap::from([
-            (("unit".into(), "Child".into()), child_old.interface_sha256()),
-        ]));
+        let root = fixture_module_interface(
+            [2; 32],
+            "unit",
+            "Root",
+            BTreeMap::from([(
+                ("unit".into(), "Child".into()),
+                child_old.interface_sha256(),
+            )]),
+        );
         let root_id = ArtifactEntry::canonical(root.clone()).descriptor.id;
         let old_id = ArtifactEntry::canonical(child_old.clone()).descriptor.id;
         let new_id = ArtifactEntry::canonical(child_new.clone()).descriptor.id;
         let issuer = ArtifactInventory::default();
-        let old = issuer.admit(&issuer.empty_view(), vec![
-            ArtifactEntry::canonical(root.clone()), ArtifactEntry::canonical(child_old.clone()),
-        ]).unwrap();
-        let new = issuer.admit(&issuer.empty_view(), vec![
-            ArtifactEntry::canonical(root.clone()), ArtifactEntry::canonical(child_new.clone()),
-        ]).unwrap();
-        let root_binding = |selection: &ArtifactGraphSelection| *selection.bindings.iter()
-            .find(|binding| binding.artifact == root_id).unwrap();
+        let old = issuer
+            .admit(
+                &issuer.empty_view(),
+                vec![
+                    ArtifactEntry::canonical(root.clone()),
+                    ArtifactEntry::canonical(child_old.clone()),
+                ],
+            )
+            .unwrap();
+        let new = issuer
+            .admit(
+                &issuer.empty_view(),
+                vec![
+                    ArtifactEntry::canonical(root.clone()),
+                    ArtifactEntry::canonical(child_new.clone()),
+                ],
+            )
+            .unwrap();
+        let root_binding = |selection: &ArtifactGraphSelection| {
+            *selection
+                .bindings
+                .iter()
+                .find(|binding| binding.artifact == root_id)
+                .unwrap()
+        };
         let selections = [old.capture_graph_selection(), new.capture_graph_selection()];
         assert_ne!(root_binding(&selections[0]), root_binding(&selections[1]));
-        let edges = old.binding_dependencies().into_iter().chain(new.binding_dependencies())
-            .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-        let bindings = selections.iter().flat_map(|selection| selection.bindings.iter().copied())
-            .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+        let edges = old
+            .binding_dependencies()
+            .into_iter()
+            .chain(new.binding_dependencies())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let bindings = selections
+            .iter()
+            .flat_map(|selection| selection.bindings.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let directory = tempfile::tempdir().unwrap();
         let mut validation = PackageInterfaceValidation::default();
-        let references = [&root, &child_old, &child_new].into_iter().map(|interface|
-            materialize_module_interface(directory.path(), interface, &mut validation,
-                MaterializationMode::Durable)).collect::<Result<Vec<_>, _>>().unwrap();
-        let descriptors = references.iter().map(
-            crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface
-        ).collect::<Vec<_>>();
-        let encoded = serde_json::to_vec(&(references, descriptors, bindings, edges, selections)).unwrap();
+        let references = [&root, &child_old, &child_new]
+            .into_iter()
+            .map(|interface| {
+                materialize_module_interface(
+                    directory.path(),
+                    interface,
+                    &mut validation,
+                    MaterializationMode::Durable,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let descriptors = references
+            .iter()
+            .map(crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface)
+            .collect::<Vec<_>>();
+        let encoded =
+            serde_json::to_vec(&(references, descriptors, bindings, edges, selections)).unwrap();
         drop((old, new, issuer, root, child_old, child_new));
         let (references, descriptors, bindings, edges, selections): (
             Vec<recovery_artifacts::RecoveryModuleInterfaceRef>,
-            Vec<crate::artifact_inventory::ArtifactDescriptor>, Vec<ArtifactBinding>,
+            Vec<crate::artifact_inventory::ArtifactDescriptor>,
+            Vec<ArtifactBinding>,
             Vec<(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)>,
             [ArtifactGraphSelection; 2],
         ) = serde_json::from_slice(&encoded).unwrap();
-        let recovered = RecoveredArtifactInventory::capture_bound(directory.path(), &[],
-            &references, &[], &[], &descriptors, &bindings, &edges).unwrap();
+        let recovered = RecoveredArtifactInventory::capture_bound(
+            directory.path(),
+            &[],
+            &references,
+            &[],
+            &[],
+            &descriptors,
+            &bindings,
+            &edges,
+        )
+        .unwrap();
         BoundRecoveryPair {
-            recovered, selections, root_id, old_id, new_id,
-            references, descriptors, bindings, edges, directory,
+            recovered,
+            selections,
+            root_id,
+            old_id,
+            new_id,
+            references,
+            descriptors,
+            bindings,
+            edges,
+            directory,
         }
     }
 
@@ -6734,53 +6844,124 @@ mod tests {
         directory: tempfile::TempDir,
     }
     impl BoundRecoveryPair {
-        fn restore(&self, selection: &ArtifactGraphSelection) -> Result<ExactDeclarationContext, CompileError> {
-            let roles = selection.namespace.iter().map(|binding|
-                CompilerInputRole::InterfaceOnly { interface: binding.artifact }).collect::<Vec<_>>();
-            self.recovered.context_with_graph_selection(selection, &roles, vec![])
+        fn restore(
+            &self,
+            selection: &ArtifactGraphSelection,
+        ) -> Result<ExactDeclarationContext, CompileError> {
+            let roles = selection
+                .namespace
+                .iter()
+                .map(|binding| CompilerInputRole::InterfaceOnly {
+                    interface: binding.artifact,
+                })
+                .collect::<Vec<_>>();
+            self.recovered
+                .context_with_graph_selection(selection, &roles, vec![])
         }
     }
 
     #[test]
     fn bound_recovery_preserves_same_root_payload_with_distinct_child_certificates() {
         let pair = bound_recovery_pair_fixture();
-        let BoundRecoveryPair { recovered, selections, root_id, old_id, new_id,
-            references, descriptors, bindings, edges, directory } = pair;
-        let root_binding = |selection: &ArtifactGraphSelection| *selection.bindings.iter()
-            .find(|binding| binding.artifact == root_id).unwrap();
+        let BoundRecoveryPair {
+            recovered,
+            selections,
+            root_id,
+            old_id,
+            new_id,
+            references,
+            descriptors,
+            bindings,
+            edges,
+            directory,
+        } = pair;
+        let root_binding = |selection: &ArtifactGraphSelection| {
+            *selection
+                .bindings
+                .iter()
+                .find(|binding| binding.artifact == root_id)
+                .unwrap()
+        };
         let restore = |selection: &ArtifactGraphSelection| {
-            let roles = selection.namespace.iter().map(|binding|
-                CompilerInputRole::InterfaceOnly { interface: binding.artifact }).collect::<Vec<_>>();
+            let roles = selection
+                .namespace
+                .iter()
+                .map(|binding| CompilerInputRole::InterfaceOnly {
+                    interface: binding.artifact,
+                })
+                .collect::<Vec<_>>();
             recovered.context_with_graph_selection(selection, &roles, vec![])
         };
         let old = restore(&selections[0]).unwrap();
         let new = restore(&selections[1]).unwrap();
         for _ in 0..4 {
-            assert_eq!(old.artifact_view().select_roots(vec![root_id]).unwrap().artifact_ids()
-                .into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([root_id, old_id]));
-            assert_eq!(new.artifact_view().select_roots(vec![root_id]).unwrap().artifact_ids()
-                .into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([root_id, new_id]));
+            assert_eq!(
+                old.artifact_view()
+                    .select_roots(vec![root_id])
+                    .unwrap()
+                    .artifact_ids()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([root_id, old_id])
+            );
+            assert_eq!(
+                new.artifact_view()
+                    .select_roots(vec![root_id])
+                    .unwrap()
+                    .artifact_ids()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([root_id, new_id])
+            );
         }
         let before = old.artifact_view().binding_dependencies();
         let mut missing = selections[0].clone();
-        missing.bindings.retain(|binding| binding.artifact != old_id);
+        missing
+            .bindings
+            .retain(|binding| binding.artifact != old_id);
         assert!(restore(&missing).is_err());
         let mut wrong_scope = selections[0].clone();
         wrong_scope.namespace[0] = root_binding(&selections[1]);
         assert!(restore(&wrong_scope).is_err());
         let mut corrupted = edges.clone();
         let old_root = root_binding(&selections[0]);
-        corrupted.iter_mut().find(|(from, _, _)|
-            *from == ArtifactBindingNode::Artifact(old_root)).unwrap().1 =
-            ArtifactBindingNode::Artifact(*selections[1].bindings.iter()
-                .find(|binding| binding.artifact == new_id).unwrap());
-        let refused = RecoveredArtifactInventory::capture_bound(directory.path(), &[],
-            &references, &[], &[], &descriptors, &bindings, &corrupted).unwrap();
-        let roles = selections[0].namespace.iter().map(|binding|
-            CompilerInputRole::InterfaceOnly { interface: binding.artifact }).collect::<Vec<_>>();
-        assert!(refused.context_with_graph_selection(&selections[0], &roles, vec![]).is_err());
-        assert_eq!(old.artifact_view().binding_dependencies(), before,
-            "refusal cannot mutate an already recovered graph");
+        corrupted
+            .iter_mut()
+            .find(|(from, _, _)| *from == ArtifactBindingNode::Artifact(old_root))
+            .unwrap()
+            .1 = ArtifactBindingNode::Artifact(
+            *selections[1]
+                .bindings
+                .iter()
+                .find(|binding| binding.artifact == new_id)
+                .unwrap(),
+        );
+        let refused = RecoveredArtifactInventory::capture_bound(
+            directory.path(),
+            &[],
+            &references,
+            &[],
+            &[],
+            &descriptors,
+            &bindings,
+            &corrupted,
+        )
+        .unwrap();
+        let roles = selections[0]
+            .namespace
+            .iter()
+            .map(|binding| CompilerInputRole::InterfaceOnly {
+                interface: binding.artifact,
+            })
+            .collect::<Vec<_>>();
+        assert!(refused
+            .context_with_graph_selection(&selections[0], &roles, vec![])
+            .is_err());
+        assert_eq!(
+            old.artifact_view().binding_dependencies(),
+            before,
+            "refusal cannot mutate an already recovered graph"
+        );
         assert!(restore(&selections[0]).is_ok());
         assert!(restore(&selections[1]).is_ok());
     }
@@ -8097,7 +8278,8 @@ mod tests {
                 .map(|entry| (entry.descriptor.id, entry))
                 .collect(),
             recorded_inventory: true,
-            bindings: BTreeSet::new(), binding_edges: Vec::new(),
+            bindings: BTreeSet::new(),
+            binding_edges: Vec::new(),
             interfaces: view.interface_dependencies(),
         };
         let ids = view

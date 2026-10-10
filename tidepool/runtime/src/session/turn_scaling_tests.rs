@@ -2010,6 +2010,7 @@ where
         submissions_before_publication, submissions_before_effects,
         "freezing and restaging completed native execution must issue no compiler requests"
     );
+    let mut certification_requests = 0;
     let (ticket, certification_ns, stage_ns, certified_generation) = match publication {
         ExecutionPublication::Bindings(base) => {
             let (ticket, stage_ns) = measured_duration(
@@ -2044,10 +2045,12 @@ where
                 panic!("actual original declaration/prefix publication was rejected")
             };
             assert_eq!(accepted.intent().reserved_generation(), reserved);
-            assert_eq!(
-                tidepool_extract_cmd::extract_spawn_count(),
-                submissions_before_publication + 1,
-                "public declaration certification issues one source-less interface join"
+            certification_requests = tidepool_extract_cmd::extract_spawn_count()
+                .checked_sub(submissions_before_publication)
+                .unwrap();
+            assert!(
+                certification_requests <= 1,
+                "certification reuses an issued projection or issues one source-less join"
             );
             let (ticket, stage_ns) = measured_duration(
                 resident,
@@ -2082,7 +2085,7 @@ where
     );
     assert_eq!(
         tidepool_extract_cmd::extract_spawn_count(),
-        submissions_before_publication + u64::from(certified_generation.is_some()),
+        submissions_before_publication + certification_requests,
         "staging and publishing an accepted interface must issue no compiler requests"
     );
     if let Some(generation) = certified_generation {

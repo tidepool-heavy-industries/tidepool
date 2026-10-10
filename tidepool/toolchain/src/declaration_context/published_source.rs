@@ -665,7 +665,8 @@ mod tests {
                     .map(|entry| (entry.descriptor.id, entry))
                     .collect(),
                 recorded_inventory: true,
-            bindings: BTreeSet::new(), binding_edges: Vec::new(),
+                bindings: BTreeSet::new(),
+                binding_edges: Vec::new(),
                 interfaces: published.artifact_view().interface_dependencies(),
             };
             let recovered = recovery_inventory
