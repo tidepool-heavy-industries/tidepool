@@ -1,4 +1,6 @@
-use exomonad_worktree::{AgentRef, BindingState, BindingTable, WorkspaceAccess, WorktreeId};
+use exomonad_worktree::{
+    AgentRef, BindingState, BindingTable, WorkspaceAccess, WorktreeError, WorktreeId,
+};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence};
 use std::collections::BTreeMap;
@@ -33,6 +35,14 @@ enum Operation {
         actor: usize,
         successor: usize,
     },
+    StaleSettle {
+        receipt: usize,
+        completed: bool,
+    },
+    StaleTransfer {
+        receipt: usize,
+        successor: usize,
+    },
 }
 
 impl Operation {
@@ -44,6 +54,8 @@ impl Operation {
             Self::Reopen => 3,
             Self::Recover { .. } => 4,
             Self::Transfer { .. } => 5,
+            Self::StaleSettle { .. } => 6,
+            Self::StaleTransfer { .. } => 7,
         }
     }
 }
@@ -67,6 +79,10 @@ fn operation() -> impl Strategy<Value = Operation> {
         (0usize..4).prop_map(|actor| Operation::Recover { actor }),
         (0usize..4, 0usize..4)
             .prop_map(|(actor, successor)| Operation::Transfer { actor, successor }),
+        (0usize..8, any::<bool>())
+            .prop_map(|(receipt, completed)| Operation::StaleSettle { receipt, completed }),
+        (0usize..8, 0usize..4)
+            .prop_map(|(receipt, successor)| Operation::StaleTransfer { receipt, successor }),
     ]
 }
 
@@ -90,6 +106,111 @@ fn worktree(index: usize) -> WorktreeId {
 
 fn agent(index: usize) -> AgentRef {
     AgentRef::exact_actor("property-run", index as u64, 0)
+}
+
+fn durable_bytes(root: &std::path::Path) -> Vec<Option<Vec<u8>>> {
+    (0..3)
+        .map(
+            |tree| match std::fs::read(root.join(format!("bindings/wt-{tree}.json"))) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("observe durable binding rows: {error}"),
+            },
+        )
+        .collect()
+}
+
+#[test]
+fn stale_receipts_cannot_mutate_reopened_memberships() {
+    #[derive(Clone, Copy, Debug)]
+    enum Custody {
+        FreshPeer,
+        RecoverPredecessor,
+        ReclaimSuccessor,
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum Action {
+        Release,
+        Complete,
+        Transfer,
+    }
+    for recovery in [
+        Custody::FreshPeer,
+        Custody::RecoverPredecessor,
+        Custody::ReclaimSuccessor,
+    ] {
+        for transferred in [false, true] {
+            if matches!(recovery, Custody::ReclaimSuccessor) && !transferred {
+                continue;
+            }
+            for action in [Action::Release, Action::Complete, Action::Transfer] {
+                let storage = tempfile::tempdir().unwrap();
+                let anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+                let tree = worktree(0);
+                let mut table = BindingTable::open(&anchor, "bindings").unwrap();
+                let mut stale = table
+                    .bind(&tree, &agent(0), WorkspaceAccess::ReadOnly, 1)
+                    .unwrap();
+                if transferred {
+                    table.transfer(&mut stale, &agent(1), 2).unwrap();
+                }
+                let predecessor = agent(if matches!(recovery, Custody::ReclaimSuccessor) {
+                    0
+                } else {
+                    usize::from(transferred)
+                });
+                let successor = agent(if matches!(recovery, Custody::ReclaimSuccessor) {
+                    1
+                } else {
+                    2
+                });
+                drop(table);
+                let mut table = BindingTable::open(&anchor, "bindings").unwrap();
+                // Align the new owner's generation with a transferred old lease.
+                let peer = transferred.then(|| {
+                    table
+                        .bind(&worktree(1), &agent(4), WorkspaceAccess::ReadOnly, 3)
+                        .unwrap()
+                });
+                let current = match recovery {
+                    Custody::FreshPeer => {
+                        table.bind(&tree, &successor, WorkspaceAccess::ReadWrite, 3)
+                    }
+                    Custody::RecoverPredecessor | Custody::ReclaimSuccessor => {
+                        table.recover_active(&tree, &predecessor, &successor, 3)
+                    }
+                }
+                .unwrap();
+                let path = storage.path().join("bindings/wt-0.json");
+                let bytes = std::fs::read(&path).unwrap();
+                let rows: Vec<_> = table.participants(&tree).unwrap().cloned().collect();
+                let result = match action {
+                    Action::Release => stale.release(&mut table),
+                    Action::Complete => stale.complete(&mut table),
+                    Action::Transfer => table.transfer(&mut stale, &agent(3), 4),
+                };
+                assert!(
+                    matches!(result, Err(WorktreeError::StorageFailure { .. })),
+                    "foreign receipt must refuse: recovery={recovery:?}, transferred={transferred}, action={action:?}"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(
+                    table
+                        .participants(&tree)
+                        .unwrap()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    rows
+                );
+                assert!(table.membership(&tree, &successor).is_some());
+                current.release(&mut table).unwrap();
+                assert!(table.membership(&tree, &successor).is_none());
+                if let Some(peer) = peer {
+                    peer.complete(&mut table).unwrap();
+                }
+            }
+        }
+    }
 }
 
 fn check_model(table: &BindingTable, active: &BTreeMap<usize, Active>) {
@@ -155,7 +276,8 @@ fn replay(history: &[Operation]) {
     let mut table = BindingTable::open(&anchor, "bindings").expect("open binding table");
     let mut active = BTreeMap::<usize, Active>::new();
     let mut leases = BTreeMap::new();
-    let mut support = [0usize; 7]; // six operations and maximum peers on one tree
+    let mut stale = Vec::new();
+    let mut support = [0usize; 9]; // eight operations and maximum peers on one tree
 
     // Every generated history begins with a witness for shared membership,
     // the per-actor workspace limit, settlement isolation, and restart custody.
@@ -181,7 +303,19 @@ fn replay(history: &[Operation]) {
         },
         Operation::Reopen,
         Operation::Recover { actor: 2 },
+        Operation::StaleTransfer {
+            receipt: 0,
+            successor: 3,
+        },
+        Operation::StaleSettle {
+            receipt: 0,
+            completed: false,
+        },
         Operation::Recover { actor: 0 },
+        Operation::StaleSettle {
+            receipt: 0,
+            completed: true,
+        },
         Operation::Release { actor: 2 },
         Operation::Complete { actor: 0 },
     ];
@@ -198,7 +332,9 @@ fn replay(history: &[Operation]) {
                 let actor = agent(actor_index);
                 let tree = worktree(tree_index);
                 if active.contains_key(&actor_index) {
+                    let before = durable_bytes(storage.path());
                     assert!(table.bind(&tree, &actor, access, 100).is_err());
+                    assert_eq!(durable_bytes(storage.path()), before);
                 } else {
                     let lease = table.bind(&tree, &actor, access, 100).expect("attach");
                     active.insert(
@@ -233,7 +369,7 @@ fn replay(history: &[Operation]) {
                 }
             }
             Operation::Reopen => {
-                leases.clear();
+                stale.extend(std::mem::take(&mut leases).into_values());
                 for membership in active.values_mut() {
                     membership.authorized = false;
                 }
@@ -251,6 +387,7 @@ fn replay(history: &[Operation]) {
                             })
                             .expect("actor domain has a distinct incorrect predecessor");
                         let wrong_predecessor = agent(wrong_index);
+                        let before = durable_bytes(storage.path());
                         assert!(table
                             .recover_active(
                                 &worktree(membership.worktree),
@@ -259,6 +396,7 @@ fn replay(history: &[Operation]) {
                                 99,
                             )
                             .is_err());
+                        assert_eq!(durable_bytes(storage.path()), before);
                         let lease = table
                             .recover_active(
                                 &worktree(membership.worktree),
@@ -271,13 +409,19 @@ fn replay(history: &[Operation]) {
                         leases.insert(actor_index, lease);
                     }
                     Some(membership) => {
+                        let before = durable_bytes(storage.path());
                         assert!(table
                             .recover_active(&worktree(membership.worktree), &actor, &actor, 100)
                             .is_err());
+                        assert_eq!(durable_bytes(storage.path()), before);
                     }
-                    None => assert!(table
-                        .recover_active(&worktree(0), &actor, &actor, 100)
-                        .is_err()),
+                    None => {
+                        let before = durable_bytes(storage.path());
+                        assert!(table
+                            .recover_active(&worktree(0), &actor, &actor, 100)
+                            .is_err());
+                        assert_eq!(durable_bytes(storage.path()), before);
+                    }
                 }
             }
             Operation::Transfer {
@@ -293,8 +437,10 @@ fn replay(history: &[Operation]) {
                     continue;
                 }
                 if active.contains_key(&successor_index) {
+                    let before = durable_bytes(storage.path());
                     let lease = leases.get_mut(&actor_index).expect("authorized lease");
                     assert!(table.transfer(lease, &agent(successor_index), 100).is_err());
+                    assert_eq!(durable_bytes(storage.path()), before);
                 } else {
                     let mut lease = leases.remove(&actor_index).expect("authorized lease");
                     table
@@ -313,8 +459,32 @@ fn replay(history: &[Operation]) {
                     leases.insert(successor_index, lease);
                 }
             }
+            Operation::StaleSettle { receipt, completed } => {
+                if !stale.is_empty() {
+                    let before = durable_bytes(storage.path());
+                    let lease = stale.remove(receipt % stale.len());
+                    let result = if completed {
+                        lease.complete(&mut table)
+                    } else {
+                        lease.release(&mut table)
+                    };
+                    assert!(matches!(result, Err(WorktreeError::StorageFailure { .. })));
+                    assert_eq!(durable_bytes(storage.path()), before);
+                }
+            }
+            Operation::StaleTransfer { receipt, successor } => {
+                if !stale.is_empty() {
+                    let before = durable_bytes(storage.path());
+                    let index = receipt % stale.len();
+                    assert!(matches!(
+                        table.transfer(&mut stale[index], &agent(successor), 100),
+                        Err(WorktreeError::StorageFailure { .. })
+                    ));
+                    assert_eq!(durable_bytes(storage.path()), before);
+                }
+            }
         }
-        support[6] = support[6].max(
+        support[8] = support[8].max(
             (0..3)
                 .map(|tree| table.participants(&worktree(tree)).unwrap().count())
                 .max()
@@ -324,8 +494,9 @@ fn replay(history: &[Operation]) {
     }
     assert!(support[0] > 0 && support[1] > 0 && support[2] > 0);
     assert!(support[3] > 0 && support[4] > 0 && support[5] > 0);
+    assert!(support[6] > 0 && support[7] > 0);
     assert!(
-        support[6] >= 2,
+        support[8] >= 2,
         "the history must exercise shared membership"
     );
 }

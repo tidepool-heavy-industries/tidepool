@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::WorktreeError;
 use crate::id::WorktreeId;
@@ -163,9 +164,9 @@ impl Binding {
     }
 }
 
-/// Move-only lease for one active binding generation. Settlement consumes
-/// the receipt; transfer updates it to the successor's generation. A stale
-/// receipt cannot settle a later occupant of the same worktree.
+/// Move-only lease for one active binding generation issued by one table owner.
+/// Settlement consumes the receipt; transfer updates it to the successor's
+/// generation. A stale receipt cannot settle a later occupant of the same worktree.
 ///
 /// Dropping this receipt leaves its row active. Only explicit settlement can
 /// attest release; a panic or lost owner cannot manufacture cleanup evidence.
@@ -173,6 +174,7 @@ impl Binding {
 pub struct ActiveBinding {
     worktree: WorktreeId,
     generation: u64,
+    owner: Arc<()>,
 }
 
 impl ActiveBinding {
@@ -215,6 +217,9 @@ pub struct BindingTable {
     /// dropping this owner and exclusively reopening authoritative storage.
     write_uncertain: bool,
     next_generation: u64,
+    /// Process-local receipt authority. Retained leases keep this allocation
+    /// alive across reopen without retaining the table's storage lock.
+    owner: Arc<()>,
     /// Held (exclusively flocked) for this table's whole lifetime. The
     /// enforcement decisions (`bind`'s already-bound refusal) run against the
     /// IN-MEMORY rows, which is only sound while exactly one process owns the
@@ -314,6 +319,7 @@ impl BindingTable {
             return Ok(ActiveBinding {
                 worktree: worktree.clone(),
                 generation,
+                owner: Arc::clone(&self.owner),
             });
         }
         if self.bindings[current].binding.agent() != predecessor {
@@ -342,6 +348,7 @@ impl BindingTable {
         Ok(ActiveBinding {
             worktree: worktree.clone(),
             generation,
+            owner: Arc::clone(&self.owner),
         })
     }
 
@@ -492,6 +499,7 @@ impl BindingTable {
             bindings,
             write_uncertain: false,
             next_generation: 0,
+            owner: Arc::new(()),
             _owner_lock: owner_lock,
         })
     }
@@ -561,18 +569,15 @@ impl BindingTable {
         Ok(ActiveBinding {
             worktree: worktree.clone(),
             generation,
+            owner: Arc::clone(&self.owner),
         })
     }
 
     /// Settle `lease`'s row to `to`'s terminal state, consuming the receipt.
     ///
-    /// Looks up the row by BOTH `lease.worktree` and `lease.generation` — not
-    /// just the worktree — so a stale receipt from a binding that was already
-    /// settled (and, since then, rebound) fails loud instead of silently
-    /// settling the NEW occupant. That case is a genuine invariant violation
-    /// rather than a normal outcome (a live `ActiveBinding` is, by
-    /// construction, the only receipt for its membership generation until consumed — see
-    /// the type's docs), reported as a storage invariant failure.
+    /// Requires the issuing table owner and its exact worktree generation.
+    /// Reopening creates a new owner even when generation numbers repeat;
+    /// retained receipts cannot settle its recovered or newly bound rows.
     fn settle(&mut self, lease: ActiveBinding, to: BindingTerminal) -> Result<(), WorktreeError> {
         let i = self.active_index(&lease)?;
         let previous = self.bindings[i].binding.state();
@@ -590,6 +595,12 @@ impl BindingTable {
 
     fn active_index(&self, lease: &ActiveBinding) -> Result<usize, WorktreeError> {
         self.ensure_writable()?;
+        if !Arc::ptr_eq(&self.owner, &lease.owner) {
+            return Err(storage_failure(
+                &self.path_for(&lease.worktree),
+                "binding receipt was issued by another table owner",
+            ));
+        }
         self.bindings.iter().rposition(|binding| {
             binding.binding.worktree() == &lease.worktree
                 && binding.binding.state() == BindingState::Active
