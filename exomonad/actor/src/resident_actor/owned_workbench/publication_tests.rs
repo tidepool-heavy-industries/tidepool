@@ -347,7 +347,7 @@ fn sibling_fence_before_preflight(cancel: bool) {
             ResidentError::Session(preflight),
         )),
     };
-    assert!(error.requires_recovery());
+    assert!(error.requires_recovery(), "preflight refused with {error:?}");
     let failure = private_publication_rejection(
         &control,
         Ok(KernelStep::Continue(response(
