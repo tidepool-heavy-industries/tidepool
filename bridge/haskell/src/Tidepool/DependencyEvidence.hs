@@ -21,6 +21,8 @@ module Tidepool.DependencyEvidence
 
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Data.List (intercalate, nub, sort, stripPrefix)
 import Control.Monad (forM, unless)
 import Numeric (showHex)
@@ -153,10 +155,12 @@ validateDependencyEvidence evidence = do
   unchanged <- revalidateDependencyEvidence evidence
   unless unchanged (ioError (userError "source changed while compiler artifacts were being published"))
 
-writeDependencyEvidence :: FilePath -> DependencyEvidence -> IO ()
+writeDependencyEvidence :: FilePath -> DependencyEvidence -> IO BS.ByteString
 writeDependencyEvidence outDir evidence = do
   validateDependencyEvidence evidence
-  writeFile (outDir </> "dependencies.json") (renderDependencyEvidence evidence)
+  let bytes = TE.encodeUtf8 (T.pack (renderDependencyEvidence evidence))
+  BS.writeFile (outDir </> "dependencies.json") bytes
+  pure bytes
 
 renderDependencyEvidence :: DependencyEvidence -> String
 renderDependencyEvidence evidence =

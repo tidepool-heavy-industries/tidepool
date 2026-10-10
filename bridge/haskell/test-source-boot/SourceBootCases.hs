@@ -37,7 +37,7 @@ import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIO
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
-import Data.List (isInfixOf, isPrefixOf, sort, sortOn, stripPrefix)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort, sortOn, stripPrefix)
 import Data.Maybe (mapMaybe, catMaybes, isJust, isNothing, maybeToList)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -3464,6 +3464,37 @@ originalProjectionProducts = withScratch $ \work -> do
     if exists then listDirectory receiptDirectory else pure []
   unless (receiptsAfterItems == receiptsBefore) $
     fail "staged segment published a compilation receipt before completion"
+  stagedFiles <- listDirectory segmentDirectory
+  let requiredOutputs = ["module-products.cbor","module-package-imports.cbor","dependencies.json"]
+      materializedOutputs = filter (\name ->
+        any (`isSuffixOf` name)
+          [".finalized.core",".finalized.hi",".finalized.packages.cbor",".finalized.certificate.cbor"]
+        || name == "execution-source.cbor") stagedFiles
+      corruptionTargets = requiredOutputs ++ materializedOutputs
+  unless (all (`elem` stagedFiles) requiredOutputs
+      && any (".finalized.core" `isSuffixOf`) materializedOutputs
+      && any (".finalized.hi" `isSuffixOf`) materializedOutputs
+      && any (".finalized.packages.cbor" `isSuffixOf`) materializedOutputs) $
+    fail ("producer fixture omitted a required staged output role: " ++ show stagedFiles)
+  forM_ corruptionTargets $ \name -> do
+    let path = segmentDirectory </> name
+    owned <- BS.readFile path
+    let refuse label = do
+          before <- doesDirectoryExist receiptDirectory >>= \exists ->
+            if exists then listDirectory receiptDirectory else pure []
+          published <- try (publishStagedOriginalProducts paired sharedCertificate)
+            :: IO (Either IOException CertifiedOriginalProducts)
+          after <- doesDirectoryExist receiptDirectory >>= \exists ->
+            if exists then listDirectory receiptDirectory else pure []
+          certificateExists <- doesFileExist (segmentDirectory </> "certified-products.cbor")
+          unless (case published of Left _ -> after == before && not certificateExists; _ -> False) $
+            fail ("staged " ++ label ++ " output published authority: " ++ name)
+    removeFile path
+    refuse "missing"
+    BS.writeFile path owned
+    BS.writeFile path (BS.singleton 0)
+    refuse "changed"
+    BS.writeFile path owned
   _ <- publishStagedOriginalProducts paired sharedCertificate
   sharedFacts <- readCertificateCodecFacts work (segmentDirectory </> "certified-products.cbor")
   receiptsAfterCompletion <- doesDirectoryExist receiptDirectory >>= \exists ->

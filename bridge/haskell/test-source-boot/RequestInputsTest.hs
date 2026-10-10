@@ -44,6 +44,7 @@ import Tidepool.ExactScope
   , scopeInterfaces, scopeModuleInterfaceProofs, readExactScope, revalidateExactScope
   , writeCheckedExactCompilation, writeRetainedExactCompilation
   , writeRetainedExactCompilationWithOutputsAndPublication
+  , freshOutputSealsFromWrites
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
@@ -644,7 +645,7 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   let freshOutput = work </> "fresh-retained-output.cbor"
       publicationMarker = work </> "retained-publication-marker"
       freshOutputBytes = BS.pack [12,34,56,78]
-      outputSeal = [(freshOutput,digest freshOutputBytes,Just (1024 * 1024))]
+      outputSeal = either error id (freshOutputSealsFromWrites [(freshOutput,freshOutputBytes)])
       publishWithOutput = writeRetainedExactCompilationWithOutputsAndPublication
         environment retained compilation evidence outputSeal
         (BS.writeFile publicationMarker (BS.pack [9,8,7]))

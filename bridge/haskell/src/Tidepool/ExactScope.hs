@@ -12,7 +12,7 @@ module Tidepool.ExactScope
   , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
   , captureFinalizedSourceOriginals, compilationOriginalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
-  , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
+  , canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalCoreArtifact
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal, normalizeInterfaceEvidence
   , canonicalProofMatchesOwner
@@ -23,6 +23,8 @@ module Tidepool.ExactScope
   , writeExactCompilation, writeCheckedExactCompilation, writeCheckedExactCompilationWithPublication
   , writeRetainedExactCompilation, writeRetainedExactCompilationWithPublication
   , writeRetainedExactCompilationWithOutputsAndPublication, extendSourceSelectedOriginals
+  , writeCheckedExactCompilationWithOutputsAndPublication
+  , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , revalidateExactScopesAtWithOutputs
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
@@ -252,6 +254,43 @@ data CanonicalInterfaceProof = CanonicalInterfaceProof
   , canonicalFacts :: CanonicalModuleCertificate
   }
 
+-- Opaque terminal evidence issued alongside files by their materialization
+-- owner. Paths and expected bytes come from that same writer; callers cannot
+-- silently reconstruct a fresh-output set from the final scope inventory.
+newtype FreshOutputSeals = FreshOutputSeals [(FilePath,String,Maybe Int)]
+
+emptyFreshOutputSeals :: FreshOutputSeals
+emptyFreshOutputSeals = FreshOutputSeals []
+
+freshOutputSealsFromWrites :: [(FilePath,BS.ByteString)] -> Either String FreshOutputSeals
+freshOutputSealsFromWrites writes
+  | any ((> 1) . length) (filter (not . allEqual) (Map.elems grouped)) =
+      Left "fresh output writer issued conflicting bytes for one path"
+  | length unique > 4096 = Left "fresh output inventory exceeds its entry bound"
+  | sum (map (BS.length . snd) unique) > 512 * 1024 * 1024 =
+      Left "fresh output inventory exceeds its byte bound"
+  | any (BS.null . snd) unique = Left "fresh output inventory contains an empty artifact"
+  | otherwise = Right (FreshOutputSeals
+      [(path,digest bytes,Just (BS.length bytes)) | (path,bytes) <- unique])
+  where
+    grouped = Map.fromListWith (++) [(path,[bytes]) | (path,bytes) <- writes]
+    allEqual [] = True
+    allEqual (first:rest) = all (== first) rest
+    unique = Map.toAscList (Map.mapMaybe first grouped)
+    first [] = Nothing
+    first (bytes:_) = Just bytes
+
+appendFreshOutputSeals :: FreshOutputSeals -> FreshOutputSeals -> Either String FreshOutputSeals
+appendFreshOutputSeals (FreshOutputSeals left) (FreshOutputSeals right)
+  | length joined > 4096 = Left "fresh output inventory exceeds its entry bound"
+  | sum [maybe 0 id bound | (_,_,bound) <- joined] > 512 * 1024 * 1024 =
+      Left "fresh output inventory exceeds its byte bound"
+  | length paths /= Set.size (Set.fromList paths) = Left "fresh output inventory repeats a path"
+  | otherwise = Right (FreshOutputSeals joined)
+  where
+    joined = left ++ right
+    paths = [path | (path,_,_) <- joined]
+
 -- Metadata validation grants no executable bytes. Promotion and exact-scope
 -- admission bind a proof to the single budgeted request input owner.
 data CanonicalInputCustody = DescriptorInputs | CapturedCanonicalInputs (Map.Map FilePath ArtifactBytes)
@@ -274,6 +313,9 @@ canonicalCertificatePath = proofCertificatePath
 
 canonicalCertificateSha256 :: CanonicalInterfaceProof -> String
 canonicalCertificateSha256 = proofCertificateSha256
+
+canonicalCertificateBytes :: CanonicalInterfaceProof -> BS.ByteString
+canonicalCertificateBytes = toStrictByteString . encodeCanonicalModuleCertificate . canonicalFacts
 
 canonicalCoreArtifact :: CanonicalInterfaceProof -> Maybe CanonicalCoreArtifact
 canonicalCoreArtifact = proofCoreArtifact
@@ -1683,15 +1725,15 @@ revalidateExactScope env scope = revalidateExactScopesAt ExplicitScopeValidation
 -- current manifests, package resolution and the operation's fresh outputs in
 -- one bounded map. Captured original bodies are carried by their byte owner.
 revalidateExactScopesAt :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> IO (Either String ())
-revalidateExactScopesAt reason env scopes = revalidateExactScopesAtWithOutputs reason env scopes []
+revalidateExactScopesAt reason env scopes = revalidateExactScopesAtWithOutputs reason env scopes emptyFreshOutputSeals
 
 -- Freshly materialized outputs participate in the same bounded terminal proof
 -- as selected scopes. Captured inputs are not reconstructed here: only output
 -- seals supplied by the operation that wrote them are observed.
 revalidateExactScopesAtWithOutputs
   :: ExactScopeValidationReason -> HscEnv -> [ExactScope]
-  -> [(FilePath,String,Maybe Int)] -> IO (Either String ())
-revalidateExactScopesAtWithOutputs reason env scopes outputs = do
+  -> FreshOutputSeals -> IO (Either String ())
+revalidateExactScopesAtWithOutputs reason env scopes (FreshOutputSeals outputs) = do
   timing <- readTimingEnabled
   summary <- readSummaryTimingEnabled
   totals <- newIORef Nothing
@@ -1745,12 +1787,17 @@ writeExactCompilation compilation evidence =
 writeCheckedExactCompilation
   :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO ()
 writeCheckedExactCompilation env = writeCheckedExactCompilationWithScopes
-  CheckedReceiptPublication env [] [] (pure ())
+  CheckedReceiptPublication env [] emptyFreshOutputSeals (pure ())
 
 writeCheckedExactCompilationWithPublication
   :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO () -> IO ()
 writeCheckedExactCompilationWithPublication env compilation evidence publish =
-  writeCheckedExactCompilationWithScopes CheckedReceiptPublication env [] [] publish compilation evidence
+  writeCheckedExactCompilationWithScopes CheckedReceiptPublication env [] emptyFreshOutputSeals publish compilation evidence
+
+writeCheckedExactCompilationWithOutputsAndPublication
+  :: HscEnv -> ExactCompilation -> DependencyEvidence -> FreshOutputSeals -> IO () -> IO ()
+writeCheckedExactCompilationWithOutputsAndPublication env compilation evidence outputs publish =
+  writeCheckedExactCompilationWithScopes CheckedReceiptPublication env [] outputs publish compilation evidence
 
 -- Retention and the checked receipt share this final publication boundary.
 -- Capture source evidence first, then check selected scopes and fresh outputs
@@ -1758,21 +1805,21 @@ writeCheckedExactCompilationWithPublication env compilation evidence publish =
 writeRetainedExactCompilation
   :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO ()
 writeRetainedExactCompilation env retained = writeCheckedExactCompilationWithScopes
-  RetainedReceiptPublication env [retained] [] (pure ())
+  RetainedReceiptPublication env [retained] emptyFreshOutputSeals (pure ())
 
 writeRetainedExactCompilationWithPublication
   :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO () -> IO ()
 writeRetainedExactCompilationWithPublication env retained compilation evidence publish =
-  writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] [] publish compilation evidence
+  writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] emptyFreshOutputSeals publish compilation evidence
 
 writeRetainedExactCompilationWithOutputsAndPublication
   :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence
-  -> [(FilePath,String,Maybe Int)] -> IO () -> IO ()
+  -> FreshOutputSeals -> IO () -> IO ()
 writeRetainedExactCompilationWithOutputsAndPublication env retained compilation evidence outputs publish =
   writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] outputs publish compilation evidence
 
 writeCheckedExactCompilationWithScopes
-  :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> [(FilePath,String,Maybe Int)]
+  :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> FreshOutputSeals
   -> IO () -> ExactCompilation -> DependencyEvidence -> IO ()
 writeCheckedExactCompilationWithScopes reason env retained outputs publishCertificate compilation evidence = do
   selected <- either fail pure (extendSourceSelectedOriginals

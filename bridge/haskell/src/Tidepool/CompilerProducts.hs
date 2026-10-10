@@ -60,13 +60,14 @@ import Tidepool.ExactHydration
 import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
-  , writeCheckedExactCompilation, writeCheckedExactCompilationWithPublication
+  , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
+  , writeCheckedExactCompilationWithOutputsAndPublication
   , writeRetainedExactCompilationWithOutputsAndPublication
   , scopeCanonicalInterfaces, scopeInterfaceToken, scopeOriginalBytes
   , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
   , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
-  , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalSourceSha256 )
+  , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
   , prepareModuleProductEncoding, prepareModuleProductEncodingFromGroups, encodeModuleProductInventory )
@@ -92,7 +93,8 @@ import Tidepool.ExecutionSource
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, LocalFinalizedAdmission
-  , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedSourceSha256 )
+  , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedSourceSha256
+  , finalizedMaterializedOutputBytes )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult(..), pprAcceptedCandidates, PipelineResult(..), PreparedModuleObserver(..), PreparedModuleCompletionInputs(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
@@ -199,10 +201,10 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
 -- Segment facts remain in memory until the segment's terminal proof succeeds.
 -- Item products may borrow the target context without publishing this authority.
 data StagedOriginalProducts = StagedOriginalProducts
-  CertifiedOriginalProducts FilePath BS.ByteString
+  CertifiedOriginalProducts FilePath BS.ByteString FreshOutputSeals
 
 stagedCertifiedOriginalProducts :: StagedOriginalProducts -> CertifiedOriginalProducts
-stagedCertifiedOriginalProducts (StagedOriginalProducts certified _ _) = certified
+stagedCertifiedOriginalProducts (StagedOriginalProducts certified _ _ _) = certified
 
 data PreparedProductContext = PreparedProductContext
   { preparedProductInventory :: PreparedModuleProducts
@@ -622,18 +624,19 @@ writeCertifiedProductsKeepingWithOriginals
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
   -> [(String, WireProgram)] -> IO CertifiedOriginalProducts
 writeCertifiedProductsKeepingWithOriginals includes originals directory prepared context targets =
-  fst <$> writeCertifiedProducts OrdinaryProductFacts False includes originals directory prepared context targets
+  first <$> writeCertifiedProducts OrdinaryProductFacts False includes originals directory prepared context targets
+  where first (certified,_,_) = certified
 
 writeCertifiedSegmentProducts
   :: [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult
   -> PreparedProductContext -> IO StagedOriginalProducts
 writeCertifiedSegmentProducts includes originals directory prepared context = do
-  (certified,bytes) <- writeCertifiedProducts SegmentOriginalFacts True includes originals directory prepared (Just context) []
-  pure (StagedOriginalProducts certified (directory </> "certified-products.cbor") bytes)
+  (certified,bytes,outputs) <- writeCertifiedProducts SegmentOriginalFacts True includes originals directory prepared (Just context) []
+  pure (StagedOriginalProducts certified (directory </> "certified-products.cbor") bytes outputs)
 
 writeCertifiedSegmentItemProducts
   :: PreparedPipelineResult -> StagedOriginalProducts -> FilePath -> WireProgram -> IO ()
-writeCertifiedSegmentItemProducts prepared (StagedOriginalProducts originals _ _) directory program = do
+writeCertifiedSegmentItemProducts prepared (StagedOriginalProducts originals _ _ _) directory program = do
   context <- maybe (fail "item output lacks its segment original certification") pure
     (certifiedTargetContext originals)
   certified <- encodeCertifiedItemProducts (prHscEnv (pprPipelineResult prepared)) context program
@@ -641,19 +644,21 @@ writeCertifiedSegmentItemProducts prepared (StagedOriginalProducts originals _ _
   BS.writeFile (directory </> "certified-products.cbor") bytes
 
 publishStagedOriginalProducts :: PreparedPipelineResult -> StagedOriginalProducts -> IO CertifiedOriginalProducts
-publishStagedOriginalProducts prepared (StagedOriginalProducts certified path bytes) = do
+publishStagedOriginalProducts prepared (StagedOriginalProducts certified path bytes outputs) = do
   revalidatePreparedCandidateInputs prepared
   let env = prHscEnv (pprPipelineResult prepared)
   case preparedExactCompilation prepared of
-    Nothing -> BS.writeFile path bytes
-    Just compilation -> writeCheckedExactCompilationWithPublication env compilation
-      (preparedFreshDependencies prepared) (BS.writeFile path bytes)
+    Nothing -> do
+      revalidateExactScopesAtWithOutputs RetainedProductsPublication env [] outputs >>= either fail pure
+      BS.writeFile path bytes
+    Just compilation -> writeCheckedExactCompilationWithOutputsAndPublication env compilation
+      (preparedFreshDependencies prepared) outputs (BS.writeFile path bytes)
   pure certified
 
 writeCertifiedProducts
   :: CertifiedProductKind -> Bool
   -> [FilePath] -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
-  -> [(String, WireProgram)] -> IO (CertifiedOriginalProducts, BS.ByteString)
+  -> [(String, WireProgram)] -> IO (CertifiedOriginalProducts, BS.ByteString, FreshOutputSeals)
 writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir prepared productContext targets = do
     let hscEnv = prHscEnv (pprPipelineResult prepared)
         retained = maybe Map.empty preparedRetainedOriginals productContext
@@ -672,7 +677,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         availability = maybe Map.empty currentOriginalAvailability inventory
         freshProducts = maybe [] currentOriginalProducts inventory
         productPackages = maybe Map.empty currentOriginalPackages inventory
-    productBytes <- timeDetailPhase timing "module_products" "write_products" $
+    (productBytes,inventoryOutputs) <- timeDetailPhase timing "module_products" "write_products" $
       writeProductInventory outDir freshProducts
         [(unit,name,bytes) | ((unit,name),bytes) <- Map.toAscList productPackages]
     let withCertified = foldr (\candidate -> Map.insert
@@ -690,20 +695,21 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
           Nothing -> freshDependencies
           Just _ -> freshDependencies
             { dependencyCacheSafe = False, dependencySelectionComplete = False }
-    timeDetailPhase timing "module_products" "dependency_evidence" $
+    dependencyBytes <- timeDetailPhase timing "module_products" "dependency_evidence" $
       writeDependencyEvidence outDir finalDependencies
-    evidenceBytes <- timeDetailPhase timing "module_products" "certificate_inputs" $
-      BS.readFile (outDir </> "dependencies.json")
+    let evidenceBytes = dependencyBytes
     sourceRecipe <- case preparedExactCompilation prepared of
       Nothing -> pure OrdinaryExecutionSource
       Just compilation -> issueFreshExecutionSource includes prepared freshDependencies
         [product | product <- freshProducts, let (unit,name,_,_) = moduleProductInput product
           , Map.notMember (T.unpack unit,T.unpack name) retainedProofs]
         (compilationScope compilation)
-    case sourceRecipe of
-      ExactExecutionSourceAvailable graph ->
-        BS.writeFile (outDir </> "execution-source.cbor") (executionGraphBytes graph)
-      _ -> pure ()
+    executionOutput <- case sourceRecipe of
+      ExactExecutionSourceAvailable graph -> do
+        let bytes = executionGraphBytes graph
+        BS.writeFile (outDir </> "execution-source.cbor") bytes
+        pure [(outDir </> "execution-source.cbor",bytes)]
+      _ -> pure []
     (retainedVersions,targetContext,certificateBytes) <- timeDetailPhase timing "module_products" "certify" $ do
       let emittedSeals = Map.fromList
             [((unit,name),(version,T.pack (shaHex iface),T.pack (shaHex native),T.pack (shaHex packages)))
@@ -727,11 +733,9 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         finalDependencies productBytes evidenceBytes
       case certified of
         Right (bytes,versions,context) -> do
-          unless stageCertificate $ BS.writeFile (outDir </> "certified-products.cbor") bytes
           pure (versions,case kind of OrdinaryProductFacts -> Nothing; SegmentOriginalFacts -> Just context,bytes)
         Left reason -> do
           hPutStrLn stderr ("product certification unavailable: " ++ reason)
-          unless stageCertificate $ BS.writeFile (outDir </> "certified-products.cbor") BS.empty
           unless (null freshProducts) $ fail ("native product certification failed: " ++ reason)
           pure (Map.empty,Nothing,BS.empty)
     sourceOriginals <- case preparedExactCompilation prepared of
@@ -740,11 +744,23 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         let owner = tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared))
         captureFinalizedSourceOriginals compilation (pprAcceptedCandidates prepared)
           (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
+    outputSeals <- either fail pure $ freshOutputSealsFromWrites
+      (finalizedMaterializedOutputBytes finalized
+        ++ inventoryOutputs
+        ++ [(outDir </> "dependencies.json",dependencyBytes)]
+        ++ executionOutput
+        ++ [(canonicalCertificatePath proof,canonicalCertificateBytes proof)
+            | proof <- Map.elems sourceOriginals])
     unless stageCertificate $ do
       revalidatePreparedCandidateInputs prepared
-      forM_ (preparedExactCompilation prepared) $ \compilation ->
-        writeCheckedExactCompilation hscEnv compilation freshDependencies
-    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions targetContext, certificateBytes)
+      let publishCertificate = BS.writeFile (outDir </> "certified-products.cbor") certificateBytes
+      case preparedExactCompilation prepared of
+        Just compilation -> writeCheckedExactCompilationWithOutputsAndPublication hscEnv compilation
+          freshDependencies outputSeals publishCertificate
+        Nothing -> do
+          revalidateExactScopesAtWithOutputs RetainedProductsPublication hscEnv [] outputSeals >>= either fail pure
+          publishCertificate
+    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions targetContext, certificateBytes, outputSeals)
 
 
 -- An immutable original product needs captured finalized Core as well as its
@@ -832,21 +848,23 @@ admitModuleProducts originalInterfaces productContext finalized interfaces packa
 
 -- Interface-only captures emit the same valid inventory framing with no native
 -- rows. Product absence never prevents retaining the actual finalization.
-writeProductInventory :: FilePath -> [ModuleProductEncoding] -> [(String,String,BS.ByteString)] -> IO BS.ByteString
+writeProductInventory :: FilePath -> [ModuleProductEncoding] -> [(String,String,BS.ByteString)] -> IO (BS.ByteString,[(FilePath,BS.ByteString)])
 writeProductInventory outDir products packageBundles = do
   timing <- readTimingEnabled
   let productBytes = encodeModuleProductInventory products
+      packageBytes = toStrictByteString (encodeListLen 3
+        <> encodeString (T.pack "TPPKGBUNDLES") <> encodeWord 1
+        <> encodeListLen (fromIntegral (length packageBundles))
+        <> foldMap (\(unit, moduleName', sidecar) -> encodeListLen 3
+          <> encodeString (T.pack unit) <> encodeString (T.pack moduleName')
+          <> encodeBytes sidecar) packageBundles)
   timeDetailPhase timing "module_products" "encode_products" $
     BS.writeFile (outDir </> "module-products.cbor") productBytes
   timeDetailPhase timing "module_products" "encode_package_bundles" $
-    BS.writeFile (outDir </> "module-package-imports.cbor")
-    (toStrictByteString (encodeListLen 3
-      <> encodeString (T.pack "TPPKGBUNDLES") <> encodeWord 1
-      <> encodeListLen (fromIntegral (length packageBundles))
-      <> foldMap (\(unit, moduleName', sidecar) -> encodeListLen 3
-        <> encodeString (T.pack unit) <> encodeString (T.pack moduleName')
-        <> encodeBytes sidecar) packageBundles))
-  pure productBytes
+    BS.writeFile (outDir </> "module-package-imports.cbor") packageBytes
+  pure (productBytes,
+    [(outDir </> "module-products.cbor",productBytes)
+    ,(outDir </> "module-package-imports.cbor",packageBytes)])
 
 
 -- A later item can execute a quoter defined by an original retained here.
@@ -980,46 +998,29 @@ retainStagedProgramProducts
   -> StagedOriginalProducts -> String -> ExactScope -> IO ExactScope
 retainStagedProgramProducts directory prepared staged target initial =
   retainProgramProductsWithPublication
-    (Just (stagedCertificatePath staged,stagedCertificateBytes staged))
+    (Just (stagedCertificatePath staged,stagedCertificateBytes staged,stagedOutputSeals staged))
     directory prepared (stagedCertifiedOriginalProducts staged) target initial
 
 stagedCertificatePath :: StagedOriginalProducts -> FilePath
-stagedCertificatePath (StagedOriginalProducts _ path _) = path
+stagedCertificatePath (StagedOriginalProducts _ path _ _) = path
 
 stagedCertificateBytes :: StagedOriginalProducts -> BS.ByteString
-stagedCertificateBytes (StagedOriginalProducts _ _ bytes) = bytes
+stagedCertificateBytes (StagedOriginalProducts _ _ bytes _) = bytes
 
--- Only paths introduced while extending this retained generation are fresh
--- outputs. Existing scope artifacts remain captured inputs and are not
--- reopened at terminal publication.
-retainedFreshOutputSeals :: ExactScope -> ExactScope -> [(FilePath,String,Maybe Int)]
-retainedFreshOutputSeals before after =
-  [(path,sha,bound) | (path,sha,bound) <- candidates, path `notElem` oldPaths]
-  where
-    oldPaths = concat
-      [ [exactPath artifact,packages]
-      | (artifact,packages,_) <- scopeInterfaces before]
-      ++ map exactPath (scopeValueInterfaces before)
-      ++ map originalProductPath (scopeProducts before)
-    candidates = concat
-      [ [(exactPath artifact,exactSha256 artifact,Just (32 * 1024 * 1024))
-        ,(packages,packagesSha,Just (4 * 1024 * 1024))]
-      | (artifact,packages,packagesSha) <- scopeInterfaces after]
-      ++ [(exactPath artifact,exactSha256 artifact,Just (32 * 1024 * 1024))
-        | artifact <- scopeValueInterfaces after]
-      ++ [(originalProductPath product',originalProductSha256 product',Just (64 * 1024 * 1024))
-        | product' <- scopeProducts after]
+stagedOutputSeals :: StagedOriginalProducts -> FreshOutputSeals
+stagedOutputSeals (StagedOriginalProducts _ _ _ seals) = seals
 
 retainProgramProductsWithPublication
-  :: Maybe (FilePath,BS.ByteString) -> FilePath -> PreparedPipelineResult
+  :: Maybe (FilePath,BS.ByteString,FreshOutputSeals) -> FilePath -> PreparedPipelineResult
   -> CertifiedOriginalProducts -> String -> ExactScope -> IO ExactScope
 retainProgramProductsWithPublication stagedCertificate directory prepared certified target initial = do
+  outputWrites <- newIORef []
   selected <- either fail pure (extendSourceSelectedOriginals
     (preparedExactCompilation prepared >>= compilationSourceSelection) initial)
   finalized <- foldM retainInterface (selected,[],[],[]) (Map.toAscList localInterfaces)
-  (cached,additions,pendingProducts,pendingLexical) <- foldM retainCached finalized (zip [0::Int ..] (pprCandidateAdmissions prepared))
+  (cached,additions,pendingProducts,pendingLexical) <- foldM (retainCached outputWrites) finalized (zip [0::Int ..] (pprCandidateAdmissions prepared))
   admitted <- extendExactScopeGeneration cached additions pendingProducts pendingLexical >>= either fail pure
-  promoted <- foldM retain admitted (zip [0::Int ..] products)
+  promoted <- foldM (retain outputWrites) admitted (zip [0::Int ..] products)
   let parcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates prepared)
   inherited <- either throwIO pure
     (extendExactExecutionSources (concatMap fst parcels) (map snd parcels) promoted)
@@ -1036,9 +1037,12 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
     ExactExecutionSourceUnavailable _ -> pure inherited
     OrdinaryExecutionSource -> fail "exact program products lack exact source recipe outcome"
   revalidatePreparedCandidateInputs prepared
+  retainedSeals <- either fail pure . freshOutputSealsFromWrites =<< readIORef outputWrites
+  outputSeals <- case stagedCertificate of
+    Nothing -> pure retainedSeals
+    Just (_,_,initialSeals) -> either fail pure (appendFreshOutputSeals initialSeals retainedSeals)
   let env = prHscEnv (pprPipelineResult prepared)
-      outputSeals = retainedFreshOutputSeals initial retained
-  let publishStaged = forM_ stagedCertificate $ \(path,bytes) -> BS.writeFile path bytes
+      publishStaged = forM_ stagedCertificate $ \(path,bytes,_) -> BS.writeFile path bytes
   case preparedExactCompilation prepared of
     Nothing -> do
       revalidateExactScopesAtWithOutputs RetainedProductsPublication env [retained] outputSeals >>= either fail pure
@@ -1046,7 +1050,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
     Just compilation -> case stagedCertificate of
       Nothing -> writeRetainedExactCompilationWithOutputsAndPublication env retained compilation
         (preparedFreshDependencies prepared) outputSeals (pure ())
-      Just (path,bytes) -> writeRetainedExactCompilationWithOutputsAndPublication env retained compilation
+      Just (path,bytes,_) -> writeRetainedExactCompilationWithOutputsAndPublication env retained compilation
         (preparedFreshDependencies prepared) outputSeals (BS.writeFile path bytes)
   pure retained
   where
@@ -1076,7 +1080,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
           , Just (ModuleInterfaceEvidence oldCanonical) <- Map.lookup key (selectedEvidenceOf scope additions)
           , canonicalCertificateSha256 oldCanonical == canonicalCertificateSha256 canonical -> pure (scope,additions,stagedProducts,stagedLexical)
         _ -> fail "fresh finalization conflicts with an admitted original owner"
-    retainCached (scope,additions,stagedProducts,stagedLexical) (index, admission) = do
+    retainCached outputWrites (scope,additions,stagedProducts,stagedLexical) (index, admission) = do
       let candidate = preparedCandidateOriginal admission
           proof = preparedCandidateProof admission
           unit = candidateUnit candidate
@@ -1105,9 +1109,9 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
                 (candidateInterfaceSha256 candidate) (candidateProductSha256 candidate) productPath groups
           -- Keep the producer's original framing and module version. This
           -- private support entry cannot become a replacement source owner.
-          BS.writeFile interfacePath interfaceBytes
-          BS.writeFile packagesPath packageBytes
-          BS.writeFile productPath productBytes
+          writeFresh outputWrites interfacePath interfaceBytes
+          writeFresh outputWrites packagesPath packageBytes
+          writeFresh outputWrites productPath productBytes
           relocated <- either fail pure (relocateCanonicalInterfaceProof proof
             (interface,packagesPath,candidatePackageImportsSha256 candidate)
             (Just (productPath,candidateProductSha256 candidate)))
@@ -1137,7 +1141,7 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
     selectedEvidenceOf scope additions = Map.union
       (Map.fromList [((exactUnit interface,exactModule interface),evidence)
         | ((interface,_,_),evidence) <- additions]) (scopeInterfaceEvidence scope)
-    retain scope (index, originalProduct) = do
+    retain outputWrites scope (index, originalProduct) = do
       let (unitText,ownerText,interfaceBytes,groups) = moduleProductInput originalProduct
           unit = T.unpack unitText
           owner = T.unpack ownerText
@@ -1181,8 +1185,11 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
           original = ExactProduct unit owner version
             (shaHex interfaceBytes) (shaHex productBytes) productPath
             (map originalGroupFromProjected groups)
-      BS.writeFile productPath productBytes
+      writeFresh outputWrites productPath productBytes
       extendExactScopeGeneration scope [] [original] [] >>= either fail pure
+    writeFresh outputWrites path bytes = do
+      BS.writeFile path bytes
+      modifyIORef' outputWrites (++ [(path,bytes)])
 
 -- Interface requirements retain every exact hydration owner. Only selected
 -- lexical owners contribute edges to the instance/family traversal graph.

@@ -10,7 +10,7 @@ module Tidepool.FinalizedModuleArtifacts
   , localFinalizedInterface, localFinalizedHomeUnits, localFinalizedSourceSha256
   , localFinalizedRequirements, localFinalizedCore, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedCoreBody, revalidateLocalFinalizedAdmission
   , revalidateLocalFinalizedAdmissionWith
-  , matchesCapturedFinalization ) where
+  , finalizedMaterializedOutputBytes, matchesCapturedFinalization ) where
 
 import Codec.CBOR.Decoding qualified as D
 import Codec.CBOR.Read (deserialiseFromBytes)
@@ -265,6 +265,25 @@ materializeFinalizedModuleArtifacts directory artifacts@(FinalizedModuleArtifact
         unless (owned == bytes) $
           throwIO (CapturedFinalizedPayloadChanged output)
       pure (FinalizedModuleArtifacts units (Just (CapturedModules destination rows)) values)
+
+-- The materializer is the owner of these newly written payload paths. Return
+-- the expected bytes from its immutable body owner for the enclosing terminal
+-- publication proof; captured origin paths are deliberately absent.
+finalizedMaterializedOutputBytes :: FinalizedModuleArtifacts -> [(FilePath,BS.ByteString)]
+finalizedMaterializedOutputBytes (FinalizedModuleArtifacts _ captured values) =
+  case captured of
+    Nothing -> []
+    Just (CapturedModules directory rows) ->
+      [ (payloadPath directory suffix body,artifactBytes body)
+      | CapturedModule _ _ _ interface package core _ _ <- rows
+      , (suffix,body) <- [("hi",interface),("packages.cbor",package)]
+          ++ maybe [] (\payload -> [("core",payload)]) core]
+      ++ [ (payloadPath directory suffix body,artifactBytes body)
+         | CapturedValueInterface _ _ interface package _ <- values
+         , (suffix,body) <- [("value.hi",interface),("value.packages.cbor",package)] ]
+
+payloadPath :: FilePath -> String -> ArtifactBytes -> FilePath
+payloadPath directory suffix body = directory </> (artifactSha256 body ++ ".finalized." ++ suffix)
 finalizedInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
 finalizedInterfaceSeals artifacts =
   finalizedValueInterfaceSeals artifacts ++ [((unit,name),T.pack (artifactSha256 body)) | CapturedModule unit name _ body _ _ _ _ <- capturedRows artifacts]
@@ -345,9 +364,6 @@ capturedRows :: FinalizedModuleArtifacts -> [CapturedModule]
 capturedRows (FinalizedModuleArtifacts _ captured _) = case captured of
   Nothing -> []
   Just (CapturedModules _ rows) -> rows
-
-payloadPath :: FilePath -> String -> ArtifactBytes -> FilePath
-payloadPath directory suffix body = directory </> (artifactSha256 body ++ ".finalized." ++ suffix)
 
 payloadSha :: ArtifactBytes -> String
 payloadSha = artifactSha256
