@@ -2057,8 +2057,8 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
       pure path
 
 -- A source-less value interface activates the session pipeline. Canonical
--- finalization supplies every original interface/Core pair; the session tier
--- additionally prepares bodies that ordinary reachability left unselected.
+-- finalization supplies every original interface/Core pair, while execution
+-- demand selects bodies independently of the ordinary/session environment.
 preparedSessionLeafCompilation :: IO ()
 preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
   let scopeRoot = root </> "session"
@@ -2094,9 +2094,11 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       fail "ordinary request lost validation-only ownership or prepared its unreachable import"
     prepared <- compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
     preparedSharing <- compilerProductSharing prepared
-    assertEqual "session tier prepares every fresh source owner"
-      ["PreparedSessionLeaf", "SessionConsumer", "SessionUnreachable", "SessionUnused"]
+    assertEqual "session execution demand selects only referenced source owners"
+      ["PreparedSessionLeaf", "SessionConsumer", "SessionUnused"]
       (preparedOwnerNames prepared)
+    unless (Map.member (mkModuleName "SessionUnreachable") (pprFinalizedModules prepared)) $
+      fail "session request lost its validation-only canonical interface/Core owner"
     unless (Map.member (mkModuleName "PreparedSessionLeaf") (pprFinalizedModules prepared)) $
       fail "session leaf lacks its canonical interface/Core owner"
     assertCoreSharing "session tier retains preceding canonical owners" True
@@ -2118,6 +2120,19 @@ preparedSessionLeafCompilation = bracket temporary removeDirectoryRecursive $ \r
       ["SessionUnused"] preparedSharing regeneratedSharing
     assertStgSharing "session tier rebuilds affected producer and consumer bodies" False
       ["SessionUnused", "SessionConsumer"] preparedSharing regeneratedSharing
+    writeFile unreachable "module SessionUnreachable (other) where\nother :: Int\nother = missingValidationOnlyName\n"
+    rejected <- try (compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing)
+      :: IO (Either DependencyLoadFailure PreparedPipelineResult)
+    case rejected of
+      Left (DependencySourceFailure diagnostics) ->
+        unless (any ((== DiagError) . dSeverity) diagnostics) $
+          fail "invalid validation-only source lost its source diagnostic"
+      Left DependencyWorkerFailure -> fail "invalid validation-only source became a worker failure"
+      Right _ -> fail "session execution demand skipped validation of an unprepared source owner"
+    writeFile unreachable "module SessionUnreachable (other) where\nother = 10 :: Int\n"
+    restored <- compiler PreparedStg mempty GeneralCompile (Just scope) target [root] Nothing
+    assertSameInterfaceEvidenceAndPreparedShape "validation-only source recovers without expanding execution demand"
+      regenerated restored
   where
     temporary = do
       parent <- getTemporaryDirectory
@@ -2349,15 +2364,22 @@ compilerLifecycleCompilation = bracket temporary removeDirectoryRecursive $ \roo
       onAnotherThread (runRequest (pure ()) (\_ -> pure ()))
     runRequest (pure ()) $ \compiler ->
       void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
-    clears <- newIORef (0 :: Int)
-    runRequest (modifyIORef' clears (+ 1)) $ \compiler -> do
+    externalRecovery <- newIORef (Nothing :: Maybe CheckedEnvironmentResult)
+    recovered <- runRequest (writeIORef externalRecovery Nothing) $ \compiler -> do
       let compile = void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
+      observed <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+      writeIORef externalRecovery (Just observed)
       writeFile target "module CompilerLifecycle where\nanswer :: Int\nanswer = missing\n"
       assertRejected "invalid source" compile
-      readIORef clears >>= assertEqual "source failure clears external recovery graphs before retry" 1
+      stale <- readIORef externalRecovery
+      case stale of
+        Nothing -> pure ()
+        Just _ -> fail "source failure retained an external recovery observation before retry"
       writeFile target valid
-      compile
-    readIORef clears >>= assertEqual "request close clears external recovery graphs" 2
+      compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
+    recoveredType <- fixtureBindingType "answer" (crTargetTcGblEnv recovered)
+    unless (eqType recoveredType intTy) $
+      fail "released request lost its completed typed result after source recovery"
     cancelled <- try (runRequest (pure ()) $ \compiler -> do
       _ <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
       throwIO ThreadKilled) :: IO (Either SomeException ())
