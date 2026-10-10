@@ -16,15 +16,31 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        Self::with_watch(false, true)
+        Self::build(false, true, false)
     }
 
-    fn with_watch(transient: bool, notify_owner: bool) -> Self {
+    fn new_native() -> Self {
+        Self::with_native_watch(false, true)
+    }
+
+    fn with_native_watch(transient: bool, notify_owner: bool) -> Self {
+        Self::build(transient, notify_owner, true)
+    }
+
+    fn build(transient: bool, notify_owner: bool, native: bool) -> Self {
         let registry = Arc::new(RequestRegistry::default());
         let owner = ActorRef::first(ActorId(41));
         let target = ActorRef::first(ActorId(42));
-        let request =
-            registry.reserve_labeled_with_reporting(owner, target, "request".into(), notify_owner);
+        let request = if native {
+            registry.reserve_native_labeled_with_reporting(
+                owner,
+                target,
+                "request".into(),
+                notify_owner,
+            )
+        } else {
+            registry.reserve_labeled_with_reporting(owner, target, "request".into(), notify_owner)
+        };
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let watch = if transient {
@@ -90,9 +106,9 @@ impl Fixture {
 #[tokio::test]
 async fn either_finishes_with_one_request_and_all_waits_for_both() {
     for any_of in [false, true] {
-        let fixture = Fixture::new();
+        let fixture = Fixture::new_native();
         let unrelated = ActorRef::first(ActorId(43));
-        let request = fixture.registry.reserve(fixture.owner, unrelated);
+        let request = fixture.registry.reserve_native(fixture.owner, unrelated);
         fixture
             .registry
             .mark_queued(fixture.owner, unrelated, request)
@@ -157,7 +173,7 @@ async fn either_finishes_with_one_request_and_all_waits_for_both() {
 #[tokio::test]
 async fn settlement_before_or_after_subscription_claims_the_original_control() {
     for subscribe_first in [false, true] {
-        let fixture = Fixture::new();
+        let fixture = Fixture::new_native();
         if !subscribe_first {
             fixture.complete();
         }
@@ -200,7 +216,7 @@ async fn unavailable_observation_keeps_its_exact_request_and_failure() {
 
 #[tokio::test]
 async fn cancellation_does_not_acknowledge_cleanup_or_cancel_the_target_request() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_native();
     let mut wait = Box::pin(fixture.wait());
     assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
     assert!(fixture.control.request_cancellation());
@@ -222,7 +238,7 @@ async fn cancellation_does_not_acknowledge_cleanup_or_cancel_the_target_request(
 
 #[tokio::test]
 async fn cancellation_before_ready_never_resumes_even_when_both_wakes_are_ready() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_native();
     assert!(fixture.control.request_cancellation());
     fixture.complete();
     assert!(matches!(fixture.wait().await, WatchWaitEvent::Cancelled));
@@ -235,7 +251,7 @@ async fn cancellation_before_ready_never_resumes_even_when_both_wakes_are_ready(
 
 #[tokio::test]
 async fn prior_retirement_wins_when_watch_settlement_is_also_ready() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_native();
     let terminal = ActorTerminal {
         kind: ActorExitKind::Cancelled,
         summary: "owner retirement before ready watch".into(),
@@ -376,7 +392,7 @@ async fn retirement_preserves_the_owner_terminal_without_claiming_or_acknowledgi
 
 #[tokio::test]
 async fn dropping_the_wait_preserves_watch_and_later_target_settlement() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_native();
     let mut wait = Box::pin(fixture.wait());
     assert!(matches!(futures_util::poll!(&mut wait), Poll::Pending));
     drop(wait);
@@ -397,7 +413,7 @@ async fn dropping_the_wait_preserves_watch_and_later_target_settlement() {
 
 #[tokio::test]
 async fn stale_watch_and_replacement_incarnation_remain_typed_refusals() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_native();
     let replacement = ActorRef {
         id: fixture.owner.id,
         incarnation: Incarnation(fixture.owner.incarnation.0 + 1),
@@ -433,7 +449,7 @@ async fn stale_watch_and_replacement_incarnation_remain_typed_refusals() {
 
 #[tokio::test]
 async fn dropping_a_direct_wait_releases_only_its_subscription() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_native();
     let transient = fixture
         .registry
         .register_transient_watch(
@@ -537,7 +553,7 @@ fn transient_release_checks_exact_owner_and_never_removes_named_watch() {
 async fn cancelled_direct_wait_restores_one_owner_notice_even_when_settlement_wins_the_registry_race(
 ) {
     for complete_first in [false, true] {
-        let fixture = Fixture::with_watch(true, true);
+        let fixture = Fixture::with_native_watch(true, true);
         let lease = TransientWatchLease::new(&fixture.registry, fixture.owner, fixture.watch);
         if complete_first {
             fixture.complete();
@@ -558,7 +574,7 @@ async fn cancelled_direct_wait_restores_one_owner_notice_even_when_settlement_wi
 
 #[tokio::test]
 async fn captured_direct_wait_consumes_the_owner_wake_without_emitting_a_later_notice() {
-    let fixture = Fixture::with_watch(true, true);
+    let fixture = Fixture::with_native_watch(true, true);
     fixture.complete();
     assert!(matches!(
         fixture.wait().await,
@@ -573,7 +589,7 @@ async fn captured_direct_wait_consumes_the_owner_wake_without_emitting_a_later_n
 
 #[tokio::test]
 async fn overlapping_direct_waits_restore_the_notice_only_after_the_last_cancelled_subscription() {
-    let fixture = Fixture::with_watch(true, true);
+    let fixture = Fixture::with_native_watch(true, true);
     let second = fixture
         .registry
         .register_transient_watch(
@@ -601,7 +617,7 @@ async fn overlapping_direct_waits_restore_the_notice_only_after_the_last_cancell
 
 #[tokio::test]
 async fn named_watch_and_silent_reporting_keep_their_policy_after_direct_wait_cancellation() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new_native();
     let direct = fixture
         .registry
         .register_transient_watch(
@@ -625,7 +641,7 @@ async fn named_watch_and_silent_reporting_keep_their_policy_after_direct_wait_ca
         Ok(WatchObservation::Ready(_))
     ));
 
-    let silent = Fixture::with_watch(true, false);
+    let silent = Fixture::with_native_watch(true, false);
     silent.complete();
     silent
         .registry
@@ -636,7 +652,7 @@ async fn named_watch_and_silent_reporting_keep_their_policy_after_direct_wait_ca
 
 #[tokio::test]
 async fn dropped_direct_wait_publishes_restored_owner_notice_without_another_event() {
-    let fixture = Fixture::with_watch(true, true);
+    let fixture = Fixture::with_native_watch(true, true);
     let (deployments, mut receive) = mpsc::channel(4);
     let mut lease = TransientWatchLease::new(&fixture.registry, fixture.owner, fixture.watch);
     lease.deployments = Some(deployments);

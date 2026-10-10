@@ -991,7 +991,7 @@ async fn invocation_cleanup_releases_transient_watch_without_cancelling_target()
     let owner = fixture.actor.identity();
     let target = ActorRef::first(crate::ActorId(owner.id.0 + 100));
     let requests = &fixture.environment.requests;
-    let request = requests.reserve(owner, target);
+    let request = requests.reserve_native(owner, target);
     requests.mark_queued(owner, target, request).unwrap();
     requests.present(target, request).unwrap();
     let watch = requests
