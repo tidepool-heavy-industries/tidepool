@@ -41,9 +41,10 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ExactScope
   ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
-  , scopeInterfaces, scopeModuleInterfaceProofs, canonicalCertificatePath
-  , canonicalCoreArtifact, canonicalCorePath, readExactScope, revalidateExactScope
-  , writeCheckedExactCompilation, writeRetainedExactCompilation, newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
+  , scopeInterfaces, scopeModuleInterfaceProofs, readExactScope, revalidateExactScope
+  , writeCheckedExactCompilation, writeRetainedExactCompilation
+  , writeRetainedExactCompilationWithOutputsAndPublication
+  , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), PreparedPipelineResult(..), PipelineResult(..)
@@ -224,8 +225,7 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
         held <- scopeInterfaceBytes live iface
         unless (held == bytes) (fail "inactive eviction dropped live original custody")
         revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= \result ->
-          unless (either (const True) (const False) result)
-            (fail "live custody bypassed terminal receiving-path drift")
+          either fail pure result
     revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= either fail pure
   -- GHC opens FIFO descriptors nonblocking, so an already-open RDWR peer
   -- prevents an early EOF. The reader's blocked state then establishes that
@@ -528,14 +528,9 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   let environment = prHscEnv (pprPipelineResult prepared)
       evidence = preparedFreshDependencies prepared
       checked = compilationScope compilation
-      paths scope = scopeManifestPath scope
-        : concat [[exactPath iface,packages] | (iface,packages,_) <- scopeInterfaces scope]
-        ++ concat [[canonicalCertificatePath proof]
-             ++ maybe [] (pure . canonicalCorePath) (canonicalCoreArtifact proof)
-            | proof <- Map.elems (scopeModuleInterfaceProofs scope)]
-      observed = nub (paths retained ++ paths checked
+      observed = nub [scopeManifestPath retained,scopeManifestPath checked]
         ++ map dependencySourcePath (dependencySources evidence)
-        ++ map dependencySourcePath (dependencySources (selectedOriginalEvidence selected)))
+        ++ map dependencySourcePath (dependencySources (selectedOriginalEvidence selected))
       absent = nub [path | resolution <- dependencyResolutions (selectedOriginalEvidence selected)
         , path <- case dependencyResolutionSelected resolution of
             Nothing -> dependencyResolutionCandidates resolution
@@ -612,7 +607,7 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
                     == fromIntegral (length (observedCounterRows diagnostics))
                 && jsonNumber "observed_bytes" (validationLine diagnostics)
                     == sum (map counterNumber (observedCounterRows diagnostics))
-                && length (counterValues ("hash_bytes.observed_file." ++ exactSha256 (fst shared)) diagnostics) == 1
+                && null (counterValues ("hash_bytes.observed_file." ++ exactSha256 (fst shared)) diagnostics)
                 && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 retained) diagnostics) == 1
                 && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 checked) diagnostics) == 1)
               (fail "publication repeated a shared path observation or omitted one of its scopes")
@@ -641,12 +636,40 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   (_,separateDiagnostics) <- captureDiagnostics $ do
     revalidateExactScope environment retained >>= either fail pure
     writeCheckedExactCompilation environment compilation evidence
-  unless (length (proofRows separateDiagnostics) == 2
-      && length (counterValues ("hash_bytes.observed_file." ++ exactSha256 (fst shared)) separateDiagnostics) == 2)
-    (fail "separate validation control did not observe the shared original twice")
+  unless (length (proofRows separateDiagnostics) == 2)
+    (fail "separate validation control did not produce two independent terminal proofs")
   measurement "separate" separateDiagnostics
   (_,combinedDiagnostics) <- captureDiagnostics (publish environment)
   measurement "combined" combinedDiagnostics
+  let freshOutput = work </> "fresh-retained-output.cbor"
+      publicationMarker = work </> "retained-publication-marker"
+      freshOutputBytes = BS.pack [12,34,56,78]
+      outputSeal = [(freshOutput,digest freshOutputBytes,Just (1024 * 1024))]
+      publishWithOutput = writeRetainedExactCompilationWithOutputsAndPublication
+        environment retained compilation evidence outputSeal
+        (BS.writeFile publicationMarker (BS.pack [9,8,7]))
+  BS.writeFile freshOutput freshOutputBytes
+  beforeOutputPublish <- receipts
+  (outputAccepted,outputDiagnostics) <- captureDiagnostics
+    (try publishWithOutput :: IO (Either IOException ()))
+  afterOutputPublish <- receipts
+  markerExists <- doesFileExist publicationMarker
+  unless (case outputAccepted of Right () -> markerExists && length afterOutputPublish == length beforeOutputPublish + 1; _ -> False)
+    (fail "terminal output proof did not publish exactly after observing a matching fresh output")
+  unless (length (counterValues ("hash_bytes.observed_file." ++ digest freshOutputBytes) outputDiagnostics) == 1)
+    (fail "terminal output proof omitted or repeated its fresh output observation")
+  removeFile publicationMarker
+  BS.writeFile freshOutput (BS.pack [0])
+  beforeOutputRefusal <- receipts
+  (outputRefused,refusalDiagnostics) <- captureDiagnostics
+    (try publishWithOutput :: IO (Either IOException ()))
+  afterOutputRefusal <- receipts
+  markerAfterRefusal <- doesFileExist publicationMarker
+  unless (case outputRefused of Left _ -> not markerAfterRefusal && afterOutputRefusal == beforeOutputRefusal; _ -> False)
+    (fail "mutated fresh output published a receipt or staged product")
+  unless (length (counterValues ("hash_bytes.observed_file." ++ digest (BS.pack [0])) refusalDiagnostics) == 1)
+    (fail "refused terminal output proof did not retain its observed mismatch evidence")
+  BS.writeFile freshOutput freshOutputBytes
   check environment originals
   -- Every issued file and negative candidate must reach the publication owner.
   forM_ (Map.toAscList originals) $ \(path,value) -> bracket (pure ()) (const restore) $ \_ -> do
@@ -686,11 +709,14 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   afterCancellation <- receipts
   unless (beforeCancellation == afterCancellation) (fail "cancelled publication exposed a receipt")
   let sharedPath = exactPath (fst shared)
-      sharedBytes = originals Map.! sharedPath
-  write sharedPath (changed sharedBytes)
-  check environment (Map.insert sharedPath (changed sharedBytes) originals)
-  restore
-  check environment originals
+  sharedBytes <- BS.readFile sharedPath
+  beforeCapturedDrift <- receipts
+  BS.writeFile sharedPath (sharedBytes <> BS.singleton 0)
+  capturedDrift <- try (publish environment) :: IO (Either IOException ())
+  afterCapturedDrift <- receipts
+  BS.writeFile sharedPath sharedBytes
+  unless (case capturedDrift of Right () -> length afterCapturedDrift == length beforeCapturedDrift + 1; _ -> False)
+    (fail "terminal publication depended on a captured original materialization path")
   -- Equal installed bytes at another selected path must still refuse.
   roots <- concat <$> forM (scopeInterfaces retained) (\(iface,path,_) ->
     BS.readFile path >>= either fail (pure . packageInterfaces) . decodeCapturedPackageImports iface)

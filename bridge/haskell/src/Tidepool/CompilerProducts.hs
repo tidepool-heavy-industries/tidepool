@@ -59,7 +59,11 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
-  , ExactScopeValidationReason(..), revalidateExactScopesAt, writeCheckedExactCompilation, writeCheckedExactCompilationWithPublication, writeRetainedExactCompilation, writeRetainedExactCompilationWithPublication, scopeCanonicalInterfaces, scopeInterfaceToken, scopeInterfaceToken, scopeOriginalBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
+  , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
+  , writeCheckedExactCompilation, writeCheckedExactCompilationWithPublication
+  , writeRetainedExactCompilationWithOutputsAndPublication
+  , scopeCanonicalInterfaces, scopeInterfaceToken, scopeOriginalBytes
+  , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
   , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalSourceSha256 )
@@ -985,6 +989,27 @@ stagedCertificatePath (StagedOriginalProducts _ path _) = path
 stagedCertificateBytes :: StagedOriginalProducts -> BS.ByteString
 stagedCertificateBytes (StagedOriginalProducts _ _ bytes) = bytes
 
+-- Only paths introduced while extending this retained generation are fresh
+-- outputs. Existing scope artifacts remain captured inputs and are not
+-- reopened at terminal publication.
+retainedFreshOutputSeals :: ExactScope -> ExactScope -> [(FilePath,String,Maybe Int)]
+retainedFreshOutputSeals before after =
+  [(path,sha,bound) | (path,sha,bound) <- candidates, path `notElem` oldPaths]
+  where
+    oldPaths = concat
+      [ [exactPath artifact,packages]
+      | (artifact,packages,_) <- scopeInterfaces before]
+      ++ map exactPath (scopeValueInterfaces before)
+      ++ map originalProductPath (scopeProducts before)
+    candidates = concat
+      [ [(exactPath artifact,exactSha256 artifact,Just (32 * 1024 * 1024))
+        ,(packages,packagesSha,Just (4 * 1024 * 1024))]
+      | (artifact,packages,packagesSha) <- scopeInterfaces after]
+      ++ [(exactPath artifact,exactSha256 artifact,Just (32 * 1024 * 1024))
+        | artifact <- scopeValueInterfaces after]
+      ++ [(originalProductPath product',originalProductSha256 product',Just (64 * 1024 * 1024))
+        | product' <- scopeProducts after]
+
 retainProgramProductsWithPublication
   :: Maybe (FilePath,BS.ByteString) -> FilePath -> PreparedPipelineResult
   -> CertifiedOriginalProducts -> String -> ExactScope -> IO ExactScope
@@ -1012,16 +1037,17 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
     OrdinaryExecutionSource -> fail "exact program products lack exact source recipe outcome"
   revalidatePreparedCandidateInputs prepared
   let env = prHscEnv (pprPipelineResult prepared)
+      outputSeals = retainedFreshOutputSeals initial retained
   let publishStaged = forM_ stagedCertificate $ \(path,bytes) -> BS.writeFile path bytes
   case preparedExactCompilation prepared of
     Nothing -> do
-      revalidateExactScopesAt RetainedProductsPublication env [retained] >>= either fail pure
+      revalidateExactScopesAtWithOutputs RetainedProductsPublication env [retained] outputSeals >>= either fail pure
       publishStaged
     Just compilation -> case stagedCertificate of
-      Nothing -> writeRetainedExactCompilation env retained compilation
-        (preparedFreshDependencies prepared)
-      Just (path,bytes) -> writeRetainedExactCompilationWithPublication env retained compilation
-        (preparedFreshDependencies prepared) (BS.writeFile path bytes)
+      Nothing -> writeRetainedExactCompilationWithOutputsAndPublication env retained compilation
+        (preparedFreshDependencies prepared) outputSeals (pure ())
+      Just (path,bytes) -> writeRetainedExactCompilationWithOutputsAndPublication env retained compilation
+        (preparedFreshDependencies prepared) outputSeals (BS.writeFile path bytes)
   pure retained
   where
     localInterfaces = Map.filterWithKey (\(_,owner) _ -> owner /= target)

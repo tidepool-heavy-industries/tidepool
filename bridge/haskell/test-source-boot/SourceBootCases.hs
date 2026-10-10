@@ -3124,9 +3124,11 @@ originalNativeAvailabilityChecks environment scope emitted = do
     ++ [TString (T.pack (changedDigest (scopeProducerSha256 selectedScope)))] ++ drop 4 fields))
   productBytes <- BS.readFile (originalProductPath snapshot)
   (BS.writeFile (originalProductPath snapshot) (BS.snoc productBytes 0)
-      >> revalidateExactScope environment selectedScope >>= \case
-        Left _ -> pure ()
-        Right _ -> fail "changed native payload passed terminal revalidation")
+      >> readExactScope (scopeManifestPath selectedScope) >>= \case
+        Left _ -> revalidateExactScope environment selectedScope >>= \case
+          Right () -> pure ()
+          Left _ -> fail "captured native payload path drift invalidated terminal revalidation"
+        Right _ -> fail "fresh native product acquisition accepted a mismatched current output")
     `finally` BS.writeFile (originalProductPath snapshot) productBytes
   revalidateExactScope environment selectedScope >>= either fail pure
   originalNativeCensusRoundTripChecks environment scope owner available
@@ -3242,8 +3244,8 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
       Right _ -> fail "changed issued native certificate retained its descriptor authority")
     `finally` BS.writeFile descriptorPath nativeBytes
   (BS.writeFile descriptorPath (BS.snoc nativeBytes 0) >> revalidateExactScope environment scope >>= \case
-      Left _ -> pure ()
-      Right () -> fail "cached native census bypassed current receipt integrity")
+      Right () -> pure ()
+      Left _ -> fail "captured native census path drift invalidated terminal revalidation")
     `finally` BS.writeFile descriptorPath nativeBytes
   restored <- readExactScope (scopeManifestPath scope) >>= either fail pure
   unless (scopeAvailableOriginalProducts restored == available && scopeProducts restored == scopeProducts scope) $
@@ -3500,8 +3502,10 @@ originalProjectionProducts = withScratch $ \work -> do
     `finally` BS.writeFile (exactPath originInterface) originBytes
     :: IO (Either SomeException CertifiedOriginalProducts)
   case changedOrigin of
-    Left _ -> pure ()
-    Right _ -> fail "reused inventory published a packet from changed captured origin bytes"
+    Left failure -> fail ("captured finalized original depended on its old origin path: " ++ show failure)
+    Right reused -> unless (map moduleProductInput (certifiedOriginalProducts reused)
+        == map moduleProductInput (certifiedOriginalProducts currentCertificate)) $
+      fail "changed old origin path altered the captured original packet"
   restoredCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
     packetDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
   unless (map moduleProductInput (certifiedOriginalProducts restoredCertificate)
@@ -3601,8 +3605,8 @@ originalProjectionProducts = withScratch $ \work -> do
     case changedOwner of
       Just (Right groups) | bad `notElem` concatMap projectedBinders groups -> pure ()
       other -> fail ("recovered-only generation change adopted stale original groups: " ++ show other)
-    -- Cached recovery consumes the admitted snapshot; persistent producer
-    -- drift is independently refused at terminal publication.
+    -- Cached recovery and terminal validation consume the admitted body; its
+    -- old producer path is no longer terminal authority.
     ownerProof <- maybe (fail "cache fixture lacks its canonical owner") pure
       (Map.lookup ("main","ProjectionOwner") (scopeModuleInterfaceProofs capturedScope))
     core <- maybe (fail "cache fixture lacks original Core") pure (canonicalCoreArtifact ownerProof)
@@ -3614,8 +3618,8 @@ originalProjectionProducts = withScratch $ \work -> do
       unless (snapshotBodies == firstBodies)
         (fail "cached original recovery replaced captured Core after producer mutation")
       terminal <- revalidateExactScope capturedEnv capturedScope
-      unless (either (const True) (const False) terminal)
-        (fail "terminal original publication accepted changed Core")
+      unless (either (const False) (const True) terminal)
+        (fail "terminal original validation depended on its captured Core path")
       ) `finally` BS.writeFile (canonicalCorePath core) originalCore
   let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
   case requireOriginalExecutableGlobals pairedEnv (Set.union wrongUnitBinders incompleteBinders)

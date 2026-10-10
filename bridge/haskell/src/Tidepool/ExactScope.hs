@@ -21,7 +21,9 @@ module Tidepool.ExactScope
   , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, scopeValueInterfaces
   , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes
   , writeExactCompilation, writeCheckedExactCompilation, writeCheckedExactCompilationWithPublication
-  , writeRetainedExactCompilation, writeRetainedExactCompilationWithPublication, extendSourceSelectedOriginals
+  , writeRetainedExactCompilation, writeRetainedExactCompilationWithPublication
+  , writeRetainedExactCompilationWithOutputsAndPublication, extendSourceSelectedOriginals
+  , revalidateExactScopesAtWithOutputs
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
   , scopeAvailableOriginalProducts
@@ -1697,11 +1699,19 @@ validationReasonName reason = case reason of
 revalidateExactScope :: HscEnv -> ExactScope -> IO (Either String ())
 revalidateExactScope env scope = revalidateExactScopesAt ExplicitScopeValidation env [scope]
 
--- A terminal operation can own several scopes with shared paths. These checks
--- only observe inputs; their observations end before publication or any further
--- compiler work. Every scope still checks its own seals, bounds and selection.
+-- A terminal operation can own several scopes with shared paths. It observes
+-- current manifests, package resolution and the operation's fresh outputs in
+-- one bounded map. Captured original bodies are carried by their byte owner.
 revalidateExactScopesAt :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> IO (Either String ())
-revalidateExactScopesAt reason env scopes = do
+revalidateExactScopesAt reason env scopes = revalidateExactScopesAtWithOutputs reason env scopes []
+
+-- Freshly materialized outputs participate in the same bounded terminal proof
+-- as selected scopes. Captured inputs are not reconstructed here: only output
+-- seals supplied by the operation that wrote them are observed.
+revalidateExactScopesAtWithOutputs
+  :: ExactScopeValidationReason -> HscEnv -> [ExactScope]
+  -> [(FilePath,String,Maybe Int)] -> IO (Either String ())
+revalidateExactScopesAtWithOutputs reason env scopes outputs = do
   timing <- readTimingEnabled
   summary <- readSummaryTimingEnabled
   totals <- newIORef Nothing
@@ -1734,17 +1744,16 @@ revalidateExactScopesAt reason env scopes = do
             mapM_ (checkProduct observations) (scopeProducts scope)
             mapM_ (checkValue observations) (scopeValueInterfaces scope))
             :: IO (Either IOException ())
+          outputOutcome <- try (forM_ outputs $ \(path,sha,bound) ->
+            observeSeal observations path bound sha "fresh exact output changed before publication")
+            :: IO (Either IOException ())
           observed <- fileObservationTotals observations
           writeIORef totals (Just observed)
-          either throwIO pure outcome)
+          either throwIO pure outcome
+          either throwIO pure outputOutcome)
           :: IO (Either IOException ())
         pure $ either (Left . show) Right result
   withValidationTiming summary "exact_scope" (validationReasonName reason) readCounts validate
-  where
-    checkValue observations value = observeSeal observations (exactPath value) Nothing
-      (exactSha256 value) "checked value interface changed"
-    checkProduct observations originalProduct = observeSeal observations (originalProductPath originalProduct) Nothing
-      (originalProductSha256 originalProduct) "exact original product changed"
 
 -- Every successful compile owns a distinct immutable source snapshot. Check,
 -- fold and inspection requests can consume several generated modules, so a
@@ -1760,33 +1769,40 @@ writeExactCompilation compilation evidence =
 writeCheckedExactCompilation
   :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO ()
 writeCheckedExactCompilation env = writeCheckedExactCompilationWithScopes
-  CheckedReceiptPublication env [] (pure ())
+  CheckedReceiptPublication env [] [] (pure ())
 
 writeCheckedExactCompilationWithPublication
   :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO () -> IO ()
 writeCheckedExactCompilationWithPublication env compilation evidence publish =
-  writeCheckedExactCompilationWithScopes CheckedReceiptPublication env [] publish compilation evidence
+  writeCheckedExactCompilationWithScopes CheckedReceiptPublication env [] [] publish compilation evidence
 
 -- Retention and the checked receipt share this final publication boundary.
--- Capture source evidence first, then check both original and retained paths in
--- one fresh proof. No observation or validation token reaches the publisher.
+-- Capture source evidence first, then check selected scopes and fresh outputs
+-- in one proof. No observation or validation token reaches the publisher.
 writeRetainedExactCompilation
   :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO ()
 writeRetainedExactCompilation env retained = writeCheckedExactCompilationWithScopes
-  RetainedReceiptPublication env [retained] (pure ())
+  RetainedReceiptPublication env [retained] [] (pure ())
 
 writeRetainedExactCompilationWithPublication
   :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO () -> IO ()
 writeRetainedExactCompilationWithPublication env retained compilation evidence publish =
-  writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] publish compilation evidence
+  writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] [] publish compilation evidence
+
+writeRetainedExactCompilationWithOutputsAndPublication
+  :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence
+  -> [(FilePath,String,Maybe Int)] -> IO () -> IO ()
+writeRetainedExactCompilationWithOutputsAndPublication env retained compilation evidence outputs publish =
+  writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] outputs publish compilation evidence
 
 writeCheckedExactCompilationWithScopes
-  :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> IO () -> ExactCompilation -> DependencyEvidence -> IO ()
-writeCheckedExactCompilationWithScopes reason env retained publishCertificate compilation evidence = do
+  :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> [(FilePath,String,Maybe Int)]
+  -> IO () -> ExactCompilation -> DependencyEvidence -> IO ()
+writeCheckedExactCompilationWithScopes reason env retained outputs publishCertificate compilation evidence = do
   selected <- either fail pure (extendSourceSelectedOriginals
     (compilationSourceSelection compilation) (compilationScope compilation))
   receipt <- captureExactCompilationReceipt compilation evidence
-  revalidateExactScopesAt reason env (retained ++ [selected]) >>= either fail pure
+  revalidateExactScopesAtWithOutputs reason env (retained ++ [selected]) outputs >>= either fail pure
   publishCertificate
   publishExactCompilationReceipt receipt
 

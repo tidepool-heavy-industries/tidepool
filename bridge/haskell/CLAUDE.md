@@ -121,17 +121,14 @@ Installed packages belong to the matched pinned immutable compiler universe.
 Their exact resolution is checked in each consuming environment, with fresh
 interface seal observations at admission and terminal publication. Package
 objects and shared libraries are not request snapshots. Current source selection,
-source/dependency and negative-candidate checks remain fresh. Terminal publication
-also re-observes the receiving materializations and selected protected original
-paths issued by acquisition, refusing persistent drift while snapshot
-consumption stays independent of transient producer-path mutations. Prepared
-candidate results retain the issuer's opaque admission through certification and
-program retention. Durable support copies bind explicit path aliases to that
-same captured payload and budget; terminal publication observes both paths.
+source/dependency and negative-candidate checks remain fresh. Prepared candidate
+results retain the issuer's opaque admission through certification and program
+retention. Captured originals remain available from their immutable byte owner;
+terminal publication does not reopen their origin or materialization paths.
 Retention and checked receipt publication capture source evidence before one
-terminal proof over their required scopes. That proof shares current path
-observations only across its read-only checks; no observations survive into
-publication, cancellation recovery or further compiler work.
+terminal proof over their required scopes. That proof shares current scope,
+package/import and newly materialized output observations; no observations
+survive into publication, cancellation recovery or further compiler work.
 
 Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
 original references. Exact-scope graph paths come from the retained immutable
