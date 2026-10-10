@@ -60,7 +60,7 @@ pub(crate) struct PendingInputSlice {
 /// Requests and detached selections retain this same owner through their slices.
 #[derive(Debug)]
 pub(crate) struct OwnedInputArena {
-    _file: File,
+    _file: Arc<File>,
     generation: Arc<()>,
     endpoint: PathBuf,
     extent: u64,
@@ -169,7 +169,7 @@ impl OwnedInputArenaBuilder {
                 return Err(ArenaError::ExtentChanged);
             }
             Ok(Arc::new(OwnedInputArena {
-                _file: self.file,
+                _file: Arc::new(self.file),
                 generation: self.generation,
                 endpoint,
                 extent: self.extent,
@@ -203,6 +203,13 @@ impl OwnedInputArena {
 }
 
 impl OwnedInputSlice {
+    /// Keep only the sealed physical storage through the compiler transaction's
+    /// confirmed close. This does not issue input selection or certificate
+    /// authority, and clones the owner without duplicating its descriptor.
+    pub(crate) fn compiler_file_lease(&self) -> Arc<File> {
+        Arc::clone(&self.arena._file)
+    }
+
     pub(crate) fn endpoint(&self) -> &Path {
         &self.arena.endpoint
     }
@@ -467,7 +474,45 @@ mod tests {
         assert!(status.success());
         assert_eq!(arena._file.as_raw_fd(), owner_fd);
         use std::io::Seek;
-        assert_eq!((&arena._file).stream_position().unwrap(), arena.len());
+        assert_eq!(arena._file.as_ref().stream_position().unwrap(), arena.len());
         assert_eq!(read_slice(&slice), b"prefix-middle-suffix");
+    }
+
+    #[test]
+    fn compiler_file_lease_retains_storage_without_arena_metadata() {
+        let mut builder = OwnedInputArenaBuilder::new(100).unwrap();
+        let pending = builder.append(b"transaction-owned-original").unwrap();
+        let arena = builder.finish().unwrap();
+        let weak_arena = Arc::downgrade(&arena);
+        let slice = arena.issue_slice(pending).unwrap();
+        let endpoint = slice.endpoint().to_owned();
+        let lease = slice.compiler_file_lease();
+        let other_lease = slice.compiler_file_lease();
+        let weak_file = Arc::downgrade(&lease);
+        assert!(Arc::ptr_eq(&lease, &other_lease));
+        assert_eq!(lease.as_raw_fd(), arena._file.as_raw_fd());
+        drop(slice);
+        drop(arena);
+        assert!(weak_arena.upgrade().is_none());
+        assert!(weak_file.upgrade().is_some());
+        assert_eq!(
+            lease.set_len(0).unwrap_err().raw_os_error(),
+            Some(libc::EPERM)
+        );
+        let read_original = || {
+            let mut bytes = [0; 26];
+            open_endpoint(&endpoint)
+                .unwrap()
+                .read_exact_at(&mut bytes, 0)
+                .unwrap();
+            assert_eq!(&bytes, b"transaction-owned-original");
+        };
+        read_original();
+        drop(lease);
+        read_original();
+        drop(other_lease);
+        assert!(weak_file.upgrade().is_none());
+        assert!(matches!(open_endpoint(&endpoint),
+            Err(ArenaError::EndpointUnavailable(error)) if error.kind() == io::ErrorKind::NotFound));
     }
 }
