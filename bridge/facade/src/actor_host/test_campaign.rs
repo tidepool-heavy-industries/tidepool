@@ -641,8 +641,9 @@ impl TestCampaign {
         .await
     }
 
-    /// Drive setup concurrently with the native admission it must acknowledge.
-    /// Neither future outlives the campaign if the named operation times out.
+    /// Drive a single-child setup against the native admission it must acknowledge.
+    /// Premature operation settlement fails immediately with its actual receipt;
+    /// neither future outlives the campaign if the named operation times out.
     pub async fn dispatch_native_spawn_setup(
         &mut self,
         what: &str,
@@ -651,16 +652,19 @@ impl TestCampaign {
     ) -> (serde_json::Value, exomonad_actor::LocalResidentInstallation) {
         let policy = self.root_installation.policy.clone();
         tokio::time::timeout(limit, async {
-            tokio::join!(dispatch_haskell_script(policy.as_ref(), script), async {
-                let child = self
-                    .next_deployment(what, limit, |event| match event {
-                        LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                        other => Err(other),
-                    })
-                    .await;
-                self.acknowledge_native_spawn(&child);
-                child
-            })
+            let setup = dispatch_haskell_script(policy.as_ref(), script);
+            tokio::pin!(setup);
+            let child = tokio::select! {
+                receipt = &mut setup => panic!(
+                    "{what} settled before native child installation: {receipt}"
+                ),
+                child = self.next_deployment(what, limit, |event| match event {
+                    LocalResidentDeployment::PolicyInstalled(child) => Ok(*child),
+                    other => Err(other),
+                }) => child,
+            };
+            self.acknowledge_native_spawn(&child);
+            (setup.await, child)
         })
         .await
         .unwrap_or_else(|_| panic!("timed out after {limit:?} during {what}"))

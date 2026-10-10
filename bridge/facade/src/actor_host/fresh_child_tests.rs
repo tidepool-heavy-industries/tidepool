@@ -109,6 +109,41 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
 }
 
 #[tokio::test]
+async fn native_spawn_setup_refuses_settlement_without_child_admission() {
+    use futures_util::FutureExt;
+    let campaign = TestCampaign::start_with_child_sessions().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let refusal = std::panic::AssertUnwindSafe(campaign.dispatch_native_spawn_setup(
+                    "no-spawn setup control",
+                    "let nativeSpawnSetupControl = (41 :: Int)",
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                ))
+                .catch_unwind()
+                .await;
+                let failure = refusal
+                    .err()
+                    .expect("setup without a spawn admission must fail");
+                let message = failure
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| failure.downcast_ref::<&str>().copied())
+                    .unwrap_or("");
+                assert!(
+                    message.contains("settled before native child installation"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("committed"),
+                    "the actual settled receipt is retained: {message}"
+                );
+            })
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn fresh_context_callable_reply_survives_retirement_and_request_forget() {
     callable_reply_scenario(
         "respond ((sessionInput + 1 :: Int), (\\n -> n + sessionInput))",
