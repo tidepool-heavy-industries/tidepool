@@ -190,11 +190,13 @@ impl CertifiedRecoveryProduct {
         &self,
         other: &Self,
     ) -> Result<Self, crate::CompileError> {
-        if self != other {
+        if !self.same_durable_artifact(other) {
             return Err(crate::CompileError::ExtractFailed(
-                "native custody requires identical certified inputs".into(),
+                "native custody requires identical durable certified inputs".into(),
             ));
         }
+        // Fresh source admission evidence belongs to the receiving view. Equal
+        // durable originals may arrive with another witness or with none.
         let mut merged = self.clone();
         if let (Some(first), Some(second)) = (&self.module_interface, &other.module_interface) {
             merged.module_interface = Some(first.merge_catalog_input_custody(second)?);
@@ -207,6 +209,11 @@ impl CertifiedRecoveryProduct {
             .module_interface
             .map(|interface| interface.without_catalog_input_custody());
         self
+    }
+
+    pub(crate) fn without_issuing_authority(mut self) -> Self {
+        self.source_sha256 = None;
+        self.without_catalog_input_custody()
     }
 
     pub(crate) fn module_interface(

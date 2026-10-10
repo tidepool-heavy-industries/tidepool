@@ -549,8 +549,24 @@ impl ArtifactEntry {
         }
     }
 
-    fn without_catalog_input_custody(entry: &Arc<Self>) -> Arc<Self> {
-        if entry.catalog_input_custody().is_none() {
+    fn source_admission_witness(&self) -> Option<[u8; 32]> {
+        match &self.payload {
+            ArtifactPayload::Original(product) => product.source_sha256(),
+            _ => None,
+        }
+    }
+
+    fn same_issuing_authority(&self, other: &Self) -> bool {
+        self.source_admission_witness() == other.source_admission_witness()
+            && match (self.catalog_input_custody(), other.catalog_input_custody()) {
+                (None, None) => true,
+                (Some(first), Some(second)) => Arc::ptr_eq(&first, &second),
+                _ => false,
+            }
+    }
+
+    fn without_issuing_authority(entry: &Arc<Self>) -> Arc<Self> {
+        if entry.catalog_input_custody().is_none() && entry.source_admission_witness().is_none() {
             return Arc::clone(entry);
         }
         let mut semantic = (**entry).clone();
@@ -559,7 +575,7 @@ impl ArtifactEntry {
                 ArtifactPayload::Canonical(interface.clone().without_catalog_input_custody())
             }
             ArtifactPayload::Original(product) => {
-                ArtifactPayload::Original(product.clone().without_catalog_input_custody())
+                ArtifactPayload::Original(product.clone().without_issuing_authority())
             }
             payload => payload.clone(),
         };
@@ -1280,7 +1296,7 @@ impl ArtifactInventory {
             roots,
             native_custody,
             parents,
-            payload_custody: BTreeMap::new(),
+            issuing_payloads: BTreeMap::new(),
             materialization_parents,
             materialization: Mutex::new(BTreeMap::new()),
         })
@@ -1449,10 +1465,20 @@ impl ArtifactInventory {
             let retained = if let Some(previous) = supplied
                 .get(&id)
                 .or_else(|| parent_entries.get(&id).copied())
-                .or_else(|| state.payloads.get(&id))
             {
                 ArtifactEntry::merge_catalog_input_custody(previous, &entry)?
             } else {
+                // An unrelated global vertex supplies semantic bytes, never
+                // another admission's source proof or physical custody.
+                if state
+                    .payloads
+                    .get(&id)
+                    .is_some_and(|existing| existing != &entry)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::MetadataConflict { artifact: id },
+                    ));
+                }
                 entry
             };
             supplied.insert(id, retained);
@@ -1504,15 +1530,16 @@ impl ArtifactInventory {
                 "recovered native group closure differs from certified demand",
             ));
         }
-        // Physical custody belongs to this exact view. The shared semantic
-        // payload never acquires origins from unrelated admissions.
-        let payload_custody = selected
+        // Issuing authority belongs to this exact view. Global vertices retain
+        // durable bytes without fresh source witnesses or physical custody.
+        let issuing_payloads = selected
             .iter()
-            .filter(|(id, entry)| {
-                entry.catalog_input_custody().is_some()
-                    && parent_entries
-                        .get(id)
-                        .is_none_or(|previous| !Arc::ptr_eq(previous, entry))
+            .filter(|(id, entry)| match parent_entries.get(id) {
+                Some(previous) => !previous.same_issuing_authority(entry),
+                None => {
+                    entry.catalog_input_custody().is_some()
+                        || entry.source_admission_witness().is_some()
+                }
             })
             .map(|(id, entry)| (*id, Arc::clone(entry)))
             .collect();
@@ -1527,10 +1554,9 @@ impl ArtifactInventory {
                 state.graph.add_edge(source, target, dependency);
             }
             if let InventoryNodeKey::Artifact(id) = key {
-                state.payloads.insert(
-                    id,
-                    ArtifactEntry::without_catalog_input_custody(&selected[&id]),
-                );
+                state
+                    .payloads
+                    .insert(id, ArtifactEntry::without_issuing_authority(&selected[&id]));
                 state.entry_handle_copies.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -1548,7 +1574,7 @@ impl ArtifactInventory {
             roots,
             native_custody,
             parents: vec![Arc::clone(&parent.lease)],
-            payload_custody,
+            issuing_payloads,
             materialization_parents,
             materialization: Mutex::new(BTreeMap::new()),
         }))
@@ -1580,9 +1606,10 @@ struct ViewLease {
     /// retain bytes without becoming source roots or executable group demand.
     native_custody: Vec<ArtifactId>,
     parents: Vec<Arc<ViewLease>>,
-    // Immutable overrides for newly issued or changed physical custody. Parent
-    // leases retain unchanged issuing handles without copying the full catalog.
-    payload_custody: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    // Sparse immutable overrides for custody and fresh source admission proof.
+    // Explicit None overrides mask a different parent's proof in a join.
+    // Parent leases retain unchanged handles without copying the full catalog.
+    issuing_payloads: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     // Projected selection must retain issued files without importing its
     // source view's selection roots or executable authority.
     materialization_parents: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
@@ -1610,6 +1637,7 @@ struct ViewReadCache {
 struct ViewReadProjection {
     nodes: BTreeSet<InventoryNodeKey>,
     entries: Vec<Arc<ArtifactEntry>>,
+    issuing_ids: BTreeSet<ArtifactId>,
     dependencies: OnceLock<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>,
 }
 impl ViewLease {
@@ -1852,13 +1880,13 @@ impl std::fmt::Debug for ArtifactView {
 }
 impl ArtifactView {
     #[cfg(test)]
-    pub(crate) fn retained_catalog_custody_handles(&self) -> usize {
+    pub(crate) fn retained_issuing_payload_handles(&self) -> usize {
         let mut pending = vec![&self.lease];
         let mut seen = BTreeSet::new();
         let mut handles = 0;
         while let Some(lease) = pending.pop() {
             if seen.insert(Arc::as_ptr(lease)) {
-                handles += lease.payload_custody.len();
+                handles += lease.issuing_payloads.len();
                 pending.extend(lease.parents.iter());
             }
         }
@@ -1913,7 +1941,7 @@ impl ArtifactView {
                 if !seen.insert(Arc::as_ptr(lease)) {
                     continue;
                 }
-                for (id, entry) in &lease.payload_custody {
+                for (id, entry) in &lease.issuing_payloads {
                     if ids.contains(id) {
                         custody.entry(*id).or_insert(entry);
                     }
@@ -1932,6 +1960,7 @@ impl ArtifactView {
                     .cmp(&(&right.descriptor.owner, right.descriptor.id))
             });
             ViewReadProjection {
+                issuing_ids: custody.keys().copied().collect(),
                 nodes,
                 entries,
                 dependencies: OnceLock::new(),
@@ -2502,13 +2531,16 @@ impl ArtifactView {
             ));
             Arc::get_mut(&mut retained.lease)
                 .expect("new selection lease")
-                .payload_custody = self
+                .issuing_payloads = self
                 .read_projection(&state)
                 .entries
                 .iter()
                 .filter(|entry| {
                     selected.contains(&entry.descriptor.id)
-                        && entry.catalog_input_custody().is_some()
+                        && self
+                            .read_projection(&state)
+                            .issuing_ids
+                            .contains(&entry.descriptor.id)
                 })
                 .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
                 .collect();
@@ -2549,19 +2581,16 @@ impl ArtifactView {
                 .iter()
                 .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
                 .collect::<BTreeMap<_, _>>();
-            let mut payload_custody = BTreeMap::new();
+            let mut issuing_payloads = BTreeMap::new();
             for entry in &other.read_projection(&state).entries {
                 let id = entry.descriptor.id;
                 let merged = match entries.get(&id) {
                     Some(previous) => {
                         let merged = ArtifactEntry::merge_catalog_input_custody(previous, entry)?;
-                        if previous
-                            .catalog_input_custody()
-                            .as_ref()
-                            .zip(entry.catalog_input_custody().as_ref())
-                            .is_some_and(|(first, second)| !Arc::ptr_eq(first, second))
+                        if !merged.same_issuing_authority(previous)
+                            || !merged.same_issuing_authority(entry)
                         {
-                            payload_custody.insert(id, Arc::clone(&merged));
+                            issuing_payloads.insert(id, Arc::clone(&merged));
                         }
                         merged
                     }
@@ -2583,7 +2612,7 @@ impl ArtifactView {
                 roots: Vec::new(),
                 native_custody: Vec::new(),
                 parents: vec![Arc::clone(&self.lease), Arc::clone(&other.lease)],
-                payload_custody,
+                issuing_payloads,
                 materialization_parents: Vec::new(),
                 materialization: Mutex::new(BTreeMap::new()),
             }))
@@ -3175,6 +3204,151 @@ mod tests {
                 occurrence,
                 record_parent: None,
             },
+        }
+    }
+
+    #[test]
+    fn independent_native_admission_does_not_inherit_global_source_witness() {
+        let cold = native_entry("Original", &[]);
+        let mut fresh = cold.clone();
+        let ArtifactPayload::Original(cold_product) = &cold.payload else {
+            unreachable!()
+        };
+        fresh.payload = ArtifactPayload::Original(cold_product.clone().with_source_sha256([1; 32]));
+        let ArtifactPayload::Original(fresh_product) = &fresh.payload else {
+            unreachable!()
+        };
+        assert_eq!(cold, fresh);
+        assert_ne!(cold_product, fresh_product);
+        let mut observations = Vec::new();
+        for (existing, incoming, expected) in
+            [(&fresh, &cold, None), (&cold, &fresh, Some([1; 32]))]
+        {
+            let inventory = ArtifactInventory::default();
+            let old = inventory
+                .admit(&inventory.empty_view(), vec![existing.clone()])
+                .unwrap();
+            let unrelated = inventory
+                .admit(&inventory.empty_view(), vec![incoming.clone()])
+                .unwrap();
+            let selected = unrelated
+                .entries()
+                .into_iter()
+                .find(|entry| entry.descriptor.id == incoming.descriptor.id)
+                .unwrap();
+            let ArtifactPayload::Original(product) = &selected.payload else {
+                unreachable!()
+            };
+            eprintln!("independent admission: expected_source={expected:?}, actual_source={:?}, equals_fresh_product={}", product.source_sha256(), product == fresh_product);
+            observations.push((expected, product.source_sha256()));
+            let old_entries = old.entries();
+            let ArtifactPayload::Original(old_product) = &old_entries
+                .iter()
+                .find(|entry| entry.descriptor.id == existing.descriptor.id)
+                .unwrap()
+                .payload
+            else {
+                unreachable!()
+            };
+            let ArtifactPayload::Original(existing_product) = &existing.payload else {
+                unreachable!()
+            };
+            assert_eq!(old_product, existing_product);
+            let joined = unrelated.merge(&old).unwrap();
+            let selected = joined.select_roots(vec![incoming.descriptor.id]).unwrap();
+            drop(joined);
+            drop(unrelated);
+            drop(old);
+            let source_of = |view: &ArtifactView| {
+                let entries = view.entries();
+                let ArtifactPayload::Original(product) = &entries
+                    .iter()
+                    .find(|entry| entry.descriptor.id == incoming.descriptor.id)
+                    .unwrap()
+                    .payload
+                else {
+                    unreachable!()
+                };
+                product.source_sha256()
+            };
+            assert_eq!(source_of(&selected), expected);
+            let fresh_again = inventory
+                .admit(&inventory.empty_view(), vec![fresh.clone()])
+                .unwrap();
+            assert_eq!(source_of(&selected.merge(&fresh_again).unwrap()), expected);
+        }
+        assert!(observations.iter().all(|(expected, actual)| expected == actual), "unrelated retained artifacts cannot replace a receiving source witness: {observations:?}");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 64,
+            max_shrink_iters: 4096,
+            failure_persistence: option_env!("TIDEPOOL_PROPTEST_REGRESSIONS").map(|path| Box::new(proptest::test_runner::FileFailurePersistence::Direct(path)) as Box<dyn proptest::test_runner::FailurePersistence>),
+            ..proptest::test_runner::Config::default()
+        })]
+        #[test]
+        fn source_witness_histories_follow_selected_issuer(
+            operations in proptest::collection::vec((0u8..5, 0u8..3, proptest::bool::ANY), 1..40)
+        ) {
+            let base = native_entry("Original", &[]);
+            let id = base.descriptor.id;
+            let issue = |choice| {
+                let mut entry = base.clone();
+                if choice != 0 {
+                    let ArtifactPayload::Original(product) = &entry.payload else { unreachable!() };
+                    entry.payload = ArtifactPayload::Original(product.clone().with_source_sha256([choice; 32]));
+                }
+                entry
+            };
+            let witness = |view: &ArtifactView| {
+                let entries = view.entries();
+                let entry = entries.iter().find(|entry| entry.descriptor.id == id).unwrap();
+                let ArtifactPayload::Original(product) = &entry.payload else { unreachable!() };
+                product.source_sha256()
+            };
+            let inventory = ArtifactInventory::default();
+            let mut current = inventory.admit(&inventory.empty_view(), vec![issue(0)]).unwrap();
+            let mut expected = None;
+            let mut old_views = Vec::new();
+            let mut operation_counts = [0usize; 5];
+            let mut warm_reads = 0usize;
+            let mut delayed_reads = 0usize;
+            for (operation, choice, warm) in operations {
+                operation_counts[operation as usize] += 1;
+                if warm { proptest::prop_assert_eq!(witness(&current), expected); }
+                old_views.push((current.clone(), expected));
+                let incoming_expected = if choice == 0 { None } else { Some([choice; 32]) };
+                match operation {
+                    0 => {
+                        current = inventory.admit(&inventory.empty_view(), vec![issue(choice)]).unwrap();
+                        expected = incoming_expected;
+                    }
+                    1 => { current = inventory.admit(&current, vec![issue(choice)]).unwrap(); }
+                    2 | 3 => {
+                        let other_inventory = if operation == 2 { inventory.clone() } else { ArtifactInventory::default() };
+                        let incoming = other_inventory.admit(&other_inventory.empty_view(), vec![issue(choice)]).unwrap();
+                        proptest::prop_assert_eq!(witness(&incoming), incoming_expected);
+                        current = current.merge(&incoming).unwrap();
+                    }
+                    _ => { current = current.select_roots(vec![id]).unwrap(); }
+                }
+                if warm {
+                    warm_reads += 1;
+                    proptest::prop_assert_eq!(witness(&current), expected);
+                    let (old, proof) = &old_views[choice as usize % old_views.len()];
+                    proptest::prop_assert_eq!(witness(old), *proof);
+                    // Unchanged issuing authority does not copy a map per append.
+                    let appended = inventory.admit_shared(&current, current.entries()).unwrap();
+                    proptest::prop_assert_eq!(appended.retained_issuing_payload_handles(), current.retained_issuing_payload_handles());
+                    current = appended;
+                } else {
+                    delayed_reads += 1;
+                }
+            }
+            proptest::prop_assert_eq!(witness(&current), expected);
+            for (old, proof) in &old_views { proptest::prop_assert_eq!(witness(old), *proof); }
+            eprintln!("source_witness_history operations={operation_counts:?} warm_reads={warm_reads} delayed_reads={delayed_reads}");
         }
     }
 

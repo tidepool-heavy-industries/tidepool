@@ -171,6 +171,15 @@ Read-only bundle permissions do not replace new-acquisition checks.
 Actual Nix registration, NAR, retention and final bundle qualification remain the
 qualification owner’s independent checks.
 
+Artifact identity compares durable certified bytes. A fresh native source
+admission witness and acquired input custody belong to the issuing view, not the
+shared semantic vertex. Independent admission retains its own witness; a join
+keeps the receiving view's witness while combining compatible custody. Sparse
+view overrides include explicit absent witnesses when needed to mask another
+parent's proof. Detached selection retains those exact overrides. Tests must
+cross source-witness differences with acquired custody, rather than treating
+outer artifact equality as equality of issuing authority.
+
 `tidepool-module-package inspect` uses the same declared snapshot, probe, targets,
 direct configured endpoint and build-action source guards as `build`. It writes
 `catalog-inventory.json` only after actual product certification, with canonical

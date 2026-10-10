@@ -1122,12 +1122,130 @@ fn acquired_catalog_append_history_retains_only_new_or_changed_custody_handles()
             if repeat == 0 {
                 expected_handles += selected.by_owner.len();
             }
-            assert_eq!(view.retained_catalog_custody_handles(), expected_handles,
+            assert_eq!(view.retained_issuing_payload_handles(), expected_handles,
                 "unchanged offers share ancestor issuing handles; only changed custody adds an override");
             assert_eq!(view.entries().len(), 2);
         }
-        census.push(view.retained_catalog_custody_handles());
+        census.push(view.retained_issuing_payload_handles());
     }
     assert_eq!(census, vec![2, 4, 6, 8]);
     eprintln!("acquired custody append census: 64 admissions, 4 actual acquisitions, retained handles {census:?}");
+}
+
+#[test]
+fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders() {
+    use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, ArtifactPayload};
+    for relocated in [false, true] {
+        let fixture = Fixture::new();
+        let acquired = Arc::new(fixture.load().unwrap());
+        let selected = borrow_catalog(&acquired).unwrap();
+        let incoming_root = if relocated {
+            let moved = fixture._root.path().join("moved-products");
+            fs::rename(&fixture.output, &moved).unwrap();
+            moved
+        } else {
+            fixture.output.clone()
+        };
+        let incoming_package = Arc::new(
+            DeploymentModulePackage::load_under(
+                &incoming_root.join("catalog.json"),
+                &fixture.authority,
+                RootPolicy::Fixture,
+            )
+            .unwrap(),
+        );
+        let incoming_selected = borrow_catalog(&incoming_package).unwrap();
+        let source = selected.by_owner[&("u".into(), "Library".into())]
+            .original_module_interface
+            .source_sha256();
+        let producer = selected.by_owner[&("u".into(), "Library".into())]
+            .original_module_interface
+            .producer_sha256();
+        for retained_fresh in [false, true] {
+            for retained_captured in [false, true] {
+                for warm in [false, true] {
+                    let mut previous = acquired.records[0].certified_original().unwrap().clone();
+                    let mut incoming = incoming_package.records[0]
+                        .certified_original()
+                        .unwrap()
+                        .clone();
+                    if retained_fresh {
+                        previous = previous.with_source_sha256(source);
+                    } else {
+                        incoming = incoming.with_source_sha256(source);
+                    }
+                    if !retained_captured {
+                        previous = previous.without_catalog_input_custody();
+                    }
+                    assert!(previous.same_durable_artifact(&incoming));
+                    assert_ne!(
+                        previous, incoming,
+                        "fresh source proof is separate from durable recovery identity"
+                    );
+                    let expected = previous.source_sha256();
+                    let first = ArtifactEntry::original(producer, previous).unwrap();
+                    let id = first.descriptor.id;
+                    let next = ArtifactEntry::original(producer, incoming).unwrap();
+                    let inventory = ArtifactInventory::default();
+                    let parent = inventory
+                        .admit(&inventory.empty_view(), vec![first])
+                        .unwrap();
+                    let source_of = |view: &crate::artifact_inventory::ArtifactView| {
+                        let entry = view
+                            .entries()
+                            .into_iter()
+                            .find(|entry| entry.descriptor.id == id)
+                            .unwrap();
+                        let ArtifactPayload::Original(product) = &entry.payload else {
+                            panic!("native original");
+                        };
+                        product.source_sha256()
+                    };
+                    if warm {
+                        assert_eq!(source_of(&parent), expected);
+                    }
+                    let independent = inventory
+                        .admit(&inventory.empty_view(), vec![next.clone()])
+                        .unwrap();
+                    assert_ne!(source_of(&independent), expected);
+                    // The same-inventory join must mask a right-side fresh proof,
+                    // including when the left product explicitly has no proof.
+                    let shallow_join = parent.merge(&independent).unwrap();
+                    let deep_parent = inventory.admit_shared(&parent, parent.entries()).unwrap();
+                    let deep_join = deep_parent.merge(&independent).unwrap();
+                    assert_eq!(source_of(&shallow_join), expected);
+                    assert_eq!(source_of(&deep_join), expected);
+                    let detached = deep_join.select_roots(vec![id]).unwrap();
+                    drop(deep_join);
+                    drop(deep_parent);
+                    drop(shallow_join);
+                    drop(independent);
+                    assert_eq!(source_of(&detached), expected);
+                    let joined = inventory.admit(&parent, vec![next]).unwrap();
+                    assert_eq!(
+                        source_of(&joined),
+                        expected,
+                        "custody cannot promote or replace the selected source witness"
+                    );
+                    assert_eq!(
+                        source_of(&parent),
+                        expected,
+                        "cold and warm old views preserve their source proof"
+                    );
+                    assert!(!origin_paths(&joined, id).is_empty());
+                    if retained_captured && relocated {
+                        let origins = origin_paths(&joined, id);
+                        assert!(origins.iter().any(|path| path.starts_with(&fixture.output)));
+                        assert!(origins.iter().any(|path| path.starts_with(&incoming_root)));
+                    }
+                    let projected = joined.select_roots(vec![id]).unwrap();
+                    drop(joined);
+                    drop(parent);
+                    assert_eq!(source_of(&projected), expected);
+                    assert_eq!(source_of(&detached), expected);
+                }
+            }
+        }
+        drop(incoming_selected);
+    }
 }
