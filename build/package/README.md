@@ -342,9 +342,14 @@ child installation and every native reply. Each child setup and its attributed
 compiled installer phase must submit zero compiler requests. Each child's
 provider-visible preview must match its distinct `NativeInput` ordinal.
 The home-module `Display`/`WorkbenchDisplay` instances exercise original
-source and literal images: one complete retained image bundle serves separately
-issued child machine sessions, and each renderer invocation must install its
-target with zero successful native image constructions. The focused
+source and literal images: one complete retained image bundle serves every child,
+and each renderer invocation must install its target with zero successful native
+image constructions. The ordinary one/twenty-child gate retains the production
+shared-machine placement. The separate
+`production_prepared_toolset_twenty_distinct_machines_execute_original_native_probe`
+gate selects the existing dedicated-machine capability using the owner's root
+bootstrap, and requires a separately issued machine session for every child.
+The focused
 `source_prepared_toolset_two_children_share_distinct_native_renderer_inputs`
 control uses the same scenario with source preparation; it does not qualify a
 frozen release. Partial progress

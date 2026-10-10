@@ -2019,8 +2019,14 @@ async fn run_owned(
         .with_child_session_factory(child_session_factory)
         .with_handler_effect_support(tidepool_mcp::InstalledEffectSupport::installed_effect_support)
         .with_image_registry(image_registry);
-    // No child bootstrap program: every launch stays on its launching
-    // session, as before per-actor machines.
+    // Production hosts retain the launching machine. Dedicated acceptance
+    // campaigns select the existing capability with the owner-produced root.
+    #[cfg(test)]
+    if test_hooks.as_ref().is_some_and(|hooks| {
+        hooks.child_machines == hosted_test_context::HostedChildMachines::Dedicated
+    }) {
+        forest = forest.with_child_bootstrap_program(Arc::clone(&program));
+    }
     let _ = &program;
     if let Some(layers) = &source_layers {
         forest.set_source_layers(layers.clone());

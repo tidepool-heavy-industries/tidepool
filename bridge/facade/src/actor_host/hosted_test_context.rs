@@ -647,12 +647,19 @@ pub(super) type HostTransportFactory = Box<
         + Send,
 >;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostedChildMachines {
+    Shared,
+    Dedicated,
+}
+
 pub(super) struct HostTestHooks {
     pub(super) observer: HostTestObserver,
     pub(super) assembled: Option<oneshot::Sender<HostedActorContext>>,
     pub(super) stopping: watch::Receiver<bool>,
     pub(super) transport: Option<HostTransportFactory>,
     pub(super) owner_admission: Arc<Mutex<HostOwnerAdmission>>,
+    pub(super) child_machines: HostedChildMachines,
 }
 
 /// These handles are issued by the production assembly after durable startup.
@@ -1099,6 +1106,7 @@ impl HostedTestRuntime {
             None,
             false,
             None,
+            HostedChildMachines::Shared,
         )
         .await
     }
@@ -1116,6 +1124,7 @@ impl HostedTestRuntime {
             None,
             false,
             Some(diagnostics_root),
+            HostedChildMachines::Shared,
         )
         .await
     }
@@ -1125,6 +1134,23 @@ impl HostedTestRuntime {
         transport: &Arc<dyn harness::engine::ResponsesTransport>,
         configure: impl FnOnce(&mut ActorHostConfig),
     ) -> Result<Self, HostedStartupError> {
+        Self::start_prepared_configured_with_child_machines(
+            settings,
+            transport,
+            configure,
+            HostedChildMachines::Shared,
+        )
+        .await
+    }
+
+    /// Select the existing dedicated-machine capability with the root owner's
+    /// compiled bootstrap; all construction and transfer remain runtime-owned.
+    pub(super) async fn start_prepared_configured_with_child_machines(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        child_machines: HostedChildMachines,
+    ) -> Result<Self, HostedStartupError> {
         Self::start_owned(
             settings,
             configure,
@@ -1132,6 +1158,7 @@ impl HostedTestRuntime {
             None,
             true,
             None,
+            child_machines,
         )
         .await
     }
@@ -1153,6 +1180,7 @@ impl HostedTestRuntime {
             Some(Box::new(transport)),
             false,
             None,
+            HostedChildMachines::Shared,
         )
         .await
     }
@@ -1164,6 +1192,7 @@ impl HostedTestRuntime {
         transport_factory: Option<HostTransportFactory>,
         prepare: bool,
         diagnostics_root_override: Option<std::path::PathBuf>,
+        child_machines: HostedChildMachines,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::install_tracing();
         let startup_policy = StartupPolicy::parse(
@@ -1293,6 +1322,7 @@ impl HostedTestRuntime {
             stopping,
             transport: transport_factory,
             owner_admission: Arc::clone(&owner_admission),
+            child_machines,
         };
         let (ready, mut readiness) = mpsc::unbounded_channel();
         let (complete, mut outcome) = oneshot::channel();
