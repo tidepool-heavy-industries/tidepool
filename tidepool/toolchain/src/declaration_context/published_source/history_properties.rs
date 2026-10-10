@@ -1,7 +1,7 @@
 //! Publication facts remain fixed while the same original gains native demand.
 //! The reference model uses authored ordinals, independently of graph queries.
 use super::*;
-use crate::artifact_inventory::{NativeArtifactDemand, NativeGroupKey};
+use crate::artifact_inventory::{NativeArtifactDemand, NativeGroupBinding, NativeGroupKey};
 use crate::certified_products::PendingImportOwner;
 use proptest::prelude::*;
 use tidepool_repr::execution_schema::SymbolIdentity;
@@ -14,6 +14,7 @@ enum Operation {
     Compose,
     Recover,
     Reopen,
+    NormalizeSelection,
     AlterSelection(u8),
 }
 
@@ -24,7 +25,7 @@ fn operations() -> impl Strategy<Value = Vec<Operation>> {
             2 => Just(Operation::Compose),
             2 => Just(Operation::Recover),
             1 => Just(Operation::Reopen),
-            1 => (0u8..4).prop_map(Operation::AlterSelection),
+            1 => (0u8..6).prop_map(Operation::AlterSelection),
         ],
         0..24,
     )
@@ -127,48 +128,6 @@ fn restored(
             .unwrap();
     let edges: Vec<_> =
         serde_json::from_slice(&serde_json::to_vec(&view.binding_dependencies()).unwrap()).unwrap();
-    let bindings = selection.bindings.iter().copied().collect::<BTreeSet<_>>();
-    let artifacts = bindings
-        .iter()
-        .map(|binding| binding.artifact)
-        .collect::<BTreeSet<_>>();
-    let payloads = view
-        .descriptors()
-        .iter()
-        .map(|row| row.id)
-        .collect::<BTreeSet<_>>();
-    let edge_count = edges.iter().collect::<BTreeSet<_>>().len();
-    let missing = edges
-        .iter()
-        .flat_map(|(from, to, _)| [*from, *to])
-        .filter(|node| {
-            let binding = match node {
-                crate::artifact_inventory::ArtifactBindingNode::Artifact(binding) => *binding,
-                crate::artifact_inventory::ArtifactBindingNode::Group(group) => group.binding,
-            };
-            !bindings.contains(&binding)
-        })
-        .collect::<BTreeSet<_>>();
-    if bindings.len() != selection.bindings.len()
-        || artifacts != payloads
-        || edge_count != edges.len()
-        || !missing.is_empty()
-    {
-        static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!(
-                "bound recovery fixture endpoint census: {}",
-                serde_json::json!({
-                    "bindings": selection.bindings.len(), "unique_bindings": bindings.len(),
-                    "artifact_ids": artifacts.len(), "authenticated_payload_ids": payloads.len(),
-                    "extra_artifact_ids": artifacts.difference(&payloads).collect::<Vec<_>>(),
-                    "missing_artifact_ids": payloads.difference(&artifacts).collect::<Vec<_>>(),
-                    "edges": edges.len(), "unique_edges": edge_count,
-                    "missing_endpoints": missing, "selection": selection, "binding_edges": edges,
-                })
-            );
-        }
-    }
     RecoveredArtifactInventory::capture_bound(
         scratch.path(),
         &products,
@@ -206,6 +165,8 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
     let mut runner = proptest::test_runner::TestRunner::new(config);
     let callbacks = std::cell::Cell::new(0usize);
     let observed: [std::cell::Cell<usize>; 5] = std::array::from_fn(|_| std::cell::Cell::new(0));
+    let refusals: [std::cell::Cell<usize>; 6] = std::array::from_fn(|_| std::cell::Cell::new(0));
+    let normalizations = std::cell::Cell::new(0usize);
     let result = runner.run(&(0..ORDINALS.len(), operations()), |(initial, history)| {
         callbacks.set(callbacks.get() + 1);
         let (root, publication) = fixture(initial);
@@ -221,13 +182,16 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         let mut context = original.as_ref().clone();
         // Every history reaches the causal interaction, even after shrinking:
         // later same-owner body -> compose publication -> durable reconstruction.
-        let history = history.into_iter().chain([
-            Operation::Demand((initial + 1) % ORDINALS.len()),
-            Operation::Compose,
-            Operation::Recover,
-            Operation::Reopen,
-            Operation::AlterSelection(1),
-        ]);
+        let history = history
+            .into_iter()
+            .chain([
+                Operation::Demand((initial + 1) % ORDINALS.len()),
+                Operation::Compose,
+                Operation::Recover,
+                Operation::Reopen,
+                Operation::NormalizeSelection,
+            ])
+            .chain((0..6).map(Operation::AlterSelection));
         for operation in history {
             match operation {
                 Operation::Demand(index) => {
@@ -297,26 +261,78 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 }
                 Operation::AlterSelection(partition) => {
                     observed[4].set(observed[4].get() + 1);
-                    let mut roles = serde_json::to_value(context.compiler_input_roles()).unwrap();
-                    let field = if partition < 2 {
-                        "native_groups"
-                    } else {
-                        "artifacts"
-                    };
-                    let selection = roles[0]["selection"][field].as_array_mut().unwrap();
+                    let issued_roles = context.compiler_input_roles();
+                    let published = issued_roles
+                        .iter()
+                        .position(CompilerInputRole::is_published_source_original)
+                        .unwrap();
+                    let mut roles = serde_json::to_value(&issued_roles).unwrap();
+                    let issued = roles[published].clone();
+                    let graph = &mut roles[published]["selection"]["graph"];
                     match partition {
-                        0 | 2 => selection.clear(),
-                        1 => selection.push(
-                            serde_json::to_value(NativeGroupKey {
-                                artifact: root.descriptor.id,
-                                original_ordinal: ORDINALS[(initial + 1) % ORDINALS.len()],
-                            })
-                            .unwrap(),
-                        ),
-                        _ => selection.push(selection[0].clone()),
+                        0 => graph["native_groups"].as_array_mut().unwrap().clear(),
+                        1 => {
+                            let groups = graph["native_groups"].as_array_mut().unwrap();
+                            let mut unissued: NativeGroupBinding =
+                                serde_json::from_value(groups[0].clone()).unwrap();
+                            prop_assert_eq!(unissued.original_ordinal, ORDINALS[initial]);
+                            unissued.original_ordinal = ORDINALS[(initial + 1) % ORDINALS.len()];
+                            groups.push(serde_json::to_value(unissued).unwrap());
+                        }
+                        2 => graph["bindings"].as_array_mut().unwrap().clear(),
+                        3 => {
+                            let bindings = graph["bindings"].as_array_mut().unwrap();
+                            let scope = bindings[0]["selection"].as_array_mut().unwrap();
+                            scope[0] = serde_json::json!(scope[0].as_u64().unwrap() ^ 1);
+                        }
+                        4 => graph["namespace"].as_array_mut().unwrap().clear(),
+                        5 => {
+                            let digest =
+                                roles[published]["selection_sha256"].as_array_mut().unwrap();
+                            digest[0] = serde_json::json!(digest[0].as_u64().unwrap() ^ 1);
+                        }
+                        _ => unreachable!(),
                     }
+                    prop_assert_ne!(&roles[published], &issued);
                     let altered: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
+                    prop_assert_ne!(&altered, &issued_roles);
                     prop_assert!(restored(&context, &altered).is_err());
+                    refusals[usize::from(partition)]
+                        .set(refusals[usize::from(partition)].get() + 1);
+                }
+                Operation::NormalizeSelection => {
+                    // Embedded publication rows describe a set of selected nodes.
+                    // Repetition changes the encoding, not the issued selection.
+                    let issued_roles = context.compiler_input_roles();
+                    let published = issued_roles
+                        .iter()
+                        .position(CompilerInputRole::is_published_source_original)
+                        .unwrap();
+                    let mut roles = serde_json::to_value(&issued_roles).unwrap();
+                    let bindings = roles[published]["selection"]["graph"]["bindings"]
+                        .as_array_mut()
+                        .unwrap();
+                    bindings.push(bindings[0].clone());
+                    let repeated: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
+                    prop_assert_ne!(&repeated, &issued_roles);
+                    let normalized = restored(&context, &repeated).unwrap();
+                    let reopened = normalized.published_source_original_selections().unwrap();
+                    prop_assert_eq!(reopened.len(), 1);
+                    let expected = publication.context();
+                    let actual = reopened[0].context();
+                    prop_assert_eq!(
+                        actual.artifact_view().capture_graph_selection().namespace,
+                        expected.artifact_view().capture_graph_selection().namespace
+                    );
+                    prop_assert_eq!(
+                        actual.artifact_view().selected_native_groups(),
+                        expected.artifact_view().selected_native_groups()
+                    );
+                    prop_assert_eq!(
+                        actual.artifact_view().binding_dependencies(),
+                        expected.artifact_view().binding_dependencies()
+                    );
+                    normalizations.set(normalizations.get() + 1);
                 }
             }
             prop_assert_eq!(context.compiler_input_roles(), expected_roles.clone());
@@ -339,8 +355,35 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         prop_assert!(demanded.len() >= 2);
         Ok(())
     });
-    eprintln!("publication history configured_cases={configured_cases} callbacks={} demand={} compose={} recovery={} reopen={} refusal={}", callbacks.get(), observed[0].get(), observed[1].get(), observed[2].get(), observed[3].get(), observed[4].get());
+    eprintln!(
+        "publication history configured_cases={configured_cases} callbacks={} demand={} compose={} recovery={} reopen={} refusal={}",
+        callbacks.get(),
+        observed[0].get(),
+        observed[1].get(),
+        observed[2].get(),
+        observed[3].get(),
+        observed[4].get()
+    );
+    eprintln!(
+        "publication refusal cases missing_groups={} unissued_group={} missing_bindings={} wrong_binding_scope={} wrong_namespace={} wrong_digest={}",
+        refusals[0].get(),
+        refusals[1].get(),
+        refusals[2].get(),
+        refusals[3].get(),
+        refusals[4].get(),
+        refusals[5].get()
+    );
+    eprintln!(
+        "publication duplicate-row normalizations={}",
+        normalizations.get()
+    );
     result.unwrap();
+    assert!(normalizations.get() >= configured_cases as usize);
+    assert!(
+        refusals
+            .iter()
+            .all(|count| count.get() >= configured_cases as usize)
+    );
 }
 
 #[test]
