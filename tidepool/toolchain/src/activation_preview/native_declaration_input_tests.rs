@@ -183,8 +183,9 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
         "availability must not select executable groups"
     );
     let manifest: Value =
-        ciborium::de::from_reader(std::fs::read(request.manifest).unwrap().as_slice()).unwrap();
+        ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice()).unwrap();
     let fields = manifest.as_array().unwrap();
+    let originals = request.compiler_original_products().unwrap();
     let mut owners = fields[6]
         .as_array()
         .unwrap()
@@ -192,30 +193,38 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
         .map(|row| {
             let row = row.as_array().unwrap();
             let module = string(&row[1]).unwrap();
-            // Literal fixture expectations do not consult the issued census or
-            // selected groups, so truncation and ordinal renumbering are visible.
-            let expected = Value::Array(
-                [3u32, 17]
-                    .into_iter()
-                    .map(|ordinal| {
-                        Value::Array(vec![
-                            Value::Integer(ordinal.into()),
-                            Value::Array(vec![Value::Array(vec![
-                                Value::Text("main".into()),
-                                Value::Text(module.into()),
-                                Value::Text("value".into()),
-                                Value::Text(format!("entry_{ordinal}")),
-                                Value::Null,
-                            ])]),
-                            Value::Array(Vec::new()),
-                        ])
-                    })
-                    .collect(),
-            );
+            // The manifest advertises ordinals; authenticated original groups
+            // retain their independent binder identities and definitions.
             assert_eq!(
-                row[6], expected,
+                row[6],
+                Value::Array(
+                    [3u32, 17]
+                        .map(|ordinal| Value::Integer(ordinal.into()))
+                        .into()
+                ),
                 "complete sparse native availability census"
             );
+            let original = originals
+                .iter()
+                .find(|product| product.owner().module == module)
+                .unwrap();
+            let groups = crate::certified_products::original_available_groups(original)
+                .unwrap()
+                .collect::<Vec<_>>();
+            assert_eq!(groups.len(), 2);
+            for (group, ordinal) in groups.into_iter().zip([3u32, 17]) {
+                assert_eq!(group.original_ordinal(), ordinal);
+                assert_eq!(
+                    group.binders(),
+                    &[tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "main".into(),
+                        module: module.into(),
+                        namespace: "value".into(),
+                        occurrence: format!("entry_{ordinal}"),
+                        record_parent: None,
+                    }]
+                );
+            }
             module.to_owned()
         })
         .collect::<Vec<_>>();

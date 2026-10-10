@@ -7106,7 +7106,14 @@ mod tests {
         let native = request
             .admit_fixture_support(empty.clone(), &offer, &[], None)
             .unwrap();
-        assert_eq!(native.compiler_original_products().unwrap().len(), 1);
+        assert_eq!(native.recovery_products().len(), 1);
+        assert!(native.compiler_original_products().unwrap().is_empty());
+        assert!(native
+            .compiler_input_roles()
+            .iter()
+            .all(|role| matches!(role, CompilerInputRole::InterfaceOnly { .. })));
+        assert!(native.lexical_graph().is_empty());
+        assert!(request.program_support.is_none());
         assert!(request.program_source_lexical().is_empty());
 
         let types = CompilerSupportFixture {
@@ -7124,6 +7131,30 @@ mod tests {
         assert!(retained.compiler_original_products().unwrap().is_empty());
         assert!(request.program_support.is_none());
         assert!(retained.lexical_graph().is_empty());
+
+        // Authenticated source admissions select implementations independently
+        // of the otherwise identical native custody-only support operation.
+        let source_offer = support_offer(&[
+            support_product("InstanceOwner"),
+            support_product("InstanceRelay"),
+        ]);
+        let mut request = program_request(directory.path(), empty.clone());
+        let admitted = request
+            .admit_fixture_support(
+                empty.clone(),
+                &source_offer,
+                &[support_admission(directory.path())],
+                None,
+            )
+            .unwrap();
+        assert_eq!(admitted.compiler_original_products().unwrap().len(), 2);
+        assert_eq!(
+            admitted.compiler_input_roles(),
+            source_offer.projection.roles()
+        );
+        assert!(request.program_support.is_some());
+        assert_eq!(request.program_source_lexical().len(), 2);
+        assert!(empty.artifact_view().is_empty());
 
         let uncertified = CertifiedRecoveryProduct::from_certification(
             product.owner().clone(),
@@ -11128,11 +11159,18 @@ mod tests {
             assert!(matches!(error, CompileError::ArtifactInventory(error)
                 if matches!(error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict { .. })));
         };
-        assert_native_refusal(
-            request
-                .admit_fixture_support(context.clone(), &support, &[], None)
-                .unwrap_err(),
+        let inherited_roles = context.compiler_input_roles();
+        let inherited_originals = context.compiler_original_products().unwrap();
+        let retained = request
+            .admit_fixture_support(context.clone(), &support, &[], None)
+            .unwrap();
+        assert_eq!(retained.recovery_products().len(), 2);
+        assert_eq!(retained.compiler_input_roles(), inherited_roles);
+        assert_eq!(
+            retained.compiler_original_products().unwrap(),
+            inherited_originals
         );
+        assert!(retained.lexical_graph().is_empty());
         assert!(request.program_support.is_none());
         assert!(request.program_source_lexical().is_empty());
         assert_eq!(context.recovery_products().len(), 1);
@@ -11166,6 +11204,12 @@ mod tests {
             promoted.recovery_products()[0].owner(),
             unchanged[0].owner()
         );
+        assert!(promoted.compiler_original_products().unwrap().is_empty());
+        assert!(promoted
+            .compiler_input_roles()
+            .iter()
+            .all(|role| matches!(role, CompilerInputRole::InterfaceOnly { .. })));
+        assert!(canonical_request.program_support.is_none());
         assert!(promoted.lexical_graph().is_empty());
 
         // A real validated current-source receipt cannot replace native identity
