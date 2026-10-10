@@ -12,7 +12,7 @@ use crate::resident_workbench::request_tests::ActivationPublicationPhaseFixture;
 use crate::{ActorExitKind, ActorId, ActorTerminal, Incarnation};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -751,7 +751,10 @@ fn run_history(
     // capability issued by that owner, including capabilities retained by waiters.
     fixture.make_ready();
     if initially_pending {
+        let started = std::time::Instant::now();
+        eprintln!("initial run fence begin");
         fixture.make_pending();
+        eprintln!("initial run fence complete in {:?}", started.elapsed());
     }
     let mut owner_ready = !initially_pending;
     let registry = Arc::new(RequestRegistry::default());
@@ -885,8 +888,12 @@ fn run_history(
                     } else {
                         outcome
                     };
+                    eprintln!("native producer settlement step {step}: {outcome:?}, owner_ready={owner_ready}");
                     if matches!(outcome, NativeOutcome::RecoveryRequired) && owner_ready {
+                        let started = std::time::Instant::now();
+                        eprintln!("producer run fence begin at step {step}");
                         fixture.make_pending();
+                        eprintln!("producer run fence complete in {:?}", started.elapsed());
                         owner_ready = false;
                         coverage.owner_fences += 1;
                     }
@@ -999,7 +1006,10 @@ fn run_history(
             }
             Action::FenceOwner => {
                 if owner_ready {
+                    let started = std::time::Instant::now();
+                    eprintln!("midflight run fence begin at step {step}");
                     fixture.make_pending();
+                    eprintln!("midflight run fence complete in {:?}", started.elapsed());
                     owner_ready = false;
                     coverage.owner_fences += 1;
                 }
@@ -1403,8 +1413,14 @@ fn config(name: &'static str) -> Config {
 async fn generated_request_activation_matches_native_evidence() {
     // Registry histories share their original checked input. This family never
     // mutates run readiness; fence integration has independent owner epochs.
+    let setup = std::time::Instant::now();
+    eprintln!("ready-only fixture construction begin");
     let fixture =
         crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
+    eprintln!(
+        "ready-only fixture construction complete in {:?}",
+        setup.elapsed()
+    );
     let coverage = RefCell::new(Coverage::default());
     TestRunner::new(config(concat!(
         module_path!(),
@@ -1436,19 +1452,22 @@ async fn generated_run_fences_preserve_publication_receipts() {
     }
     for initially_pending in [false, true] {
         let coverage = RefCell::new(Coverage::default());
+        let attempts = Cell::new(0usize);
         TestRunner::new(cfg.clone())
             .run(&histories(true), |history| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                let setup = std::time::Instant::now();
+                eprintln!("fresh-owner attempt {attempt}, initially_pending={initially_pending}, operations={}: fixture construction begin", history.len());
                 let fixture = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(
-                crate::resident_workbench::request_tests::activation_publication_phase_fixture()
-            )
+                    let future = crate::resident_workbench::request_tests::activation_publication_phase_fixture();
+                    tokio::runtime::Handle::current().block_on(future)
                 });
-                run_history(
-                    &history,
-                    &fixture,
-                    initially_pending,
-                    &mut coverage.borrow_mut(),
-                )
+                eprintln!("fresh-owner attempt {attempt}: fixture construction complete in {:?}", setup.elapsed());
+                let execution = std::time::Instant::now();
+                let result = run_history(&history, &fixture, initially_pending, &mut coverage.borrow_mut());
+                eprintln!("fresh-owner attempt {attempt}: operations complete in {:?}, result={result:?}", execution.elapsed());
+                result
             })
             .unwrap();
         eprintln!(
@@ -1461,8 +1480,14 @@ async fn generated_run_fences_preserve_publication_receipts() {
 #[tokio::test]
 async fn request_activation_phase_support_covers_contract_partitions() {
     let mut coverage = Coverage::default();
+    let setup = std::time::Instant::now();
+    eprintln!("partition ready-only fixture construction begin");
     let ready_fixture =
         crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
+    eprintln!(
+        "partition ready-only fixture construction complete in {:?}",
+        setup.elapsed()
+    );
     for mode in 0..17 {
         for cancel_native in [false, true] {
             run_history(
@@ -1484,8 +1509,14 @@ async fn request_activation_phase_support_covers_contract_partitions() {
         (false, 17, false),
         (false, 17, true),
     ] {
+        let setup = std::time::Instant::now();
+        eprintln!("partition mode={mode}, initially_pending={initially_pending}, cancel_native={cancel_native}: fixture construction begin");
         let fixture =
             crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
+        eprintln!(
+            "partition fixture construction complete in {:?}",
+            setup.elapsed()
+        );
         run_history(
             &guided(mode, cancel_native),
             &fixture,
