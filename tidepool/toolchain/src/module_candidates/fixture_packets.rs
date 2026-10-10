@@ -10,6 +10,104 @@ use crate::certified_products::{
 use crate::declaration_context::{certified_product_artifact_view, ExactDeclarationContext};
 use crate::declaration_join::ExactModuleIdentity;
 
+#[derive(Clone, Copy)]
+enum PacketProducer {
+    OriginalProducts,
+    AuthoredDeclaration,
+    Codec,
+}
+
+impl PacketProducer {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OriginalProducts => "original-products",
+            Self::AuthoredDeclaration => "authored-declaration",
+            Self::Codec => "codec",
+        }
+    }
+}
+
+// Completion belongs to the request bytes actually consumed by this producer.
+// It is issued last, once, after the specific output publication succeeds.
+struct PacketCompletion<'a> {
+    packet: &'a Path,
+    producer: PacketProducer,
+    request_sha: [u8; 32],
+}
+
+impl<'a> PacketCompletion<'a> {
+    fn new(packet: &'a Path, producer: PacketProducer, request: &[u8]) -> Self {
+        assert!(packet.is_absolute());
+        assert!(request.len() <= MANIFEST_LIMIT);
+        assert!(
+            !packet.join("completion.cbor").exists(),
+            "packet already completed"
+        );
+        Self {
+            packet,
+            producer,
+            request_sha: Sha256::digest(request).into(),
+        }
+    }
+
+    fn publish(self, outputs: &[PathBuf]) {
+        use std::io::{Read, Write};
+        assert!(
+            !outputs.is_empty() && outputs.len() <= 16,
+            "completed packet requires outputs"
+        );
+        let mut seen = BTreeSet::new();
+        let mut total = 0;
+        let rows = outputs
+            .iter()
+            .map(|path| {
+                assert!(seen.insert(path.clone()), "duplicate completion output");
+                assert!(path.is_absolute() && path.starts_with(self.packet));
+                assert!(
+                    path.canonicalize()
+                        .unwrap()
+                        .starts_with(self.packet.canonicalize().unwrap()),
+                    "completion output escaped its packet"
+                );
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(
+                    &mut fs::File::open(path)
+                        .unwrap()
+                        .take((16 * MANIFEST_LIMIT + 1) as u64),
+                    &mut bytes,
+                )
+                .unwrap();
+                total += bytes.len();
+                assert!(
+                    total <= 16 * MANIFEST_LIMIT,
+                    "completion output aggregate bound"
+                );
+                Value::Array(vec![
+                    Value::Text(path.to_str().unwrap().into()),
+                    Value::Integer(bytes.len().into()),
+                    Value::Bytes(Sha256::digest(&bytes).to_vec()),
+                ])
+            })
+            .collect();
+        let receipt = Value::Array(vec![
+            Value::Text("TPFIXTURECOMPLETE1".into()),
+            Value::Text(self.producer.label().into()),
+            Value::Text(self.packet.to_str().unwrap().into()),
+            Value::Bytes(self.request_sha.to_vec()),
+            Value::Array(rows),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&receipt, &mut bytes).unwrap();
+        assert!(bytes.len() <= 8192, "completion metadata bound");
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.packet.join("completion.cbor"))
+            .expect("one-shot packet completion");
+        output.write_all(&bytes).unwrap();
+    }
+}
+
 fn text_field(value: &Value) -> &str {
     value.as_text().expect("fixture text field")
 }
@@ -153,7 +251,7 @@ fn publish_fixture_candidates(
     certified: &CertifiedProducts,
     requested: &BTreeSet<String>,
     delivery: &Path,
-) {
+) -> PathBuf {
     let native_owners = certified
         .recovery_products
         .iter()
@@ -220,6 +318,7 @@ fn publish_fixture_candidates(
     );
     let destination = delivery.join("module-candidates.cbor");
     assert_eq!(selected.manifest_path, destination);
+    destination
 }
 
 fn write_fixture_scope_output(packet: &Path, manifest: &Path) {
@@ -251,6 +350,8 @@ fn source_boot_candidate_packet_producer() {
     assert!(packet.is_absolute());
     let request = fs::read(packet.join("request.cbor")).unwrap();
     assert!(request.len() <= MANIFEST_LIMIT);
+    let completion = PacketCompletion::new(&packet, PacketProducer::OriginalProducts, &request);
+    let mut outputs = Vec::new();
     let request: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
     let fields = request.as_array().expect("fixture request tuple");
     assert_eq!(fields.len(), 10);
@@ -353,7 +454,7 @@ fn source_boot_candidate_packet_producer() {
             &lexical_roots,
         );
         if !requested.is_empty() {
-            publish_fixture_candidates(
+            let manifest = publish_fixture_candidates(
                 producer,
                 &include,
                 &evidence,
@@ -363,6 +464,12 @@ fn source_boot_candidate_packet_producer() {
                 &requested,
                 packet.parent().unwrap(),
             );
+            // Candidate graph descriptors retain their publication directory.
+            // Deliver a packet-owned snapshot of that actual manifest; Haskell
+            // never treats a preexisting shared manifest as completed output.
+            let snapshot = packet.join("module-candidates.cbor");
+            fs::write(&snapshot, fs::read(manifest).unwrap()).unwrap();
+            outputs.push(snapshot);
         }
         context
     } else {
@@ -384,7 +491,9 @@ fn source_boot_candidate_packet_producer() {
             .prepare_fixture_compilation(&request_root, producer)
             .unwrap();
         write_fixture_scope_output(&packet, &scope.manifest);
+        outputs.extend([scope.manifest.clone(), packet.join("delivery.cbor")]);
     }
+    completion.publish(&outputs);
     println!(
         "genuine fixture: Rust certification, full ArtifactView admission and production delivery passed"
     );
@@ -399,6 +508,7 @@ fn source_boot_authored_declaration_packet_producer() {
     assert!(packet.is_absolute());
     let request = fs::read(packet.join("request.cbor")).unwrap();
     assert!(request.len() <= MANIFEST_LIMIT);
+    let completion = PacketCompletion::new(&packet, PacketProducer::AuthoredDeclaration, &request);
     let request: Value = ciborium::de::from_reader(request.as_slice()).unwrap();
     let fields = request.as_array().expect("authored fixture request tuple");
     assert_eq!(fields.len(), 5);
@@ -461,5 +571,31 @@ fn source_boot_authored_declaration_packet_producer() {
         .prepare_fixture_compilation(&request_root, endpoint.identity().producer_bytes())
         .expect("production authored scope delivery with original carrier association");
     write_fixture_scope_output(&packet, &scope.manifest);
+    completion.publish(&[scope.manifest.clone(), packet.join("delivery.cbor")]);
     println!("genuine authored fixture: reserved declaration certification, origin-preserving type-only projection and production scope delivery passed");
+}
+
+#[test]
+fn packet_completion_refuses_partial_and_competing_issuance() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("output.cbor");
+    let receipt = root.path().join("completion.cbor");
+    let request = b"actual consumed request";
+    let attempt = |outputs: &[PathBuf]| {
+        std::panic::catch_unwind(|| {
+            PacketCompletion::new(root.path(), PacketProducer::Codec, request).publish(outputs);
+        })
+    };
+    assert!(attempt(&[]).is_err());
+    assert!(!receipt.exists());
+    assert!(attempt(std::slice::from_ref(&output)).is_err());
+    assert!(!receipt.exists());
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    assert!(attempt(&[outside.path().to_owned()]).is_err());
+    assert!(!receipt.exists());
+    fs::write(&output, b"published output").unwrap();
+    let pending = PacketCompletion::new(root.path(), PacketProducer::Codec, request);
+    fs::write(&receipt, b"competing one-shot completion").unwrap();
+    assert!(std::panic::catch_unwind(|| pending.publish(&[output])).is_err());
+    assert_eq!(fs::read(receipt).unwrap(), b"competing one-shot completion");
 }

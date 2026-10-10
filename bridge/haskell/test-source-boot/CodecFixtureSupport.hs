@@ -23,7 +23,6 @@ import Data.Text qualified as T
 import Data.Word (Word32, Word64)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (issueCodecFixturePacket)
-import System.FilePath ((</>))
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.CheckedCell (RequestHelperRecipe(..))
@@ -96,21 +95,21 @@ readPurposeCodecFixture work includes purpose = do
         CodecCellPurpose -> ("cell", TNull)
         CodecItemPurpose -> ("item", TNull)
         CodecInspectionPurpose -> ("inspection", TNull)
-  packet <- codecRequest work "purpose" [text name,TList (map text includes),signature]
-  readCodecTerm (packet </> "purpose.cbor")
+  path <- codecRequest work "purpose.cbor" "purpose" [text name,TList (map text includes),signature]
+  readCodecTerm path
 
 readExpressionItemCodecFixture :: FilePath -> [FilePath] -> BS.ByteString -> IO Term
 readExpressionItemCodecFixture work includes expression = do
-  packet <- codecRequest work "expression_purpose" [TList (map text includes),TBytes expression]
-  readCodecTerm (packet </> "purpose.cbor")
+  path <- codecRequest work "purpose.cbor" "expression_purpose" [TList (map text includes),TBytes expression]
+  readCodecTerm path
 
 readRequestTypesCodecFixture
   :: FilePath -> BS.ByteString -> RequestHelperRecipe -> Maybe BS.ByteString -> IO Term
 readRequestTypesCodecFixture work signatures recipe inner = do
   let name = case recipe of NoRequestHelpers -> "none"; ActorReplyHelpers -> "actor-reply"
-  packet <- codecRequest work "request_types"
+  path <- codecRequest work "purpose.cbor" "request_types"
     [TBytes signatures,text name,maybe TNull TBytes inner]
-  readCodecTerm (packet </> "purpose.cbor")
+  readCodecTerm path
 
 data ReceiptCodecFacts = ReceiptCodecFacts
   { codecReceiptSource :: FilePath
@@ -196,14 +195,14 @@ readCompilerInputCodecFacts work proof evidence = readFacts work "input_facts" [
       fields <- closedMap ["owner","packages"] term
       (,) <$> field fields "owner" owner <*> field fields "packages" (array owner)
 
-codecRequest :: FilePath -> String -> [Term] -> IO FilePath
-codecRequest work operation arguments = issueCodecFixturePacket work
+codecRequest :: FilePath -> FilePath -> String -> [Term] -> IO FilePath
+codecRequest work output operation arguments = issueCodecFixturePacket work output
   (toStrictByteString (encodeTerm (TList [text "TPCODECFIXTURE1",text operation,TList arguments])))
 
 readFacts :: FilePath -> String -> [Term] -> (Term -> Either String a) -> IO a
 readFacts work operation arguments decode = do
-  packet <- codecRequest work operation arguments
-  envelope <- readCodecTerm (packet </> "facts.cbor")
+  path <- codecRequest work "facts.cbor" operation arguments
+  envelope <- readCodecTerm path
   case envelope of
     TList [TString "TPCODECFACTS1",TString actual, facts] | actual == T.pack operation ->
       either (fail . ("invalid typed codec observation: " ++)) pure (decode facts)

@@ -213,9 +213,7 @@ fn decode_arguments<T: serde::de::DeserializeOwned>(value: &Value, fields: usize
     );
     value.deserialized().expect("typed codec arguments")
 }
-fn packet_request(root: &Path) -> CodecRequest {
-    assert!(root.is_absolute(), "codec request root must be absolute");
-    let bytes = bounded_bytes(&root.join("request.cbor"), MANIFEST_LIMIT);
+fn packet_request(bytes: &[u8]) -> CodecRequest {
     let mut cursor = std::io::Cursor::new(&bytes);
     let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut cursor, 32)
         .expect("codec request CBOR");
@@ -291,38 +289,59 @@ fn source_boot_codec_packet_producer() {
         std::env::var_os("TIDEPOOL_CANDIDATE_FIXTURE_PACKET")
             .expect("codec producer private request directory"),
     );
-    match packet_request(&root) {
+    let bytes = bounded_bytes(&root.join("request.cbor"), MANIFEST_LIMIT);
+    let completion = super::PacketCompletion::new(&root, super::PacketProducer::Codec, &bytes);
+    let output = match packet_request(&bytes) {
         CodecRequest::Candidate(case) => {
             let mut bytes = vec![];
             ciborium::ser::into_writer(&candidate_fixture(case), &mut bytes).unwrap();
             assert!(bytes.len() <= MANIFEST_LIMIT, "candidate packet bound");
             tidepool_atomic_write::write_best_effort(&root.join("module-candidates.cbor"), &bytes)
                 .unwrap();
+            root.join("module-candidates.cbor")
         }
         CodecRequest::ScopeEmpty => {
             let producer = b"tidepool-structural-codec-scope";
             let context = Arc::new(super::empty_fixture_scope(Sha256::digest(producer).into()));
             context
                 .prepare_fixture_compilation(&root.join("scope"), producer)
-                .expect("owning empty scope serializer");
+                .expect("owning empty scope serializer")
+                .manifest
         }
-        CodecRequest::CellPurpose(includes, values) => cell_purpose(&root, &includes, values),
-        CodecRequest::ReceiptFacts(path) => receipt_facts(&root, absolute_path(&path)),
-        CodecRequest::CertificateFacts(path) => certificate_facts(&root, absolute_path(&path)),
-        CodecRequest::SegmentItemFacts(path) => segment_item_facts(&root, absolute_path(&path)),
+        CodecRequest::CellPurpose(includes, values) => {
+            cell_purpose(&root, &includes, values);
+            root.join("purpose.cbor")
+        }
+        CodecRequest::ReceiptFacts(path) => {
+            receipt_facts(&root, absolute_path(&path));
+            root.join("facts.cbor")
+        }
+        CodecRequest::CertificateFacts(path) => {
+            certificate_facts(&root, absolute_path(&path));
+            root.join("facts.cbor")
+        }
+        CodecRequest::SegmentItemFacts(path) => {
+            segment_item_facts(&root, absolute_path(&path));
+            root.join("facts.cbor")
+        }
         CodecRequest::InputFacts(proof, evidence) => {
-            input_facts(&root, absolute_path(&proof), absolute_path(&evidence))
+            input_facts(&root, absolute_path(&proof), absolute_path(&evidence));
+            root.join("facts.cbor")
         }
         CodecRequest::Purpose(case, includes, signature) => {
-            purpose(&root, case, &includes, signature)
+            purpose(&root, case, &includes, signature);
+            root.join("purpose.cbor")
         }
         CodecRequest::RequestTypes(signatures, recipe, inner) => {
-            request_types(&root, signatures, recipe, inner)
+            request_types(&root, signatures, recipe, inner);
+            root.join("purpose.cbor")
         }
         CodecRequest::ExpressionPurpose(includes, plan) => {
-            expression_purpose(&root, &includes, plan)
+            expression_purpose(&root, &includes, plan);
+            root.join("purpose.cbor")
         }
-    }
+    };
+    completion.publish(&[output]);
 }
 fn absolute_path(path: &Path) -> &Path {
     assert!(path.is_absolute(), "codec input path must be absolute");

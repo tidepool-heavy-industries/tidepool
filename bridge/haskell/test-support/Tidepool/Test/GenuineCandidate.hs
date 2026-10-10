@@ -14,7 +14,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm)
 import Codec.CBOR.Encoding
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Monad (unless, void)
+import Control.Monad (unless)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
 import Data.Map.Strict qualified as Map
@@ -25,7 +25,7 @@ import GHC.Unit.Module (moduleName, moduleNameString)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import Tidepool.Test.FixturePacket
-  ( PacketProducer(..), newPacketDirectory, runPacketProducer )
+  ( PacketProducer(..), PacketCompletion, completedPacketOutput, newPacketDirectory, runPacketProducer )
 import Tidepool.ExecutionProjection (projectOriginalHomeModuleProducts)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.GhcPipeline (PreparedPipelineResult(..), pprAcceptedCandidates, PipelineResult(..))
@@ -65,7 +65,7 @@ data FixtureDelivery
   | ScopeDelivery { fixtureDeliveryRoot :: FilePath }
 
 data FixtureOutput
-  = CandidateManifestOutput FilePath
+  = CandidateManifestOutput BS.ByteString
   | ScopeOutput FilePath
 
 captureCompilerFixture :: FixtureCompilerInput -> PreparedPipelineResult -> IO CapturedCompilerFixture
@@ -87,8 +87,11 @@ deliverCapturedFixture capture selection delivery =
   writePacket delivery (Just capture) selection
 
 writeGenuineCandidateManifestFor :: [String] -> FilePath -> CapturedCompilerFixture -> IO ()
-writeGenuineCandidateManifestFor names work capture =
-  void (deliverCapturedFixture capture (FixtureSelection names [] [] []) (CandidateDelivery work))
+writeGenuineCandidateManifestFor names work capture = do
+  output <- deliverCapturedFixture capture (FixtureSelection names [] [] []) (CandidateDelivery work)
+  case output of
+    CandidateManifestOutput bytes -> BS.writeFile (work </> "module-candidates.cbor") bytes
+    ScopeOutput _ -> fail "fixture delivery omitted its requested candidate manifest"
 
 writeGenuineMetadataScope :: FilePath -> [String] -> CapturedCompilerFixture -> IO FilePath
 writeGenuineMetadataScope work names capture = scopeOutput $
@@ -122,12 +125,14 @@ scopeOutput action = action >>= \output -> case output of
 
 -- The production request owns both graph descriptors and its manifest. Return
 -- its actual path rather than relocating one part of the issued resource.
-readScopeOutput :: FilePath -> IO FixtureOutput
-readScopeOutput packet = do
-  bytes <- BSL.readFile (packet </> "delivery.cbor")
+readScopeOutput :: FilePath -> PacketCompletion -> IO FixtureOutput
+readScopeOutput packet completion = do
+  bytes <- BSL.fromStrict <$> completedPacketOutput completion (packet </> "delivery.cbor")
   case deserialiseFromBytes decodeTerm bytes of
     Right (trailing, TList [TString "TPSOURCEBOOTDELIVERY1", TString path])
-      | BSL.null trailing -> pure (ScopeOutput (T.unpack path))
+      | BSL.null trailing -> do
+          _ <- completedPacketOutput completion (T.unpack path)
+          pure (ScopeOutput (T.unpack path))
     _ -> fail "genuine fixture adapter did not return its original scope resource"
 
 requiredProducer :: IO String
@@ -148,8 +153,8 @@ writeGenuineAuthoredDeclarationScope owner includes source work = do
   BS.writeFile (packet </> "request.cbor") (toStrictByteString
     (encodeListLen 5 <> text "TPSOURCEBOOTAUTHORED2" <> encodeWord64 generation
       <> names includes <> text source <> text work))
-  runPacketProducer AuthoredDeclarationProducer packet
-  scopeOutput (readScopeOutput packet)
+  completion <- runPacketProducer AuthoredDeclarationProducer packet
+  scopeOutput (readScopeOutput packet completion)
 
 writePacket :: FixtureDelivery -> Maybe CapturedCompilerFixture -> FixtureSelection -> IO FixtureOutput
 writePacket delivery input selection = do
@@ -167,9 +172,9 @@ writePacket delivery input selection = do
       <> names includes <> names (fixtureCandidates selection) <> names (fixtureInterfaces selection)
       <> names (fixtureNativeOwners selection) <> encodeBool wantsScope
       <> text producer <> names (fixtureLexicalRoots selection) <> optional capture))
-  runPacketProducer OriginalProductsProducer packet
-  if wantsScope then readScopeOutput packet
-    else pure (CandidateManifestOutput (fixtureDeliveryRoot delivery </> "module-candidates.cbor"))
+  completion <- runPacketProducer OriginalProductsProducer packet
+  if wantsScope then readScopeOutput packet completion
+    else CandidateManifestOutput <$> completedPacketOutput completion (packet </> "module-candidates.cbor")
 
 -- Select the actual checked root; projection policy and all emission belong to
 -- the same internal compiler owner used by the production worker.

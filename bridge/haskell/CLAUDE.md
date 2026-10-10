@@ -449,6 +449,15 @@ immutable outputs from complete declared inputs; no source refresh/updater,
 ambient compiler cache, or committed metadata fingerprint is the acceptance
 owner. Retain actual execution counts and reports separately from compilation.
 
+The shared Haskell `Tidepool.Test.FixturePacket` transport consumes the Rust
+`module_candidates::fixture_packets` completion owner. A successful libtest exit
+alone does not establish fixture issuance. Completion is one-shot and binds the
+specific producer, consumed request bytes, private packet and output hashes.
+Genuine compiler captures and structural codec requests retain separate entries;
+completion grants no compiler authority. Candidate manifests are delivered from
+a verified packet snapshot; their work-owned graph companions retain the original
+publication identity and pass independent graph and candidate admission checks.
+
 ## Extractor diagnostics
 
 Diagnostics are opt-in:

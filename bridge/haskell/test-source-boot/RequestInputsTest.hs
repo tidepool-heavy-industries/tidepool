@@ -1,18 +1,22 @@
-module RequestInputsTest (requestInputHistories, requestInputBoundaries, retainedCompilationPublication) where
+{-# LANGUAGE OverloadedStrings #-}
+
+module RequestInputsTest (requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories) where
 
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, fromException, throwIO, try)
-import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (foldM, forM, forM_, unless, when)
+import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Monad (foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString as BS
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (isInfixOf, isPrefixOf, nub, stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Text as T
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFileExist, listDirectory, removeFile)
+import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, removeFile, setPermissions, Permissions(..))
 import System.FilePath ((</>), takeDirectory)
 import System.Timeout (timeout)
 import Test.QuickCheck
+import Test.QuickCheck.Random (mkQCGen)
 import GHC.Driver.Env (HscEnv(..))
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
 import GHC.Unit.Finder.Types (FinderCache(..))
@@ -35,10 +39,181 @@ import Tidepool.GhcPipeline
   , runPipelineSessionSelected, preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.RequestInputs
-import Tidepool.Session (SessionScope(..), emptySessionScope)
-import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope)
+import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
+import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope)
+import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
+import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
+import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer)
+import Codec.CBOR.Term (Term(..), encodeTerm)
+import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
+import CodecFixtureSupport (readCodecTerm)
 import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics)
+
+-- This fault injector invokes the actual libtest binary. It never derives
+-- success from rendered test output; receipt mutations use independently known
+-- request/output bytes and paths instead of reproducing the completion decoder.
+data IssuerStep = IssueNormally | SelectZeroCases | ProducerError | ReplayCompletion
+  | WrongProducer | WrongRequest | WrongPacket | WrongOutput | ChangeOutput
+  deriving (Eq, Show, Enum, Bounded)
+
+instance Arbitrary IssuerStep where
+  arbitrary = elements [minBound .. maxBound]
+  shrink IssueNormally = []
+  shrink SelectZeroCases = [IssueNormally]
+  shrink _ = [IssueNormally, SelectZeroCases]
+
+fixtureIssuerCountingHistories :: IO ()
+fixtureIssuerCountingHistories = withTiming $ withScratch $ \work -> do
+  forM_ ["OptionalAnchor.hs", "OptionalSupport.hs", "OptionalWarmer.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
+    Nothing (work </> "OptionalWarmer.hs") [work] Nothing
+  fixture <- capturePreparedFixture work original
+  writeGenuineCandidateManifestFor ["OptionalAnchor"] work fixture
+  term <- readCodecTerm (work </> "module-candidates.cbor")
+  graph <- case term of
+    TList [_,_,_,_,_,TList [TList (TList [_,TString path]:_),_],_] -> pure (T.unpack path)
+    _ -> fail "genuine fixture lacks an independently validated graph companion"
+  graphBytes <- BS.readFile graph
+  let authored = work </> "Tidepool" </> "Session" </> "Lib" </> "G1.hs"
+      originalAction = do
+        writeGenuineCandidateManifestFor ["OptionalAnchor"] work fixture
+        selected <- readModuleCandidates (work </> "module-candidates.cbor") >>= either fail pure
+        unless (map candidateModule selected == ["OptionalAnchor"])
+          (fail "genuine completion changed requested candidate owners")
+      actions =
+        [("original", originalAction)
+        ,("authored", do
+            path <- writeGenuineAuthoredDeclarationScope
+              (SessionModule LibMod (Generation 1)) [work] authored work
+            scope <- readExactScope path >>= either fail pure
+            unless (not (Map.null (scopeModuleInterfaceProofs scope)))
+              (fail "authored completion omitted original canonical evidence"))
+        ,("codec", do
+            path <- writeCandidateCodecFixture work EmptyCandidateInventory
+            selected <- readModuleCandidates path >>= either fail pure
+            unless (map candidateModule selected == ["Fixture"]
+              && all (null . candidateGroups) selected
+              && all ((== Nothing) . candidateExecutionSource) selected)
+              (fail "empty structural codec changed its group inventory or execution parcel"))]
+  createDirectoryIfMissing True (takeDirectory authored)
+  writeFile authored "module Tidepool.Session.Lib.G1 where\nfixtureValue :: Int\nfixtureValue = 41\n"
+  -- Save a valid old packet receipt. Replaying it into a fresh packet must
+  -- refuse even when its original output files remain valid and readable.
+  oldPacket <- newPacketDirectory work "prior-codec"
+  BS.writeFile (oldPacket </> "request.cbor") (toStrictByteString (encodeTerm
+    (TList [TString "TPCODECFIXTURE1", TString "candidate_empty", TList []])))
+  _ <- runPacketProducer CodecProducer oldPacket
+  copyFile (oldPacket </> "completion.cbor") (work </> "prior-completion.cbor")
+  duplicate <- try (void (runPacketProducer CodecProducer oldPacket)) :: IO (Either IOException ())
+  case duplicate of Left _ -> pure (); Right _ -> fail "completed packet was issued twice"
+  issuer <- lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER" >>= maybe (fail "missing fixture issuer") pure
+  python <- lookupEnv "TIDEPOOL_TEST_PYTHON" >>= maybe (fail "missing declared fixture Python") pure
+  let wrapper = work </> "faulted-fixture-issuer"
+  writeFile wrapper ("#!" ++ python ++ "\n" ++ unlines
+    ["import os,sys,subprocess,hashlib,pathlib,time"
+    ,"args=sys.argv[1:]"
+    ,"issuer=" ++ show issuer
+    ,"if '--list' in args: os.execv(issuer,[issuer]+args)"
+    ,"packet=pathlib.Path(os.environ['TIDEPOOL_CANDIDATE_FIXTURE_PACKET'])"
+    ,"mode=os.environ.get('TIDEPOOL_FIXTURE_FAULT','IssueNormally')"
+    ,"receipt=packet/'completion.cbor'"
+    ,"if mode=='ProducerError': sys.exit(23)"
+    ,"if mode=='SelectZeroCases': os.execv(issuer,[issuer,'--exact','fixture_counting_intentionally_missing','--ignored','--nocapture'])"
+    ,"if mode=='ReplayCompletion':"
+    ,"    receipt.write_bytes(pathlib.Path(" ++ show (work </> "prior-completion.cbor") ++ ").read_bytes()); sys.exit(0)"
+    ,"status=subprocess.call([issuer]+args)"
+    ,"if status: sys.exit(status)"
+    ,"if mode=='CancelAfterIssuance':"
+    ,"    marker=pathlib.Path(" ++ show (work </> "cancel-ready") ++ "); temporary=marker.with_suffix('.ready')"
+    ,"    temporary.write_text(str(os.getpid())); temporary.replace(marker); time.sleep(60); sys.exit(0)"
+    ,"data=receipt.read_bytes()"
+    ,"if mode=='WrongProducer':"
+    ,"    for kind in [b'original-products',b'authored-declaration',b'codec']: data=data.replace(kind,kind[:-1]+b'x')"
+    ,"elif mode=='WrongRequest': data=data.replace(hashlib.sha256((packet/'request.cbor').read_bytes()).digest(),bytes(32))"
+    ,"elif mode=='WrongPacket': data=data.replace(str(packet).encode(),(str(packet)[:-1]+'!').encode())"
+    ,"elif mode=='ChangeSharedOutput': (packet.parent/'module-candidates.cbor').write_bytes(b'stale shared output')"
+    ,"elif mode=='ChangeSharedCompanion': pathlib.Path(" ++ show graph ++ ").write_bytes(b'changed companion')"
+    ,"elif mode=='MissingSharedCompanion': pathlib.Path(" ++ show graph ++ ").unlink()"
+    ,"elif mode in ['WrongOutput','ChangeOutput']:"
+    ,"    outputs=list(packet.glob('module-candidates.cbor'))+list(packet.glob('**/exact-declaration-scope.cbor'))"
+    ,"    for output in outputs:"
+    ,"        if mode=='ChangeOutput': output.write_bytes(output.read_bytes()+b'x')"
+    ,"        else:"
+    ,"            wrong=output.with_name(output.name[:-6]+'x'+output.name[-5:]); wrong.write_bytes(output.read_bytes()); data=data.replace(str(output).encode(),str(wrong).encode())"
+    ,"receipt.write_bytes(data)"
+    ])
+  permissions <- getPermissions wrapper
+  setPermissions wrapper permissions {executable=True}
+  withFixtureEnvironment "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER" wrapper $ do
+    let check step action = withFixtureEnvironment "TIDEPOOL_FIXTURE_FAULT" (show step) $ do
+          before <- BS.readFile (work </> "module-candidates.cbor")
+          outcome <- try action :: IO (Either IOException ())
+          unless (either (const (step /= IssueNormally)) (const (step == IssueNormally)) outcome)
+            (fail ("fixture completion acceptance mismatch at " ++ show step
+              ++ ": " ++ either (take 256 . show) (const "unexpected successful delivery") outcome))
+          when (step /= IssueNormally) $ do
+            after <- BS.readFile (work </> "module-candidates.cbor")
+            selected <- readModuleCandidates (work </> "module-candidates.cbor") >>= either fail pure
+            unless (after == before && map candidateModule selected == ["OptionalAnchor"])
+              (fail "refused issuer changed retained candidate output")
+    check SelectZeroCases (writeGenuineCandidateManifestFor ["NeverCapturedByFixture"] work fixture)
+    -- Fixed matrix proves positive, zero-selection, error and bound-identity
+    -- controls through each real producer and its actual Haskell consumer.
+    forM_ actions $ \(name, action) -> do
+      forM_ [minBound .. maxBound] $ \step -> check step action
+      let marker = work </> "cancel-ready"
+      exists <- doesFileExist marker
+      when exists (removeFile marker)
+      withFixtureEnvironment "TIDEPOOL_FIXTURE_FAULT" "CancelAfterIssuance" $ do
+        done <- newEmptyMVar
+        worker <- forkIO (try action >>= putMVar done)
+        ready <- timeout 10000000 (let await = doesFileExist marker >>= \seen ->
+                                        unless seen (threadDelay 1000 >> await) in await)
+        killThread worker
+        outcome <- takeMVar done :: IO (Either SomeException ())
+        unless (ready == Just () && either
+          (\problem -> fromException problem == Just ThreadKilled) (const False) outcome)
+          (fail ("fixture cancellation did not propagate at " ++ name))
+        pid <- readFile marker
+        gone <- timeout 5000000 (let await = doesDirectoryExist ("/proc" </> pid) >>= \alive ->
+                                       when alive (threadDelay 1000 >> await) in await)
+        unless (gone == Just ()) (fail ("cancelled fixture subprocess survived cleanup: " ++ pid))
+      putStrLn ("fixture completion controls: " ++ name ++ " passed")
+    withFixtureEnvironment "TIDEPOOL_FIXTURE_FAULT" "ChangeSharedOutput" $ do
+      writeGenuineCandidateManifestFor ["OptionalAnchor"] work fixture
+      selected <- readModuleCandidates (work </> "module-candidates.cbor") >>= either fail pure
+      unless (map candidateModule selected == ["OptionalAnchor"])
+        (fail "candidate delivery reopened the changed shared manifest instead of its completed snapshot")
+    forM_ ["ChangeSharedCompanion", "MissingSharedCompanion"] $ \mode -> do
+      withFixtureEnvironment "TIDEPOOL_FIXTURE_FAULT" mode $ do
+        outcome <- try originalAction :: IO (Either IOException ())
+        case outcome of
+          Left _ -> pure ()
+          Right _ -> fail ("independent candidate graph validation accepted " ++ mode)
+      BS.writeFile graph graphBytes
+    withFixtureEnvironment "TIDEPOOL_FIXTURE_FAULT" "IssueNormally" $
+      forM_ [OriginalProductsProducer, AuthoredDeclarationProducer, CodecProducer] $ \producer -> do
+        packet <- newPacketDirectory work "malformed-request"
+        BS.writeFile (packet </> "request.cbor") (BS.singleton 0)
+        outcome <- try (void (runPacketProducer producer packet)) :: IO (Either IOException ())
+        exists <- doesFileExist (packet </> "completion.cbor")
+        unless (either (const True) (const False) outcome && not exists)
+          (fail ("failed producer issued completion: " ++ show producer))
+    -- Histories mix issuance, fresh zero-selection and replay while old genuine
+    -- candidate bytes stay available. The oracle is simply actual issuance iff
+    -- IssueNormally; shrinking preserves the sequence of requested operations.
+    result <- quickCheckWithResult stdArgs {maxSuccess=30,maxSize=8,replay=Just (mkQCGen 20261009,0)} $
+      forAllShrink (resize 8 (listOf arbitrary)) shrink $ \steps -> ioProperty $ do
+        forM_ steps $ \step -> check step (snd (last actions))
+        pure (tabulate "issuer history operations" (map show steps) (counterexample (show steps) True))
+    unless (isSuccess result) (fail "fixture completion histories failed")
+  putStrLn "fixture completion: 27 producer controls, stale global request refusal, completed snapshot delivery, 2 companion refusals, 3 actual producer errors, 3 cancellations, 30 generated histories passed"
+
+withFixtureEnvironment :: String -> String -> IO a -> IO a
+withFixtureEnvironment name value action = bracket (lookupEnv name)
+  (maybe (unsetEnv name) (setEnv name)) (\_ -> setEnv name value >> action)
 
 data PublicationStep
   = RestorePublicationInputs
