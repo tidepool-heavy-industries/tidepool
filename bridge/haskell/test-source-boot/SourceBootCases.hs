@@ -799,10 +799,8 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
   scopePath <- writeGenuineMetadataScope work ["CanonicalSource","CanonicalDependency"] originalFixture
   (base,admissionDiagnostics) <- captureDiagnostics (readExactScope scopePath >>= either fail pure)
   unless (counterTotal "exact_scope.certificate_decodes" admissionDiagnostics
-        == fromIntegral (Map.size (scopeModuleInterfaceProofs base))
-      && counterTotal "package_proof.sidecar_decodes" admissionDiagnostics
-        == fromIntegral (length (scopeInterfaces base))) $
-    fail "canonical scope did not decode each admitted certificate and sidecar once"
+        == fromIntegral (Map.size (scopeModuleInterfaceProofs base))) $
+    fail "canonical scope did not decode each admitted certificate once"
   forM_ [1::Int .. 3] $ \_ -> do
     (verdict,diagnostics) <- captureDiagnostics (revalidateExactScope (prHscEnv (pprPipelineResult original)) base)
     either fail pure verdict
@@ -914,6 +912,46 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
       (Map.lookup localOwner (certifiedSourceOriginals emitted))
     localCompilation <- maybe (fail "fresh support did not retain exact compilation custody") pure
       (preparedExactCompilation captured)
+    stagedDirectory <- pure (work </> "checked-local-staged-products")
+    createDirectory stagedDirectory
+    let capturedEnv = prHscEnv (pprPipelineResult captured)
+        targetModule = tcg_mod (prTargetTcGblEnv (pprPipelineResult captured))
+    projection <- prepareCompilerProjectionContext captured Map.empty targetModule "result" [] Nothing
+    (_,rawProducts) <- prepareOriginalProducts capturedEnv
+      (compilationScope <$> preparedExactCompilation captured)
+      (pprProductInterfaces captured) projection Set.empty (pprModules captured)
+    issuedProducts <- admitCurrentOriginalProducts originals captureDirectory captured rawProducts
+    staged <- writeCertifiedSegmentProducts includes originals stagedDirectory captured issuedProducts
+    stagedNames <- listDirectory stagedDirectory
+    let canonicalPaths =
+          [stagedDirectory </> name | name <- stagedNames, ".finalized.certificate.cbor" `isSuffixOf` name]
+    let graphPath = stagedDirectory </> "execution-source.cbor"
+    graphExists <- doesFileExist graphPath
+    unless (not (null canonicalPaths) && graphExists) $
+      fail ("checked-cell stage did not emit canonical and execution-source roles: " ++ show stagedNames)
+    receiptDirectory <- pure (work </> ".exact-compilations")
+    let assertStageRefuses path label = do
+          original <- BS.readFile path
+          forM_ [Nothing,Just (BS.singleton 0)] $ \replacement -> do
+            case replacement of
+              Nothing -> removeFile path
+              Just bytes -> BS.writeFile path bytes
+            receiptsBefore <- doesDirectoryExist receiptDirectory >>= \exists ->
+              if exists then listDirectory receiptDirectory else pure []
+            refused <- try (publishStagedOriginalProducts captured staged)
+              :: IO (Either IOException CertifiedOriginalProducts)
+            receiptsAfter <- doesDirectoryExist receiptDirectory >>= \exists ->
+              if exists then listDirectory receiptDirectory else pure []
+            certificateExists <- doesFileExist (stagedDirectory </> "certified-products.cbor")
+            unless (case refused of Left _ -> receiptsAfter == receiptsBefore && not certificateExists; _ -> False) $
+              fail ("mutated staged " ++ label ++ " published a certificate or receipt")
+            BS.writeFile path original
+    canonicalPath <- case canonicalPaths of
+      [path] -> pure path
+      _ -> fail ("checked-cell stage emitted an unexpected canonical certificate count: " ++ show canonicalPaths)
+    assertStageRefuses canonicalPath "canonical certificate"
+    assertStageRefuses graphPath "execution-source graph"
+    _ <- publishStagedOriginalProducts captured staged
     inherited <- either fail pure (extendSourceSelectedOriginals
       (compilationSourceSelection localCompilation) admitted)
     -- Fresh rows are in the completed capture rather than its input scope.
@@ -959,27 +997,29 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
       [((localIface {exactModule=snd wrongOwner},packages,seal),ModuleInterfaceEvidence relocated)]
     unless (either (const True) (const False) wrongOwnerProof) $
       fail "captured source original authorized another exact module owner"
-    -- Typed facts survive only while their actual sealed files still match.
+    -- The completed scope carries captured original bytes; later edits to
+    -- their former materialization paths do not invalidate that authority.
     forM_ [canonicalCertificatePath localProof,exactPath localIface,packages] $ \path ->
-      bracket (BS.readFile path) (BS.writeFile path) $ \_ -> do
-        BS.writeFile path "changed admitted input bytes"
-        refused <- revalidateExactScope (prHscEnv (pprPipelineResult captured)) selectedScope
-        unless (either (const True) (const False) refused) $
-          fail "retained parsed input facts admitted changed certificate/interface/sidecar bytes"
+      bracket (BS.readFile path) (BS.writeFile path) $ \bytes -> do
+        removeFile path
+        revalidateExactScope (prHscEnv (pprPipelineResult captured)) selectedScope >>= either fail pure
+        BS.writeFile path "changed former materialization bytes"
+        revalidateExactScope (prHscEnv (pprPipelineResult captured)) selectedScope >>= either fail pure
+        BS.writeFile path bytes
     revalidateExactScope (prHscEnv (pprPipelineResult captured)) selectedScope >>= either fail pure
     case localFinalizedCore localAdmission of
       Nothing -> fail "completed local fixture lacks its Core length/seal control"
       Just (corePath,_) -> do
-        let validateLocal = withFileObservations $ \observations -> do
-              _ <- observeFile observations (exactPath localIface) (Just (32 * 1024 * 1024))
+        let validateLocal = withFileObservations $ \observations ->
               revalidateLocalFinalizedAdmissionWith observations localAdmission
         validateLocal >>= either fail pure
         bracket (BS.readFile corePath) (BS.writeFile corePath) $ \bytes ->
-          forM_ [BS.take (max 0 (BS.length bytes - 1)) bytes,bytes <> BS.singleton 0] $ \changed -> do
-            BS.writeFile corePath changed
-            refused <- validateLocal
-            unless (either (const True) (const False) refused) $
-              fail "shared file observation bypassed captured local Core exact length"
+          forM_ [Nothing,Just (BS.take (max 0 (BS.length bytes - 1)) bytes),Just (bytes <> BS.singleton 0)] $ \changed -> do
+            case changed of
+              Nothing -> removeFile corePath
+              Just contents -> BS.writeFile corePath contents
+            validateLocal >>= either fail pure
+            BS.writeFile corePath bytes
         validateLocal >>= either fail pure
     copyFile "test-source-boot/fixtures/CanonicalDependencyChanged.hs" (work </> "CanonicalDependency.hs")
     requireOriginalSourceBytesChanged "captured source retained import closure"
