@@ -302,6 +302,7 @@
     "exomonad/actor/src/resident_actor/terminal_transfer_request.hs",
     "exomonad/actor/src/resident_actor/terminal_transfer_setup.hs",
     "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
+    "exomonad/actor/src/resident_workbench/replacement_inputs.hs",
     "exomonad/actor/tests/profile_compile_failures/read_only_fs_write.hs",
     "exomonad/actor/tests/record_dynamic_sources/compile.hs",
     "exomonad/actor/tests/record_dynamic_sources/run.hs",

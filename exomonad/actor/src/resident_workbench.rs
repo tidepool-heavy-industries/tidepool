@@ -14,6 +14,8 @@ use parking_lot::Mutex;
 
 #[cfg(test)]
 mod display_callback_tests;
+#[cfg(test)]
+mod replacement_input_tests;
 mod structured_introspection;
 pub(crate) mod to_haskell;
 

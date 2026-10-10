@@ -354,6 +354,8 @@ rust_filegroup(
         "src/resident_tools/operation_settlement.rs": "exomonad/actor/src/resident_tools/operation_settlement.rs",
         "src/resident_workbench.rs": "exomonad/actor/src/resident_workbench.rs",
         "src/resident_workbench/display_callback_tests.rs": "exomonad/actor/src/resident_workbench/display_callback_tests.rs",
+        "src/resident_workbench/replacement_input_tests.rs": "exomonad/actor/src/resident_workbench/replacement_input_tests.rs",
+        "src/resident_workbench/replacement_inputs.hs": "exomonad/actor/src/resident_workbench/replacement_inputs.hs",
         "src/resident_workbench/structured_introspection.rs": "exomonad/actor/src/resident_workbench/structured_introspection.rs",
         "src/resident_workbench/to_haskell.rs": "exomonad/actor/src/resident_workbench/to_haskell.rs",
         "src/role.rs": "exomonad/actor/src/role.rs",
@@ -440,6 +442,7 @@ tidepool_rust_binary(
         "exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs",
         "exomonad/actor/src/resident_actor/scope_runtime_tests.rs",
         "exomonad/actor/src/resident_workbench/display_callback_tests.rs",
+        "exomonad/actor/src/resident_workbench/replacement_input_tests.rs",
     ],
     test_fixtures = [
         "exomonad/actor/src/fixtures/prepared-instance-agent-spec.hs",
@@ -888,6 +891,8 @@ filegroup(
         "exomonad/actor/src/resident_tools/operation_settlement.rs": "src/resident_tools/operation_settlement.rs",
         "exomonad/actor/src/resident_workbench.rs": "src/resident_workbench.rs",
         "exomonad/actor/src/resident_workbench/display_callback_tests.rs": "src/resident_workbench/display_callback_tests.rs",
+        "exomonad/actor/src/resident_workbench/replacement_input_tests.rs": "src/resident_workbench/replacement_input_tests.rs",
+        "exomonad/actor/src/resident_workbench/replacement_inputs.hs": "src/resident_workbench/replacement_inputs.hs",
         "exomonad/actor/src/resident_workbench/structured_introspection.rs": "src/resident_workbench/structured_introspection.rs",
         "exomonad/actor/src/resident_workbench/to_haskell.rs": "src/resident_workbench/to_haskell.rs",
         "exomonad/actor/src/role.rs": "src/role.rs",
@@ -1254,6 +1259,13 @@ export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f646973706c61795f63616c6c6261636b5f696d6d6564696174652e6873",
     src = "src/resident_workbench/display_callback_immediate.hs",
     out = "display_callback_immediate.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f7265706c6163656d656e745f696e707574732e6873",
+    src = "src/resident_workbench/replacement_inputs.hs",
+    out = "replacement_inputs.hs",
     visibility = ["PUBLIC"],
 )
 

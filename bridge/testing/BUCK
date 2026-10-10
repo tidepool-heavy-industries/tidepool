@@ -430,6 +430,7 @@ filegroup(
         "exomonad/actor/src/resident_actor/terminal_transfer_request.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f7465726d696e616c5f7472616e736665725f726571756573742e6873",
         "exomonad/actor/src/resident_actor/terminal_transfer_setup.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f6163746f722f7465726d696e616c5f7472616e736665725f73657475702e6873",
         "exomonad/actor/src/resident_workbench/display_callback_immediate.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f646973706c61795f63616c6c6261636b5f696d6d6564696174652e6873",
+        "exomonad/actor/src/resident_workbench/replacement_inputs.hs": "//exomonad/actor:haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f7265706c6163656d656e745f696e707574732e6873",
         "exomonad/actor/tests/profile_compile_failures/read_only_fs_write.hs": "//exomonad/actor:haskell_test_fixture_74657374732f70726f66696c655f636f6d70696c655f6661696c757265732f726561645f6f6e6c795f66735f77726974652e6873",
         "exomonad/actor/tests/record_dynamic_sources/compile.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265636f72645f64796e616d69635f736f75726365732f636f6d70696c652e6873",
         "exomonad/actor/tests/record_dynamic_sources/run.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265636f72645f64796e616d69635f736f75726365732f72756e2e6873",
