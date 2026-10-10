@@ -1,7 +1,7 @@
 use super::*;
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
-use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError};
+use proptest::test_runner::{contextualize_config, Config, FileFailurePersistence, TestCaseError};
 use std::{cell::RefCell, sync::Arc};
 use tidepool_repr::execution_schema::{Architecture, Endianness, StorageLayout, TargetDescriptor};
 
@@ -409,7 +409,7 @@ fn run_history(counts: [u8; REGIONS], history: &[Op]) -> Result<Coverage, TestCa
 
 #[test]
 fn catalog_histories_match_linear_region_facts() {
-    let mut config = property_config();
+    let mut config = contextualize_config(property_config());
     config.source_file = Some(file!());
     config.test_name = Some(concat!(
         module_path!(),
