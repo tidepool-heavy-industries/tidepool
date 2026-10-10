@@ -5013,6 +5013,45 @@ impl ExactDeclarationContext {
         Ok((products, interfaces))
     }
 
+    /// Seal requested joined and value interfaces from the issuing exact view.
+    /// Native and canonical payloads use the product materializer above.
+    pub fn materialize_joined_and_value_interfaces_for_artifacts(
+        &self,
+        root: &Path,
+        artifacts: &BTreeSet<ArtifactId>,
+    ) -> Result<(Vec<RecoveryJoinRef>, Vec<RecoveryValueInterfaceRef>), CompileError> {
+        if artifacts.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let entries = self.inventory.entries_for_artifacts(artifacts)?;
+        let mut work = recovery_artifacts::RecoveryArtifactWork::default();
+        let mut joined = Vec::new();
+        let mut values = Vec::new();
+        for entry in entries {
+            match &entry.payload {
+                ArtifactPayload::Interface(interface, JoinedInterfaceRole::LexicalJoin) => {
+                    joined.push(
+                        interface
+                            .materialize_with_work(root, &mut work)
+                            .map_err(materialization_failure)?,
+                    );
+                }
+                ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) => {
+                    values.push(
+                        CertifiedValueInterface::from_admitted_interface(
+                            interface.clone(),
+                            entry.requirements.clone(),
+                        )
+                        .materialize_with_work(root, &mut work)
+                        .map_err(materialization_failure)?,
+                    );
+                }
+                ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_) => {}
+            }
+        }
+        Ok((joined, values))
+    }
+
     /// Select the original native owner from its compiler-issued origin. A
     /// lexical projection may have a different owner and grants no native root.
     pub fn authored_native_root(
@@ -8529,6 +8568,82 @@ mod tests {
         );
         assert!(source
             .materialize_recovery_products_and_interfaces_for_artifacts(
+                scratch.path(),
+                &BTreeSet::from([ArtifactId([0xee; 32])])
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn selected_interface_materialization_skips_retained_join_and_preserves_value_identity() {
+        let source = published_original_history_fixture();
+        let entries = source.artifact_view().entries();
+        let joined = entries
+            .iter()
+            .find(|entry| entry.descriptor.owner.module == "Joined")
+            .unwrap();
+        let value = entries
+            .iter()
+            .find(|entry| entry.descriptor.owner.module == "Value")
+            .unwrap();
+        let ArtifactPayload::Interface(joined_interface, JoinedInterfaceRole::LexicalJoin) =
+            &joined.payload
+        else {
+            panic!("joined fixture")
+        };
+        assert_eq!(joined_interface.artifact_id(), joined.descriptor.id);
+        let scratch = tempfile::tempdir().unwrap();
+        let absent = scratch.path().join("absent");
+        assert_eq!(
+            source
+                .materialize_joined_and_value_interfaces_for_artifacts(&absent, &BTreeSet::new())
+                .unwrap(),
+            (vec![], vec![])
+        );
+        assert!(!absent.exists());
+        let (joins, values) = source
+            .materialize_joined_and_value_interfaces_for_artifacts(
+                scratch.path(),
+                &BTreeSet::from([joined.descriptor.id]),
+            )
+            .unwrap();
+        assert_eq!(joins.len(), 1);
+        assert!(values.is_empty());
+        assert_eq!(
+            crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(&joins[0]).id,
+            joined.descriptor.id
+        );
+        let retained_path = scratch.path().join(&joins[0].interface_path);
+        std::fs::write(&retained_path, b"damaged retained join").unwrap();
+        let (joins, values) = source
+            .materialize_joined_and_value_interfaces_for_artifacts(
+                scratch.path(),
+                &BTreeSet::from([value.descriptor.id]),
+            )
+            .unwrap();
+        assert!(joins.is_empty());
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].artifact_id, value.descriptor.id);
+        assert_eq!(
+            crate::artifact_inventory::ArtifactDescriptor::from_recovery_value_interface(
+                &values[0]
+            )
+            .id,
+            value.descriptor.id
+        );
+        assert_eq!(values[0].requirements, value.requirements);
+        assert_eq!(
+            std::fs::read(&retained_path).unwrap(),
+            b"damaged retained join"
+        );
+        assert!(source
+            .materialize_joined_and_value_interfaces_for_artifacts(
+                scratch.path(),
+                &BTreeSet::from([joined.descriptor.id])
+            )
+            .is_err());
+        assert!(source
+            .materialize_joined_and_value_interfaces_for_artifacts(
                 scratch.path(),
                 &BTreeSet::from([ArtifactId([0xee; 32])])
             )

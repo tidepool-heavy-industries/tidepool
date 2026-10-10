@@ -396,6 +396,17 @@ impl CertifiedJoinedInterface {
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
         self.toolchain_identity_sha256
     }
+    /// Immutable payload identity for the lexical join role. A value interface
+    /// has its own role identity through `CertifiedValueInterface::artifact_id`.
+    pub fn artifact_id(&self) -> crate::artifact_inventory::ArtifactId {
+        crate::artifact_inventory::ArtifactEntry::interface(
+            self.clone(),
+            crate::artifact_inventory::JoinedInterfaceRole::LexicalJoin,
+            Vec::new(),
+        )
+        .descriptor
+        .id
+    }
     pub fn materialize(&self, root: &Path) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
         self.materialize_with_work(root, &mut RecoveryArtifactWork::default())
     }

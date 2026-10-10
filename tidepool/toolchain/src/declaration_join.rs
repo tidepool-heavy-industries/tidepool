@@ -992,6 +992,20 @@ impl AcceptedJoin {
     pub(crate) fn interface(&self) -> &crate::recovery_artifacts::CertifiedJoinedInterface {
         &self.interface
     }
+    pub fn artifact_id(&self) -> crate::artifact_inventory::ArtifactId {
+        self.interface.artifact_id()
+    }
+    /// Seal this receipt's own joined interface. Inherited context artifacts
+    /// remain under their exact selection and the run's retained references.
+    pub fn materialize_interface(
+        &self,
+        root: &Path,
+    ) -> Result<
+        crate::recovery_artifacts::RecoveryJoinRef,
+        crate::recovery_artifacts::RecoveryArtifactError,
+    > {
+        self.interface.materialize(root)
+    }
     pub fn materialize(
         &self,
         root: &Path,
@@ -2692,7 +2706,13 @@ mod authored_tests {
         drop(worker_root);
         drop(source_root);
         let durable = tempfile::tempdir().unwrap();
+        let own_join = accepted.materialize_interface(durable.path()).unwrap();
+        assert_eq!(
+            accepted.artifact_id(),
+            crate::artifact_inventory::ArtifactDescriptor::from_recovery_join(&own_join).id
+        );
         let stored = accepted.materialize(durable.path()).unwrap();
+        assert_eq!(stored.join, own_join);
         let verified =
             crate::recovery_artifacts::verify_materialized_join(durable.path(), &stored.join)
                 .unwrap();
