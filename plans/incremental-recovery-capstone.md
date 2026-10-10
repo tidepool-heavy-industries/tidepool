@@ -144,20 +144,25 @@ declarations retain typed roots rather than eagerly expanded contexts. Shared
 block/proof observations are reused in one recovery acquisition; no long-lived
 SQL read transaction belongs to a capture.
 
-Production roots come only from the pinned owning materializer or authenticated
-matched catalog producer. Verify content, library shape and exact semantic
+Production snapshot roots come only from the pinned owning materializer. Verify
+content, library shape and exact semantic
 facts/custody. Do not rebuild canonical HAMTs during ordinary cold recovery.
 Canonical rebuild and independent lookup/enumeration checks belong to properties
 and qualification. This work does not add arbitrary external-root admission.
 
-Catalog evidence uses the same blocks/encoding in a closed self-contained
-read-only SQLite block image. Verify/import the reachable closure once into run
-blocks; children share roots thereafter. Keep raw GHC/native file materialization
-under its existing owner. Publish the image in DELETE journal format; never
-copy only a live WAL database's main file.
+Deployment catalogs retain original products, interfaces and their authenticated
+compiler receipts through the existing catalog owner. They contain no runtime
+context roots and need no second SQLite block image or import protocol. Original
+entry dependency records contain only equality observations of issued interface
+and reusable-original roles plus the native selection digest. Reopening reissues
+the selection from authenticated originals and compares those observations;
+decoding them grants no compiler authority. Published-source declaration policy
+belongs to the run context owner and cannot occur in these entry records.
 
-Bump affected recovery, exact evidence and catalog contracts together through
-their owning writers. Refuse incompatible state before writer PRAGMAs. Old runs
+Bump changed recovery and exact evidence contracts through their owning writers.
+Keep unchanged catalog/entry wire contracts: narrowing entry roles preserves the
+two variants their producer issues and refuses unissued runtime-context policy.
+Refuse incompatible state before writer PRAGMAs. Old runs
 keep matching old binaries; no migration or dual writers. Regenerable caches may
 rebuild after explicit format refusal.
 
@@ -169,7 +174,7 @@ integration. Root integrates and verifies cross-boundary behavior. No build-owne
 permission queue: parallelize against measured host/cgroup headroom.
 
 Parallel owners: exact identity/scope; persistent snapshots/materializer;
-run database/publication; leases and recovery consumers; catalog deployment;
+run database/publication; leases and recovery consumers; entry observations;
 Harness/SQLite dependencies; properties and diagnostics. Publish concrete shared
 interfaces early. Preserve old WIP branches while deleting obsolete machinery
 from the integrated implementation.
