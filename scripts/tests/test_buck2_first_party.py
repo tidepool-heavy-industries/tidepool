@@ -879,6 +879,33 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                          '$(location toolchains//:exomonad_runtime_tools)/bin/git')
         self.assertNotIn('//exomonad/examples/workspace:shipped_skills', group['resources'])
 
+    def test_actor_notebook_cohort_retains_the_integration_harness_runtime_inputs(self):
+        actor = self.package('exomonad-actor', 'exomonad/actor', [
+            ('exomonad_actor', 'lib', 'src/lib.rs'),
+            ('actor', 'test', 'tests/suites/actor.rs'),
+        ])
+        metadata = json.loads(self.metadata.read_text())
+        metadata['packages'].append(actor)
+        metadata['workspace_members'].append(actor['id'])
+        metadata['resolve']['nodes'].append({'id': actor['id'], 'deps': []})
+        self.metadata.write_text(json.dumps(metadata))
+        self.write('exomonad/actor/Cargo.toml', "[package]\nname = 'exomonad-actor'\n")
+        self.write('exomonad/actor/src/lib.rs', 'pub fn actor() {}\n')
+        self.write('exomonad/actor/tests/suites/actor.rs', '#[test] fn integration() {}\n')
+        result = self.generate('--package', 'exomonad-actor')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        broad = self.rule('exomonad/actor', 'actor', 'tidepool_rust_isolated_test')
+        cohort = self.rule('exomonad/actor', 'actor_notebook_contract_tests',
+                           'tidepool_rust_test_cases')
+        self.assertEqual(cohort['binary'], ':actor_binary')
+        self.assertEqual(cohort['expected_count'], 4)
+        self.assertEqual(len(set(cohort['exact_tests'])), 4)
+        for field in ('env', 'resource_env', 'resources', 'haskell_worker'):
+            self.assertEqual(cohort[field], broad[field], field)
+        self.assertIs(cohort['haskell_worker'], True)
+        self.assertEqual(cohort['jobs'], 1)
+        self.assertEqual(cohort['timeout'], 600)
+
     def test_facade_recipe_sources_are_declared_in_focused_and_aggregate_execution(self):
         result = self.generate("--package", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)

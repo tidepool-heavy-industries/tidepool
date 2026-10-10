@@ -436,6 +436,7 @@ filegroup(
         "exomonad/actor/tests/resident_local_actor/conflicting_join_cell.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f636f6e666c696374696e675f6a6f696e5f63656c6c2e6873",
         "exomonad/actor/tests/resident_local_actor/interleaved_bind_cell.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f696e7465726c65617665645f62696e645f63656c6c2e6873",
         "exomonad/actor/tests/resident_local_actor/join_base.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f6a6f696e5f626173652e6873",
+        "exomonad/actor/tests/resident_local_actor/notebook_policy.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f6e6f7465626f6f6b5f706f6c6963792e6873",
         "exomonad/actor/tests/resident_local_actor/policy.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f706f6c6963792e6873",
         "exomonad/actor/tests/resident_local_actor/policy_failed_hook.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f706f6c6963795f6661696c65645f686f6f6b2e6873",
         "exomonad/actor/tests/resident_local_actor/shadow_cell.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f736861646f775f63656c6c2e6873",

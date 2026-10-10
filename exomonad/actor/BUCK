@@ -613,6 +613,7 @@ rust_filegroup(
         "tests/resident_local_actor/conflicting_join_cell.hs": "exomonad/actor/tests/resident_local_actor/conflicting_join_cell.hs",
         "tests/resident_local_actor/interleaved_bind_cell.hs": "exomonad/actor/tests/resident_local_actor/interleaved_bind_cell.hs",
         "tests/resident_local_actor/join_base.hs": "exomonad/actor/tests/resident_local_actor/join_base.hs",
+        "tests/resident_local_actor/notebook_policy.hs": "exomonad/actor/tests/resident_local_actor/notebook_policy.hs",
         "tests/resident_local_actor/policy.hs": "exomonad/actor/tests/resident_local_actor/policy.hs",
         "tests/resident_local_actor/policy_failed_hook.hs": "exomonad/actor/tests/resident_local_actor/policy_failed_hook.hs",
         "tests/resident_local_actor/reload_progress.rs": "exomonad/actor/tests/resident_local_actor/reload_progress.rs",
@@ -678,6 +679,41 @@ tidepool_rust_isolated_test(
         "exomonad/actor/tests/suites/actor.rs",
         "exomonad/actor/tests/support/mod.rs",
     ],
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/testing:haskell_test_fixtures",
+        "//build/package:compiler_deployment",
+        "//build/package:tidepool_extract_runtime_libraries",
+    ],
+    resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "actor_notebook_contract_tests",
+    binary = ":actor_binary",
+    exact_tests = [
+        "resident_local_actor::completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control",
+        "resident_local_actor::reload_progress::cancelled_and_rejected_reload_release_the_administrative_owner",
+        "resident_local_actor::reload_progress::two_parked_cells_reload_and_control_progress_independently",
+        "resident_local_actor::reload_uncertainty::visible_reload_uncertainty_and_failed_freeze_preserve_failure",
+    ],
+    expected_count = 4,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 2460000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -871,6 +907,7 @@ filegroup(
         "exomonad/actor/tests/resident_local_actor/conflicting_join_cell.hs": "tests/resident_local_actor/conflicting_join_cell.hs",
         "exomonad/actor/tests/resident_local_actor/interleaved_bind_cell.hs": "tests/resident_local_actor/interleaved_bind_cell.hs",
         "exomonad/actor/tests/resident_local_actor/join_base.hs": "tests/resident_local_actor/join_base.hs",
+        "exomonad/actor/tests/resident_local_actor/notebook_policy.hs": "tests/resident_local_actor/notebook_policy.hs",
         "exomonad/actor/tests/resident_local_actor/policy.hs": "tests/resident_local_actor/policy.hs",
         "exomonad/actor/tests/resident_local_actor/policy_failed_hook.hs": "tests/resident_local_actor/policy_failed_hook.hs",
         "exomonad/actor/tests/resident_local_actor/reload_progress.rs": "tests/resident_local_actor/reload_progress.rs",
@@ -1292,6 +1329,13 @@ export_file(
     name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f6a6f696e5f626173652e6873",
     src = "tests/resident_local_actor/join_base.hs",
     out = "join_base.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f6e6f7465626f6f6b5f706f6c6963792e6873",
+    src = "tests/resident_local_actor/notebook_policy.hs",
+    out = "notebook_policy.hs",
     visibility = ["PUBLIC"],
 )
 

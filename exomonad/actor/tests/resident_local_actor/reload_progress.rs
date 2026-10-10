@@ -42,10 +42,10 @@ impl exomonad_actor::ActorSourceLayers for ReloadGate {
         ))
     }
 
-    fn layer_include(&self, _: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
+    fn layer_include_for(&self, _: &str) -> Result<Vec<std::path::PathBuf>, String> {
         Ok(Vec::new())
     }
-    fn bind(&self, _: tidepool_repr::PrincipalId, _: &[String]) {}
+    fn bind_for(&self, _: tidepool_repr::PrincipalId, _: &str) {}
 
     fn reload_helpers_with_publication(
         &self,
@@ -174,11 +174,12 @@ async fn two_parked_cells_reload_and_control_progress_independently() {
         serde_json::json!({}),
     )
     .await;
-    let c = fixture.read("reload-C", "c <- pure (42 :: Int)\nc").await;
-    assert_eq!(
-        c["items"].as_array().unwrap().last().unwrap()["output"],
-        "42"
-    );
+    fixture
+        .read(
+            "reload-C",
+            "c <- pure (42 :: Int)\nif c == 42 then pure () else error \"C binding changed\"",
+        )
+        .await;
     let status = ConcurrentResident::settle(
         hosted_tool(
             &fixture,
@@ -212,8 +213,7 @@ async fn two_parked_cells_reload_and_control_progress_independently() {
             .expect("queued reload starts with A/B still parked"),
         Some(1)
     );
-    let d = fixture.read("reload-D", "c").await;
-    assert_eq!(d["items"][0]["output"], "42");
+    fixture.check_value("reload-D", "c == 42").await;
     assert!(!next_reload.is_finished() && !a.is_finished() && !b.is_finished());
     layers.release();
     assert_eq!(
@@ -233,13 +233,12 @@ async fn two_parked_cells_reload_and_control_progress_independently() {
         committed_execution(&ConcurrentResident::settle(b).await.expect("B resumes")),
         b_execution
     );
-    let joined = fixture
-        .read(
+    fixture
+        .check_value(
             "reload-joined",
             "x == 22 && c == 42 && oldA == 0 && oldB == 0",
         )
         .await;
-    assert_eq!(joined["items"][0]["output"], "True");
     fixture.shutdown(&markers).await;
 }
 
@@ -393,9 +392,8 @@ async fn cancelled_and_rejected_reload_release_the_administrative_owner() {
         layers.decisions.lock().unwrap()[2].phase(),
         PublicationPhase::Published
     );
-    assert_eq!(
-        fixture.read("reload-cancel-kept", "kept").await["items"][0]["output"],
-        "42"
-    );
+    fixture
+        .check_value("reload-cancel-kept", "kept == 42")
+        .await;
     fixture.shutdown(&[]).await;
 }

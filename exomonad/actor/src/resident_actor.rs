@@ -4451,14 +4451,33 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         // Discovery is implicit, so the resolved rule and file are reported
         // rather than left to be guessed. A concise view stays concise; every
         // wider view names the spec that is actually live.
-        let spec = match (view, self.installed_tools.current_tools().as_ref()) {
+        let spec = match (view, self.installed_tools.observe()) {
             (StatusView::Concise, _) => String::new(),
-            (_, Some(tools)) => format!(
-                "\n  spec: {} slots=[{}]",
+            (_, crate::resident_workbench::InstalledToolsObservation::Available(Some(tools))) => {
+                format!(
+                    "\n  spec: {} slots=[{}]",
+                    tools.provenance(),
+                    tools.slots.join(", ")
+                )
+            }
+            (
+                _,
+                crate::resident_workbench::InstalledToolsObservation::SourceUnavailable(Some(
+                    tools,
+                )),
+            ) => format!(
+                "\n  spec: {} slots=[{}]; source unavailable",
                 tools.provenance(),
                 tools.slots.join(", ")
             ),
-            (_, None) => "\n  spec: none installed".to_string(),
+            (_, crate::resident_workbench::InstalledToolsObservation::SourceUnavailable(None)) => {
+                "\n  spec: none installed; source unavailable".to_string()
+            }
+            (
+                _,
+                crate::resident_workbench::InstalledToolsObservation::Empty
+                | crate::resident_workbench::InstalledToolsObservation::Available(None),
+            ) => "\n  spec: none installed".to_string(),
         };
         // Where an abstention's reason lives, and where a failure line's
         // reference points. Never repeated into the results themselves.
