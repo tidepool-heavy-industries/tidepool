@@ -174,6 +174,8 @@ TEST_ONLY_FIXTURES = {
         'tidepool/runtime/src/session/fixtures/compiled-cell-source-selected-declaration.hs',
         'tidepool/runtime/src/session/fixtures/constraint-tuple-G1.hs',
         'tidepool/runtime/src/session/fixtures/exact-join-original.hs',
+        'tidepool/runtime/src/session/fixtures/owned-result-callable.hs',
+        'tidepool/runtime/src/session/fixtures/owned-result-receiver.hs',
         'tidepool/runtime/src/session/fixtures/paired-instance-only.hs',
         'tidepool/runtime/src/session/fixtures/paired-late-operator.hs',
         'tidepool/runtime/src/session/fixtures/paired-public-value-only.hs',
