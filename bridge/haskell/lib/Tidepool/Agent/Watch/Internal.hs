@@ -12,7 +12,7 @@ module Tidepool.Agent.Watch.Internal
   , AwaitDependency (..), AwaitError (..)
   , Watch, WatchId (..), Watches (..), WatchState (..)
   , RawWatchObservation (..), ForgetWatchOutcome (..)
-  , response, settledResponse, result, settlement, eitherOf, after, afterSited, observed, await
+  , response, responseSited, settledResponse, settledResponseSited, result, resultSited, settlement, settlementSited, eitherOf, after, afterSited, observed, await
   , watch, pollWatch, forgetWatch
   , Route, RouteState (..), route, pollRoute, listRoutes, forgetRoute
   , requireObserved, Observation (..)
@@ -27,7 +27,7 @@ import Tidepool.Effects.Core (CommandReport)
 import Tidepool.Agent.Reply.Internal
   ( ReplyError (..), Progress (..), ProgressCursor (..), ProgressState (..)
   , PendingProgress (..), RequestId (..), Request, ResponseFailure
-  , ResponseResult (responseValue), readResponse, responseRequestId
+  , ResponseResult (responseValue), responseRequestId
   )
 
 data AwaitDependency
@@ -55,17 +55,21 @@ data AwaitDecision = AwaitDecision [(Int, Maybe ResponseFailure)] [(Int, Bool)]
 data Observation = Observation Int [Int]
 
 data Await a = Await AwaitPlan
-  (forall effects. Member Watches effects => Observation -> Int -> AwaitDecision -> Eff effects a)
+  (forall effects. Member Watches effects => Observation -> Int -> AwaitDecision -> Eff effects (Either AwaitError a))
 
 instance Functor Await where
-  fmap f (Await plan observe) = Await plan (\watchId offset decision -> f <$> observe watchId offset decision)
+  fmap f (Await plan observe) = Await plan (\watchId offset decision -> fmap f <$> observe watchId offset decision)
 
 instance Applicative Await where
-  pure value = Await (AwaitPlan [ReadyNode] 0) (\_ _ _ -> pure value)
+  pure value = Await (AwaitPlan [ReadyNode] 0) (\_ _ _ -> pure (Right value))
   Await left observeFunction <*> Await right observeArgument =
     let (plan, rightOffset, _) = combine AllNode left right
     in Await plan $ \watchId offset decision ->
-      observeFunction watchId offset decision <*> observeArgument watchId (offset + rightOffset) decision
+      do
+        function <- observeFunction watchId offset decision
+        case function of
+          Left failure -> pure (Left failure)
+          Right f -> fmap (fmap f) (observeArgument watchId (offset + rightOffset) decision)
 
 -- | Select the first terminal branch, including failure. Already terminal
 -- ties prefer the left. A nested choice remains fixed while its parent waits.
@@ -74,8 +78,8 @@ eitherOf (Await left observeLeft) (Await right observeRight) =
   let (plan, rightOffset, choiceNode) = combine EitherNode left right
   in Await plan $ \watchId offset decision@(AwaitDecision _ choices) ->
     case lookup (offset + choiceNode) choices of
-      Just True -> Left <$> observeLeft watchId offset decision
-      Just False -> Right <$> observeRight watchId (offset + rightOffset) decision
+      Just True -> fmap Left <$> observeLeft watchId offset decision
+      Just False -> fmap Right <$> observeRight watchId (offset + rightOffset) decision
       Nothing -> error "await: terminal decision omitted its selected branch"
 
 combine :: (Int -> Int -> AwaitNode) -> AwaitPlan -> AwaitPlan -> (AwaitPlan, Int, Int)
@@ -119,6 +123,7 @@ data Watches a where
   RegisterRouteWith :: Text -> (Int -> Eff effects ()) -> AwaitPlan -> Watches Int
   ObserveRouteWith :: Int -> Watches RouteState
   ListRoutesWith :: Watches [Int]
+  ObserveWatchResponseWith :: RequestSite '[ResponseResult result] (Either ReplyError (ResponseResult result)) -> Int -> [Int] -> Int -> Watches (Either ReplyError (ResponseResult result))
   ObserveWatchProgressWith :: RequestSite '[progress] (ProgressState progress) -> Int -> [Int] -> Int -> Int -> Watches (ProgressState progress)
   ObserveWatchDecisionWith :: Int -> [Int] -> Watches AwaitDecision
   ObserveWatchWith :: Int -> Watches RawWatchObservation
@@ -131,26 +136,47 @@ data ForgetWatchOutcome = WatchForgotten | WatchForgetPending | WatchForgetRejec
 
 -- | Retain the original successful reply and its execution/worktree evidence.
 -- Dependency failures are returned by 'await'.
-response :: Request a -> Await (ResponseResult a)
-response request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) False)] 0)
-  (\_ _ _ -> pure (requireObserved (readResponse request)))
+{-# OPAQUE response #-}
+response :: forall result. Request result -> Await (ResponseResult result)
+response = responseSited (error "response: extractor must assign a typed site")
+
+{-# OPAQUE responseSited #-}
+responseSited :: forall result. RequestSite '[ResponseResult result] (Either ReplyError (ResponseResult result)) -> Request result -> Await (ResponseResult result)
+responseSited site request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) False)] 0)
+  (\(Observation identity path) node _ -> fmap (either (Left . AwaitRejected) Right)
+    (send (ObserveWatchResponseWith site identity path node)))
 
 -- | Capture terminal failure as a value while retaining successful receipts.
--- This uses the same evaluator and projection custody as 'response'.
-settledResponse :: Request a -> Await (Either ResponseFailure (ResponseResult a))
-settledResponse request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) True)] 0)
-  (\_ node (AwaitDecision leaves _) -> pure $ case lookup node leaves of
-    Just (Just failure) -> Left failure
-    Just Nothing -> Right (requireObserved (readResponse request))
+{-# OPAQUE settledResponse #-}
+settledResponse :: forall result. Request result -> Await (Either ResponseFailure (ResponseResult result))
+settledResponse = settledResponseSited (error "settledResponse: extractor must assign a typed site")
+
+{-# OPAQUE settledResponseSited #-}
+settledResponseSited :: forall result. RequestSite '[ResponseResult result] (Either ReplyError (ResponseResult result)) -> Request result -> Await (Either ResponseFailure (ResponseResult result))
+settledResponseSited site request = Await (AwaitPlan [LeafNode (AwaitDependency (responseRequestId request) True)] 0)
+  (\(Observation identity path) node (AwaitDecision leaves _) -> case lookup node leaves of
+    Just (Just failure) -> pure (Right (Left failure))
+    Just Nothing -> fmap (either (Left . AwaitRejected) (Right . Right))
+      (send (ObserveWatchResponseWith site identity path node))
     Nothing -> error "await: terminal decision omitted its selected settlement")
 
 -- | Project a successful value without changing its readiness or custody.
-result :: Request a -> Await a
-result = fmap responseValue . response
+{-# OPAQUE result #-}
+result :: forall result. Request result -> Await result
+result = resultSited (error "result: extractor must assign a typed site")
+
+{-# OPAQUE resultSited #-}
+resultSited :: forall result. RequestSite '[ResponseResult result] (Either ReplyError (ResponseResult result)) -> Request result -> Await result
+resultSited site = fmap responseValue . responseSited site
 
 -- | Capture terminal failure as a value for ordinary traverse collection.
-settlement :: Request a -> Await (Either ResponseFailure a)
-settlement = fmap (fmap responseValue) . settledResponse
+{-# OPAQUE settlement #-}
+settlement :: forall result. Request result -> Await (Either ResponseFailure result)
+settlement = settlementSited (error "settlement: extractor must assign a typed site")
+
+{-# OPAQUE settlementSited #-}
+settlementSited :: forall result. RequestSite '[ResponseResult result] (Either ReplyError (ResponseResult result)) -> Request result -> Await (Either ResponseFailure result)
+settlementSited site = fmap (fmap responseValue) . settledResponseSited site
 
 requireObserved :: Maybe a -> a
 requireObserved (Just value) = value
@@ -164,7 +190,7 @@ after = afterSited (error "after: extractor must assign a typed site")
 afterSited :: forall progress. RequestSite '[progress] (ProgressState progress) -> Progress progress -> ProgressCursor -> Await (ProgressState progress)
 afterSited site (Progress request@(RequestId requestId)) cursor@(ProgressCursor revision) =
   Await (AwaitPlan [LeafNode (AwaitProgress request cursor)] 0) $ \(Observation watchId path) _ _ ->
-    send (ObserveWatchProgressWith site watchId path requestId revision)
+    Right <$> send (ObserveWatchProgressWith site watchId path requestId revision)
 
 -- | Await the original watch's decision, retaining its selected values.
 -- The source handle can be forgotten after this dependency is admitted.
@@ -218,10 +244,10 @@ waitSubscription (Watch (WatchId identity) (Await _ observe)) = loop
         WatchReady value -> pure (Right value)
         WatchUnavailable failure -> pure (Left failure)
 
-project :: Member Watches effects => Observation -> (Observation -> Int -> AwaitDecision -> Eff effects a) -> RawWatchObservation -> Eff effects (WatchState a)
+project :: Member Watches effects => Observation -> (Observation -> Int -> AwaitDecision -> Eff effects (Either AwaitError a)) -> RawWatchObservation -> Eff effects (WatchState a)
 project view observe observation = case observation of
   RawWatchPending progress -> pure (WatchPending progress)
-  RawWatchReady decision -> WatchReady <$> observe view 0 decision
+  RawWatchReady decision -> either WatchUnavailable WatchReady <$> observe view 0 decision
   RawWatchUnavailable request failure -> pure (WatchUnavailable (AwaitDependencyUnavailable request failure))
   RawWatchRejected failure -> pure (WatchUnavailable (AwaitRejected failure))
 

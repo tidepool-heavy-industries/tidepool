@@ -1,5 +1,9 @@
 #[cfg(test)]
+mod result_tests;
+#[cfg(test)]
 mod sequence_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub(crate) mod readiness;
 
@@ -22,7 +26,9 @@ use std::collections::{HashMap, VecDeque};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::owned_result::{OwnedResultSnapshot, RequestResultDestination};
 use crate::{ActorExitKind, ActorRef, ActorTerminal};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeadlineUnit {
@@ -239,6 +245,8 @@ pub enum ReplyError {
     WrongIncarnation,
     InvalidReadiness,
     ProgressTypeMismatch,
+    ReplyResultTypeMismatch,
+    ReplyResultUnavailable,
     CancellationRequested,
 }
 
@@ -357,10 +365,57 @@ enum TargetState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OwnerState {
     Observing,
-    Ready,
+    Ready(RequestSuccess),
     Unavailable(ResponseFailure),
     Abandoned,
 }
+
+/// Typed success and command completion carry different, mandatory evidence.
+#[derive(Debug, Clone)]
+enum RequestSuccess {
+    Typed(Arc<OwnedResultSnapshot>),
+    Command(tidepool_bridge_effects::CommandReport),
+}
+
+impl PartialEq for RequestSuccess {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Typed(left), Self::Typed(right)) => Arc::ptr_eq(left, right),
+            (Self::Command(left), Self::Command(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+impl Eq for RequestSuccess {}
+
+/// One accepted reply attempt. Async incorporation cannot manufacture or copy
+/// this winner; committing consumes it and rechecks the exact request state.
+#[derive(Debug)]
+pub(crate) struct RequestReplyClaim {
+    request: RequestId,
+    target: ActorRef,
+    generation: u64,
+    destination: Arc<RequestResultDestination>,
+}
+
+impl RequestReplyClaim {
+    pub(crate) fn request(&self) -> RequestId {
+        self.request
+    }
+    pub(crate) fn destination(&self) -> Arc<RequestResultDestination> {
+        Arc::clone(&self.destination)
+    }
+}
+
+impl PartialEq for RequestReplyClaim {
+    fn eq(&self, other: &Self) -> bool {
+        self.request == other.request
+            && self.target == other.target
+            && self.generation == other.generation
+            && Arc::ptr_eq(&self.destination, &other.destination)
+    }
+}
+impl Eq for RequestReplyClaim {}
 
 enum ProgressTypeAdmission {
     Unadmitted,
@@ -395,6 +450,8 @@ struct RequestRecord {
     label: String,
     target_state: TargetState,
     owner_state: OwnerState,
+    result_destination: Option<Arc<RequestResultDestination>>,
+    reply_claim: Option<u64>,
     deadline: Option<ActiveRequestDeadline>,
     progress: Option<ProgressSnapshot>,
     progress_type: ProgressTypeAdmission,
@@ -423,7 +480,6 @@ struct RequestRecord {
     /// it is excluded from target-side work and settles only through
     /// [`RequestRegistry::settle_command`].
     command_job: Option<String>,
-    command_report: Option<tidepool_bridge_effects::CommandReport>,
     /// A command record armed for a watch that has not registered yet. It is
     /// not released before that watch names it or is refused.
     held_for_watch: bool,
@@ -514,6 +570,7 @@ struct WatchSnapshot {
     decision: readiness::Decision,
     progress: HashMap<(RequestId, u64), ProgressCapture>,
     commands: HashMap<usize, (String, tidepool_bridge_effects::CommandReport)>,
+    responses: HashMap<usize, Arc<OwnedResultSnapshot>>,
     sources: HashMap<usize, std::sync::Arc<WatchSnapshot>>,
 }
 
@@ -530,6 +587,7 @@ struct WatchRecord {
     state: WatchState,
     progress: HashMap<(RequestId, u64), ProgressCapture>,
     commands: HashMap<usize, (String, tidepool_bridge_effects::CommandReport)>,
+    responses: HashMap<usize, Arc<OwnedResultSnapshot>>,
     /// When the owner last observed this watch (via `observe_watch`) already
     /// settled Ready or Unavailable. Lets delivery acknowledge a queued
     /// `WatchChanged` notice without prompting when the owner polled the
@@ -565,6 +623,7 @@ struct WatchDependency {
 #[derive(Default)]
 struct RequestStateTable {
     next_request: u64,
+    next_reply_claim: u64,
     received_requests: HashMap<ActorRef, u64>,
     next_watch: u64,
     next_watch_waiter: u64,
@@ -596,8 +655,13 @@ enum RequestSettlement {
     CommandComplete {
         report: String,
         revision: Option<String>,
+        value: tidepool_bridge_effects::CommandReport,
     },
-    ReplyComplete(Option<String>),
+    ReplyComplete {
+        claim: RequestReplyClaim,
+        value: Arc<OwnedResultSnapshot>,
+        preview: Option<String>,
+    },
     ReplyFailed(String),
     CancellationAcknowledged,
 }
@@ -679,6 +743,8 @@ impl RequestStateTable {
                 label,
                 target_state,
                 owner_state: OwnerState::Observing,
+                result_destination: None,
+                reply_claim: None,
                 deadline: None,
                 progress: None,
                 progress_type: ProgressTypeAdmission::Unadmitted,
@@ -689,7 +755,6 @@ impl RequestStateTable {
                 target_path: None,
                 target_revision: None,
                 command_job,
-                command_report: None,
                 held_for_watch,
             },
         );
@@ -702,35 +767,55 @@ impl RequestStateTable {
         transition: RequestSettlement,
     ) -> Option<SettlementEffects> {
         let releases_command = match transition {
-            RequestSettlement::CommandComplete { report, revision } => {
+            RequestSettlement::CommandComplete {
+                report,
+                revision,
+                value,
+            } => {
                 let record = self.requests.get_mut(&request)?;
                 if record.command_job.is_none() || record.target_state == TargetState::Closed {
                     return None;
                 }
                 record.target_state = TargetState::Closed;
                 if record.owner_state == OwnerState::Observing {
-                    record.owner_state = OwnerState::Ready;
+                    record.owner_state = OwnerState::Ready(RequestSuccess::Command(value));
                 }
                 record.reply_preview = Some(report);
                 record.target_revision = revision;
                 true
             }
-            RequestSettlement::ReplyComplete(reply_preview) => {
+            RequestSettlement::ReplyComplete {
+                claim,
+                value,
+                preview,
+            } => {
                 let record = self.requests.get_mut(&request)?;
-                if record.target_state != TargetState::Settling {
+                if record.target_state != TargetState::Settling
+                    || record.target != claim.target
+                    || record.reply_claim != Some(claim.generation)
+                {
                     return None;
                 }
                 record.target_state = TargetState::Closed;
+                record.reply_claim = None;
                 if record.owner_state == OwnerState::Observing {
-                    record.owner_state = OwnerState::Ready;
+                    if value.belongs_to(&claim.destination) {
+                        record.owner_state = OwnerState::Ready(RequestSuccess::Typed(value));
+                        record.reply_preview = preview;
+                    } else {
+                        record.owner_state =
+                            OwnerState::Unavailable(ResponseFailure::SettlementFailed(
+                                "reply result belongs to a different request admission".into(),
+                            ));
+                    }
                 }
-                record.reply_preview = reply_preview;
                 false
             }
             RequestSettlement::ReplyFailed(detail) => {
                 if let Some(record) = self.requests.get_mut(&request) {
                     if record.target_state == TargetState::Settling {
                         record.target_state = TargetState::Closed;
+                        record.reply_claim = None;
                         if record.owner_state == OwnerState::Observing {
                             record.owner_state =
                                 OwnerState::Unavailable(ResponseFailure::SettlementFailed(detail));
@@ -766,8 +851,8 @@ impl RequestStateTable {
 }
 
 /// One process-local owner for request identity, terminal state, and watch
-/// readiness. Live request inputs and results remain in the resident Haskell
-/// heap; this table stores only exact actor identities and closed transitions.
+/// readiness. Typed successes retain the runtime-authenticated ROOT-owned
+/// snapshot; watch and source captures share its immutable ownership.
 #[derive(Default)]
 pub(crate) struct RequestRegistry {
     state: Mutex<RequestStateTable>,
@@ -1369,7 +1454,7 @@ impl RequestRegistry {
                 continue;
             }
             match record.owner_state {
-                OwnerState::Ready => status
+                OwnerState::Ready(_) => status
                     .ready_responses
                     .push((*request, record.label.clone())),
                 OwnerState::Unavailable(ref failure) => status.unavailable_responses.push((
@@ -1511,7 +1596,9 @@ impl RequestRegistry {
         label: String,
         notify_owner: bool,
     ) -> RequestId {
-        self.reserve_for_operation(owner, target, label, notify_owner, None)
+        let request = self.reserve_for_operation(owner, target, label, notify_owner, None);
+        test_support::admit_destination(self, owner, request);
+        request
     }
 
     pub(crate) fn reserve_for_operation(
@@ -1590,18 +1677,17 @@ impl RequestRegistry {
         request: RequestId,
         report: String,
         revision: Option<String>,
-        value: Option<tidepool_bridge_effects::CommandReport>,
+        value: tidepool_bridge_effects::CommandReport,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
-        if let Some(record) = state.requests.get_mut(&request) {
-            if record.command_report.is_none() {
-                record.command_report = value;
-            }
-        }
         state
             .settle(
                 request,
-                RequestSettlement::CommandComplete { report, revision },
+                RequestSettlement::CommandComplete {
+                    report,
+                    revision,
+                    value,
+                },
             )
             .map_or_else(Vec::new, |effects| effects.notifications)
     }
@@ -1810,12 +1896,41 @@ impl RequestRegistry {
         }
     }
 
+    /// Admission binds result ownership before the payload can enter a mailbox.
+    /// Cleanup handoff changes `owner`, never this original issuer destination.
+    pub(crate) fn admit_result_destination(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+        destination: RequestResultDestination,
+    ) -> Result<(), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+        authorize_owner(record, owner)?;
+        if destination.issuer() != owner {
+            return Err(identity_error(owner, destination.issuer()));
+        }
+        if record.target_state != TargetState::Reserved
+            || record.result_destination.is_some()
+            || record.command_job.is_some()
+        {
+            return Err(ReplyError::Stale);
+        }
+        record.result_destination = Some(Arc::new(destination));
+        Ok(())
+    }
+
     pub(crate) fn begin_reply(
         &self,
         target: ActorRef,
         request: RequestId,
-    ) -> Result<(), ReplyError> {
+    ) -> Result<RequestReplyClaim, ReplyError> {
         let mut state = self.state.lock();
+        let generation = state
+            .next_reply_claim
+            .checked_add(1)
+            .ok_or(ReplyError::Stale)?;
+        state.next_reply_claim = generation;
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_target(record, target)?;
         match record.target_state {
@@ -1831,10 +1946,20 @@ impl RequestRegistry {
                 {
                     return Err(ReplyError::UpdatePending);
                 }
+                let destination = record
+                    .result_destination
+                    .clone()
+                    .ok_or(ReplyError::ReplyResultUnavailable)?;
                 record.target_state = TargetState::Settling;
+                record.reply_claim = Some(generation);
                 record.publish_source_closure();
                 record.progress = None;
-                Ok(())
+                Ok(RequestReplyClaim {
+                    request,
+                    target,
+                    generation,
+                    destination,
+                })
             }
             TargetState::CancellationRequested { .. }
             | TargetState::AcknowledgingCancellation(_) => Err(ReplyError::CancellationRequested),
@@ -1868,12 +1993,20 @@ impl RequestRegistry {
     /// notice; nothing else on the request depends on it.
     pub(crate) fn finish_reply(
         &self,
-        request: RequestId,
+        claim: RequestReplyClaim,
+        value: Arc<OwnedResultSnapshot>,
         reply_preview: Option<String>,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
         state
-            .settle(request, RequestSettlement::ReplyComplete(reply_preview))
+            .settle(
+                claim.request,
+                RequestSettlement::ReplyComplete {
+                    claim,
+                    value,
+                    preview: reply_preview,
+                },
+            )
             .map_or_else(Vec::new, |effects| effects.notifications)
     }
 
@@ -1917,7 +2050,7 @@ impl RequestRegistry {
         let state = self.state.lock();
         let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
         Ok(match &record.owner_state {
-            OwnerState::Ready => ResponseObservation::Ready,
+            OwnerState::Ready(_) => ResponseObservation::Ready,
             OwnerState::Unavailable(failure) => ResponseObservation::Unavailable(failure.clone()),
             OwnerState::Abandoned => ResponseObservation::Unavailable(ResponseFailure::Abandoned),
             OwnerState::Observing => match record.target_state {
@@ -1927,6 +2060,21 @@ impl RequestRegistry {
                 _ => ResponseObservation::Pending(base_pending_progress(&state, request)),
             },
         })
+    }
+
+    /// Borrowed observation returns the same canonical root on every read.
+    /// A released handle grants no new observation, even if a watch retains it.
+    pub(crate) fn observe_response_result(
+        &self,
+        _owner: ActorRef,
+        request: RequestId,
+    ) -> Result<Arc<OwnedResultSnapshot>, ReplyError> {
+        let state = self.state.lock();
+        let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
+        match &record.owner_state {
+            OwnerState::Ready(RequestSuccess::Typed(snapshot)) => Ok(Arc::clone(snapshot)),
+            _ => Err(ReplyError::ReplyResultUnavailable),
+        }
     }
 
     pub(crate) fn cancel_request(
@@ -2123,7 +2271,7 @@ impl RequestRegistry {
                 AbandonResponseOutcome::AbandonedNow
             }
             OwnerState::Abandoned => AbandonResponseOutcome::AlreadyAbandoned,
-            OwnerState::Ready | OwnerState::Unavailable(_) => {
+            OwnerState::Ready(_) | OwnerState::Unavailable(_) => {
                 AbandonResponseOutcome::AlreadyTerminal
             }
         };
@@ -2315,6 +2463,7 @@ impl RequestRegistry {
                 state: WatchState::Pending,
                 progress: HashMap::new(),
                 commands: HashMap::new(),
+                responses: HashMap::new(),
                 observed_ready_at: None,
                 registered_at_unix_ms: unix_time_ms(),
                 transitioned_at_unix_ms: None,
@@ -2380,6 +2529,20 @@ impl RequestRegistry {
             .commands
             .values()
             .find_map(|(captured_job, report)| (captured_job == job).then(|| report.clone())))
+    }
+
+    pub(crate) fn observe_watch_snapshot_response(
+        &self,
+        watch: WatchId,
+        path: &[usize],
+        node: usize,
+    ) -> Result<Arc<OwnedResultSnapshot>, ReplyError> {
+        let state = self.state.lock();
+        snapshot_at(&state, watch, path)?
+            .responses
+            .get(&node)
+            .cloned()
+            .ok_or(ReplyError::ReplyResultUnavailable)
     }
 
     pub(crate) fn observe_watch_snapshot_decision(
@@ -2762,7 +2925,7 @@ fn request_has_pending_watcher(state: &RequestStateTable, request: RequestId) ->
 fn is_owner_terminal(state: &OwnerState) -> bool {
     matches!(
         state,
-        OwnerState::Ready | OwnerState::Unavailable(_) | OwnerState::Abandoned
+        OwnerState::Ready(_) | OwnerState::Unavailable(_) | OwnerState::Abandoned
     )
 }
 
@@ -2971,7 +3134,7 @@ fn queue_settlement_notifications(state: &mut RequestStateTable) {
         }
         if record.notify_owner && !record.settlement_notified {
             let transition = match &record.owner_state {
-                OwnerState::Ready => Some(SettlementTransition::Ready),
+                OwnerState::Ready(_) => Some(SettlementTransition::Ready),
                 OwnerState::Unavailable(failure) => {
                     Some(SettlementTransition::Unavailable(failure.clone()))
                 }
@@ -3053,6 +3216,17 @@ fn queue_settlement_notifications(state: &mut RequestStateTable) {
 
 impl RequestStateTable {
     fn reevaluate_watches(&mut self) -> Vec<WatchNotification> {
+        for record in self.requests.values_mut() {
+            // A pending target still owes native settlement after its owner
+            // stops. An accepted reply's affine claim holds the admission pin
+            // through incorporation; terminal roots retain only their custody.
+            if record.target_state == TargetState::Closed
+                || (record.reply_claim.is_some()
+                    && matches!(record.owner_state, OwnerState::Unavailable(_)))
+            {
+                record.result_destination = None;
+            }
+        }
         queue_settlement_notifications(self);
         let mut notifications = Vec::new();
         // A source must already exist at admission, so its monotonic ID is
@@ -3109,14 +3283,24 @@ impl RequestStateTable {
         }
         for dependency in &watch.dependencies {
             if let Some(record) = state.requests.get(&dependency.request) {
-                if record.owner_state == OwnerState::Ready {
-                    if let (Some(job), Some(report)) = (&record.command_job, &record.command_report)
-                    {
-                        watch
-                            .commands
-                            .entry(dependency.node)
-                            .or_insert_with(|| (job.clone(), report.clone()));
+                match &record.owner_state {
+                    OwnerState::Ready(RequestSuccess::Command(report)) => {
+                        if let Some(job) = &record.command_job {
+                            watch
+                                .commands
+                                .entry(dependency.node)
+                                .or_insert_with(|| (job.clone(), report.clone()));
+                        }
                     }
+                    OwnerState::Ready(RequestSuccess::Typed(snapshot)) => {
+                        if matches!(dependency.requirement, WatchRequirement::Response { .. }) {
+                            watch
+                                .responses
+                                .entry(dependency.node)
+                                .or_insert_with(|| Arc::clone(snapshot));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -3162,7 +3346,7 @@ impl RequestStateTable {
                 .get(&request)
                 .map(|record| &record.owner_state)
             {
-                Some(OwnerState::Ready) => return LeafState::Ready,
+                Some(OwnerState::Ready(_)) => return LeafState::Ready,
                 Some(OwnerState::Observing) => return LeafState::Pending,
                 Some(OwnerState::Unavailable(failure)) => failure.clone(),
                 Some(OwnerState::Abandoned) => ResponseFailure::Abandoned,
@@ -3193,11 +3377,13 @@ impl RequestStateTable {
                     })
                 });
                 watch.commands.retain(|node, _| selected.contains(node));
+                watch.responses.retain(|node, _| selected.contains(node));
                 watch.sources.retain(|node, _| selected.contains(node));
                 watch.snapshot = Some(std::sync::Arc::new(WatchSnapshot {
                     decision,
                     progress: std::mem::take(&mut watch.progress),
                     commands: std::mem::take(&mut watch.commands),
+                    responses: std::mem::take(&mut watch.responses),
                     sources: std::mem::take(&mut watch.sources),
                 }));
                 WatchState::Ready
@@ -3205,12 +3391,14 @@ impl RequestStateTable {
             readiness::Outcome::Rejected(error) => {
                 watch.progress.clear();
                 watch.commands.clear();
+                watch.responses.clear();
                 watch.sources.clear();
                 WatchState::Rejected(error)
             }
             readiness::Outcome::Failed(request, failure) => {
                 watch.progress.clear();
                 watch.commands.clear();
+                watch.responses.clear();
                 watch.sources.clear();
                 WatchState::Unavailable { request, failure }
             }
@@ -3309,9 +3497,13 @@ mod tests {
         registry.mark_target_unavailable(target, grandchild);
         assert_eq!(registry.open_without_reply(target), Some(request));
 
-        registry.begin_reply(target, request).unwrap();
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
         assert_eq!(registry.open_without_reply(target), None);
-        registry.finish_reply(request, None);
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert_eq!(registry.open_without_reply(target), None);
     }
 
@@ -3327,15 +3519,23 @@ mod tests {
             registry.reserve_labeled_with_reporting(owner, ready_target, "ready".into(), true);
         registry.mark_queued(owner, ready_target, ready).unwrap();
         registry.present(ready_target, ready).unwrap();
-        registry.begin_reply(ready_target, ready).unwrap();
-        registry.finish_reply(ready, None);
+        let mut reply_claim_ready = Some(registry.begin_reply(ready_target, ready).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_ready,
+            None,
+        );
 
         let silent =
             registry.reserve_labeled_with_reporting(owner, silent_target, "silent".into(), false);
         registry.mark_queued(owner, silent_target, silent).unwrap();
         registry.present(silent_target, silent).unwrap();
-        registry.begin_reply(silent_target, silent).unwrap();
-        registry.finish_reply(silent, None);
+        let mut reply_claim_silent = Some(registry.begin_reply(silent_target, silent).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_silent,
+            None,
+        );
 
         let failed =
             registry.reserve_labeled_with_reporting(owner, failed_target, "failed".into(), true);
@@ -3385,15 +3585,30 @@ mod tests {
                 )]],
             )
             .unwrap();
-        let ready = registry.settle_command(watched, "job-b report".into(), None, None);
+        let ready = registry.settle_command(
+            watched,
+            "job-b report".into(),
+            None,
+            crate::request::test_support::command_report(),
+        );
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].watch, watch);
         assert_eq!(ready[0].transition, WatchTransition::Ready);
 
-        registry.settle_command(notified, "job-a report".into(), Some("abc123".into()), None);
+        registry.settle_command(
+            notified,
+            "job-a report".into(),
+            Some("abc123".into()),
+            crate::request::test_support::command_report(),
+        );
         // Settling twice keeps the first report.
         assert!(registry
-            .settle_command(notified, "later".into(), None, None)
+            .settle_command(
+                notified,
+                "later".into(),
+                None,
+                crate::request::test_support::command_report()
+            )
             .is_empty());
         let notices = registry.take_settlement_notifications();
         assert_eq!(
@@ -3443,7 +3658,12 @@ mod tests {
             ))
         );
         assert!(registry
-            .settle_command(stopped, "after stop".into(), None, None)
+            .settle_command(
+                stopped,
+                "after stop".into(),
+                None,
+                crate::request::test_support::command_report()
+            )
             .is_empty());
         let notices = registry.take_settlement_notifications();
         assert!(notices.iter().all(|notice| notice.transition
@@ -3461,14 +3681,24 @@ mod tests {
         let request = registry.reserve_command_settlement(owner, "job".into(), false);
         registry.release_command_holds(&[request]);
         assert!(registry.notify_command_owner(request).is_some());
-        registry.settle_command(request, "finished".into(), None, None);
+        registry.settle_command(
+            request,
+            "finished".into(),
+            None,
+            crate::request::test_support::command_report(),
+        );
         assert_eq!(registry.take_settlement_notifications().len(), 1);
         // A later handoff can rearm from the retained job report; it cannot
         // emit a second notice from this released request.
         assert!(registry.notify_command_owner(request).is_none());
 
         let raced = registry.reserve_command_settlement(owner, "raced".into(), false);
-        registry.settle_command(raced, "already finished".into(), None, None);
+        registry.settle_command(
+            raced,
+            "already finished".into(),
+            None,
+            crate::request::test_support::command_report(),
+        );
         assert!(registry.notify_command_owner(raced).is_some());
         assert!(registry.notify_command_owner(raced).is_some());
         let notices = registry.take_settlement_notifications();
@@ -3539,7 +3769,12 @@ mod tests {
         let owner = actor(1);
         let armed = registry.reserve_command_settlement(owner, "job".into(), false);
         // Held for its watch: settling does not release it.
-        registry.settle_command(armed, "report".into(), None, None);
+        registry.settle_command(
+            armed,
+            "report".into(),
+            None,
+            crate::request::test_support::command_report(),
+        );
         assert!(registry.hold_command(armed));
         registry.release_command_holds(&[armed]);
         assert_eq!(
@@ -3634,8 +3869,12 @@ mod tests {
             )
             .unwrap()
             .0;
-        registry.begin_reply(actor(3), right).unwrap();
-        registry.finish_reply(right, None);
+        let mut reply_claim_right = Some(registry.begin_reply(actor(3), right).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_right,
+            None,
+        );
         let original = registry
             .observe_watch_snapshot_decision(source, &[])
             .unwrap();
@@ -3643,8 +3882,12 @@ mod tests {
         registry.forget_watch(owner, source).unwrap();
         registry.forget_watch(owner, first).unwrap();
         registry.mark_target_unavailable(owner, left);
-        registry.begin_reply(actor(4), tail).unwrap();
-        registry.finish_reply(tail, None);
+        let mut reply_claim_tail = Some(registry.begin_reply(actor(4), tail).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_tail,
+            None,
+        );
         assert!(matches!(
             registry.observe_watch(owner, nested),
             Ok(WatchObservation::Ready(_))
@@ -3771,7 +4014,7 @@ mod tests {
             output_complete: true,
             tail: "stable projection".into(),
         };
-        registry.settle_command(request, "exit 0".into(), None, Some(report.clone()));
+        registry.settle_command(request, "exit 0".into(), None, report.clone());
         let read = registry
             .register_transient_watch(
                 owner,
@@ -3862,7 +4105,7 @@ mod tests {
                 output_complete: true,
                 tail: "captured before release".into(),
             };
-            registry.settle_command(request, "exit 0".into(), None, Some(report.clone()));
+            registry.settle_command(request, "exit 0".into(), None, report.clone());
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
             let observer = {
                 let registry = registry.clone();
@@ -3946,8 +4189,12 @@ mod tests {
                 })
             };
             barrier.wait();
-            registry.begin_reply(target, request).unwrap();
-            let notifications = registry.finish_reply(request, None);
+            let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+            let notifications = crate::request::test_support::complete_optional_reply(
+                &registry,
+                &mut reply_claim_request,
+                None,
+            );
             let (watch, initial) = registrar.join().unwrap();
             assert_eq!(notifications.len() + initial.len(), 1);
             assert!(matches!(
@@ -4039,8 +4286,12 @@ mod tests {
                 vec![(request, WatchRequirement::ProgressAfter(0))],
             )
             .unwrap();
-        registry.begin_reply(target, request).unwrap();
-        let notifications = registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        let notifications = crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert_eq!(notifications.len(), 2);
         assert!(notifications.iter().any(|notice| notice.watch == watch));
         assert!(notifications
@@ -4056,7 +4307,12 @@ mod tests {
             registry.observe_watch_progress(target, watch, request, 0),
             Ok((None, true))
         ));
-        assert!(registry.finish_reply(request, None).is_empty());
+        assert!(crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None
+        )
+        .is_empty());
         let (late, notifications) = registry
             .register_watch_requirements(
                 owner,
@@ -4099,8 +4355,12 @@ mod tests {
             .unwrap();
         assert!(initial.is_empty());
 
-        registry.begin_reply(first_target, first).unwrap();
-        let notifications = registry.finish_reply(first, None);
+        let mut reply_claim_first = Some(registry.begin_reply(first_target, first).unwrap());
+        let notifications = crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_first,
+            None,
+        );
         assert_eq!(notifications.len(), 1);
         assert!(matches!(
             registry.observe_watch(owner, watch),
@@ -4119,8 +4379,13 @@ mod tests {
             Err(ReplyError::Unauthorized)
         ));
 
-        registry.begin_reply(second_target, second).unwrap();
-        assert!(registry.finish_reply(second, None).is_empty());
+        let mut reply_claim_second = Some(registry.begin_reply(second_target, second).unwrap());
+        assert!(crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_second,
+            None
+        )
+        .is_empty());
         assert!(matches!(
             registry.observe_watch_progress(owner, watch, second, 0),
             Err(ReplyError::Unauthorized)
@@ -4136,8 +4401,12 @@ mod tests {
         let request = registry.reserve(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert!(matches!(
             registry.begin_cleanup(owner, &inspected),
             Err(CleanupAdmissionError::Stale)
@@ -4161,8 +4430,12 @@ mod tests {
             registry.begin_cleanup(owner, &inspected),
             Err(CleanupAdmissionError::Pending)
         ));
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         // Unrelated root work and inspection do not invalidate this decision.
         let outside = registry.reserve(owner, actor(3));
         registry.mark_queued(owner, actor(3), outside).unwrap();
@@ -4200,8 +4473,12 @@ mod tests {
             registry.begin_cleanup(owner, &inspected),
             Err(CleanupAdmissionError::Pending)
         ));
-        registry.begin_reply(outside, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(outside, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         let (_, _) = registry.register_watch(member, vec![request]).unwrap();
         assert!(matches!(
             registry.begin_cleanup(owner, &inspected),
@@ -4231,10 +4508,19 @@ mod tests {
         let (watch, initial) = registry.register_watch(owner, vec![left, right]).unwrap();
         assert!(initial.is_empty());
 
-        registry.begin_reply(left_target, left).unwrap();
-        assert!(registry.finish_reply(left, None).is_empty());
-        registry.begin_reply(right_target, right).unwrap();
-        let notifications = registry.finish_reply(right, None);
+        let mut reply_claim_left = Some(registry.begin_reply(left_target, left).unwrap());
+        assert!(crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_left,
+            None
+        )
+        .is_empty());
+        let mut reply_claim_right = Some(registry.begin_reply(right_target, right).unwrap());
+        let notifications = crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_right,
+            None,
+        );
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(notifications[0].label, "watch");
@@ -4243,7 +4529,14 @@ mod tests {
         assert_eq!(notifications[0].sequence, ActorEventSequence(1));
         assert_eq!(notifications[0].watermark, ActorEventSequence(1));
         assert_eq!(notifications[0].transition, WatchTransition::Ready);
-        assert_eq!(registry.finish_reply(right, None), Vec::new());
+        assert_eq!(
+            crate::request::test_support::complete_optional_reply(
+                &registry,
+                &mut reply_claim_right,
+                None
+            ),
+            Vec::new()
+        );
         assert_eq!(
             registry.begin_reply(right_target, right),
             Err(ReplyError::AlreadySettled)
@@ -4551,8 +4844,13 @@ mod tests {
         let request = registry.reserve(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
-        registry.begin_reply(target, request).unwrap();
-        assert!(registry.finish_reply(request, None).is_empty());
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        assert!(crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None
+        )
+        .is_empty());
 
         let (watch, notifications) = registry.register_watch(owner, vec![request]).unwrap();
         assert_eq!(notifications.len(), 1);
@@ -4571,8 +4869,12 @@ mod tests {
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
 
         let before_settlement = registry.subscribe_watch(owner, watch).unwrap();
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert!(matches!(
             before_settlement.wait().await,
             Ok(WatchObservation::Ready(_))
@@ -4640,8 +4942,12 @@ mod tests {
             .get(&watch)
             .is_some_and(|record| record.waiters.is_empty()));
 
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert!(matches!(
             registry.observe_watch(owner, watch),
             Ok(WatchObservation::Ready(_))
@@ -4657,8 +4963,12 @@ mod tests {
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
 
         let waiting = registry.subscribe_watch(owner, watch).unwrap();
         assert_eq!(
@@ -4677,8 +4987,12 @@ mod tests {
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
 
         let waiting = registry.subscribe_watch(owner, watch).unwrap();
         registry.forget_terminal_actor_metadata(owner).unwrap();
@@ -4697,7 +5011,7 @@ mod tests {
         let (watch, initial) = registry.register_watch(owner, vec![request]).unwrap();
         assert!(initial.is_empty());
 
-        registry.begin_reply(target, request).unwrap();
+        let _claim = registry.begin_reply(target, request).unwrap();
         let notifications = registry.fail_reply_settlement(request, "continuation trapped");
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
@@ -4797,8 +5111,12 @@ mod tests {
             diagnostic: None,
         };
         assert!(registry.actor_stopped(failed_target, &terminal).is_empty());
-        registry.begin_reply(ready_target, ready).unwrap();
-        let notifications = registry.finish_reply(ready, None);
+        let mut reply_claim_ready = Some(registry.begin_reply(ready_target, ready).unwrap());
+        let notifications = crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_ready,
+            None,
+        );
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(
@@ -5030,7 +5348,7 @@ mod tests {
             registry.present(target, request).unwrap();
             let (_, initial) = registry.register_watch(owner, vec![request]).unwrap();
             assert!(initial.is_empty());
-            registry.begin_reply(target, request).unwrap();
+            let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
             assert_eq!(
                 registry.deadline_request(owner, request),
                 (None, Vec::new())
@@ -5038,7 +5356,11 @@ mod tests {
             let notifications = if settlement_fails {
                 registry.fail_reply_settlement(request, "lost result")
             } else {
-                registry.finish_reply(request, None)
+                crate::request::test_support::complete_optional_reply(
+                    &registry,
+                    &mut reply_claim_request,
+                    None,
+                )
             };
             assert_eq!(notifications.len(), 1);
             let expected = if settlement_fails {
@@ -5105,8 +5427,13 @@ mod tests {
             registry.observe_reply(target, request),
             Ok(ReplyObservation::Open)
         );
-        registry.begin_reply(target, request).unwrap();
-        assert!(registry.finish_reply(request, None).is_empty());
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        assert!(crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None
+        )
+        .is_empty());
         assert_eq!(
             registry.observe_reply(target, request),
             Ok(ReplyObservation::Closed)
@@ -5191,8 +5518,12 @@ mod tests {
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
 
-        registry.begin_reply(target, request).unwrap();
-        let notifications = registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        let notifications = crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         let transition_time = notifications
             .iter()
             .find(|notification| notification.watch == watch)
@@ -5268,8 +5599,12 @@ mod tests {
         let (owner_watch, _) = registry.register_watch(owner, vec![request]).unwrap();
         let (child_watch, _) = registry.register_watch(child, vec![request]).unwrap();
 
-        registry.begin_reply(target, request).unwrap();
-        let ready_notices = registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        let ready_notices = crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert_eq!(ready_notices.len(), 2);
         assert!(ready_notices
             .iter()
@@ -5318,8 +5653,12 @@ mod tests {
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(child, vec![request]).unwrap();
-        registry.begin_reply(target, request).unwrap();
-        let notices = registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        let notices = crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].watch, watch);
         let owner_notices = registry.take_settlement_notifications();
@@ -5343,8 +5682,13 @@ mod tests {
         let (watch, _) = registry
             .register_watch(child, vec![completed, active])
             .unwrap();
-        registry.begin_reply(target, completed).unwrap();
-        assert!(registry.finish_reply(completed, None).is_empty());
+        let mut reply_claim_completed = Some(registry.begin_reply(target, completed).unwrap());
+        assert!(crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_completed,
+            None
+        )
+        .is_empty());
         assert!(matches!(
             registry.observe_watch(child, watch),
             Ok(WatchObservation::Pending(_))
@@ -5360,8 +5704,16 @@ mod tests {
             registry.forget_response(owner, active),
             Ok((ForgetResponseOutcome::StillPending, Vec::new()))
         );
-        registry.begin_reply(target, active).unwrap();
-        assert_eq!(registry.finish_reply(active, None).len(), 1);
+        let mut reply_claim_active = Some(registry.begin_reply(target, active).unwrap());
+        assert_eq!(
+            crate::request::test_support::complete_optional_reply(
+                &registry,
+                &mut reply_claim_active,
+                None
+            )
+            .len(),
+            1
+        );
         assert!(matches!(
             registry.observe_watch(child, watch),
             Ok(WatchObservation::Ready(_))
@@ -5393,8 +5745,12 @@ mod tests {
                 ],
             )
             .unwrap();
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert!(matches!(
             registry.observe_watch(child, watch),
             Ok(WatchObservation::Ready(_))
@@ -5427,8 +5783,12 @@ mod tests {
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(observer, vec![request]).unwrap();
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
 
         let notifications = registry.forget_terminal_actor_metadata(owner).unwrap();
         assert!(notifications.is_empty());
@@ -5459,8 +5819,12 @@ mod tests {
             registry.forget_watch(owner, watch),
             Ok(ForgetWatchOutcome::StillPending)
         );
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         let (outcome, notifications) = registry.forget_response(owner, request).unwrap();
         assert_eq!(outcome, ForgetResponseOutcome::Forgotten);
         assert!(notifications.is_empty());
@@ -5497,8 +5861,12 @@ mod tests {
         registry.mark_queued(owner, ready_target, ready).unwrap();
         registry.present(ready_target, ready).unwrap();
         let (ready_watch, _) = registry.register_watch(owner, vec![ready]).unwrap();
-        registry.begin_reply(ready_target, ready).unwrap();
-        registry.finish_reply(ready, None);
+        let mut reply_claim_ready = Some(registry.begin_reply(ready_target, ready).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_ready,
+            None,
+        );
 
         let pending = registry.reserve_labeled(owner, pending_target, "pending".into());
         registry
@@ -5542,11 +5910,15 @@ mod tests {
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
-        registry.begin_reply(target, request).unwrap();
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
 
         // The settlement that makes the watch Ready is exactly the transition
         // a publisher would be holding when cleanup runs.
-        let notifications = registry.finish_reply(request, None);
+        let notifications = crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert!(
             notifications.iter().any(|notice| notice.watch == watch),
             "the settled request must produce the watch transition under test"

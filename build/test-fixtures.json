@@ -270,6 +270,8 @@
     "exomonad/actor/src/fixtures/request-alias-borrow.hs",
     "exomonad/actor/src/fixtures/scope-live-result.hs",
     "exomonad/actor/src/local_actor/failure_origin.hs",
+    "exomonad/actor/src/request/fixtures/result-receiver.hs",
+    "exomonad/actor/src/request/fixtures/result-request.hs",
     "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
     "exomonad/actor/src/resident_actor/capture_workspace_declarations.hs",
     "exomonad/actor/src/resident_actor/green_runtime_cancel.hs",

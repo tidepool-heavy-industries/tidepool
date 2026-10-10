@@ -81,6 +81,7 @@ pub enum ConstructorReplyObservation {
     Static {
         node: TypeNodeId,
         shape: ReplyTypeObservation,
+        input_site: Option<(u32, u32, Option<u32>)>,
     },
 }
 
@@ -2649,6 +2650,23 @@ fn constructor_replies_equivalent(
 ) -> Result<bool, TypeGraphError> {
     match (x, y) {
         (ConstructorReply::AtSite, ConstructorReply::AtSite) => Ok(true),
+        (
+            ConstructorReply::StaticWithSite {
+                reply: x,
+                field: xf,
+                payload_field: xp,
+                capture_input: xc,
+            },
+            ConstructorReply::StaticWithSite {
+                reply: y,
+                field: yf,
+                payload_field: yp,
+                capture_input: yc,
+            },
+        ) if (xf, xp, xc) == (yf, yp, yc) => {
+            let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+            a.types.rooted_compatible(x, &b.types, y, &mut budget)
+        }
         (ConstructorReply::Static(x), ConstructorReply::Static(y)) => {
             let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
             a.types.rooted_compatible(x, &b.types, y, &mut budget)
@@ -2687,7 +2705,17 @@ fn reply_conflict_evidence(
     fn observe(facts: &ProgramFacts, reply: ConstructorReply) -> ConstructorReplyObservation {
         match reply {
             ConstructorReply::AtSite => ConstructorReplyObservation::AtSite,
-            ConstructorReply::Static(node) => {
+            ConstructorReply::Static(node)
+            | ConstructorReply::StaticWithSite { reply: node, .. } => {
+                let input_site = match reply {
+                    ConstructorReply::StaticWithSite {
+                        field,
+                        payload_field,
+                        capture_input,
+                        ..
+                    } => Some((field, payload_field, capture_input)),
+                    _ => None,
+                };
                 let mut budget = TypeWorkBudget::new(256);
                 let shape = match facts.types.open_root(node, &mut budget) {
                     Err(source) => ReplyTypeObservation::Refused(source),
@@ -2710,7 +2738,11 @@ fn reply_conflict_evidence(
                         }
                     },
                 };
-                ConstructorReplyObservation::Static { node, shape }
+                ConstructorReplyObservation::Static {
+                    node,
+                    shape,
+                    input_site,
+                }
             }
         }
     }
@@ -5362,6 +5394,38 @@ impl PreparedEngine {
                 constructor: *constructor,
                 node,
             }),
+            ConstructorReply::StaticWithSite {
+                reply: node,
+                field,
+                payload_field,
+                capture_input,
+            } => {
+                let site = fields
+                    .get(field as usize)
+                    .and_then(|field| site_field(field, table))
+                    .ok_or(PreparedRuntimeError::MalformedRequestSite {
+                        constructor: *constructor,
+                    })?;
+                let selected = self
+                    .sites
+                    .get(&site)
+                    .ok_or(PreparedRuntimeError::UnknownSite { site })?;
+                let row = &self.programs[&selected.owner].sites[selected.row];
+                if capture_input.is_some_and(|input| row.inputs.len() != input as usize + 1) {
+                    return Err(PreparedRuntimeError::MalformedRequestSite {
+                        constructor: *constructor,
+                    });
+                }
+                Ok(PreparedReplyEvidence::StaticWithSite {
+                    owner: witness.owner,
+                    constructor: *constructor,
+                    node,
+                    site_owner: selected.owner,
+                    site_row: selected.row,
+                    payload_field,
+                    capture_input,
+                })
+            }
             ConstructorReply::AtSite => {
                 let site = fields
                     .first()
@@ -5392,6 +5456,9 @@ impl PreparedEngine {
         match reply {
             PreparedReplyEvidence::Static {
                 constructor, node, ..
+            }
+            | PreparedReplyEvidence::StaticWithSite {
+                constructor, node, ..
             } => Ok((owner, node, ReplyTarget::Static(constructor))),
             PreparedReplyEvidence::AtSite { row, .. } => {
                 let row = facts
@@ -5412,10 +5479,33 @@ impl PreparedEngine {
     /// Dynamic request site, if this frame carries compiler-attested AtSite evidence.
     pub fn parked_site(&self, id: ContinuationId) -> Option<u64> {
         let (_, evidence) = self.machine.parked(id)?;
-        let PreparedReplyEvidence::AtSite { owner, row } = evidence.reply else {
-            return None;
+        let (owner, row) = match evidence.reply {
+            PreparedReplyEvidence::AtSite { owner, row } => (owner, row),
+            PreparedReplyEvidence::StaticWithSite {
+                site_owner,
+                site_row,
+                ..
+            } => (site_owner, site_row),
+            PreparedReplyEvidence::Static { .. } => return None,
         };
         Some(self.programs.get(&owner)?.sites.get(row)?.site)
+    }
+
+    /// Result capture requires the actual parked constructor's compiler proof
+    /// that its retained payload has the final input's type.
+    pub fn parked_capture_site(&self, id: ContinuationId) -> Option<(u64, usize)> {
+        let (_, evidence) = self.machine.parked(id)?;
+        let PreparedReplyEvidence::StaticWithSite {
+            site_owner,
+            site_row,
+            capture_input: Some(input),
+            ..
+        } = evidence.reply
+        else {
+            return None;
+        };
+        let row = self.programs.get(&site_owner)?.sites.get(site_row)?;
+        (row.inputs.len() == input as usize + 1).then_some((row.site, input as usize))
     }
 
     /// Observe and classify a suspension by its exact request constructor.
@@ -5516,8 +5606,19 @@ impl PreparedEngine {
         // newly tenured handle without a frame to own it; then mirror the field
         // before releasing `payload`. `PreparedMachine::park` consumes the
         // handle on both success and refusal.
+        let live_payload = match (park.live_payload, reply) {
+            (
+                LivePayloadPolicy::ValueField(_),
+                PreparedReplyEvidence::StaticWithSite { payload_field, .. },
+            ) => LivePayloadPolicy::ValueField(payload_field as usize),
+            (
+                LivePayloadPolicy::ClosureField(_),
+                PreparedReplyEvidence::StaticWithSite { payload_field, .. },
+            ) => LivePayloadPolicy::ClosureField(payload_field as usize),
+            (policy, _) => policy,
+        };
         let live_payload_root =
-            match self.tenure_live_payload(payload, realm, park.live_payload, &request) {
+            match self.tenure_live_payload(payload, realm, live_payload, &request) {
                 Ok(root) => root,
                 Err(error) => {
                     self.machine.release(payload);
@@ -5526,6 +5627,28 @@ impl PreparedEngine {
                 }
             };
         self.machine.release(payload);
+        let reply = match reply {
+            PreparedReplyEvidence::StaticWithSite {
+                owner,
+                constructor,
+                node,
+                site_owner,
+                site_row,
+                payload_field,
+                capture_input: _,
+            } if live_payload != LivePayloadPolicy::ValueField(payload_field as usize) => {
+                PreparedReplyEvidence::StaticWithSite {
+                    owner,
+                    constructor,
+                    node,
+                    site_owner,
+                    site_row,
+                    payload_field,
+                    capture_input: None,
+                }
+            }
+            reply => reply,
+        };
         let evidence = PreparedFrameEvidence {
             reply,
             runner: program,
@@ -5819,6 +5942,79 @@ impl PreparedEngine {
         )?;
         let built = builder
             .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.resume_parked(id, built)
+    }
+
+    /// Borrow a live result under compiler-checked single-field wrappers.
+    /// Construction is transactional; a refused wrapper keeps both the root
+    /// and parked continuation live.
+    pub fn resume_with_nested_handle(
+        &mut self,
+        id: ContinuationId,
+        raw: ValueHandle,
+        constructors: &[DataConId],
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let handle = self
+            .machine
+            .prepared_handle_of(raw)
+            .ok_or(PreparedRuntimeError::UnknownHandle)?;
+        let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownContinuation(id),
+        ))?;
+        let (owner_id, wire, site) = self.structural_reply(evidence.reply)?;
+        if constructors.is_empty() || constructors.len() > MAX_ANSWER_DEPTH {
+            return Err(PreparedRuntimeError::AnswerShape {
+                site,
+                detail: "nested borrowed framing requires a bounded nonempty constructor path",
+            });
+        }
+        let owner = &self.programs[&owner_id];
+        let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+        let mut cursor = owner
+            .types
+            .open_root(wire, &mut budget)
+            .map_err(|source| PreparedRuntimeError::AnswerTypeEvidence { site, source })?;
+        for &constructor in constructors.iter().rev() {
+            let fields = owner
+                .selected_fields(&cursor, constructor, &mut budget)
+                .map_err(|source| PreparedRuntimeError::AnswerTypeEvidence { site, source })?
+                .ok_or(PreparedRuntimeError::AnswerConstructor {
+                    site,
+                    host_id: constructor,
+                })?;
+            let [field] = fields.as_slice() else {
+                return Err(PreparedRuntimeError::AnswerShape {
+                    site,
+                    detail: "nested borrowed framing requires one field per constructor",
+                });
+            };
+            cursor = field.clone();
+        }
+        if self.machine.cancellation_requested(realm) {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let mut builder = self
+            .machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let mut field = ManagedField::Handle(handle);
+        let mut root = None;
+        for &constructor in constructors {
+            let node = builder
+                .constructor(constructor, &[field])
+                .map_err(PreparedRuntimeError::Run)?;
+            root = Some(node);
+            field = ManagedField::Consume(node);
+        }
+        let built = builder
+            .finish(
+                realm,
+                root.ok_or(PreparedRuntimeError::AnswerShape {
+                    site,
+                    detail: "the nested constructor path produced no root",
+                })?,
+            )
             .map_err(PreparedRuntimeError::Run)?;
         self.resume_parked(id, built)
     }
@@ -11890,6 +12086,100 @@ pub(super) mod tests {
             assert_eq!(engine.parked_count(), 0);
             assert_eq!(engine.handle_count(), 0);
         }
+    }
+
+    fn nonleading_site_program(capture_input: Option<u32>) -> PreparedProgram {
+        let prepared = attested_request_program(ConstructorReply::Static(TypeNodeId(0)));
+        let mut wire = prepared_data::wire_from_prepared(&prepared);
+        wire.constructors[0] = mount_constructor(
+            "Fixture",
+            "Request",
+            "Fixture",
+            "Effect",
+            77,
+            1,
+            1,
+            vec![
+                RuntimeRep::Int(64),
+                RuntimeRep::Int(64),
+                RuntimeRep::LiftedRef,
+            ],
+        );
+        wire.constructor_replies[0].1 = ConstructorReply::StaticWithSite {
+            reply: TypeNodeId(0),
+            field: 1,
+            payload_field: 2,
+            capture_input,
+        };
+        wire.sites[0].inputs = vec![TypeNodeId(0)];
+        testing::prepare(wire).unwrap()
+    }
+
+    #[test]
+    fn nonleading_site_preserves_closed_reply_and_requires_exact_capture_vector() {
+        let (mut engine, owner) =
+            PreparedEngine::bootstrap(nonleading_site_program(Some(0))).unwrap();
+        let table = json_mount_table();
+        let request = |site| {
+            HaskellValue::Con(
+                DataConId(77),
+                vec![
+                    HaskellValue::Lit(Literal::LitInt(999)),
+                    site,
+                    HaskellValue::Con(DataConId(105), vec![]),
+                ],
+            )
+        };
+        for malformed in [
+            HaskellValue::Lit(Literal::LitInt(-1)),
+            HaskellValue::Lit(Literal::LitWord(41)),
+        ] {
+            assert!(matches!(
+                engine.classify_reply(&request(malformed), &table),
+                Err(PreparedRuntimeError::MalformedRequestSite { .. })
+            ));
+        }
+        assert!(matches!(
+            engine.classify_reply(&request(HaskellValue::Lit(Literal::LitInt(42))), &table),
+            Err(PreparedRuntimeError::UnknownSite { site: 42 })
+        ));
+        let valid = request(HaskellValue::Lit(Literal::LitInt(41)));
+        let reply = engine.classify_reply(&valid, &table).unwrap();
+        let (reply_owner, node, target) = engine.structural_reply(reply).unwrap();
+        assert_eq!(reply_owner, owner);
+        assert_eq!(node, TypeNodeId(0));
+        assert!(matches!(target, ReplyTarget::Static(DataConId(77))));
+        let id = park_attested_fixture(&mut engine, owner, reply);
+        assert_eq!(engine.parked_site(id), Some(41));
+        assert_eq!(engine.parked_capture_site(id), Some((41, 0)));
+        engine.abort_parked(id).unwrap();
+        let mut missing = prepared_data::wire_from_prepared(&nonleading_site_program(Some(0)));
+        missing.sites[0].inputs.clear();
+        let (engine, _) = PreparedEngine::bootstrap(testing::prepare(missing).unwrap()).unwrap();
+        assert!(matches!(
+            engine.classify_reply(&valid, &table),
+            Err(PreparedRuntimeError::MalformedRequestSite { .. })
+        ));
+    }
+
+    #[test]
+    fn nonleading_original_site_without_typed_payload_never_issues_capture() {
+        let (mut engine, owner) = PreparedEngine::bootstrap(nonleading_site_program(None)).unwrap();
+        let request = HaskellValue::Con(
+            DataConId(77),
+            vec![
+                HaskellValue::Lit(Literal::LitInt(999)),
+                HaskellValue::Lit(Literal::LitInt(41)),
+                HaskellValue::Con(DataConId(105), vec![]),
+            ],
+        );
+        let reply = engine
+            .classify_reply(&request, &json_mount_table())
+            .unwrap();
+        let id = park_attested_fixture(&mut engine, owner, reply);
+        assert_eq!(engine.parked_site(id), Some(41));
+        assert_eq!(engine.parked_capture_site(id), None);
+        engine.abort_parked(id).unwrap();
     }
 
     #[test]

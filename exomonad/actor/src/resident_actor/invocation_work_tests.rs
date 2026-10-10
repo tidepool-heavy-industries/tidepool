@@ -1022,10 +1022,10 @@ async fn invocation_cleanup_releases_transient_watch_without_cancelling_target()
         requests.observe_response(owner, request),
         Ok(ResponseObservation::Pending(_))
     ));
-    requests
+    let claim = requests
         .begin_reply(target, request)
         .expect("target remains able to reply");
-    requests.finish_reply(request, None);
+    crate::request::test_support::complete_reply(requests, claim, None);
     assert_eq!(
         requests.observe_response(owner, request),
         Ok(ResponseObservation::Ready)
@@ -1357,10 +1357,12 @@ async fn blocked_settlement_notice_does_not_prevent_invocation_cancellation() {
         "retained-report".into(),
         true,
     );
-    fixture
-        .environment
-        .requests
-        .settle_command(notice, "completed".into(), None, None);
+    fixture.environment.requests.settle_command(
+        notice,
+        "completed".into(),
+        None,
+        crate::request::test_support::command_report(),
+    );
     assert!(fixture.environment.requests.has_settlement_notifications());
 
     for index in 0..DEPLOYMENT_CHANNEL_CAPACITY {
@@ -1888,6 +1890,7 @@ async fn detached_invocation_request_survives_scope_cleanup_until_target_replies
         false,
         Some(work.reservation.clone()),
     );
+    crate::request::test_support::admit_destination(requests, owner, request);
     requests.mark_queued(owner, target, request).unwrap();
     requests.present(target, request).unwrap();
     work.detach_request(requests, owner, request).unwrap();
@@ -1899,8 +1902,8 @@ async fn detached_invocation_request_survives_scope_cleanup_until_target_replies
         requests.observe_response(owner, request),
         Ok(ResponseObservation::Pending(_))
     ));
-    requests.begin_reply(target, request).unwrap();
-    requests.finish_reply(request, None);
+    let claim = requests.begin_reply(target, request).unwrap();
+    crate::request::test_support::complete_reply(requests, claim, None);
     assert_eq!(
         requests.observe_response(owner, request),
         Ok(ResponseObservation::Ready)

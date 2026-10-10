@@ -199,7 +199,9 @@ impl ResidentInteractiveSession {
                     initial_user_message,
                     siblings.into_iter().map(SiblingPreview::from).collect(),
                 ),
-                crate::generated::agent_session::AgentSessionReq::AgentAttachWith(..) => {
+                crate::generated::agent_session::AgentSessionReq::AgentAttachWith(..)
+                | crate::generated::agent_session::AgentSessionReq::AgentSessionPublishResponseWith(..)
+                | crate::generated::agent_session::AgentSessionReq::AgentSessionPublishProgressResponseWith(..) => {
                     unreachable!("agent attachment is classified before session capture")
                 }
             };

@@ -49,6 +49,7 @@ mod profile;
 mod prompt_catalog;
 pub(crate) mod reload_helpers_tool;
 pub(crate) mod reload_spec_tool;
+mod owned_result;
 mod request;
 pub use request::sources::SourceDelivery;
 mod recovery;

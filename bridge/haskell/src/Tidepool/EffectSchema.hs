@@ -9,7 +9,7 @@ module Tidepool.EffectSchema
   , mergeYieldSites
   , SiteTypePosition(..)
   , polymorphicSiteMessage
-  , sitedVerbs
+  , sitedVerbs, verbKey
   ) where
 
 import Data.Text (Text)
@@ -90,6 +90,7 @@ data SiteAnswerSource
   = FirstTypeArgument
   | TypeArgument Int
   | EffectResult
+  | CarrierReply
   deriving (Eq, Show)
 
 data SiteDelivery
@@ -106,22 +107,28 @@ data SiteWireSource
   | ProgressStateEvidence
   deriving (Eq, Ord, Show)
 
+verbKey :: VerbSpec -> String
+verbKey spec = vsModule spec ++ "." ++ vsName spec
+
 -- | The complete typed-suspension vocabulary understood by the extractor.
 -- Adding a verb is one row here; recognition and sibling resolution both
 -- consume this table.
 sitedVerbs :: [VerbSpec]
 sitedVerbs =
-  [ verb "request" "Tidepool.Actors.Internal.Agent"
+  [ (verb "request" "Tidepool.Actors.Internal.Agent"
       "requestSited" "Tidepool.Actors.Internal.Agent" False [1]
-      DeliverExitCellFill ResponseResultEvidence
+      DeliverExitCellFill ResponseResultEvidence)
+      { vsDerivedInput = Just (0, ResponseResultEvidence) }
   , (verb "requestWithProgress" "Tidepool.Actors.Internal.Agent"
       "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" False [2, 0]
       DeliverExitCellFill ResponseResultEvidence)
-      { vsAnswerSource = TypeArgument 1 }
+      { vsAnswerSource = TypeArgument 1
+      , vsDerivedInput = Just (1, ResponseResultEvidence) }
   , (verb "requestWithProgressInto" "Tidepool.Actors.Internal.Agent"
       "requestWithProgressIntoSited" "Tidepool.Actors.Internal.Agent" False [2, 0]
       DeliverExitCellFill ResponseResultEvidence)
-      { vsAnswerSource = TypeArgument 1 }
+      { vsAnswerSource = TypeArgument 1
+      , vsDerivedInput = Just (1, ResponseResultEvidence) }
   , (verb "currentRequest" "Tidepool.Agent.Reply.Internal"
       "currentRequestSited" "Tidepool.Agent.Reply.Internal" False [0, 1]
       DeliverHostAnswer SelectedAnswer)
@@ -140,6 +147,25 @@ sitedVerbs =
   , verb "progressSource" "Tidepool.Actor.Source"
       "progressSourceSited" "Tidepool.Actor.Source" False [0]
       DeliverHostAnswer ProgressStateEvidence
+  , responseObserver "pollResponse" "Tidepool.Agent.Reply.Internal"
+  , responseObserver "response" "Tidepool.Agent.Watch.Internal"
+  , responseObserver "settledResponse" "Tidepool.Agent.Watch.Internal"
+  , responseObserver "result" "Tidepool.Agent.Watch.Internal"
+  , responseObserver "settlement" "Tidepool.Agent.Watch.Internal"
+  , responseObserver "settlementSource" "Tidepool.Actor.Source"
+  , responseObserver "settlement" "Tidepool.Actor.Record"
+  , responseObserver "forwardResult" "Tidepool.Actor.Record"
+  , (verb "progress" "Tidepool.Actor.Record" "progressSited" "Tidepool.Actor.Record"
+      False [0] DeliverHostAnswer ProgressStateEvidence)
+  , exitSite "startActor" "Tidepool.Actor"
+  , exitSite "replaceActor" "Tidepool.Actor"
+  , exitSite "runActor" "Tidepool.Actor"
+  , (exitSite "startUnitActor" "Tidepool.Actor") { vsAnswerSource = FirstTypeArgument }
+  , exitSite "awaitExit" "Tidepool.Actor"
+  , exitSite "pollExit" "Tidepool.Actor"
+  , exitSite "start" "Tidepool.Actor.Record"
+  , exitSite "replace" "Tidepool.Actor.Record"
+  , exitSite "finish" "Tidepool.Actor.Record"
   , verb "receive" "Tidepool.Actor"
       "receiveSited" "Tidepool.Actor" False [] DeliverLiveReentry SelectedAnswer
   , verb "serve" "Tidepool.Actor"
@@ -153,6 +179,12 @@ sitedVerbs =
       { vsAnswerSource = EffectResult }
   ]
   where
+    responseObserver name owner =
+      (verb name owner (name ++ "Sited") owner False [] DeliverHostAnswer SelectedAnswer)
+        { vsAnswerSource = CarrierReply, vsDerivedInput = Just (0, ResponseResultEvidence) }
+    exitSite name owner =
+      (verb name owner (name ++ "Sited") owner False [0] DeliverHostAnswer SelectedAnswer)
+        { vsAnswerSource = CarrierReply }
     verb name source sibling siblingSource listAnswer inputs delivery wireSource =
       VerbSpec name source sibling siblingSource listAnswer inputs Nothing FirstTypeArgument
         delivery wireSource

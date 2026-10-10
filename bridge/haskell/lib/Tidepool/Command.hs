@@ -267,7 +267,7 @@ tryBackground (Command spec) = fmap Job <$> send (CommandBackgroundWith spec)
 -- started at; it says nothing about a later revision.
 awaitFinished :: Job -> Await CommandReport
 awaitFinished (Job key) =
-  Await (AwaitPlan [LeafNode (AwaitCommand key)] 0) (\(Watch.Observation watchId path) _ _ -> requireObserved <$> send (ObserveWatchCommandWith watchId path key))
+  Await (AwaitPlan [LeafNode (AwaitCommand key)] 0) (\(Watch.Observation watchId path) _ _ -> Right . requireObserved <$> send (ObserveWatchCommandWith watchId path key))
 
 -- | Run once and suspend until terminal completion, preserving the continuation.
 run :: (Member Commands effects) => Command -> Eff effects RunResult

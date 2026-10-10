@@ -79,8 +79,8 @@ impl<D> Plan<D> {
 }
 
 /// A decision contains only selected leaves and selected sum branches.
-/// Successful values remain in Haskell cells; progress snapshots stay owned
-/// by the watch. Node indices bind this decision to its admitted plan.
+/// Selected successful values and progress snapshots are retained by the watch.
+/// Node indices bind this decision to its admitted plan and owned snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Decision {
     pub leaves: Vec<(usize, Option<ResponseFailure>)>,

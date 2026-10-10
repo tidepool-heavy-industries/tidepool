@@ -28,7 +28,7 @@ import Data.Word (Word32, Word64, Word8)
 import GHC.Generics (Generic)
 
 schemaVersion, executionAbiVersion :: Word64
-schemaVersion = 16
+schemaVersion = 17
 executionAbiVersion = 9
 
 newtype ValueId = ValueId Word32 deriving stock (Eq, Ord, Show, Generic)
@@ -255,5 +255,8 @@ data ProjectedGroup = ProjectedGroup
 
 -- | Reply evidence owned by the exact request constructor. AtSite reads only
 -- its authenticated first runtime field; StaticReply never inspects payloads.
-data ConstructorReply = StaticReply TypeNodeId | ReplyAtSite
+data ConstructorReply
+  = StaticReply TypeNodeId
+  | StaticReplyWithSite TypeNodeId Word32 Word32 (Maybe Word32)
+  | ReplyAtSite
   deriving stock (Eq, Ord, Show, Generic)

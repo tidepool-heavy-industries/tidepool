@@ -5,6 +5,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RoleAnnotations #-}
+{-# LANGUAGE TypeOperators #-}
 
 -- | Engine-private representation of persistent-agent requests and replies.
 module Tidepool.Agent.Reply.Internal
@@ -50,14 +51,13 @@ module Tidepool.Agent.Reply.Internal
   , reserveRequest
   , submitRequest
   , newRequestHandles
-  , fillResponse
   , responseRequestId
   , responseActor
   , replyRequestId
-  , readResponse
   , attemptReply
   , reply
   , pollResponse
+  , pollResponseSited
   , cancelRequest
   , retainRequest
   , abandonResponse
@@ -78,12 +78,6 @@ import Tidepool.Duration (Duration)
 import Tidepool.Agent.Ref (AgentRef, agentAddressText)
 import Tidepool.Inspection.Display (Display (..), WorkbenchDisplay (workbenchReplyDisplay), opaqueHandle)
 
-import Tidepool.Internal.ExitCell
-  ( ExitCell
-  , fillExitCell
-  , newExitCell
-  , readExitCell
-  )
 import Tidepool.Effects.Core
   ( WorkerLifetime (..)
   , GitOid
@@ -98,16 +92,16 @@ newtype RequestId = RequestId Int
   deriving (Show, Eq, Ord)
 
 
--- | One singular request-control identity and its retained typed result cell.
-data Request result where
-  Request :: RequestId -> AgentRef -> ExitCell pending (ResponseResult result) -> Request result
+-- | One singular request-control identity. Runtime custody owns its typed result.
+type role Request nominal
+data Request (result :: Type) = Request RequestId AgentRef
 
 instance Show (Request result) where
-  show (Request request actor _) =
+  show (Request request actor) =
     "Request { request = " <> show request <> ", actor = " <> show actor <> " }"
 
 instance Display (Request result) where
-  displayTree (Request (RequestId request) actor _) =
+  displayTree (Request (RequestId request) actor) =
     opaqueHandle ("request " <> tshow request <> " to agent " <> agentAddressText actor)
 
 data SettlementReporting = NotifyOwner | Silent
@@ -234,6 +228,8 @@ data ReplyError
   | ReplyUpdatePending
   | ReplyProgressTypeMismatch
   | ReplySettlementCancelled
+  | ReplyResultTypeMismatch
+  | ReplyResultUnavailable
   deriving (Show, Eq)
 
 data ResponseFailure
@@ -335,7 +331,7 @@ data RawReplyObservation
 data Replies a where
   CurrentRequestWith :: RequestSite '[input, result, ResponseResult result] (RequestScope input result) -> Replies (RequestScope input result)
   ReserveRequestWith :: Maybe Text -> (Int, Int) -> Bool -> WorkerLifetime -> Replies (Either RequestError Int)
-  SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe Duration -> Replies (Either RequestError ())
+  SubmitRequestWith :: Int -> RequestSite (input ': extra) result -> request -> (Int, Int) -> Maybe Duration -> Replies (Either RequestError ())
   -- | The 'Text' is a bounded, already-rendered preview of @result@ (see
   -- 'replyPreviewCharBudget'), carried alongside the live value so the
   -- settlement notice the reply produces can show readable text -- 'Text'
@@ -344,7 +340,7 @@ data Replies a where
   -- 'WorkbenchDisplay' instance a reply type already needs can read it.
   AttemptReplyWith :: Int -> result -> Text -> Replies (Either ReplyError Void)
   ReplyWith :: Int -> result -> Text -> Replies Void
-  ObserveResponseWith :: Int -> Replies RawResponseObservation
+  ObserveResponseWith :: RequestSite '[ResponseResult result] (ResponseState result) -> Int -> Replies (ResponseState result)
   CancelRequestWith :: Int -> Replies CancelRequestOutcome
   RetainRequestWith :: Int -> WorkerLifetime -> Replies (Either ReplyError ())
   AbandonResponseWith :: Int -> Replies AbandonOutcome
@@ -401,34 +397,29 @@ reserveRequest
 reserveRequest label target reporting lifetime =
   fmap (fmap RequestId) (send (ReserveRequestWith label target (reporting == NotifyOwner) lifetime))
 
+{-# OPAQUE submitRequest #-}
 submitRequest
   :: Member Replies effs
   => RequestId
+  -> RequestSite (input ': extra) result
   -> (Int, Int)
   -> request
   -> Maybe Duration
   -> Eff effs (Either RequestError ())
-submitRequest (RequestId request) target requestPayload deadline =
-  send (SubmitRequestWith request requestPayload target deadline)
+submitRequest (RequestId request) site target requestPayload deadline =
+  send (SubmitRequestWith request site requestPayload target deadline)
 
-newRequestHandles :: pending -> RequestId -> AgentRef -> (Request result, Reply result)
-newRequestHandles pending request actor =
-  (Request request actor (newExitCell pending), Reply request)
-
-fillResponse :: Request result -> ResponseResult result -> ()
-fillResponse (Request _ _ cell) = fillExitCell cell
+newRequestHandles :: RequestId -> AgentRef -> (Request result, Reply result)
+newRequestHandles request actor = (Request request actor, Reply request)
 
 responseRequestId :: Request result -> RequestId
-responseRequestId (Request request _ _) = request
+responseRequestId (Request request _) = request
 
 responseActor :: Request result -> AgentRef
-responseActor (Request _ actor _) = actor
+responseActor (Request _ actor) = actor
 
 replyRequestId :: Reply result -> RequestId
 replyRequestId (Reply request) = request
-
-readResponse :: Request result -> Maybe (ResponseResult result)
-readResponse (Request _ _ cell) = readExitCell () cell
 
 -- | Character budget for the rendered reply 'reply' and 'attemptReply'
 -- carry alongside the live value. Twice the settlement notice's byte budget
@@ -452,29 +443,24 @@ reply (Reply (RequestId request)) result =
   let (preview, _) = workbenchReplyDisplay replyPreviewCharBudget result
    in send (ReplyWith request result preview)
 
+{-# OPAQUE pollResponse #-}
 pollResponse
-  :: Member Replies effs
-  => Request result
-  -> Eff effs (ResponseState result)
-pollResponse response@(Request (RequestId request) _ _) = do
-  observation <- send (ObserveResponseWith request)
-  pure $ case observation of
-    RawResponsePending progress -> ResponsePending progress
-    RawResponseCancellationPending reason -> ResponseCancellationPending reason
-    RawResponseReady ->
-      case readResponse response of
-        Just result -> ResponseReady result
-        Nothing -> error "Tidepool response became ready before its Haskell cell was filled"
-    RawResponseUnavailable failure -> ResponseUnavailable failure
-    RawResponseRejected failure ->
-      ResponseUnavailable (ResponseRejected failure)
-    RawResponseStarting detail -> ResponseStarting detail
+  :: forall result effs. Member Replies effs
+  => Request result -> Eff effs (ResponseState result)
+pollResponse = pollResponseSited (error "pollResponse: extractor must assign a typed site")
+
+{-# OPAQUE pollResponseSited #-}
+pollResponseSited
+  :: forall result effs. Member Replies effs
+  => RequestSite '[ResponseResult result] (ResponseState result)
+  -> Request result -> Eff effs (ResponseState result)
+pollResponseSited site (Request (RequestId request) _) = send (ObserveResponseWith site request)
 
 cancelRequest
   :: Member Replies effs
   => Request result
   -> Eff effs CancelRequestOutcome
-cancelRequest (Request (RequestId request) _ _) = send (CancelRequestWith request)
+cancelRequest (Request (RequestId request) _) = send (CancelRequestWith request)
 
 -- | Transfer cleanup ownership without changing the target actor lifetime.
 retainRequest
@@ -482,19 +468,19 @@ retainRequest
   => Request result
   -> WorkerLifetime
   -> Eff effs (Either ReplyError ())
-retainRequest (Request (RequestId request) _ _) lifetime = send (RetainRequestWith request lifetime)
+retainRequest (Request (RequestId request) _) lifetime = send (RetainRequestWith request lifetime)
 
 abandonResponse
   :: Member Replies effs
   => Request result
   -> Eff effs AbandonOutcome
-abandonResponse (Request (RequestId request) _ _) = send (AbandonResponseWith request)
+abandonResponse (Request (RequestId request) _) = send (AbandonResponseWith request)
 
 forgetResponse
   :: Member Replies effs
   => Request result
   -> Eff effs ForgetResponseOutcome
-forgetResponse (Request (RequestId request) _ _) = send (ForgetResponseWith request)
+forgetResponse (Request (RequestId request) _) = send (ForgetResponseWith request)
 
 pollReply :: Member Replies effs => Reply result -> Eff effs ReplyState
 pollReply (Reply (RequestId request)) = do

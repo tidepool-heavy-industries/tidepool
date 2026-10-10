@@ -123,7 +123,7 @@ pub use resident::{
     ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentParcel,
     ResidentResumeError, ResidentSession, RootCustody, RuntimeActivationInput,
     RuntimeActivationInputAdmission, RuntimeActivationPreviewAdmission, RuntimeProgressPublication,
-    SessionRunContext,
+    RuntimeResultParcel, RuntimeResultPublication, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, HaskellTypeSource, SessionCompileView, SourceImports};

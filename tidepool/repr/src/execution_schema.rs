@@ -15,7 +15,7 @@ use crate::session_ids::SessionVarId;
 use crate::type_graph::TypeGraph;
 pub use crate::type_graph::TypeNode;
 
-pub const SCHEMA_VERSION: u64 = 16;
+pub const SCHEMA_VERSION: u64 = 17;
 pub const EXECUTION_ABI_VERSION: u64 = 9;
 
 macro_rules! dense_id {
@@ -344,6 +344,13 @@ pub enum SiteDelivery {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ConstructorReply {
     Static(TypeNodeId),
+    /// A closed reply and a separately authenticated original input site.
+    StaticWithSite {
+        reply: TypeNodeId,
+        field: u32,
+        payload_field: u32,
+        capture_input: Option<u32>,
+    },
     AtSite,
 }
 

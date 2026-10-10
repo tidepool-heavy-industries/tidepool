@@ -343,6 +343,9 @@ encodeConstructorReply (constructor, reply) = array
   , case reply of
       StaticReply node -> tagged 0 [encodeTypeNodeId node]
       ReplyAtSite -> tag 1
+      StaticReplyWithSite node field payload capture -> tagged 2
+        [encodeTypeNodeId node, encodeWord32 field, encodeWord32 payload,
+          maybe encodeNull encodeWord32 capture]
   ]
 
 encodeValueRef :: ValueRef -> Encoding

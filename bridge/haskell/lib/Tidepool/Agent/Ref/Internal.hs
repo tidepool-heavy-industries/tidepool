@@ -21,7 +21,6 @@ import Prelude
 import Tidepool.Inspection.Display (Display (..), opaqueHandle)
 
 import Tidepool.Internal.ActorRef (ActorRef (..), actorAddress)
-import Tidepool.Internal.ExitCell (newExitCell)
 import Tidepool.Effects.Core
   ( ActorLocal, AgentTools, AgentSession, Actor, FsRead, Worktree
   , Notifications, Console, Sleep, WorktreeHandle
@@ -58,9 +57,7 @@ agentAddressText agent =
 agentBoundWorktree :: AgentRef -> Maybe WorktreeHandle
 agentBoundWorktree (AgentRef _ tree) = tree
 
--- | Trusted workbench construction for its own exact incarnation. The exit
--- cell is a permanently pending placeholder; use this reference for its
--- address, not for observing the actor's exit.
+-- | Trusted workbench construction for its own exact incarnation.
 internalAgentRef :: Int -> Int -> AgentRef
 internalAgentRef actor incarnation =
-  AgentRef (ActorRef actor incarnation (newExitCell ())) Nothing
+  AgentRef (ActorRef actor incarnation) Nothing

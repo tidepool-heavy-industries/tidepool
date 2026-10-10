@@ -48,6 +48,10 @@ enum ResidentResumeInput {
         constructor: tidepool_repr::DataConId,
         prefix: Vec<HaskellValue>,
     },
+    NestedHandle {
+        handle: ValueHandle,
+        constructors: Vec<DataConId>,
+    },
     FramedHandleSources {
         handle: ValueHandle,
         constructor: tidepool_repr::DataConId,
@@ -190,12 +194,13 @@ impl CompiledProvenancePlan {
                     && site.input_type_witnesses.len() == site.inputs.len()
                     && site.input_type_witnesses.iter().any(Option::is_some)
             }) {
-                let Some(signatures) = &site.request_type_signatures else {
-                    continue;
-                };
                 let mut roots = std::collections::BTreeSet::new();
-                for name in std::iter::once(signatures.reply())
-                    .chain(signatures.progress())
+                for name in site
+                    .request_type_signatures
+                    .iter()
+                    .flat_map(|signatures| {
+                        std::iter::once(signatures.reply()).chain(signatures.progress())
+                    })
                     .flat_map(|signature| signature.names())
                 {
                     if home_units.contains(name.unit()) {
@@ -209,7 +214,7 @@ impl CompiledProvenancePlan {
                         roots.insert(*id);
                     }
                 }
-                if let Some(witness) = site.input_type_witnesses.first().and_then(Option::as_ref) {
+                for witness in site.input_type_witnesses.iter().flatten() {
                     for (unit, module, seal) in witness.interface_seals() {
                         let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
                             unit: unit.to_owned(),
@@ -1171,6 +1176,40 @@ impl RuntimeProgressPublication {
     }
 }
 
+/// One result value and its canonical type, issued jointly from an
+/// authenticated parked publication and owned by the machine's root realm.
+#[derive(Debug)]
+pub struct RuntimeResultPublication {
+    custody: RootCustody,
+    type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+}
+
+static_assertions::assert_not_impl_any!(RuntimeResultPublication: Clone, Copy);
+
+impl RuntimeResultPublication {
+    pub fn custody(&self) -> &RootCustody {
+        &self.custody
+    }
+    pub fn type_witness(
+        &self,
+    ) -> &Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness> {
+        &self.type_witness
+    }
+    /// The destination lease and incorporated root must share their issuer.
+    pub fn belongs_to_bindings(&self, lease: &BindingLease) -> bool {
+        Arc::ptr_eq(&self.custody.cleanup.0, &lease.cleanup.0)
+    }
+}
+
+/// Typed transport preserves joint value/type issuance across machines.
+#[must_use = "a result parcel must be imported or deliberately dropped"]
+pub struct RuntimeResultParcel {
+    parcel: ResidentParcel,
+    type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+}
+
+static_assertions::assert_not_impl_any!(RuntimeResultParcel: Clone, Copy);
+
 /// One affine original input paired with a fresh type-interface reservation.
 pub struct RuntimeActivationInputAdmission {
     input: RuntimeActivationInput,
@@ -1481,6 +1520,15 @@ impl RootCustody {
     #[must_use]
     pub fn provenance(&self) -> &ProgramProvenance {
         &self.provenance
+    }
+
+    fn checked_handle(&self, cleanup: &Arc<CustodyCleanup>) -> Result<ValueHandle, ResidentError> {
+        if !Arc::ptr_eq(&self.cleanup.0, cleanup) {
+            return Err(ResidentError::ForeignCustody);
+        }
+        Ok(self
+            .handle
+            .expect("live custody always contains its handle"))
     }
 
     fn into_transfer(mut self) -> CustodyTransfer {
@@ -4419,7 +4467,7 @@ where
         let input_type = metadata
             .inputs
             .first()
-            .filter(|_| metadata.inputs.len() <= 2)
+            .filter(|_| (2..=3).contains(&metadata.inputs.len()))
             .ok_or_else(invalid)?
             .ty
             .clone();
@@ -4433,16 +4481,28 @@ where
             .and_then(Option::as_ref)
             .ok_or_else(missing_witness)?
             .clone();
-        let progress_type_witness = match metadata.input_type_witnesses.get(1) {
+        let signatures = metadata
+            .request_type_signatures
+            .clone()
+            .ok_or_else(invalid)?;
+        if metadata.inputs.len()
+            != if signatures.progress().is_some() {
+                3
+            } else {
+                2
+            }
+        {
+            return Err(invalid());
+        }
+        let progress_type_witness = match signatures
+            .progress()
+            .and_then(|_| metadata.input_type_witnesses.get(1))
+        {
             Some(witness) => Some(Arc::new(
                 witness.as_ref().ok_or_else(missing_witness)?.clone(),
             )),
             None => None,
         };
-        let signatures = metadata
-            .request_type_signatures
-            .clone()
-            .ok_or_else(invalid)?;
         let interfaces = provenance
             .authenticated_inputs
             .get(&site)
@@ -4523,6 +4583,140 @@ where
         })
     }
 
+    fn parked_canonical_input_witness(
+        &mut self,
+        continuation: &str,
+        site: u64,
+        input: usize,
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
+    {
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == continuation)
+            .ok_or_else(invalid)?;
+        if self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.parked_site(entry.id))
+            != Some(site)
+        {
+            return Err(invalid());
+        }
+        if !entry.provenance.authenticated_inputs.contains_key(&site) {
+            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
+        }
+        let metadata = entry.provenance.sites.get(&site).ok_or_else(invalid)?;
+        if metadata.input_type_witnesses.len() != metadata.inputs.len() {
+            return Err(invalid());
+        }
+        let witness = metadata
+            .input_type_witnesses
+            .get(input)
+            .and_then(Option::as_ref)
+            .ok_or(ResidentError::MissingActivationInputWitness { site })?;
+        Ok(Arc::new(witness.clone()))
+    }
+
+    /// Admission uses the submitted original site's final canonical response
+    /// input, while its static unit reply remains independent.
+    pub fn request_result_type_witness(
+        &mut self,
+        site: u64,
+        hole: &ResidentHole,
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
+    {
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
+        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
+        let signatures = metadata
+            .request_type_signatures
+            .as_ref()
+            .ok_or_else(invalid)?;
+        let count = if signatures.progress().is_some() {
+            3
+        } else {
+            2
+        };
+        if metadata.inputs.len() != count {
+            return Err(invalid());
+        }
+        self.parked_canonical_input_witness(hole.cont_id(), site, count - 1)
+    }
+
+    /// An observer's own parked typed helper issues its expected result type.
+    pub fn result_type_witness(
+        &mut self,
+        continuation: &str,
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
+    {
+        self.progress_type_witness(continuation)
+    }
+
+    pub fn capture_result_publication(
+        &mut self,
+        hole: &ResidentHole,
+        site: u64,
+        realm: RealmId,
+    ) -> Result<RuntimeResultPublication, ResidentError> {
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        if realm != RealmId::ROOT {
+            return Err(invalid());
+        }
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == hole.cont_id())
+            .ok_or_else(invalid)?;
+        let (actual, input) = self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.parked_capture_site(entry.id))
+            .ok_or_else(invalid)?;
+        if actual != site {
+            return Err(invalid());
+        }
+        let type_witness = self.parked_canonical_input_witness(hole.cont_id(), site, input)?;
+        let custody = self
+            .live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)?
+            .ok_or_else(invalid)?;
+        Ok(RuntimeResultPublication {
+            custody,
+            type_witness,
+        })
+    }
+
+    pub fn export_result(
+        &mut self,
+        publication: RuntimeResultPublication,
+    ) -> Result<RuntimeResultParcel, ResidentError> {
+        Ok(RuntimeResultParcel {
+            parcel: self.export_custody(publication.custody)?,
+            type_witness: publication.type_witness,
+        })
+    }
+
+    pub fn export_result_shared(
+        &mut self,
+        publication: &RuntimeResultPublication,
+    ) -> Result<RuntimeResultParcel, ResidentError> {
+        Ok(RuntimeResultParcel {
+            parcel: self.export_shared(&publication.custody)?,
+            type_witness: publication.type_witness.clone(),
+        })
+    }
+
+    pub fn import_result(
+        &mut self,
+        parcel: RuntimeResultParcel,
+    ) -> Result<RuntimeResultPublication, ResidentError> {
+        Ok(RuntimeResultPublication {
+            custody: self.import_parcel(parcel.parcel, RealmId::ROOT)?,
+            type_witness: parcel.type_witness,
+        })
+    }
+
     /// Transfer a rooted value to another runtime resource scope.
     ///
     /// This is the ownership operation used when a live value outlives the
@@ -4534,6 +4728,7 @@ where
         custody: RootCustody,
         owner: RealmId,
     ) -> Result<RootCustody, ResidentError> {
+        custody.checked_handle(&self.custody_cleanup)?;
         self.settle_dropped_custody();
         let transfer = custody.into_transfer();
         let handle = transfer.handle;
@@ -4551,6 +4746,9 @@ where
 
     /// Abandon a rooted value deliberately, releasing its root immediately.
     pub fn discard_custody(&mut self, custody: RootCustody) -> bool {
+        if custody.checked_handle(&self.custody_cleanup).is_err() {
+            return false;
+        }
         self.settle_dropped_custody();
         let transfer = custody.into_transfer();
         let discarded = self
@@ -4576,9 +4774,7 @@ where
         custody: RootCustody,
     ) -> Result<ResidentParcel, ResidentError> {
         self.settle_dropped_custody();
-        if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
-            return Err(ResidentError::ForeignCustody);
-        }
+        custody.checked_handle(&self.custody_cleanup)?;
         let transfer = custody.into_transfer();
         let handle = transfer.handle;
         let Some(engine) = self.state.prepared_mut() else {
@@ -4614,9 +4810,7 @@ where
         custody: &RootCustody,
     ) -> Result<ResidentParcel, ResidentError> {
         self.settle_dropped_custody();
-        if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
-            return Err(ResidentError::ForeignCustody);
-        }
+        custody.checked_handle(&self.custody_cleanup)?;
         let Some(handle) = custody.handle else {
             unreachable!("live custody always contains its handle");
         };
@@ -4744,6 +4938,9 @@ where
         custody: RootCustody,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError> {
+        custody
+            .checked_handle(&self.custody_cleanup)
+            .map_err(ResidentResumeError::Rejected)?;
         self.settle_dropped_custody();
         let seed = hole.seed();
         let cont_id = match hole {
@@ -4938,6 +5135,7 @@ where
         custody: RootCustody,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
+        custody.checked_handle(&self.custody_cleanup)?;
         self.settle_dropped_custody();
         if !self.state.scope_tree().is_live(scope) {
             self.discard_custody(custody);
@@ -5655,6 +5853,7 @@ where
         interface_source: ValueInterfaceSource,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
+        custody.checked_handle(&self.custody_cleanup)?;
         let transfer = custody.into_transfer();
         let provenance = Arc::clone(&transfer.provenance);
         let raw = transfer.handle;
@@ -5707,9 +5906,9 @@ where
         prefix: Vec<HaskellValue>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError> {
-        let Some(handle) = custody.handle else {
-            unreachable!("live custody always contains its handle");
-        };
+        let handle = custody
+            .checked_handle(&self.custody_cleanup)
+            .map_err(ResidentResumeError::Rejected)?;
         let seed = hole.seed();
         let cont_id = match hole {
             ResidentHole::Plain(hole) => hole.id,
@@ -5744,9 +5943,9 @@ where
     where
         T: tidepool_bridge::ToHaskell + Send + 'static,
     {
-        let Some(handle) = custody.handle else {
-            unreachable!("live custody always contains its handle");
-        };
+        let handle = custody
+            .checked_handle(&self.custody_cleanup)
+            .map_err(ResidentResumeError::Rejected)?;
         let seed = hole.seed();
         let cont_id = match hole {
             ResidentHole::Plain(hole) => hole.id,
@@ -5762,6 +5961,32 @@ where
                     .into_iter()
                     .map(|field| Box::new(field) as Box<dyn tidepool_bridge::ToHaskell + Send>)
                     .collect(),
+            },
+            seed,
+            Some(&custody.provenance),
+            settlement,
+        )
+    }
+
+    /// Borrow the result under single-field constructors, inner to outer.
+    /// Every wrapper is checked against the parked reply's compiler graph.
+    pub fn resume_nested_custody_classified(
+        &mut self,
+        hole: ResidentHole,
+        custody: &RootCustody,
+        constructors: Vec<DataConId>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
+        let handle = custody
+            .checked_handle(&self.custody_cleanup)
+            .map_err(ResidentResumeError::Rejected)?;
+        let seed = hole.seed();
+        let cont_id = hole.cont_id().to_owned();
+        self.reenter(
+            &cont_id,
+            ResidentResumeInput::NestedHandle {
+                handle,
+                constructors,
             },
             seed,
             Some(&custody.provenance),
@@ -7914,6 +8139,10 @@ where
                     constructor,
                     prefix,
                 } => engine.resume_with_framed_handle(frame_id, handle, constructor, prefix, table),
+                ResidentResumeInput::NestedHandle {
+                    handle,
+                    constructors,
+                } => engine.resume_with_nested_handle(frame_id, handle, &constructors),
                 ResidentResumeInput::FramedHandleSources {
                     handle,
                     constructor,
@@ -8195,6 +8424,89 @@ mod custody_release_tests {
             PreparedOuter::Constructor { fields, .. } if matches!(fields.as_slice(),
                 [PreparedResult::Scalar(99)]))
         );
+    }
+
+    #[test]
+    fn foreign_custody_never_enters_destination() {
+        let mut source = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        bind_fixture(&mut source, ScopeId::ROOT, 47);
+        let destination_id = bind_fixture(&mut destination, ScopeId::ROOT, 47);
+        let local = destination.retain_binding_custody("x").unwrap().unwrap();
+        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
+        assert_ne!(
+            foreign.handle, local.handle,
+            "native handles are process-unique; ownership is still checked before hole access"
+        );
+        let hole = ResidentHole::mint(
+            "not-a-parked-hole".into(),
+            HoleSeed {
+                obligation: HoleObligation::Plain,
+                checked: None,
+            },
+        );
+        let before = destination.value_handle_count();
+        for outcome in [
+            destination.resume_framed_custody_classified(
+                hole.clone(),
+                &foreign,
+                DataConId(0),
+                vec![],
+            ),
+            destination.resume_framed_custody_sources_classified(
+                hole.clone(),
+                &foreign,
+                DataConId(0),
+                Vec::<i64>::new(),
+            ),
+            destination.resume_nested_custody_classified(
+                hole.clone(),
+                &foreign,
+                vec![DataConId(0)],
+            ),
+        ] {
+            assert!(matches!(
+                outcome,
+                Err(ResidentResumeError::Rejected(ResidentError::ForeignCustody))
+            ));
+        }
+        assert!(matches!(
+            destination.resume_handle_classified(hole, foreign),
+            Err(ResidentResumeError::Rejected(ResidentError::ForeignCustody))
+        ));
+        source.settle_dropped_custody();
+        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
+        assert!(matches!(
+            destination.rehome_custody(foreign, RealmId::ROOT),
+            Err(ResidentError::ForeignCustody)
+        ));
+        source.settle_dropped_custody();
+        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
+        assert!(!destination.discard_custody(foreign));
+        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
+        let binder = BoundBinder {
+            name: "foreignBinding".into(),
+            var_id: 1401,
+            module: SessionModule::val(Generation(47)).module_name(),
+            tier: ValueTier::ForceData,
+            type_display: "Int".into(),
+            root_head: None,
+            host_authority: None,
+        };
+        assert!(matches!(
+            destination.mount_compiled_binding_in(
+                ScopeId::ROOT,
+                &binder,
+                Generation(47),
+                &DataConTable::default(),
+                foreign
+            ),
+            Err(ResidentError::ForeignCustody)
+        ));
+        assert_eq!(destination.value_handle_count(), before);
+        major_collect(&mut destination);
+        assert_live_binding(&mut destination, ScopeId::ROOT, destination_id);
+        assert!(destination.discard_custody(local));
     }
 
     #[test]

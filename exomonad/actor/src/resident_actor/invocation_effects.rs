@@ -33,7 +33,8 @@ where
             ResidentActorBoundary::Poll(poll) => {
                 let terminal = kernel
                     .resolve(poll.target)
-                    .and_then(|target| target.terminal().get());
+                    .map(|target| target.terminal().clone())
+                    .filter(|terminal| terminal.get().is_some());
                 Ok(OwnedWorkbenchWait::PollExit {
                     continuation: poll.continuation,
                     target: poll.target,

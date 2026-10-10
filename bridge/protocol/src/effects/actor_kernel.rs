@@ -67,9 +67,45 @@ pub fn actor_kernel() -> Effect {
         default_row_args: &[],
         extra_imports: &["import Tidepool.Actor"],
         type_defs: vec![actor_lifecycle()],
-        external_types: &[],
+        external_types: &[
+            crate::schema::ExternalType {
+                haskell_name: "RequestSite",
+                rust_wire: "i64",
+                core_module: Some("Tidepool.Internal.RequestSite"),
+            },
+            crate::schema::ExternalType {
+                haskell_name: "ActorRef",
+                rust_wire: "(i64, i64)",
+                core_module: Some("Tidepool.Internal.ActorRef"),
+            },
+        ],
         errors: None,
         verbs: vec![
+            Verb {
+                ctor: "ActorPublishExitWith",
+                method: "actor_publish_exit_with",
+                args: vec![
+                    Arg {
+                        name: "value",
+                        ty: HsType::Var("exit"),
+                        rust: RustBinding::HaskellValue,
+                    },
+                    Arg {
+                        name: "site",
+                        ty: HsType::app(
+                            HsType::app(
+                                HsType::Named("RequestSite"),
+                                HsType::TypeList(vec![HsType::Var("exit")]),
+                            ),
+                            HsType::Var("siteReply"),
+                        ),
+                        rust: RustBinding::External,
+                    },
+                ],
+                ret: HsType::Unit,
+                errors: None,
+                handling: HandlingClass::Actor,
+            },
             Verb {
                 ctor: "ActorInstallShutdownWith",
                 method: "actor_install_shutdown_with",

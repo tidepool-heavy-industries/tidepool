@@ -2411,6 +2411,7 @@ pub(crate) enum ResidentWorkbenchStep {
         outcome: Box<ResidentWorkbenchSuspension>,
     },
     Replied {
+        claim: crate::request::RequestReplyClaim,
         request: crate::RequestId,
         result: RootCustody,
         preview: Option<String>,
@@ -2984,6 +2985,21 @@ pub(crate) enum ResidentActorBoundary {
     RequestSubmission(RequestSubmission),
     ReplyAttempt(ReplyAttempt),
     ResponsePoll(ResponsePoll),
+    ExitPublication {
+        continuation: ResidentHole,
+        value: tidepool_runtime::session::RuntimeResultPublication,
+    },
+    ResponsePublication {
+        continuation: ResidentHole,
+        request: crate::RequestId,
+        value: tidepool_runtime::session::RuntimeResultPublication,
+    },
+    WatchResponsePoll {
+        continuation: ResidentHole,
+        watch: crate::WatchId,
+        path: Vec<usize>,
+        node: usize,
+    },
     ProgressPublication {
         continuation: ResidentHole,
         request: crate::RequestId,
@@ -3157,6 +3173,9 @@ impl ResidentActorBoundary {
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
             Self::ResponsePoll(_) => "pollResponse",
+            Self::ExitPublication { .. } => "exit publication",
+            Self::ResponsePublication { .. } => "publishResponse",
+            Self::WatchResponsePoll { .. } => "observeWatchResponse",
             Self::ProgressPublication { .. } => "reportProgress",
             Self::ProgressPoll(_) => "pollProgress",
             Self::RequestUpdate { .. } => "updateRequest",
@@ -3465,6 +3484,7 @@ impl ResidentRequest {
             Self::ActorKernel(
                 crate::generated::actor_kernel::ActorKernelReq::ActorCommandInputWith,
             ) => "command source input",
+            Self::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorPublishExitWith(..)) => "exit publication",
             Self::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith) => {
                 "ready"
             }
@@ -3525,6 +3545,9 @@ impl ResidentRequest {
             Self::AgentSession(
                 crate::generated::agent_session::AgentSessionReq::AgentAttachWith(..),
             ) => "agent attachment",
+            Self::AgentSession(crate::generated::agent_session::AgentSessionReq::AgentSessionPublishResponseWith(..)
+                | crate::generated::agent_session::AgentSessionReq::AgentSessionPublishProgressResponseWith(..)) => "response publication",
+            Self::Watches(WatchesReq::ObserveWatchResponseWith(..)) => "watch response observation",
             Self::Replies(RepliesReq::ReserveRequestWith(..)) => "request reservation",
             Self::Replies(RepliesReq::CurrentRequestWith(..)) => "currentRequest",
             Self::Replies(RepliesReq::SubmitRequestWith(..)) => "request submission",
@@ -8405,6 +8428,11 @@ where
                         request,
                         table: session.data_con_table().clone(),
                     }),
+                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorPublishExitWith(_, site)) => {
+                        let site = u64::try_from(site).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid exit publication site".into()))?;
+                        let value = session.capture_result_publication(&hole, site, RealmId::ROOT)?;
+                        Ok(ResidentActorBoundary::ExitPublication { continuation: hole, value })
+                    }
                     ResidentRequest::ActorContext(
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),
@@ -8745,6 +8773,18 @@ where
                         .map(ResidentActorBoundary::AgentSession)
                         .map_err(ResidentActorWorkbenchError::InteractiveSessionCapture)
                     }
+                    ResidentRequest::AgentSession(
+                        crate::generated::agent_session::AgentSessionReq::AgentSessionPublishResponseWith(request, site, _)
+                        | crate::generated::agent_session::AgentSessionReq::AgentSessionPublishProgressResponseWith(request, site, _),
+                    ) => {
+                        let site = u64::try_from(site).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
+                            "response publication has a negative site".into()
+                        ))?;
+                        let value = session.capture_result_publication(&hole, site, RealmId::ROOT)?;
+                        Ok(ResidentActorBoundary::ResponsePublication {
+                            continuation: hole, request: crate::request_effect::request_id(request)?, value,
+                        })
+                    }
                     ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeRunWith(site, _)) =>
                         capture_scope_boundary(session, hole, site, actor_realm),
                     ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeDoneWith(token)) =>
@@ -8766,6 +8806,7 @@ where
                     ),
                     ResidentRequest::Replies(RepliesReq::SubmitRequestWith(
                         request_id,
+                        site,
                         _,
                         address,
                         deadline,
@@ -8777,6 +8818,13 @@ where
                                 error: crate::request_effect::RequestError::RequestInvalidDeadline(detail),
                             }),
                         };
+                        let site = u64::try_from(site).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
+                            "request submission has a negative site".into()
+                        ))?;
+                        let witness = session.request_result_type_witness(site, &hole)?;
+                        let destination = crate::owned_result::RequestResultDestination::new(
+                            context.actor, context.placement.session, witness, session.lease_bindings(&[]),
+                        );
                         let custody = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
                             ?
@@ -8795,6 +8843,7 @@ where
                                     custody,
                                 ),
                                 deadline,
+                                destination,
                             },
                         ))
                     }
@@ -8832,7 +8881,7 @@ where
                             preview: if preview.is_empty() { None } else { Some(preview) },
                         }))
                     }
-                    ResidentRequest::Replies(RepliesReq::ObserveResponseWith(request_id)) => {
+                    ResidentRequest::Replies(RepliesReq::ObserveResponseWith(_, request_id)) => {
                         Ok(ResidentActorBoundary::ResponsePoll(ResponsePoll {
                             continuation: hole,
                             request: crate::request_effect::request_id(request_id)?,
@@ -8944,6 +8993,16 @@ where
                             path: crate::request_effect::projection_path(path)?,
                             request: crate::request_effect::request_id(request)?,
                             after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
+                        })
+                    }
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchResponseWith(_, watch, path, node)) => {
+                        Ok(ResidentActorBoundary::WatchResponsePoll {
+                            continuation: hole,
+                            watch: crate::request_effect::watch_id(watch)?,
+                            path: crate::request_effect::projection_path(path)?,
+                            node: usize::try_from(node).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
+                                "negative response projection node".into()
+                            ))?,
                         })
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchDecisionWith(watch, path)) => {
@@ -9297,7 +9356,7 @@ where
             ),
             SourceEvent::Settled(_) => matches!(
                 input,
-                ResidentRequest::Replies(RepliesReq::ObserveResponseWith(_))
+                ResidentRequest::Replies(RepliesReq::ObserveResponseWith(..))
             ),
         };
         if !input_matches_event {
@@ -9341,10 +9400,11 @@ where
                 self.resume_response_observation(
                     context.clone(),
                     hole,
-                    Ok(match result {
-                        Ok(()) => crate::ResponseObservation::Ready,
-                        Err(failure) => crate::ResponseObservation::Unavailable(failure),
+                    Ok(match &result {
+                        Ok(_) => crate::ResponseObservation::Ready,
+                        Err(failure) => crate::ResponseObservation::Unavailable(failure.clone()),
                     }),
+                    result.ok(),
                 )
                 .await?
             }
@@ -9422,7 +9482,8 @@ where
                             expected.operation()
                         )));
                     }
-                    crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
+                    crate::generated::actor_kernel::ActorKernelReq::ActorPublishExitWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallCommandSourceWith(..)
@@ -9490,6 +9551,7 @@ where
                     crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(
                         ..,
                     )
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorPublishExitWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
@@ -9845,14 +9907,194 @@ where
         context: crate::ActorSessionContext,
         hole: ResidentHole,
         observation: Result<crate::ResponseObservation, crate::ReplyError>,
+        snapshot: Option<Arc<crate::owned_result::OwnedResultSnapshot>>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let observed = if matches!(observation, Ok(crate::ResponseObservation::Ready)) {
+            match snapshot {
+                Some(snapshot) => self.borrow_result(context.clone(), &hole, snapshot).await,
+                None => Err(crate::ReplyError::ReplyResultUnavailable),
+            }
+        } else {
+            Err(crate::ReplyError::ReplyResultUnavailable)
+        };
         self.access
             .with_compiler_machine(context, move |session, _, _, settlement| {
+                let observation = match (observation, observed) {
+                    (Ok(crate::ResponseObservation::Ready), Ok(value)) => {
+                        let constructor = tidepool_bridge::get_qualified(
+                            session.data_con_table(),
+                            "Tidepool.Agent.Reply.Internal.ResponseReady",
+                            1,
+                        )
+                        .ok_or_else(|| BridgeError::UnknownDataConName("ResponseReady".into()))?;
+                        return session
+                            .resume_framed_custody_sources_classified(
+                                hole,
+                                value.custody(),
+                                constructor,
+                                Vec::<i64>::new(),
+                                settlement,
+                            )
+                            .map_err(classify_resumption);
+                    }
+                    (Ok(crate::ResponseObservation::Ready), Err(error)) => Err(error),
+                    (observation, _) => observation,
+                };
                 let answer = crate::request_effect::RequestAnswer::Response(observation);
                 session
                     .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
+            .await
+    }
+
+    pub(crate) async fn incorporate_result(
+        &self,
+        from: tidepool_repr::SessionId,
+        value: tidepool_runtime::session::RuntimeResultPublication,
+        destination: Arc<crate::owned_result::RequestResultDestination>,
+    ) -> Result<Arc<crate::owned_result::OwnedResultSnapshot>, ResidentActorWorkbenchError> {
+        if value.type_witness() != destination.type_witness() {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "result publication has another canonical response type".into(),
+            ));
+        }
+        let value = if from == destination.session() {
+            value
+        } else {
+            let parcel = self
+                .access
+                .with_host_machine("result-export", from, None, move |session, _| {
+                    session
+                        .export_result(value)
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                })
+                .await?;
+            self.access
+                .with_host_machine(
+                    "result-import",
+                    destination.session(),
+                    None,
+                    move |session, _| {
+                        session
+                            .import_result(parcel)
+                            .map_err(ResidentActorWorkbenchError::Resident)
+                    },
+                )
+                .await?
+        };
+        crate::owned_result::OwnedResultSnapshot::incorporated(value, destination).map_err(
+            |error| {
+                ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "result incorporation refused: {error:?}"
+                ))
+            },
+        )
+    }
+
+    async fn borrow_result(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: &ResidentHole,
+        snapshot: Arc<crate::owned_result::OwnedResultSnapshot>,
+    ) -> Result<Arc<tidepool_runtime::session::RuntimeResultPublication>, crate::ReplyError> {
+        let continuation = hole.cont_id().to_owned();
+        let expected = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session
+                    .result_type_witness(&continuation)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "typed result observer evidence unavailable");
+                crate::ReplyError::ReplyResultUnavailable
+            })?;
+        if snapshot.type_witness() != &expected {
+            return Err(crate::ReplyError::ReplyResultTypeMismatch);
+        }
+        if snapshot.session() == context.placement.session {
+            return Ok(snapshot.publication_owner());
+        }
+        let parcel = self
+            .access
+            .with_host_machine(
+                "result-borrow-export",
+                snapshot.session(),
+                None,
+                move |session, _| {
+                    session
+                        .export_result_shared(snapshot.publication())
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                },
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "typed result borrowed export unavailable");
+                crate::ReplyError::ReplyResultUnavailable
+            })?;
+        self.access
+            .with_host_machine(
+                "result-borrow-import",
+                context.placement.session,
+                None,
+                move |session, _| {
+                    session
+                        .import_result(parcel)
+                        .map(Arc::new)
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                },
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "typed result observer incorporation unavailable");
+                crate::ReplyError::ReplyResultUnavailable
+            })
+    }
+
+    pub(crate) async fn resume_watch_response(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        observation: Result<Arc<crate::owned_result::OwnedResultSnapshot>, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let observation = match observation {
+            Ok(snapshot) => self.borrow_result(context.clone(), &hole, snapshot).await,
+            Err(error) => Err(error),
+        };
+        self.access
+            .with_compiler_machine(
+                context,
+                move |session, _, _, settlement| match observation {
+                    Ok(value) => {
+                        let constructor = tidepool_bridge::get_qualified(
+                            session.data_con_table(),
+                            "Data.Either.Right",
+                            1,
+                        )
+                        .ok_or_else(|| {
+                            BridgeError::UnknownDataConName("Data.Either.Right".into())
+                        })?;
+                        session
+                            .resume_framed_custody_sources_classified(
+                                hole,
+                                value.custody(),
+                                constructor,
+                                Vec::<i64>::new(),
+                                settlement,
+                            )
+                            .map_err(classify_resumption)
+                    }
+                    Err(error) => session
+                        .resume_classified(
+                            hole,
+                            crate::request_effect::ReplyResult::<()>(Err(error)),
+                            settlement,
+                        )
+                        .map_err(classify_resumption),
+                },
+            )
             .await
     }
 
@@ -10229,15 +10471,32 @@ where
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
-        terminal: crate::ActorTerminal,
+        retained: crate::RetainedActorExit,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_compiler_machine(context, move |session, _, _, settlement| {
-                session
-                    .resume_classified(hole, terminal, settlement)
-                    .map_err(classify_resumption)
-            })
-            .await
+        let terminal = retained.wait().await;
+        let publication = if terminal.kind == crate::ActorExitKind::Completed {
+            match retained.result() {
+                Some(result) => self.borrow_result(context.clone(), &hole, result).await,
+                None => Err(crate::ReplyError::ReplyResultUnavailable),
+            }
+        } else {
+            Err(crate::ReplyError::ReplyResultUnavailable)
+        };
+        self.access.with_compiler_machine(context, move |session, _, _, settlement| {
+            if let Ok(value) = publication {
+                let constructor = tidepool_bridge::get_qualified(session.data_con_table(), "Tidepool.Internal.ActorExit.Completed", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("Tidepool.Internal.ActorExit.Completed".into()))?;
+                session.resume_framed_custody_sources_classified(hole, value.custody(), constructor, Vec::<i64>::new(), settlement).map_err(classify_resumption)
+            } else {
+                use crate::wait::ExitObservationFailure;
+                let failure = match terminal.kind {
+                    crate::ActorExitKind::Failed => ExitObservationFailure::Failed(terminal.summary),
+                    crate::ActorExitKind::Cancelled => ExitObservationFailure::Cancelled(terminal.summary),
+                    crate::ActorExitKind::Completed => ExitObservationFailure::Unavailable("successful actor exit value is unavailable or has an incompatible type".into()),
+                };
+                session.resume_classified(hole, failure, settlement).map_err(classify_resumption)
+            }
+        }).await
     }
 
     pub(crate) async fn resume_call_status(
@@ -10259,15 +10518,44 @@ where
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
-        terminal: Option<crate::ActorTerminal>,
+        retained: Option<crate::RetainedActorExit>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_compiler_machine(context, move |session, _, _, settlement| {
-                session
-                    .resume_classified(hole, terminal, settlement)
-                    .map_err(classify_resumption)
-            })
-            .await
+        let Some(retained) = retained else {
+            return self
+                .resume_value(
+                    context,
+                    hole,
+                    Option::<crate::wait::ExitObservationFailure>::None,
+                )
+                .await;
+        };
+        let terminal = retained.wait().await;
+        let publication = if terminal.kind == crate::ActorExitKind::Completed {
+            match retained.result() {
+                Some(result) => self.borrow_result(context.clone(), &hole, result).await,
+                None => Err(crate::ReplyError::ReplyResultUnavailable),
+            }
+        } else {
+            Err(crate::ReplyError::ReplyResultUnavailable)
+        };
+        self.access.with_compiler_machine(context, move |session, _, _, settlement| {
+            if let Ok(value) = publication {
+                let table = session.data_con_table();
+                let completed = tidepool_bridge::get_qualified(table, "Tidepool.Internal.ActorExit.Completed", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("Tidepool.Internal.ActorExit.Completed".into()))?;
+                let just = tidepool_bridge::get_qualified(table, "GHC.Maybe.Just", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("GHC.Maybe.Just".into()))?;
+                session.resume_nested_custody_classified(hole, value.custody(), vec![completed, just], settlement).map_err(classify_resumption)
+            } else {
+                use crate::wait::ExitObservationFailure;
+                let failure = match terminal.kind {
+                    crate::ActorExitKind::Failed => ExitObservationFailure::Failed(terminal.summary),
+                    crate::ActorExitKind::Cancelled => ExitObservationFailure::Cancelled(terminal.summary),
+                    crate::ActorExitKind::Completed => ExitObservationFailure::Unavailable("successful actor exit value is unavailable or has an incompatible type".into()),
+                };
+                session.resume_classified(hole, Some(failure), settlement).map_err(classify_resumption)
+            }
+        }).await
     }
 
     pub(crate) async fn rehome_mailbox_value(
@@ -19426,8 +19714,8 @@ pub(crate) mod request_tests {
             verify_message(later_message).await.unwrap(),
             ResidentOutcome::Completed { .. }
         ));
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let claim = registry.begin_reply(target, request).unwrap();
+        crate::request::test_support::complete_reply(&registry, claim, None);
         let closed = tokio::time::timeout(Duration::from_secs(2), source_events.recv())
             .await
             .unwrap()
@@ -19472,7 +19760,10 @@ pub(crate) mod request_tests {
                 .unwrap();
         }
         drop(sources);
-        assert!(registry.finish_reply(request, None).is_empty());
+        assert!(matches!(
+            registry.begin_reply(target, request),
+            Err(crate::ReplyError::Stale | crate::ReplyError::AlreadySettled)
+        ));
         assert_eq!(
             registry.forget_watch(owner, watch).unwrap(),
             crate::request::ForgetWatchOutcome::Forgotten

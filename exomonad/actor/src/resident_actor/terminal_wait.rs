@@ -40,7 +40,7 @@ where
     O: OutputSink + Sync + 'static,
 {
     let reason = match wait_exit_event(&terminal, &control, &kernel.retained_exit()).await {
-        ExitWaitEvent::Observed(terminal) => {
+        ExitWaitEvent::Observed(_) => {
             let outcome = environment
                 .runner
                 .resume_terminal(context, continuation, terminal)

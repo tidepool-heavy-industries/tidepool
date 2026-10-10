@@ -1777,6 +1777,9 @@ impl<'code> PreparedMachine<'code> {
             work.push(unsafe { root.read() } as usize);
             if let Some(evidence) = evidence {
                 mark_program(evidence.reply.owner(), &mut live, &mut program_work);
+                if let Some(owner) = evidence.reply.site_owner() {
+                    mark_program(owner, &mut live, &mut program_work);
+                }
                 mark_program(evidence.runner, &mut live, &mut program_work);
             }
         }

@@ -1,5 +1,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE RoleAnnotations #-}
 
 -- | Engine-private representation of exact actor references.
 --
@@ -15,18 +16,17 @@ module Tidepool.Internal.ActorRef
 import Data.Kind (Type)
 import Prelude
 
-import Tidepool.Internal.ExitCell (ExitCell)
 
-data ActorRef (protocol :: Type -> Type) exit where
-  ActorRef :: Int -> Int -> ExitCell pending exit -> ActorRef protocol exit
+type role ActorRef nominal nominal
+data ActorRef (protocol :: Type -> Type) (exit :: Type) = ActorRef Int Int
 
 -- | An exact actor reference with its mailbox protocol hidden.
 --
 -- A worker's owned handle needs only the actor's successful exit type. Hiding the
 -- protocol avoids coupling the private worker ledger to a particular mailbox
--- API while retaining the live Haskell exit cell verbatim.
+-- API while preserving its nominal exit type.
 data ExitRef exit where
   ExitRef :: ActorRef protocol exit -> ExitRef exit
 
 actorAddress :: ActorRef protocol exit -> (Int, Int)
-actorAddress (ActorRef actorId incarnation _) = (actorId, incarnation)
+actorAddress (ActorRef actorId incarnation) = (actorId, incarnation)

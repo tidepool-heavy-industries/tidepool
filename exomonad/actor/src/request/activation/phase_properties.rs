@@ -737,6 +737,8 @@ fn run_history(
         request
     });
     let mut facts: [RequestFacts; 4] = std::array::from_fn(|_| RequestFacts::default());
+    let mut reply_claims: [Option<crate::request::RequestReplyClaim>; 4] =
+        std::array::from_fn(|_| None);
     let mut capabilities: Vec<Capability> = vec![];
     for (step, operation) in operations.iter().enumerate() {
         let Operation {
@@ -1043,7 +1045,11 @@ fn run_history(
                     coverage.releases_without_token_finish += 1;
                 }
                 check(
-                    registry.begin_reply(caller.actor(targets[key]), ids[key]),
+                    registry
+                        .begin_reply(caller.actor(targets[key]), ids[key])
+                        .map(|claim| {
+                            reply_claims[key] = Some(claim);
+                        }),
                     expected,
                     action,
                     coverage,
@@ -1057,7 +1063,12 @@ fn run_history(
                 if !model.forgotten() && !model.closed() && model.reply_claimed() {
                     model.accepted.push(RequestFact::ReplyFinished);
                 }
-                prop_assert!(registry.finish_reply(ids[key], None).is_empty());
+                prop_assert!(crate::request::test_support::complete_optional_reply(
+                    &registry,
+                    &mut reply_claims[key],
+                    None
+                )
+                .is_empty());
             }
             Action::Cancel => {
                 let model = &mut facts[key];

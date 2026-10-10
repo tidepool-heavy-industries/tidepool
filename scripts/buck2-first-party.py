@@ -727,6 +727,8 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "exomonad-node" and unit:
         env["EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY"] = "$(location :inbox_directory_fault_shared)"
         resources.append(":inbox_directory_fault_shared")
+    if package_name == "exomonad-actor":
+        env["TIDEPOOL_HASKELL_ACTORS_DIR"] = "$(location //bridge/haskell:facade_embedded_sources)/actors"
     if package_name == "exomonad-actor" and unit:
         env["TIDEPOOL_JEV_SOURCE_DIR"] = "$(location toolchains//:jev_sources)"
         resources.append("toolchains//:jev_sources")

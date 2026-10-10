@@ -10,6 +10,7 @@ module Tidepool.Actor.Source
   , progressSource
   , progressSourceSited
   , settlementSource
+  , settlementSourceSited
   , ActorLifecycle (..)
   , commandSource
   , lifecycleSource
@@ -24,13 +25,12 @@ import Data.Text (Text)
 import Tidepool.Agent.Reply.Internal
   ( Progress (..)
   , ProgressState
-  , RawResponseObservation (..)
+  , ResponseState (..)
   , Replies (..)
   , RequestId (..)
   , Request (..)
   , ResponseFailure
   , ResponseResult
-  , readResponse
   )
 import Tidepool.Effects.Core (ActorKernel (..), ActorLocal (..), ActorLifecycle (..), CommandResult)
 import Tidepool.Command.Types (Job (..))
@@ -43,7 +43,7 @@ data Source (protocol :: Type -> Type) where
     -> (ProgressState progress -> protocol ())
     -> Source protocol
   SettlementSource
-    :: Request result
+    :: RequestSite '[ResponseResult result] (ResponseState result) -> Request result
     -> (Either ResponseFailure (ResponseResult result) -> protocol ())
     -> Source protocol
   LifecycleSource
@@ -66,11 +66,20 @@ progressSourceSited
   -> Source protocol
 progressSourceSited = ProgressSource
 
+{-# OPAQUE settlementSource #-}
 settlementSource
-  :: Request result
+  :: forall result protocol. Request result
   -> (Either ResponseFailure (ResponseResult result) -> protocol ())
   -> Source protocol
-settlementSource = SettlementSource
+settlementSource = settlementSourceSited (error "settlementSource: extractor must assign a typed site")
+
+{-# OPAQUE settlementSourceSited #-}
+settlementSourceSited
+  :: forall result protocol. RequestSite '[ResponseResult result] (ResponseState result)
+  -> Request result
+  -> (Either ResponseFailure (ResponseResult result) -> protocol ())
+  -> Source protocol
+settlementSourceSited = SettlementSource
 
 lifecycleSource
   :: ActorRef api exit
@@ -85,7 +94,7 @@ commandSource = CommandSource
 -- reply type is closed: the runtime answers a host-built value only against
 -- the reply type the request constructor declares, so a shared entry over a
 -- bare @event@ variable could never be answered. Progress and settlement
--- entries read their request cells through the ordinary 'Replies'
+-- entries use typed result observations through the ordinary 'Replies'
 -- observation verbs; the runtime answers those with the delivered event
 -- rather than with a live poll.
 {-# OPAQUE installSource #-}
@@ -95,10 +104,10 @@ installSource (CommandSource (Job job) project) =
 installSource (ProgressSource site (Progress (RequestId request)) project) =
   send (ActorInstallProgressSourceWith request
     (sourceEntry (ObserveProgressWith site request) project))
-installSource (SettlementSource response@(Request (RequestId request) _ _) project) =
+installSource (SettlementSource site (Request (RequestId request) _) project) =
   send (ActorInstallSettlementSourceWith request
-    (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
-installSource (LifecycleSource (ActorRef actor incarnation _) project) =
+    (sourceEntry (ObserveResponseWith site request) (project . settledResponse)))
+installSource (LifecycleSource (ActorRef actor incarnation) project) =
   send (ActorInstallLifecycleSourceWith (actor, incarnation)
     (sourceEntry ActorLifecycleInputWith project))
 
@@ -111,10 +120,10 @@ attachSource owner (CommandSource (Job job) project) =
 attachSource owner (ProgressSource site (Progress (RequestId request)) project) =
   send @(ActorLocal protocol) (ActorLocalAttachProgressSourceWith (owner, request)
     (sourceEntry (ObserveProgressWith site request) project))
-attachSource owner (SettlementSource response@(Request (RequestId request) _ _) project) =
+attachSource owner (SettlementSource site (Request (RequestId request) _) project) =
   send @(ActorLocal protocol) (ActorLocalAttachSettlementSourceWith (owner, request)
-    (sourceEntry (ObserveResponseWith request) (project . settledResponse response)))
-attachSource owner (LifecycleSource (ActorRef actor incarnation _) project) =
+    (sourceEntry (ObserveResponseWith site request) (project . settledResponse)))
+attachSource owner (LifecycleSource (ActorRef actor incarnation) project) =
   send @(ActorLocal protocol) (ActorLocalAttachLifecycleSourceWith (owner, (actor, incarnation))
     (sourceEntry ActorLifecycleInputWith project))
 
@@ -128,12 +137,7 @@ sourceEntry input project _ = do
   event <- send input
   send (ActorReplyWith 0 (project event))
 
-settledResponse
-  :: Request result
-  -> RawResponseObservation
-  -> Either ResponseFailure (ResponseResult result)
-settledResponse response RawResponseReady = case readResponse response of
-  Just result -> Right result
-  Nothing -> error "settlement source has no filled response cell"
-settledResponse _ (RawResponseUnavailable failure) = Left failure
-settledResponse _ _ = error "settlement source received a nonterminal observation"
+settledResponse :: ResponseState result -> Either ResponseFailure (ResponseResult result)
+settledResponse (ResponseReady result) = Right result
+settledResponse (ResponseUnavailable failure) = Left failure
+settledResponse _ = error "settlement source received a nonterminal observation"

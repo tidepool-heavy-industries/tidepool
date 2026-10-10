@@ -157,7 +157,8 @@ data ProgressAuthority
 
 data AuthorityDeclaration
   = RequestCarrier | ResponseWrapper | ProgressWrapper | ReplyConstructors | WatchConstructors
-  | ProgressHelper ProgressAuthority | InstallSource | AttachSource
+  | ProgressHelper ProgressAuthority | ProtectedDeclaration String String Bool
+  | InstallSource | AttachSource
   deriving (Eq, Ord)
 
 data DeclarationIdentity
@@ -261,11 +262,13 @@ resolvePreparedSiteEnvironment env = do
         [ identifier'
         | tycon' <- maybe [] (:[]) original
         , constructor <- tyConDataCons tycon'
-        , occNameString (nameOccName (dataConName constructor)) `elem` rawProgressOccurrences
+        , occNameString (nameOccName (dataConName constructor)) `elem` rawProtectedOccurrences
         , identifier' <- dataConWorkId constructor : maybe [] (:[]) (dataConWrapId_maybe constructor)
         ]
-      raw = constructors (tycon ReplyConstructors) ++ constructors (tycon WatchConstructors)
+      raw = concatMap (constructors . tycon)
+        ([ReplyConstructors, WatchConstructors] ++ protectedConstructorDeclarations)
       sited = concatMap (identifier . ProgressHelper) progressAuthorities
+        ++ concatMap identifier protectedHelperDeclarations
       sources = identifier InstallSource ++ identifier AttachSource
       key = getKey . nameUnique . idName
       authority = SiteAuthority (tycon RequestCarrier) (tycon ResponseWrapper) (tycon ProgressWrapper)
@@ -282,11 +285,12 @@ resolvePreparedSiteEnvironment env = do
       let sibling = case thing of
             Just (AnId original) -> Just original
             _ -> Nothing
-      pure (vsName spec, (sibling, fact))
+      pure (verbKey spec, (sibling, fact))
 
 authorityDeclarations :: [AuthorityDeclaration]
 authorityDeclarations = [RequestCarrier, ResponseWrapper, ProgressWrapper, ReplyConstructors,
-  WatchConstructors] ++ map ProgressHelper progressAuthorities ++ [InstallSource, AttachSource]
+  WatchConstructors] ++ map ProgressHelper progressAuthorities
+    ++ protectedConstructorDeclarations ++ protectedHelperDeclarations ++ [InstallSource, AttachSource]
 
 progressAuthorities :: [ProgressAuthority]
 progressAuthorities = [ReportProgress, PollProgress, AwaitProgressAfter, ProgressSource]
@@ -298,11 +302,39 @@ progressVerb role = case role of
   AwaitProgressAfter -> "after"
   ProgressSource -> "progressSource"
 
-rawProgressOccurrences :: [String]
-rawProgressOccurrences = ["PublishProgressWith", "ObserveProgressWith", "ObserveWatchProgressWith"]
+rawProtectedOccurrences :: [String]
+rawProtectedOccurrences =
+  [ "PublishProgressWith", "ObserveProgressWith", "ObserveWatchProgressWith"
+  , "SubmitRequestWith", "ObserveResponseWith", "ObserveWatchResponseWith"
+  , "AgentSessionPublishResponseWith", "AgentSessionPublishProgressResponseWith"
+  , "ActorStartWith", "ActorReplaceWith", "ActorWaitWith", "ActorPollWith", "ActorPublishExitWith"
+  ]
+
+protectedConstructorDeclarations :: [AuthorityDeclaration]
+protectedConstructorDeclarations =
+  [ ProtectedDeclaration "Tidepool.Effects.Core" "AgentSession" True
+  , ProtectedDeclaration "Tidepool.Effects.Core" "Actor" True
+  , ProtectedDeclaration "Tidepool.Effects.Core" "ActorKernel" True
+  ]
+
+protectedHelperDeclarations :: [AuthorityDeclaration]
+protectedHelperDeclarations =
+  [ ProtectedDeclaration "Tidepool.Agent.Reply.Internal" "submitRequest" False
+  , ProtectedDeclaration "Tidepool.Actors.Internal.Agent" "requestConfiguredSited" False
+  , ProtectedDeclaration "Tidepool.Agent.Session" "publishResponse" False
+  , ProtectedDeclaration "Tidepool.Agent.Session" "publishProgressResponse" False
+  , ProtectedDeclaration "Tidepool.Actor" "startActorWithSite" False
+  , ProtectedDeclaration "Tidepool.Actor" "replaceActorWithSite" False
+  ] ++ [ProtectedDeclaration (vsSitedModule spec) (vsSitedName spec) False
+         | spec <- sitedVerbs, vsName spec `elem`
+           ["request", "requestWithProgress", "requestWithProgressInto", "pollResponse", "response", "settledResponse", "result", "settlement", "settlementSource"
+           , "startActor", "replaceActor", "startUnitActor", "runActor", "awaitExit", "pollExit"
+           , "start", "replace", "finish", "forwardResult", "progress"]]
 
 authorityDeclaration :: AuthorityDeclaration -> (String, OccName, Bool)
 authorityDeclaration role = case role of
+  ProtectedDeclaration owner occurrence nominal' -> (owner,
+    if nominal' then mkTcOcc occurrence else mkVarOcc occurrence, nominal')
   RequestCarrier -> nominal "Tidepool.Internal.RequestSite" "RequestSite"
   ResponseWrapper -> nominal "Tidepool.Agent.Reply.Internal" "ResponseResult"
   ProgressWrapper -> nominal "Tidepool.Agent.Reply.Internal" "ProgressState"
@@ -326,11 +358,13 @@ mayBeProtectedName name = case nameModule_maybe name of
   Just owner ->
     let spelling = moduleNameString (moduleName owner)
         occurrence = occNameString (nameOccName name)
-        raw = rawProgressOccurrences ++ map ("$W" ++) rawProgressOccurrences
-    in (spelling `elem` ["Tidepool.Agent.Reply.Internal", "Tidepool.Agent.Watch.Internal"]
+        raw = rawProtectedOccurrences ++ map ("$W" ++) rawProtectedOccurrences
+    in (spelling `elem` ["Tidepool.Agent.Reply.Internal", "Tidepool.Agent.Watch.Internal", "Tidepool.Effects.Core"]
           && occurrence `elem` raw)
        || any (\progress -> let (provider, sibling, _) = authorityDeclaration (ProgressHelper progress)
               in spelling == provider && occurrence == occNameString sibling) progressAuthorities
+       || any (\declaration -> let (provider, sibling, _) = authorityDeclaration declaration
+              in spelling == provider && occurrence == occNameString sibling) protectedHelperDeclarations
 
 resolveDeclaration :: HscEnv -> String -> OccName -> Bool
   -> IO (Maybe TyThing, DependencyFact)
@@ -394,17 +428,17 @@ observeDependency environment owned imported query = case query of
   SiblingQuery surface -> case lookupPreparedVerbName surface of
     Nothing -> UnverifiableDependency
     Just spec ->
-      let recovered = case Map.lookup (vsName spec) (environmentRecoveredSiblings environment) of
+      let recovered = case Map.lookup (verbKey spec) (environmentRecoveredSiblings environment) of
             Just (Just sibling, _) | Just surfaceOwner <- nameModule_maybe surface
               , Just siblingOwner <- nameModule_maybe (idName sibling)
               , moduleUnit surfaceOwner == moduleUnit siblingOwner -> Just sibling
             _ -> Nothing
-          selected = Map.lookup (vsName spec) owned `orElse`
-            Map.lookup (vsName spec) imported `orElse`
-            Map.lookup (vsName spec) (environmentInterfaceSiblings environment) `orElse` recovered
+          selected = Map.lookup (verbKey spec) owned `orElse`
+            Map.lookup (verbKey spec) imported `orElse`
+            Map.lookup (verbKey spec) (environmentInterfaceSiblings environment) `orElse` recovered
       in case selected of
         Just sibling -> identityFact sibling
-        Nothing -> case Map.lookup (vsName spec) (environmentRecoveredSiblings environment) of
+        Nothing -> case Map.lookup (verbKey spec) (environmentRecoveredSiblings environment) of
           Just (_, UnverifiableDependency) -> UnverifiableDependency
           Just (_, fact) -> MembershipFact False [fact]
           Nothing -> NoSelectedSibling
@@ -412,6 +446,7 @@ observeDependency environment owned imported query = case query of
     authority = environmentAuthority environment
     progressDeclarations = [ReplyConstructors, WatchConstructors]
       ++ map ProgressHelper progressAuthorities
+      ++ protectedConstructorDeclarations ++ protectedHelperDeclarations
     identityFact identifier = case nameModule_maybe (idName identifier) >>= \owner ->
       (owner,) <$> Map.lookup owner (environmentVersions environment) of
         Just (owner, version) -> KnownDeclaration owner version (ValueIdentity identifier)
@@ -490,10 +525,10 @@ elaboratePreparedSitesWithDependencies :: PreparedSiteEnvironment
 elaboratePreparedSitesWithDependencies environment owned imported bindings = do
   let IntrinsicCensus _ _ surfaces = censusPreparedIntrinsics [] bindings
       recovered = Map.fromList
-        [(vsName spec, sibling)
+        [(verbKey spec, sibling)
         | surface <- surfaces, Just spec <- [lookupPreparedVerb surface]
         , Just surfaceOwner <- [nameModule_maybe (idName surface)]
-        , Just (Just sibling, _) <- [Map.lookup (vsName spec) (environmentRecoveredSiblings environment)]
+        , Just (Just sibling, _) <- [Map.lookup (verbKey spec) (environmentRecoveredSiblings environment)]
         , Just siblingOwner <- [nameModule_maybe (idName sibling)]
         , moduleUnit surfaceOwner == moduleUnit siblingOwner]
       siblings = Map.unions [owned, imported, environmentInterfaceSiblings environment, recovered]
@@ -539,7 +574,7 @@ elaboratePreparedSitesTracked env authority siblings bindings = do
           unless (getKey (nameUnique (idName (fst origin))) `Set.member` trustedProgressOwners authority) $
             modify' (\current -> current
               { esRejections = SiteRejection (fst origin)
-                  ("raw or site-aware progress operations require compiler-issued typed helper evidence: " ++ T.unpack (snd origin))
+                  ("raw or site-aware result, exit or progress operations require compiler-issued typed helper evidence: " ++ T.unpack (snd origin))
                   : esRejections current })
         pure expression
       Lit{} -> pure expression
@@ -711,7 +746,7 @@ requestProgressType spec inputs = do
     ("Tidepool.Actors.Internal.Agent", "requestWithProgressInto") -> Right ([2, 0], TypeArgument 1, True)
     _ -> Left "request site lacks known reply/progress semantics"
   if vsInputTypeArgs spec /= indices || vsAnswerSource spec /= answer
-      || vsDerivedInput spec /= Nothing || vsListAnswer spec
+      || vsDerivedInput spec /= Just (if progress then 1 else 0, ResponseResultEvidence) || vsListAnswer spec
     then Left "request site has another input or answer type shape"
     else case (progress, inputs) of
       (False, [_]) -> Right Nothing
@@ -742,7 +777,7 @@ resolvePreparedInterfaceSiblings env = resolvePreparedSiblingIds
 
 resolvePreparedSiblingIds :: [Id] -> Map String Id
 resolvePreparedSiblingIds identifiers = Map.fromList
-  [ (vsName spec, binder)
+  [ (verbKey spec, binder)
   | spec <- sitedVerbs
   , binder : _ <- [filter (isSibling spec) identifiers]
   ]

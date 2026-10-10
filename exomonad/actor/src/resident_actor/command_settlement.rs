@@ -286,12 +286,9 @@ impl CommandSettlements {
         let request = self.jobs.replace_settlement(job, |owner| {
             requests.reserve_command_settlement(owner, job.to_owned(), notify_owner)
         })?;
-        let notifications = self.requests.settle_command(
-            request,
-            render_report(job, &report),
-            revision,
-            Some(report),
-        );
+        let notifications =
+            self.requests
+                .settle_command(request, render_report(job, &report), revision, report);
         if notify_owner {
             let settlements = self.clone();
             tokio::spawn(async move {
@@ -322,7 +319,7 @@ impl CommandSettlements {
             let request = match subject {
                 WatchSubject::Request(request) => request,
                 WatchSubject::Watch(watch) => {
-                    return Ok(crate::request::ReadinessDependency::Watch(watch))
+                    return Ok(crate::request::ReadinessDependency::Watch(watch));
                 }
                 WatchSubject::Command(job) => {
                     self.arm(&job, false, None).map_err(|error| match error {
@@ -396,7 +393,7 @@ impl CommandSettlements {
         }
         let notifications = self
             .requests
-            .settle_command(request, text, revision, Some(report));
+            .settle_command(request, text, revision, report);
         publish_request_notifications(&self.requests, &self.deployments, notifications).await;
     }
 
