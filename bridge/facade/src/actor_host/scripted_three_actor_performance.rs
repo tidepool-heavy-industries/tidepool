@@ -316,10 +316,10 @@ async fn production_harness_three_actor_capture_phases() {
             assert_ne!(child_round.origin().actor(), &AgentPath("/root".into()));
             assert_capture(&child_round, &prefix, effort);
             let graph = host.context.forest.inspect_host_graph();
-            let child_origin = child_round.origin();
+            let child_identity = child_round.host_identity();
             let node = graph.iter().find(|node| host.context.binding(node.actor)
                 .and_then(|binding| binding.conversation())
-                .is_some_and(|conversation| conversation.identity() == &child_origin)).unwrap();
+                .is_some_and(|conversation| conversation.identity() == &child_identity)).unwrap();
             assert!(matches!(node.label.as_str(), "three-actor-alpha" | "three-actor-beta"));
             assert_eq!(node.creator, Some(root));
             assert_eq!(node.supervisor_parent, Some(root));

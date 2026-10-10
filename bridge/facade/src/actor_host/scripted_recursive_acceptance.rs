@@ -23,19 +23,7 @@ const ROOT_CALL: &str = "recursive-root-await";
 const CHILD_CALL: &str = "recursive-child-await";
 
 fn identity(round: &HostedScriptRound) -> HostIdentity {
-    let harness::model::ConversationIdentity::Embedded {
-        run,
-        actor,
-        incarnation,
-    } = round.origin()
-    else {
-        panic!("hosted provider request must retain its embedded origin");
-    };
-    HostIdentity {
-        run,
-        actor,
-        incarnation,
-    }
+    round.host_identity()
 }
 
 fn operation(host: &HostedTestRuntime, round: &HostedScriptRound, call: &str) -> OperationId {

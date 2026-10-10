@@ -1070,9 +1070,18 @@ impl HostedScriptRound {
     }
 
     pub fn origin(&self) -> harness::model::ConversationIdentity {
+        let identity = self.host_identity();
+        harness::model::ConversationIdentity::Embedded {
+            run: identity.run,
+            actor: identity.actor,
+            incarnation: identity.incarnation,
+        }
+    }
+
+    pub fn host_identity(&self) -> harness::embedding::HostIdentity {
         let (prefix, incarnation) = self.request.session_id.rsplit_once(':').unwrap();
         let (run, actor) = prefix.rsplit_once(':').unwrap();
-        harness::model::ConversationIdentity::Embedded {
+        harness::embedding::HostIdentity {
             run: run.into(),
             actor: harness::model::AgentPath(actor.into()),
             incarnation: incarnation.into(),

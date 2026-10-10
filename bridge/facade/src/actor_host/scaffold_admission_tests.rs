@@ -114,7 +114,7 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
             let attachment = host.context.binding(expected_child.actor)
                 .expect("the expected child owns its production attachment");
             let conversation = attachment.conversation().expect("the child owns its provider conversation");
-            assert_eq!(conversation.identity(), &child_round.origin(),
+            assert_eq!(conversation.identity(), &child_round.host_identity(),
                 "the selected provider request belongs to the expected context child");
             let child = child_round.origin().actor().clone();
             child_round.call("prepared-default-reply", "respond (trialSeed + 1 :: Int)");
