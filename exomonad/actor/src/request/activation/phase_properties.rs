@@ -494,9 +494,9 @@ impl NativeFacts {
             return ExpectedNative::NotClaimed;
         }
         match self.decision() {
-            Some((_, outcome)) if outcome.committed() => ExpectedNative::Committed,
+            Some((_, NativeOutcome::Committed)) => ExpectedNative::Committed,
             Some((_, NativeOutcome::Refused)) => ExpectedNative::Refused,
-            Some((_, NativeOutcome::RecoveryRequired)) => ExpectedNative::Unknown,
+            Some((_, NativeOutcome::RecoveryRequired)) => ExpectedNative::Refused,
             None if self
                 .accepted
                 .iter()
@@ -520,7 +520,7 @@ impl NativeFacts {
         }
         if let Some((index, outcome)) = self.decision() {
             let terminal = self.accepted[index + 1..].iter().any(|fact| match fact {
-                NativeFact::Reconciled => !matches!(outcome, NativeOutcome::RecoveryRequired),
+                NativeFact::Reconciled => true,
                 _ => false,
             });
             if terminal {
@@ -887,7 +887,9 @@ fn run_history(
                         NativeOutcome::Refused => {
                             claim.before_rename_failure();
                         }
-                        NativeOutcome::RecoveryRequired => drop(claim),
+                        NativeOutcome::RecoveryRequired => {
+                            claim.before_rename_failure();
+                        }
                     }
                     model.native.accepted.push(NativeFact::Decided(outcome));
                     if matches!(action, Action::Finish(_)) {
@@ -957,12 +959,10 @@ fn run_history(
                         Some((_, NativeOutcome::Committed)) => {
                             PublicationCancellation::AlreadyPublished
                         }
-                        Some((_, NativeOutcome::Refused)) => {
+                        Some((_, NativeOutcome::Refused | NativeOutcome::RecoveryRequired)) => {
                             PublicationCancellation::AlreadyTerminated
                         }
-                        Some((_, NativeOutcome::RecoveryRequired)) | None => {
-                            PublicationCancellation::PendingCommitOutcome
-                        }
+                        None => PublicationCancellation::PendingCommitOutcome,
                     };
                     prop_assert_eq!(cap.decision.request_cancellation(), expected);
                     coverage.native_cancellations += 1;
@@ -1264,15 +1264,15 @@ fn run_history(
             let model = &facts[cap.request].native;
             let expected = match model.decision() {
                 Some((_, NativeOutcome::Committed)) => PublicationPhase::Published,
-                Some((_, NativeOutcome::Refused)) => PublicationPhase::Terminated,
-                Some((_, NativeOutcome::RecoveryRequired)) | None => {
-                    PublicationPhase::CommitClaimed {
-                        cancellation_pending: model
-                            .accepted
-                            .iter()
-                            .any(|fact| matches!(fact, NativeFact::CancellationRequested)),
-                    }
+                Some((_, NativeOutcome::Refused | NativeOutcome::RecoveryRequired)) => {
+                    PublicationPhase::Terminated
                 }
+                None => PublicationPhase::CommitClaimed {
+                    cancellation_pending: model
+                        .accepted
+                        .iter()
+                        .any(|fact| matches!(fact, NativeFact::CancellationRequested)),
+                },
             };
             prop_assert_eq!(
                 cap.resources.phase(),
