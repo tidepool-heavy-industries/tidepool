@@ -31,20 +31,24 @@ def _compile_fail_impl(ctx):
             "dynamic_crate": info.crate.dynamic,
         }
     inputs = ctx.actions.write_json("inputs.json", {
+        # RustToolchainInfo.compiler is RunInfo, not a bare executable. Keep
+        # its argument vector structured: Nix toolchains may wrap rustc in a
+        # source-participation launcher whose arguments are part of the
+        # compiler command.
+        "rustc_command": toolchain.compiler.args,
         "direct": direct,
         "transitive": transitive.values(),
     }, with_inputs = True)
     output = ctx.actions.declare_output("compile-proof", dir = True)
     ctx.actions.run(cmd_args([
         ctx.attrs._python[RunInfo], ctx.attrs._runner,
-        "--rustc", toolchain.compiler,
         "--inputs", inputs,
         "--control", ctx.attrs.control,
         "--source", ctx.attrs.source,
         "--expected", ctx.attrs.expected,
         "--edition", ctx.attrs.edition,
         "--output", output.as_output(),
-    ]), category = "rust_compile_fail", identifier = ctx.label.name)
+    ], hidden = [toolchain.compiler]), category = "rust_compile_fail", identifier = ctx.label.name)
     return [
         DefaultInfo(default_output = output),
         ExternalRunnerTestInfo(
