@@ -30,6 +30,16 @@ pub(crate) struct AllocationCounts {
     deallocated_bytes: u64,
 }
 
+impl AllocationCounts {
+    pub(super) fn assert_nonallocating(self) {
+        assert_eq!(self.allocations, 0, "publication installation allocated");
+        assert_eq!(
+            self.reallocations, 0,
+            "publication installation reallocated"
+        );
+    }
+}
+
 thread_local! {
     static ALLOCATION_COUNTS: Cell<Option<AllocationCounts>> = const { Cell::new(None) };
 }
@@ -697,4 +707,59 @@ fn native_retraction_does_not_extend_last_owner_through_new_captures() {
     let quiescent = scenario.machine.quiesce().unwrap();
     scenario.machine.collect_major(quiescent).unwrap();
     assert_eq!(scenario.machine.residency().programs, 0);
+}
+
+#[test]
+fn prepared_source_promotion_installs_native_custody_without_allocation() {
+    let (image, binder) = source_image();
+    let mut scenario = Scenario::new(3, 0, &image, &binder);
+    let source = scenario.parent;
+    let target = scenario.unrelated;
+    let keys: Vec<_> = scenario
+        .table
+        .source_instance_keys_in(&scenario.tree, source)
+        .into_iter()
+        .collect();
+    let before = scenario
+        .table
+        .scope_snapshot(&scenario.tree, target)
+        .unwrap();
+    let prepared = scenario
+        .table
+        .prepare_exact_publication_in(&scenario.tree, source, target, &[], &keys)
+        .unwrap();
+    assert_eq!(
+        before,
+        scenario
+            .table
+            .scope_snapshot(&scenario.tree, target)
+            .unwrap()
+    );
+    drop(prepared);
+    for _ in 0..2 {
+        let prepared = scenario
+            .table
+            .prepare_exact_publication_in(&scenario.tree, source, target, &[], &keys)
+            .unwrap();
+        measure(|| scenario.table.commit_exact_binding_promotion(prepared))
+            .1
+            .assert_nonallocating();
+    }
+    assert_eq!(
+        scenario
+            .table
+            .source_instance_keys_in(&scenario.tree, target),
+        keys.into_iter().collect()
+    );
+    let drained = scenario.table.drain_scope_with_sources(source);
+    scenario.release_sources(drained.source_instances);
+    assert_eq!(
+        scenario
+            .table
+            .source_instance_keys_in(&scenario.tree, target)
+            .len(),
+        3
+    );
+    let drained = scenario.table.drain_scope_with_sources(target);
+    scenario.release_sources(drained.source_instances);
 }

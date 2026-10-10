@@ -96,11 +96,12 @@ pub enum BindingPromotionError {
     ConflictingSourceOrigin,
     MissingSourceDomain,
     UnverifiableSourceSelection,
+    LeaseCountExhausted,
 }
 
 /// Exact binding writes and dependency leases checked before a publication
 /// decision. The caller holds the owning machine checkout through commit.
-pub struct PreparedBindingPromotion {
+struct BindingPromotionPlan {
     target: ScopeId,
     writes: Vec<(BindingName, SessionVarId)>,
     retained: HashSet<SessionVarId>,
@@ -113,10 +114,49 @@ pub struct PreparedBindingPromotion {
     next_tip: Option<u64>,
 }
 
+/// Ready-to-install publication. Preparation reserves mutable index slots and
+/// constructs immutable paths while visibility and custody remain unchanged.
+/// The owning checkout must remain exclusive until installation or cancellation.
+pub struct PreparedBindingPromotion {
+    plan: BindingPromotionPlan,
+    names: PreparedNameChanges,
+    added: Vec<(SessionVarId, usize)>,
+    added_sources: Vec<(SourceLeaseKey, usize)>,
+    membership: PreparedMembership,
+    selection: SourceSelectionView,
+    new_promoted: Option<HashSet<SessionVarId>>,
+    new_promoted_sources: Option<HashSet<SourceLeaseKey>>,
+}
+
 pub struct PreparedSourceOwnerOrigin {
     scope: ScopeId,
-    owner: tidepool_repr::execution_schema::CachedHomeOwner,
-    domain: crate::prepared_program::SourceInstanceDomain,
+    selection: SourceSelectionView,
+}
+
+/// Exact observation preservation and declaration shadowing prepared before
+/// durable admission. Dropping this token leaves all semantic state unchanged.
+pub struct PreparedDeclarationBindingChanges {
+    names: PreparedNameChanges,
+    observations: Vec<SessionVarId>,
+}
+
+struct PreparedNameChanges {
+    scope: ScopeId,
+    writes: Vec<(BindingName, SessionVarId)>,
+    removals: Vec<BindingName>,
+    hidden_additions: Vec<BindingName>,
+    new_current: Option<HashMap<BindingName, SessionVarId>>,
+    new_hidden: Option<HashSet<BindingName>>,
+    projection: Option<HashTrieMapSync<BindingName, SessionVarId>>,
+    changes: usize,
+}
+
+struct PreparedMembership {
+    retained: HashTrieSetSync<SessionVarId>,
+    sources: HashTrieSetSync<SourceLeaseKey>,
+    added_bindings: Vec<SessionVarId>,
+    added_sources: Vec<SourceLeaseKey>,
+    new: Option<CapturableMembership>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -457,7 +497,7 @@ mod promotion_tests {
     use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
     use tidepool_repr::{Generation, SessionModule};
 
-    fn entry(name: &str, generation: u64) -> BindingEntry {
+    pub(super) fn entry(name: &str, generation: u64) -> BindingEntry {
         BindingEntry {
             name: BindingName(name.into()),
             id: SessionVarId::from_extract(generation),
@@ -729,19 +769,29 @@ impl BindingTable {
         tree: &ScopeTree,
         scope: ScopeId,
     ) -> Result<BindingScopeSnapshot, BindingPromotionError> {
+        self.prepared_scope_snapshot_in(tree, scope, None, None)
+    }
+
+    /// Semantic view used to prepare the durable prefix without publishing the
+    /// staged declaration's names, observations, or source origin.
+    pub fn prepared_scope_snapshot_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        origin: Option<&PreparedSourceOwnerOrigin>,
+        changes: Option<&PreparedDeclarationBindingChanges>,
+    ) -> Result<BindingScopeSnapshot, BindingPromotionError> {
+        if origin.is_some_and(|p| p.scope != scope)
+            || changes.is_some_and(|p| p.names.scope != scope)
+        {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
         // The existing selection owner validates every selected lease and
         // authored domain before its metadata can authorize publication.
         self.source_domain_selection_in(tree, scope)?;
-        let mut dependencies: Vec<_> = self
-            .scope_dependency_ids_slow(tree, scope)
-            .into_iter()
-            .collect();
-        dependencies.sort_by_key(|id| id.raw());
-        // Own mutable observations can transitively reference foreign
-        // observations. Retain the exact edges as well as the root union:
-        // a changed per-write closure can hide inside an unchanged union.
-        // Inherited/promoted custody is already frozen and does not follow
-        // later edits to the original observation graph.
+        let excluded = changes
+            .map(|p| p.observations.as_slice())
+            .unwrap_or_default();
         let owners = if self.tips.contains_key(&scope) {
             vec![scope]
         } else {
@@ -751,9 +801,34 @@ impl BindingTable {
             .iter()
             .flat_map(|owner| self.owned.get(owner).into_iter().flat_map(HashSet::iter))
             .copied();
-        let mut observation_dependencies: Vec<_> = self
-            .dependency_closure(own)
+        let retained = self.dependency_closure_excluding(own, excluded);
+        let mut dependencies: Vec<_> = retained
+            .iter()
+            .copied()
+            .chain(
+                self.tips
+                    .get(&scope)
+                    .into_iter()
+                    .flat_map(|tip| tip.visible.values().chain(tip.retained.iter()))
+                    .copied(),
+            )
+            .chain(
+                owners
+                    .iter()
+                    .flat_map(|owner| self.promoted.get(owner).into_iter().flat_map(HashSet::iter))
+                    .copied(),
+            )
+            .collect();
+        dependencies.sort_by_key(|id| id.raw());
+        dependencies.dedup();
+        // Own mutable observations can transitively reference foreign
+        // observations. Retain the exact edges as well as the root union:
+        // a changed per-write closure can hide inside an unchanged union.
+        // Inherited/promoted custody is already frozen and does not follow
+        // later edits to the original observation graph.
+        let mut observation_dependencies: Vec<_> = retained
             .into_iter()
+            .filter(|id| !excluded.contains(id))
             .filter_map(|id| {
                 self.observations.get(&id).map(|observation| {
                     let mut edges = observation.dependencies.clone();
@@ -768,12 +843,73 @@ impl BindingTable {
             inherited: self.tip_id(scope),
             dependencies,
             observation_dependencies,
-            selection: self
-                .source_selection
-                .get(&scope)
-                .cloned()
-                .unwrap_or_else(|| SourceSelectionView::for_scope(scope)),
+            selection: origin.map(|p| p.selection.clone()).unwrap_or_else(|| {
+                self.source_selection
+                    .get(&scope)
+                    .cloned()
+                    .unwrap_or_else(|| SourceSelectionView::for_scope(scope))
+            }),
         })
+    }
+
+    /// Exact prospective visible bindings; seeded scopes keep inherited names
+    /// hidden while legacy unseeded scopes retain their ancestor lookup rule.
+    pub fn prepared_iter_current_in<'a>(
+        &'a self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        changes: &PreparedDeclarationBindingChanges,
+    ) -> Result<Vec<(BindingName, &'a BindingEntry)>, BindingPromotionError> {
+        if !tree.is_live(scope) || changes.names.scope != scope {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
+        let removed = &changes.names.removals;
+        let mut seen = Vec::new();
+        let mut names = HashSet::new();
+        let tip = self.tips.get(&scope);
+        let owners = if tip.is_some() {
+            vec![scope]
+        } else {
+            tree.lookup_chain(scope)
+        };
+        for owner in owners {
+            for (name, id) in self
+                .current
+                .get(&owner)
+                .into_iter()
+                .flat_map(|frame| frame.iter())
+            {
+                if names.contains(name)
+                    || (owner == scope && removed.contains(name))
+                    || (owner != scope && self.scope_local_aliases.contains(id))
+                {
+                    continue;
+                }
+                if let Some(entry) = self.live.get(id) {
+                    names.insert(name.clone());
+                    seen.push((name.clone(), entry));
+                }
+            }
+        }
+        if let Some(tip) = tip {
+            for (name, id) in tip.visible.iter() {
+                if names.contains(name)
+                    || removed.contains(name)
+                    || self
+                        .hidden
+                        .get(&scope)
+                        .is_some_and(|hidden| hidden.contains(name))
+                {
+                    continue;
+                }
+                if let Some(entry) = self.live.get(id) {
+                    names.insert(name.clone());
+                    seen.push((name.clone(), entry));
+                }
+            }
+        }
+        seen.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+        Ok(seen)
     }
 
     fn changed(&mut self, scope: ScopeId) {
@@ -790,7 +926,11 @@ impl BindingTable {
             || self.promoted_source_instances.contains_key(&scope)
             || self.source_selection.contains_key(&scope)
         {
-            self.scope_revisions.insert(scope, self.revision);
+            if let Some(slot) = self.scope_revisions.get_mut(&scope) {
+                *slot = self.revision;
+            } else {
+                self.scope_revisions.insert(scope, self.revision);
+            }
         } else {
             self.scope_revisions.remove(&scope);
         }
@@ -1729,7 +1869,7 @@ impl BindingTable {
     }
 
     pub fn prepare_source_owner_origin_in(
-        &self,
+        &mut self,
         tree: &ScopeTree,
         scope: ScopeId,
         owner: tidepool_repr::execution_schema::CachedHomeOwner,
@@ -1749,25 +1889,22 @@ impl BindingTable {
         {
             return Err(BindingPromotionError::ConflictingSourceOrigin);
         }
-        Ok(PreparedSourceOwnerOrigin {
-            scope,
-            owner,
-            domain: view.current,
-        })
+        let mut selection = view.clone();
+        let mut record = selection
+            .domains
+            .get(&selection.current)
+            .cloned()
+            .expect("origin domain admitted");
+        record.authored.insert_mut(owner, selection.current);
+        selection.domains.insert_mut(selection.current, record);
+        self.source_selection.reserve(1);
+        self.scope_revisions.reserve(1);
+        Ok(PreparedSourceOwnerOrigin { scope, selection })
     }
 
     pub fn commit_source_owner_origin(&mut self, prepared: PreparedSourceOwnerOrigin) {
-        let view = self
-            .source_selection
-            .entry(prepared.scope)
-            .or_insert_with(|| SourceSelectionView::for_scope(prepared.scope));
-        let mut record = view
-            .domains
-            .get(&view.current)
-            .cloned()
-            .expect("origin domain admitted");
-        record.authored.insert_mut(prepared.owner, prepared.domain);
-        view.domains.insert_mut(view.current, record);
+        self.source_selection
+            .insert(prepared.scope, prepared.selection);
         self.changed(prepared.scope);
     }
 
@@ -1938,15 +2075,365 @@ impl BindingTable {
         Ok(())
     }
 
-    /// Check every source owner and final name without changing visibility or
-    /// acquiring a lease. Publication can then perform its durable work before
-    /// the infallible commit, while retaining the same machine checkout.
     pub fn prepare_exact_binding_promotion_in(
-        &self,
+        &mut self,
         source: ScopeId,
         target: ScopeId,
         ids: &[SessionVarId],
     ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
+        let plan = self.binding_promotion_plan(source, target, ids)?;
+        self.prepare_promotion_install(plan, &[])
+    }
+
+    pub fn prepare_exact_publication_in(
+        &mut self,
+        tree: &ScopeTree,
+        source: ScopeId,
+        target: ScopeId,
+        ids: &[SessionVarId],
+        instances: &[SourceLeaseKey],
+    ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
+        let plan = self.exact_publication_plan(tree, source, target, ids, instances)?;
+        self.prepare_promotion_install(plan, &[])
+    }
+
+    /// Include declaration shadowing in the same pre-durability preparation.
+    pub fn prepare_binding_publication_removals(
+        &mut self,
+        mut prepared: PreparedBindingPromotion,
+        removed_names: &[String],
+    ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
+        prepared.names = self.prepare_name_changes(
+            prepared.plan.target,
+            prepared.plan.writes.clone(),
+            removed_names,
+        );
+        Ok(prepared)
+    }
+
+    fn prepare_promotion_install(
+        &mut self,
+        plan: BindingPromotionPlan,
+        removed_names: &[String],
+    ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
+        let target = plan.target;
+        let added = plan
+            .retained
+            .iter()
+            .filter(|id| {
+                !self
+                    .promoted
+                    .get(&target)
+                    .is_some_and(|set| set.contains(id))
+            })
+            .map(|id| {
+                self.leases
+                    .get(id)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .map(|count| (*id, count))
+                    .ok_or(BindingPromotionError::LeaseCountExhausted)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let added_sources = plan
+            .source_instances
+            .iter()
+            .filter(|key| {
+                !self
+                    .promoted_source_instances
+                    .get(&target)
+                    .is_some_and(|set| set.contains(*key))
+            })
+            .map(|key| {
+                self.source_instances
+                    .get(key)
+                    .ok_or(BindingPromotionError::MissingOrForeignSourceInstance)?
+                    .shares
+                    .checked_add(1)
+                    .map(|count| (key.clone(), count))
+                    .ok_or(BindingPromotionError::LeaseCountExhausted)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut selection = self
+            .source_selection
+            .get(&target)
+            .cloned()
+            .unwrap_or_else(|| SourceSelectionView::for_scope(target));
+        for (domain, record) in &plan.source_domains {
+            selection.domains.insert_mut(*domain, record.clone());
+        }
+        let mut record = selection
+            .domains
+            .get(&selection.current)
+            .cloned()
+            .expect("current source domain admitted");
+        for (owner, domain) in &plan.source_origins {
+            record.authored.insert_mut(owner.clone(), *domain);
+        }
+        selection.domains.insert_mut(selection.current, record);
+
+        let new_promoted = if let Some(existing) = self.promoted.get_mut(&target) {
+            existing.reserve(added.len());
+            None
+        } else {
+            Some(added.iter().map(|(id, _)| *id).collect())
+        };
+        let new_promoted_sources =
+            if let Some(existing) = self.promoted_source_instances.get_mut(&target) {
+                existing.reserve(added_sources.len());
+                None
+            } else {
+                Some(added_sources.iter().map(|(key, _)| key.clone()).collect())
+            };
+        let existing = self.capturable_membership.get(&target);
+        let tip = self.tips.get(&target);
+        let mut retained = existing
+            .map(|m| m.retained.clone())
+            .or_else(|| tip.map(|t| t.retained.clone()))
+            .unwrap_or_default();
+        let mut sources = existing
+            .map(|m| m.source_instances.clone())
+            .or_else(|| tip.map(|t| t.source_instances.clone()))
+            .unwrap_or_default();
+        let mut added_bindings = Vec::new();
+        let mut added_source_membership = Vec::new();
+        for (id, _) in &added {
+            if !retained.contains(id) {
+                retained.insert_mut(*id);
+                added_bindings.push(*id);
+            }
+        }
+        for (key, _) in &added_sources {
+            if !sources.contains(key) {
+                sources.insert_mut(key.clone());
+                added_source_membership.push(key.clone());
+            }
+        }
+        let new = if let Some(existing) = self.capturable_membership.get_mut(&target) {
+            existing.added_bindings.reserve(added_bindings.len());
+            existing
+                .added_sources
+                .reserve(added_source_membership.len());
+            None
+        } else {
+            Some(CapturableMembership {
+                retained: retained.clone(),
+                source_instances: sources.clone(),
+                dependency_ids: HashSet::new(),
+                dependency_revision: self.dependency_revision,
+                dependencies_dirty: false,
+                append_epoch: 1,
+                added_bindings: added_bindings.iter().copied().collect(),
+                added_sources: added_source_membership.iter().cloned().collect(),
+            })
+        };
+        let membership = PreparedMembership {
+            retained,
+            sources,
+            added_bindings,
+            added_sources: added_source_membership,
+            new,
+        };
+        self.promoted.reserve(1);
+        self.promoted_source_instances.reserve(1);
+        self.capturable_membership.reserve(1);
+        self.source_selection.reserve(1);
+        self.leases.reserve(added.len());
+        self.scope_revisions.reserve(1);
+        let names = self.prepare_name_changes(target, plan.writes.clone(), removed_names);
+        Ok(PreparedBindingPromotion {
+            plan,
+            names,
+            added,
+            added_sources,
+            membership,
+            selection,
+            new_promoted,
+            new_promoted_sources,
+        })
+    }
+
+    fn prepare_name_changes(
+        &mut self,
+        scope: ScopeId,
+        writes: Vec<(BindingName, SessionVarId)>,
+        removed_names: &[String],
+    ) -> PreparedNameChanges {
+        let frame = self.current.get(&scope);
+        let hidden = self.hidden.get(&scope);
+        let tip = self.tips.get(&scope);
+        let mut projection = self
+            .capturable_names
+            .get(&scope)
+            .cloned()
+            .unwrap_or_default();
+        let written: HashMap<_, _> = writes.iter().cloned().collect();
+        for (name, id) in &writes {
+            if !self.scope_local_aliases.contains(id) && self.live.contains_key(id) {
+                projection.insert_mut(name.clone(), *id);
+            } else {
+                projection.remove_mut(name);
+            }
+        }
+        let mut removals = Vec::with_capacity(removed_names.len());
+        let mut hidden_additions = Vec::new();
+        let mut seen = HashSet::new();
+        let mut changes = 0;
+        for name in removed_names {
+            let name = BindingName(name.clone());
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let removed =
+                written.contains_key(&name) || frame.is_some_and(|f| f.contains_key(&name));
+            let hide = tip.is_some_and(|t| t.visible.contains_key(&name));
+            let newly_hidden =
+                hide && (written.contains_key(&name) || !hidden.is_some_and(|h| h.contains(&name)));
+            if newly_hidden {
+                hidden_additions.push(name.clone());
+            }
+            if removed || newly_hidden {
+                changes += 1;
+                projection.remove_mut(&name);
+            }
+            removals.push(name);
+        }
+        let new_current = if frame.is_none() && !writes.is_empty() {
+            let mut new: HashMap<_, _> = writes.iter().cloned().collect();
+            for name in &removals {
+                new.remove(name);
+            }
+            Some(new)
+        } else {
+            None
+        };
+        let new_hidden = if hidden.is_none() && !hidden_additions.is_empty() {
+            Some(hidden_additions.iter().cloned().collect())
+        } else {
+            None
+        };
+        let has_tip = tip.is_some();
+        if let Some(frame) = self.current.get_mut(&scope) {
+            frame.reserve(writes.len());
+        }
+        if let Some(hidden) = self.hidden.get_mut(&scope) {
+            hidden.reserve(hidden_additions.len());
+        }
+        self.current.reserve(1);
+        self.hidden.reserve(1);
+        self.capturable_names.reserve(1);
+        self.scope_revisions.reserve(1);
+        PreparedNameChanges {
+            scope,
+            writes,
+            removals,
+            hidden_additions,
+            new_current,
+            new_hidden,
+            projection: (!projection.is_empty() || has_tip).then_some(projection),
+            changes,
+        }
+    }
+
+    fn commit_name_changes(&mut self, prepared: PreparedNameChanges) {
+        let PreparedNameChanges {
+            scope,
+            writes,
+            removals,
+            hidden_additions,
+            new_current,
+            new_hidden,
+            projection,
+            changes,
+        } = prepared;
+        if let Some(new) = new_current {
+            self.current.insert(scope, new);
+            if let Some(hidden) = self.hidden.get_mut(&scope) {
+                for (name, _) in &writes {
+                    hidden.remove(name);
+                }
+            }
+        } else if let Some(frame) = self.current.get_mut(&scope) {
+            for (name, id) in writes {
+                if let Some(hidden) = self.hidden.get_mut(&scope) {
+                    hidden.remove(&name);
+                }
+                frame.insert(name, id);
+            }
+            for name in &removals {
+                frame.remove(name);
+            }
+        }
+        if let Some(new) = new_hidden {
+            self.hidden.insert(scope, new);
+        } else if let Some(hidden) = self.hidden.get_mut(&scope) {
+            hidden.extend(hidden_additions);
+        }
+        match projection {
+            Some(root) => {
+                self.capturable_names.insert(scope, root);
+            }
+            None => {
+                self.capturable_names.remove(&scope);
+            }
+        }
+        for _ in 0..changes {
+            self.changed(scope);
+        }
+    }
+
+    pub fn prepare_declaration_binding_changes_in(
+        &mut self,
+        scope: ScopeId,
+        captured: &[VarId],
+        removed_names: &[String],
+    ) -> Result<PreparedDeclarationBindingChanges, BindingPromotionError> {
+        let mut pending: Vec<_> = captured
+            .iter()
+            .copied()
+            .map(SessionVarId::from_var)
+            .collect();
+        let mut seen = HashSet::new();
+        let mut observations = Vec::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(observation) = self.observations.get(&id) {
+                pending.extend(observation.dependencies.iter().copied());
+                observations.push(id);
+            }
+        }
+        // Each removal may establish an owner revision slot. Reserve all of
+        // them without inserting empty semantic frames during preparation.
+        self.scope_revisions.reserve(observations.len() + 1);
+        let names = self.prepare_name_changes(scope, Vec::new(), removed_names);
+        Ok(PreparedDeclarationBindingChanges {
+            names,
+            observations,
+        })
+    }
+
+    pub fn commit_declaration_binding_changes(
+        &mut self,
+        prepared: PreparedDeclarationBindingChanges,
+    ) {
+        for id in prepared.observations {
+            self.remove_observation(id);
+        }
+        self.commit_name_changes(prepared.names);
+    }
+
+    /// Check every source owner and final name without changing visibility or
+    /// acquiring a lease. Publication can then perform its durable work before
+    /// the infallible commit, while retaining the same machine checkout.
+    fn binding_promotion_plan(
+        &self,
+        source: ScopeId,
+        target: ScopeId,
+        ids: &[SessionVarId],
+    ) -> Result<BindingPromotionPlan, BindingPromotionError> {
         let mut names = HashSet::new();
         let mut writes = Vec::with_capacity(ids.len());
         for &id in ids {
@@ -1969,7 +2456,7 @@ impl BindingTable {
             writes.push((entry.name.clone(), id));
         }
         let retained = self.dependency_closure(ids.iter().copied());
-        Ok(PreparedBindingPromotion {
+        Ok(BindingPromotionPlan {
             target,
             writes,
             retained,
@@ -1982,18 +2469,18 @@ impl BindingTable {
 
     /// Check binding writes and materialized source instances against one
     /// private lexical view before the durable publication decision.
-    pub fn prepare_exact_publication_in(
+    fn exact_publication_plan(
         &self,
         tree: &ScopeTree,
         source: ScopeId,
         target: ScopeId,
         ids: &[SessionVarId],
         instances: &[SourceLeaseKey],
-    ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
+    ) -> Result<BindingPromotionPlan, BindingPromotionError> {
         if !tree.is_live(source) || !tree.is_live(target) {
             return Err(BindingPromotionError::MissingOrForeignBinding);
         }
-        let mut prepared = self.prepare_exact_binding_promotion_in(source, target, ids)?;
+        let mut prepared = self.binding_promotion_plan(source, target, ids)?;
         let source_keys = self.source_instance_keys_in(tree, source);
         let target_keys = self.source_instance_keys_in(tree, target);
         for key in instances {
@@ -2012,7 +2499,7 @@ impl BindingTable {
     /// only retained by that view grant no selection; the installer refuses
     /// conflicting selected domains rather than choosing a mutable instance.
     pub fn prepare_authored_source_publication_in(
-        &self,
+        &mut self,
         tree: &ScopeTree,
         source: ScopeId,
         target: ScopeId,
@@ -2021,8 +2508,7 @@ impl BindingTable {
         accepted_owners: &[tidepool_repr::execution_schema::CachedHomeOwner],
         binding_dependencies: &[SessionVarId],
     ) -> Result<PreparedBindingPromotion, BindingPromotionError> {
-        let mut prepared =
-            self.prepare_exact_publication_in(tree, source, target, ids, instances)?;
+        let mut prepared = self.exact_publication_plan(tree, source, target, ids, instances)?;
         let reachable = self.scope_dependency_ids(tree, source);
         if binding_dependencies
             .iter()
@@ -2085,63 +2571,71 @@ impl BindingTable {
         }
         prepared.source_domains = records;
         prepared.next_tip = Some(next_tip);
-        Ok(prepared)
+        self.prepare_promotion_install(prepared, &[])
     }
 
     /// The checkout that prepared this promotion must still own the table;
     /// there is no fallible operation after the public durability boundary.
     pub fn commit_exact_binding_promotion(&mut self, prepared: PreparedBindingPromotion) {
         let PreparedBindingPromotion {
-            target,
-            writes,
-            retained,
-            source_instances,
-            source_origins,
-            source_domains,
-            next_tip,
+            plan,
+            names,
+            added,
+            added_sources,
+            membership,
+            selection,
+            new_promoted,
+            new_promoted_sources,
         } = prepared;
-        let existing = self.promoted.entry(target).or_default();
-        let added: HashSet<_> = retained.difference(existing).copied().collect();
-        existing.extend(added.iter().copied());
-        self.add_capturable_bindings(target, added.iter().copied());
-        self.lease_exact_ids(&added);
-        let existing_source = self.promoted_source_instances.entry(target).or_default();
-        let added_source: HashSet<_> = source_instances
-            .difference(existing_source)
-            .cloned()
-            .collect();
-        existing_source.extend(added_source.iter().cloned());
-        self.add_capturable_sources(target, added_source.iter().cloned());
-        self.acquire_source_shares(&added_source);
-        let selected = self
-            .source_selection
-            .entry(target)
-            .or_insert_with(|| SourceSelectionView::for_scope(target));
-        for (domain, record) in source_domains {
-            selected.domains.insert_mut(domain, record);
+        let target = plan.target;
+        if let Some(new) = new_promoted {
+            self.promoted.insert(target, new);
+        } else {
+            let existing = self
+                .promoted
+                .get_mut(&target)
+                .expect("reserved promotion slot");
+            for (id, _) in &added {
+                existing.insert(*id);
+            }
         }
-        let mut record = selected
-            .domains
-            .get(&selected.current)
-            .cloned()
-            .expect("current domain admitted");
-        for (owner, domain) in source_origins {
-            record.authored.insert_mut(owner, domain);
+        for (id, count) in added {
+            self.leases.insert(id, count);
         }
-        selected.domains.insert_mut(selected.current, record);
-        if let Some(next_tip) = next_tip {
+        if let Some(new) = new_promoted_sources {
+            self.promoted_source_instances.insert(target, new);
+        } else {
+            let existing = self
+                .promoted_source_instances
+                .get_mut(&target)
+                .expect("reserved source slot");
+            for (key, _) in &added_sources {
+                existing.insert(key.clone());
+            }
+        }
+        for (key, count) in added_sources {
+            self.source_instances
+                .get_mut(&key)
+                .expect("admitted source slot")
+                .shares = count;
+        }
+        if let Some(new) = membership.new {
+            self.capturable_membership.insert(target, new);
+        } else {
+            let existing = self
+                .capturable_membership
+                .get_mut(&target)
+                .expect("reserved membership slot");
+            existing.retained = membership.retained;
+            existing.source_instances = membership.sources;
+            existing.added_bindings.extend(membership.added_bindings);
+            existing.added_sources.extend(membership.added_sources);
+        }
+        self.source_selection.insert(target, selection);
+        if let Some(next_tip) = plan.next_tip {
             self.next_tip = next_tip;
         }
-        for (name, id) in writes {
-            if let Some(hidden) = self.hidden.get_mut(&target) {
-                hidden.remove(&name);
-            }
-            self.current
-                .entry(target)
-                .or_default()
-                .insert(name.clone(), id);
-            self.refresh_capturable_name(target, &name);
-        }
+        self.commit_name_changes(names);
         self.changed(target);
     }
 
@@ -2716,6 +3210,23 @@ impl BindingTable {
         retained
     }
 
+    fn dependency_closure_excluding(
+        &self,
+        ids: impl IntoIterator<Item = SessionVarId>,
+        excluded: &[SessionVarId],
+    ) -> HashSet<SessionVarId> {
+        let mut retained = HashSet::new();
+        let mut pending: Vec<_> = ids.into_iter().collect();
+        while let Some(id) = pending.pop() {
+            if retained.insert(id) && !excluded.contains(&id) {
+                if let Some(observation) = self.observations.get(&id) {
+                    pending.extend(observation.dependencies.iter().copied());
+                }
+            }
+        }
+        retained
+    }
+
     fn lease_exact_ids(&mut self, ids: &HashSet<SessionVarId>) {
         for id in ids {
             *self.leases.entry(*id).or_default() += 1;
@@ -3079,3 +3590,7 @@ mod persistent_membership_cost_tests;
 #[cfg(test)]
 #[path = "binding_table/cost_tests.rs"]
 pub(crate) mod cost_tests;
+
+#[cfg(test)]
+#[path = "binding_table/publication_preparation_tests.rs"]
+mod publication_preparation_tests;
