@@ -628,6 +628,9 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
     else {
         panic!("native receiver loop and shutdown hook")
     };
+    let [receiver_binder] = receiver_bound.as_slice() else {
+        panic!("one retained native receiver entry")
+    };
     for (kind, reason_code) in [
         (ActorExitKind::Completed, "0"),
         (ActorExitKind::Failed, "1"),
@@ -681,10 +684,10 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
             lexical_scope: session.mint_isolated_scope(),
         };
         tidepool_testing::with_settlement(|settlement| {
-            session.run_projected_bind_with_sites(
+            session.run_bind_with_sites(
                 "native-mailbox-receiver",
                 receiver.code(),
-                &receiver_bound,
+                receiver_binder,
                 tidepool_repr::Generation(2),
                 settlement,
             )
