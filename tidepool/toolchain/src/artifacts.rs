@@ -1548,8 +1548,7 @@ impl ModuleCandidateOffer {
         })
     }
 
-    /// Compile a pure preview after mounting the original live input. Neither
-    /// a whole-cell receipt nor a completed authored prefix is involved.
+    /// Specialize a pure renderer against the original input type and context.
     pub fn select_activation_preview(
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
@@ -1557,8 +1556,10 @@ impl ModuleCandidateOffer {
         context: Arc<crate::declaration_context::ExactCompileContext>,
         prototype: Arc<crate::checked_cell::ExactHostBindingPrototype>,
         specification: crate::activation_preview::ActivationPreviewSpecification,
+        catalog: &crate::toolchain::CatalogSelection,
     ) -> Result<crate::activation_preview::ActivationPreviewSelection, CompileError> {
         use crate::activation_preview::{ActivationPreviewOffer, ActivationPreviewSelection};
+        let catalog = catalog.for_deployment(endpoint.deployment())?;
         let producer = endpoint.identity().producer_bytes();
         if crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
             .sha256()
@@ -1579,6 +1580,14 @@ impl ModuleCandidateOffer {
                 .clone()
                 .extend_interface_context(prototype.context())?,
         );
+        let selected = immutable_candidates_in_context_with_catalog(
+            &declarations,
+            producer,
+            include,
+            scratch,
+            BTreeSet::new(),
+            &catalog,
+        )?;
         let offer = ActivationPreviewOffer {
             specification,
             prototype,
@@ -1626,7 +1635,7 @@ impl ModuleCandidateOffer {
             )?
             .with_source_search_context(include);
         Ok(ActivationPreviewSelection::Ready(Self {
-            selected: None,
+            selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(exact),

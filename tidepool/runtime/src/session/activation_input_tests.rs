@@ -2646,6 +2646,7 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
             budget: 512,
             template_source: template.clone(),
         },
+        admission.catalog_selection(),
     )
     .unwrap() else {
         panic!("original display environment must be available");
@@ -3116,6 +3117,7 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
             budget: 512,
             template_source: turn::assemble_activation_preview_module(512),
         },
+        admission.catalog_selection(),
     )
     .expect("genuine type-only authority may report missing original instance evidence");
     assert!(

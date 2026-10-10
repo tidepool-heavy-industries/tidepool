@@ -1017,6 +1017,7 @@ pub struct RuntimeActivationPreviewAdmission {
     generation: Generation,
     digest: [u8; 32],
     exact_context: Arc<tidepool_toolchain::declaration_join::ExactCompileContext>,
+    catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     scope_lease: Arc<super::RuntimeLexicalScopeLease>,
     consumed: AtomicBool,
 }
@@ -1038,6 +1039,9 @@ impl RuntimeActivationPreviewAdmission {
     }
     pub fn exact_context(&self) -> &Arc<tidepool_toolchain::declaration_join::ExactCompileContext> {
         &self.exact_context
+    }
+    pub fn catalog_selection(&self) -> &tidepool_toolchain::toolchain::CatalogSelection {
+        &self.catalog_selection
     }
 }
 
@@ -6038,6 +6042,7 @@ where
             generation,
             digest: *hash.finalize().as_bytes(),
             exact_context,
+            catalog_selection: self.state.catalog_selection().clone(),
             scope_lease,
             consumed: AtomicBool::new(false),
         }))

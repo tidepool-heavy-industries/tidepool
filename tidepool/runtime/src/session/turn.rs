@@ -2535,6 +2535,7 @@ pub fn compile_activation_renderer(
             budget,
             template_source: template_source.into(),
         },
+        admission.catalog_selection(),
     )?;
     let ActivationPreviewSelection::Ready(offer) = selection else {
         return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);

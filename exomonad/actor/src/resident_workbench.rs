@@ -2069,6 +2069,8 @@ pub(crate) enum ActivationPublicationObservation<'a> {
     InputMounted(&'a tidepool_runtime::session::MountedActivationInput),
     RendererProducer,
     RendererWaiting,
+    RendererSealed,
+    RendererSelected(&'a tidepool_runtime::session::RuntimeActivationPreviewAdmission),
     NativeClaimed,
     BeforeConfirmation,
     NativeSettled(&'a tidepool_runtime::session::PublicManifestCommit),
@@ -5568,9 +5570,12 @@ where
             .await?;
         // The mount checkout has settled before any specialization wait or
         // compiler work. Renderer production never needs a resident machine.
-        let committed = move |source| ResidentActorWorkbenchError::ActivationBindingCommitted {
-            binding: input_binding,
-            source: Box::new(source),
+        let committed = move |source| match source {
+            error @ ResidentActorWorkbenchError::ActivationBindingCommitted { .. } => error,
+            source => ResidentActorWorkbenchError::ActivationBindingCommitted {
+                binding: input_binding,
+                source: Box::new(source),
+            },
         };
         let budget = ACTIVATION_INPUT_LIMIT as u64;
         let template = tidepool_runtime::session::turn::assemble_activation_preview_module(budget);
@@ -5610,7 +5615,7 @@ where
                             producer.begin_native();
                             let result = compiler_work.run_with_close(|| {
                                 #[cfg(test)]
-                                if let Some(observer) = producer_observer {
+                                if let Some(observer) = &producer_observer {
                                     observer(ActivationPublicationObservation::RendererProducer)
                                         .map_err(|error| {
                                             CompileError::ExtractFailed(error.to_string())
@@ -5625,12 +5630,20 @@ where
                             });
                             // The affine compiler ticket has closed before Ready or
                             // Empty is published, even if the async waiter vanished.
-                            producer.settle_native(result).map_err(|failure| match failure {
+                            let settled = producer.settle_native(result).map_err(|failure| match failure {
                                 tidepool_runtime::session::RendererProductionFailure::Compile(error) => error,
                                 tidepool_runtime::session::RendererProductionFailure::CloseUnconfirmed(close) => {
                                     CompileError::ExtractFailed(format!("activation renderer compiler close is unconfirmed: {close:?}")).into()
                                 }
-                            })
+                            });
+                            #[cfg(test)]
+                            if settled.is_ok() {
+                                if let Some(observer) = producer_observer {
+                                    observer(ActivationPublicationObservation::RendererSealed)
+                                        .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+                                }
+                            }
+                            settled
                         }))
                         .await
                         .map_err(|error| committed(ResidentActorWorkbenchError::Join(error)))?;
@@ -5639,6 +5652,15 @@ where
                 }
             }
         };
+        #[cfg(test)]
+        if specialized.is_ok() {
+            if let Some(observer) = &renderer_observer {
+                observer(ActivationPublicationObservation::RendererSelected(
+                    &admission,
+                ))
+                .map_err(committed)?;
+            }
+        }
         let preview = self.access.with_machine(context.clone(), move |session, _, _| {
             session.validate_activation_preview_admission(&admission)
                 .map_err(|error| committed(ResidentActorWorkbenchError::Resident(error)))?;
@@ -5692,7 +5714,7 @@ where
                     }
                 };
                 Ok((preview, input_binding, admission))
-        }).await?;
+        }).await.map_err(committed)?;
         let (preview, input_binding, admission) = preview;
         let input = match preview {
             ActivationPreviewOutcome::Rendered { text, omitted } => bounded_activation_text(
@@ -21663,6 +21685,216 @@ pub(crate) mod request_tests {
             assert_ne!(first.admission.generation(), second.admission.generation());
         })
         .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_renderer_producer_retains_sealed_code_for_fresh_child() {
+        with_test_compiler_owner(async {
+            let (session, context, source, mut inputs, _root) = distinct_renderer_input_fixture();
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let (mut first, first_context) =
+                renderer_activation_workbench(&workbench, &context).await;
+            let (second, second_context) =
+                renderer_activation_workbench(&workbench, &context).await;
+            let (sealed, sealed_seen) = tokio::sync::oneshot::channel();
+            let sealed = Mutex::new(Some(sealed));
+            let (resume, held) = std::sync::mpsc::channel();
+            let held = Mutex::new(held);
+            let (released, released_seen) = tokio::sync::oneshot::channel();
+            let released = Mutex::new(Some(released));
+            first.activation_preview_observer = Some(Arc::new(move |event| {
+                if matches!(event, ActivationPublicationObservation::RendererSealed) {
+                    sealed.lock().take().unwrap().send(()).unwrap();
+                    held.lock().recv_timeout(Duration::from_secs(60)).unwrap();
+                    let _ = released.lock().take().unwrap().send(());
+                }
+                Ok(())
+            }));
+            let first_input = inputs.remove(0);
+            let second_input = inputs.remove(0);
+            drop(inputs);
+            let submissions = tidepool_extract_cmd::extract_spawn_count();
+            let first_task = tokio::spawn(with_test_compiler_owner(async move {
+                first
+                    .mount_activation_input(
+                        first_context,
+                        first_input,
+                        None,
+                        "()".into(),
+                        None,
+                        Vec::new(),
+                    )
+                    .await
+            }));
+            tokio::time::timeout(Duration::from_secs(60), sealed_seen)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 2);
+            first_task.abort();
+            assert!(matches!(first_task.await, Err(error) if error.is_cancelled()));
+            let fresh = second
+                .mount_activation_input(
+                    second_context,
+                    second_input,
+                    None,
+                    "()".into(),
+                    None,
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(fresh.input_preview.trim(), "2");
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                submissions + 3,
+                "fresh child issues its interface and reuses the cancelled producer's sealed code"
+            );
+            resume.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(60), released_seen)
+                .await
+                .unwrap()
+                .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_renderer_producer_retries_only_after_native_close() {
+        with_test_compiler_owner(async {
+            let (session, context, source, mut inputs, _root) = distinct_renderer_input_fixture();
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let (mut first, first_context) =
+                renderer_activation_workbench(&workbench, &context).await;
+            let (mut second, second_context) =
+                renderer_activation_workbench(&workbench, &context).await;
+            let (started, started_seen) = tokio::sync::oneshot::channel();
+            let started = Mutex::new(Some(started));
+            let (waiting, waiting_seen) = tokio::sync::oneshot::channel();
+            let waiting = Mutex::new(Some(waiting));
+            let (resume, held) = std::sync::mpsc::channel();
+            let held = Mutex::new(held);
+            let producers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = producers.clone();
+            let observer: ActivationPublicationObserver = Arc::new(move |event| {
+                match event {
+                    ActivationPublicationObservation::RendererProducer => {
+                        if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                            started.lock().take().unwrap().send(()).unwrap();
+                            held.lock().recv_timeout(Duration::from_secs(60)).unwrap();
+                        }
+                    }
+                    ActivationPublicationObservation::RendererWaiting => {
+                        if let Some(waiting) = waiting.lock().take() {
+                            let _ = waiting.send(());
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            });
+            first.activation_preview_observer = Some(observer.clone());
+            second.activation_preview_observer = Some(observer);
+            let first_input = inputs.remove(0);
+            let second_input = inputs.remove(0);
+            drop(inputs);
+            let first_task = tokio::spawn(with_test_compiler_owner(async move {
+                first
+                    .mount_activation_input(
+                        first_context,
+                        first_input,
+                        None,
+                        "()".into(),
+                        None,
+                        Vec::new(),
+                    )
+                    .await
+            }));
+            tokio::time::timeout(Duration::from_secs(60), started_seen)
+                .await
+                .unwrap()
+                .unwrap();
+            first_task.abort();
+            assert!(matches!(first_task.await, Err(error) if error.is_cancelled()));
+            let second_task = tokio::spawn(with_test_compiler_owner(async move {
+                second
+                    .mount_activation_input(
+                        second_context,
+                        second_input,
+                        None,
+                        "()".into(),
+                        None,
+                        Vec::new(),
+                    )
+                    .await
+            }));
+            tokio::time::timeout(Duration::from_secs(60), waiting_seen)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                producers.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "cancelled producer retains the slot until its native ticket settles"
+            );
+            resume.send(()).unwrap();
+            let fresh = second_task.await.unwrap().unwrap();
+            assert_eq!(fresh.input_preview.trim(), "2");
+            assert_eq!(
+                producers.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "confirmed failed native close permits exactly one fresh producer"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cached_renderer_recheckout_refuses_stale_mount_and_preserves_ready_code() {
+        with_test_compiler_owner(async {
+            let (session, context, source, mut inputs, _root) = distinct_renderer_input_fixture();
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines.clone(), source, None);
+            let (first, first_context) = renderer_activation_workbench(&workbench, &context).await;
+            let (mut stale, stale_context) = renderer_activation_workbench(&workbench, &context).await;
+            let (third, third_context) = renderer_activation_workbench(&workbench, &context).await;
+            let first_input = inputs.remove(0);
+            let stale_input = inputs.remove(0);
+            let third_input = inputs.remove(0);
+            drop(inputs);
+            let submissions = tidepool_extract_cmd::extract_spawn_count();
+            let warm = first.mount_activation_input(first_context, first_input, None, "()".into(), None, Vec::new()).await.unwrap();
+            assert_eq!(warm.input_preview.trim(), "1");
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 2);
+            let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let invalidated = observed.clone();
+            let session_id = context.placement.session;
+            stale.activation_preview_observer = Some(Arc::new(move |event| {
+                if let ActivationPublicationObservation::RendererSelected(admission) = event {
+                    let (mut session, receipt) = machines.checkout_run(session_id).unwrap().into_parts();
+                    session.retire_scope(admission.view().lexical_scope());
+                    let holes = session.parked_holes().into_iter().map(str::to_owned).collect();
+                    machines.settle_suspended(receipt, session, holes);
+                    invalidated.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(())
+            }));
+            let refused = stale.mount_activation_input(stale_context, stale_input, None, "()".into(), None, Vec::new()).await;
+            assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(matches!(refused, Err(ResidentActorWorkbenchError::ActivationBindingCommitted { source, .. })
+                if matches!(*source, ResidentActorWorkbenchError::Resident(_))));
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 3);
+            let fresh = third.mount_activation_input(third_context, third_input, None, "()".into(), None, Vec::new()).await.unwrap();
+            assert_eq!(fresh.input_preview.trim(), "3");
+            assert_ne!(fresh.binding, warm.binding);
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 4,
+                "stale affine authority cannot invalidate retained renderer code");
+        }).await;
     }
 
     fn workbench_runner_for_test(

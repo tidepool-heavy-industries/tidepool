@@ -182,6 +182,8 @@ async fn interrupt_during_preview(
             ActivationPublicationObservation::NativeClaimed
             | ActivationPublicationObservation::RendererProducer
             | ActivationPublicationObservation::RendererWaiting
+            | ActivationPublicationObservation::RendererSealed
+            | ActivationPublicationObservation::RendererSelected(_)
             | ActivationPublicationObservation::BeforeConfirmation
             | ActivationPublicationObservation::NativeSettled(_) => return Ok(()),
             ActivationPublicationObservation::ToolsPrepared {
