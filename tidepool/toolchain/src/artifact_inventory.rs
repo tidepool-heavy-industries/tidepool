@@ -4349,6 +4349,74 @@ mod tests {
     }
 
     #[test]
+    fn later_native_group_keeps_inherited_carrier_binding() {
+        let inventory = ArtifactInventory::default();
+        let fixture = issued_native_groups("Later", vec![(3, Vec::new()), (7, Vec::new())], &[], &BTreeMap::new());
+        let ArtifactPayload::Original(product) = &fixture.payload else { unreachable!() };
+        let product = crate::certified_products::tests::recovered_witness_fixtures(
+            std::slice::from_ref(product),
+        ).remove(0).product;
+        let native = ArtifactEntry::original([2; 32], product).unwrap();
+        let native_id = native.descriptor.id;
+        let carrier = inventory.admit_shared_with_demand(
+            &inventory.empty_view(), vec![Arc::new(native.clone())],
+            NativeArtifactDemand::ScopeInterfaces,
+        ).unwrap();
+        let initial = inventory
+            .admit_shared_with_demand(
+                &carrier,
+                vec![Arc::new(native.clone())],
+                NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&native, 3)]),
+            )
+            .unwrap();
+        let original_binding = initial.capture_graph_selection().namespace
+            .into_iter().find(|binding| binding.artifact == native_id).unwrap();
+        assert_eq!(initial.selected_native_groups().len(), 1);
+        let demanded = inventory
+            .admit_shared_with_demand(
+                &initial,
+                vec![Arc::new(native.clone())],
+                NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&native, 7)]),
+            )
+            .unwrap();
+        let graph = demanded.capture_graph_selection();
+        let group = *graph.native_groups.iter().find(|group| group.original_ordinal == 7).unwrap();
+        assert_ne!(group.binding.selection, original_binding.selection);
+        assert!(!graph.bindings.contains(&group.binding));
+        let edges = demanded.binding_dependencies();
+        assert!(edges.contains(&(
+            ArtifactBindingNode::Group(group),
+            ArtifactBindingNode::Artifact(original_binding),
+            ArtifactDependency::Interface,
+        )));
+        let recovery = ArtifactInventory::default();
+        let restored = recovery.recover_selection(
+            &recovery.empty_view(), demanded.entries(), &graph, &edges,
+        ).unwrap();
+        assert_eq!(restored.capture_graph_selection(), graph);
+        assert_eq!(restored.binding_dependencies(), edges);
+        for view in [&demanded, &restored] {
+            view.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                artifact: native_id, original_ordinal: 7,
+            }]).unwrap();
+            assert_eq!(view.dependencies(), initial.dependencies(),
+                "internal group carrier edge must not become a public self dependency");
+        }
+        let repeated = inventory.admit_shared_with_demand(
+            &demanded, vec![Arc::new(entry("Unrelated", &[]))], NativeArtifactDemand::ScopeInterfaces,
+        ).unwrap();
+        assert_eq!(repeated.capture_graph_selection().native_groups, graph.native_groups);
+        let reopened = repeated.select_roots(vec![native_id]).unwrap();
+        reopened.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+            artifact: native_id, original_ordinal: 7,
+        }]).unwrap();
+        drop(carrier); drop(initial); drop(demanded); drop(repeated); drop(reopened);
+        assert_eq!(inventory.node_count(), 0);
+        drop(restored);
+        assert_eq!(recovery.node_count(), 0);
+    }
+
+    #[test]
     fn shared_native_group_keeps_each_issued_canonical_child_closure() {
         let inventory = ArtifactInventory::default();
         let child = entry("Child", &[]);
