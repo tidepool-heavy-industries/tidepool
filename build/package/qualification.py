@@ -13,6 +13,7 @@ from pathlib import PurePosixPath
 import re
 import shutil
 import shlex
+import signal
 import struct
 import subprocess
 import sys
@@ -170,6 +171,162 @@ def sha256(path: Path) -> str:
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+def write_private_json(path: Path, value: dict) -> None:
+    """Atomically publish one owner receipt readable only by its Unix owner."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as output:
+            json.dump(value, output, indent=2, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+def process_start_identity(pid: int) -> dict:
+    """Bind a local PID to this boot and its kernel start-time tick."""
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    if len(fields) <= 19:
+        raise ValueError(f"/proc/{pid}/stat is truncated")
+    return {
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "start_time_ticks": int(fields[19]),
+    }
+
+def _forward_runner_signal(process, identity: dict | None, signum: int) -> str:
+    if process.poll() is not None:
+        return "runner_already_exited"
+    if identity is None:
+        return "runner_identity_unavailable"
+    try:
+        if process_start_identity(process.pid) != identity:
+            return "runner_identity_mismatch"
+    except (OSError, ValueError):
+        return "runner_identity_unavailable"
+    try:
+        os.kill(process.pid, signum)
+    except ProcessLookupError:
+        return "runner_already_exited"
+    except OSError:
+        return "forward_failed"
+    return "forwarded"
+
+def run_owned_qualification_runner(command: list[str], environment: dict, stdout, stderr,
+                                   receipt_path: Path, descriptor_path: Path,
+                                   descriptor: dict, cohort: str) -> tuple[subprocess.CompletedProcess, dict]:
+    """Own the isolated runner until its retained result and cleanup are observable."""
+    owner_pid = os.getpid()
+    receipt = {
+        "schema": 1,
+        "status": "starting",
+        "descriptor": str(descriptor_path.absolute()),
+        "descriptor_sha256": sha256(descriptor_path),
+        "source_oid": descriptor["source_oid"],
+        "harness_revision": descriptor["harness_revision"],
+        "cohort": cohort,
+        "output_directory": str(receipt_path.parent),
+        "owner": {"pid": owner_pid, "start_identity": process_start_identity(owner_pid)},
+        "runner": None,
+        "interruptions": [],
+        "runner_reaped": False,
+    }
+    os.chmod(receipt_path.parent, 0o700)
+    write_private_json(receipt_path, receipt)
+    process = None
+    runner_identity = None
+    interrupted = receipt["interruptions"]
+
+    def forward(signum, _frame):
+        event = {"signal": signum, "name": signal.Signals(signum).name,
+                 "forwarding_status": "pending"}
+        interrupted.append(event)
+        if process is not None:
+            event["forwarding_status"] = _forward_runner_signal(process, runner_identity, signum)
+
+    prior_handlers = {signum: signal.signal(signum, forward)
+                      for signum in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        process = subprocess.Popen(command, env=environment, stdout=stdout, stderr=stderr,
+                                   start_new_session=True)
+        try:
+            runner_identity = process_start_identity(process.pid)
+        except (OSError, ValueError):
+            runner_identity = None
+        receipt["runner"] = {"pid": process.pid, "start_identity": runner_identity}
+        if runner_identity is None:
+            # Keep ownership with this exact Popen child even if procfs could
+            # not provide the stronger externally verifiable identity.
+            process.send_signal(signal.SIGTERM)
+            receipt["status"] = "runner_identity_unavailable"
+            receipt["error"] = "could not bind runner PID to boot and start identity"
+            try:
+                process.wait(timeout=5)
+                receipt["runner_reaped"] = True
+            except subprocess.TimeoutExpired:
+                receipt["runner_reap_status"] = "unconfirmed"
+            write_private_json(receipt_path, receipt)
+            raise RuntimeError(receipt["error"])
+        receipt["status"] = "running"
+        write_private_json(receipt_path, receipt)
+        for event in interrupted:
+            if event["forwarding_status"] == "pending":
+                event["forwarding_status"] = _forward_runner_signal(process, runner_identity,
+                                                                      event["signal"])
+        if interrupted:
+            receipt["status"] = "cancellation_requested"
+            write_private_json(receipt_path, receipt)
+        while True:
+            try:
+                returncode = process.wait(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if interrupted:
+                    receipt["status"] = "cancellation_requested"
+                    write_private_json(receipt_path, receipt)
+        receipt["runner_reaped"] = True
+        receipt["runner_exit_code"] = returncode
+        receipt["status"] = "interrupted" if interrupted else "finished"
+        receipt["interruption_signal"] = interrupted[0]["signal"] if interrupted else None
+        write_private_json(receipt_path, receipt)
+        return subprocess.CompletedProcess(command, returncode), receipt
+    except BaseException as error:
+        receipt["status"] = "runner_spawn_or_wait_failed"
+        receipt["error"] = f"{type(error).__name__}: {error}"
+        if process is not None:
+            receipt["runner"] = {"pid": process.pid, "start_identity": runner_identity}
+            if process.poll() is None:
+                status = _forward_runner_signal(process, runner_identity, signal.SIGTERM)
+                receipt["failure_cleanup_signal_status"] = status
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    receipt["runner_reap_status"] = "unconfirmed"
+            receipt["runner_reaped"] = process.poll() is not None
+            if receipt["runner_reaped"]:
+                receipt["runner_exit_code"] = process.returncode
+            elif receipt.get("runner_reap_status") is None:
+                receipt["runner_reap_status"] = "unconfirmed"
+        else:
+            receipt["runner_reap_status"] = "not_started"
+        receipt["interruptions"] = interrupted
+        write_private_json(receipt_path, receipt)
+        raise
+    finally:
+        for signum, handler in prior_handlers.items():
+            signal.signal(signum, handler)
 
 def inventory(root: Path, excluded=()) -> dict:
     """Bind copied bytes and declared immutable closure references, including modes."""
@@ -1496,7 +1653,10 @@ def run_cohort(args) -> int:
         command.append("--ignored")
     started = time.monotonic_ns()
     with (output / "runner.stdout").open("wb") as stdout, (output / "runner.stderr").open("wb") as stderr:
-        result = subprocess.run(command, env=execution_environment(descriptor), stdout=stdout, stderr=stderr, check=False)
+        result, owner_receipt = run_owned_qualification_runner(
+            command, execution_environment(descriptor), stdout, stderr,
+            output / "run-owner.json", args.descriptor.absolute(), descriptor, args.cohort,
+        )
     record_paths = sorted((output / "tests").glob("*.json"))
     records = [json.loads(path.read_text()) for path in record_paths]
     exact = {record["test"] for record in records} == set(cohort["tests"])
@@ -1537,7 +1697,58 @@ def run_cohort(args) -> int:
               "behavioral_completed": behavioral_completed,
               "compiler_allowance_selection_confirmed": compiler_allowance_selection_confirmed,
               "measurement": measurement, "completed": completed, "tests": records}
+    case_cleanup = [{
+        "test": record.get("test"),
+        "status": (record.get("execution") or {}).get("status"),
+        "passed": record.get("passed"),
+        "exit_code": (record.get("execution") or {}).get("exit_code"),
+        "executed_test_count": (record.get("execution") or {}).get("executed_test_count"),
+        "process_cleanup_status": (record.get("execution") or {}).get("process_cleanup_status"),
+        "hosted_cleanup_status": (record.get("execution") or {}).get("hosted_cleanup_status"),
+        "compiler_cleanup_status": (record.get("execution") or {}).get("compiler_cleanup_status"),
+        "interrupt_signal": (record.get("execution") or {}).get("interrupt_signal"),
+    } for record in records]
+    cleanup_values = [row["process_cleanup_status"] for row in case_cleanup]
+    if (not owner_receipt["runner_reaped"] or not cleanup_values
+            or any(value in (None, "unknown") for value in cleanup_values)):
+        case_process_cleanup_status = "unknown"
+    elif "unconfirmed" in cleanup_values:
+        case_process_cleanup_status = "unconfirmed"
+    elif all(value == "confirmed" for value in cleanup_values):
+        case_process_cleanup_status = "confirmed"
+    elif all(value == "not_started" for value in cleanup_values):
+        case_process_cleanup_status = "not_started"
+    elif set(cleanup_values) <= {"confirmed", "not_started"}:
+        case_process_cleanup_status = "partial"
+    else:
+        case_process_cleanup_status = "unknown"
+    interruption_receipts = []
+    for event in owner_receipt.get("interruptions", []):
+        signal_number = event["signal"]
+        runner_confirmed = (event["forwarding_status"] == "forwarded"
+                            and owner_receipt.get("runner_exit_code") == 128 + signal_number
+                            and owner_receipt.get("runner_reaped") is True)
+        interruption_receipts.append({
+            "status": "interrupted" if runner_confirmed else "unconfirmed",
+            "signal": signal_number,
+            "forwarding_status": event["forwarding_status"],
+            "runner_exit_code": owner_receipt.get("runner_exit_code"),
+            "runner_reaped": owner_receipt.get("runner_reaped"),
+            "case_process_cleanup_status": case_process_cleanup_status,
+            "case_cleanup": case_cleanup,
+        })
+    report["run_owner_receipt"] = str(output / "run-owner.json")
+    report["runner_process"] = owner_receipt["runner"]
+    report["owner_interruptions"] = owner_receipt.get("interruptions", [])
+    report["case_interruption_records"] = [row for row in case_cleanup if row["status"] == "interrupted"]
+    owner_receipt.update(
+        interruption_receipts=interruption_receipts,
+        case_cleanup=case_cleanup,
+        case_process_cleanup_status=case_process_cleanup_status,
+        report_path=str(output / "report.json"),
+    )
     write_json(output / "report.json", report)
+    write_private_json(output / "run-owner.json", owner_receipt)
     return code
 
 

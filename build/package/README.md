@@ -310,6 +310,26 @@ python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
 For the parallel command, `ADMITTED_USER_SLICE` names an existing user slice
 whose resource bounds have been checked for the chosen concurrency.
 
+To cancel a running qualification, signal its qualification owner using the
+private `run-owner.json` receipt in that output directory. The owner forwards
+the signal to the recorded isolated runner, which stops scheduling and cleans
+up its active exact case. Do not signal the runner or case process directly;
+that bypasses the queue owner's cancellation path.
+
+```sh
+OWNER_PID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["owner"]["pid"])' \
+  "$M2_EVIDENCE/run-owner.json")"
+kill -TERM "$OWNER_PID"
+```
+
+Wait for the qualification command or its process supervisor to exit, then
+inspect `run-owner.json` and `report.json`.
+The private receipt binds the descriptor hash, source revision and owner/runner
+PID start identities. It records forwarded signals, runner exit/reaping, case
+cleanup observations and any retained interruption confirmation. Treat missing
+or unconfirmed cleanup evidence as unknown; an owner process exit alone does
+not establish descendant cleanup.
+
 Every new prepared release also requires the `prepared-child` cohort from its
 own frozen descriptor. The one-child control
 `actor_host::prepared_runtime_acceptance::production_prepared_toolset_one_child_executes_original_native_probe`

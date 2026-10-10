@@ -5,10 +5,12 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import tempfile
 import subprocess
 import shutil
 import sys
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -149,6 +151,28 @@ class RegisteredGcRootTests(unittest.TestCase):
 
 
 class NativeQualificationTests(unittest.TestCase):
+    def setUp(self):
+        # Legacy run_cohort fixtures mock subprocess.run to synthesize runner
+        # records. Keep that seam behind the new owner boundary by adapting
+        # their mocked invocation into a completed owner result.
+        self._owned_runner_patch = patch.object(
+            qualification, 'run_owned_qualification_runner',
+            side_effect=self.run_mocked_owned_runner)
+        self._owned_runner_patch.start()
+        self.addCleanup(self._owned_runner_patch.stop)
+
+    @staticmethod
+    def run_mocked_owned_runner(command, environment, stdout, stderr, receipt_path,
+                                descriptor_path, descriptor, cohort):
+        result = qualification.subprocess.run(
+            command, env=environment, stdout=stdout, stderr=stderr, check=False)
+        return result, {
+            'runner': {'pid': -1, 'start_identity': None},
+            'runner_reaped': True,
+            'runner_exit_code': result.returncode,
+            'interruptions': [],
+        }
+
     def fixture_source(self, root, relative='workspace/fixtures/sample.hs', track_fixture=True):
         source = root / 'source'
         source.mkdir()
@@ -1066,14 +1090,18 @@ class NativeQualificationTests(unittest.TestCase):
                     if marker is not None:
                         execution['startup_diagnostic_seconds'] = marker
                     receipt = {'test': 'suite::works', 'passed': True, 'execution': execution}
-                    def run(command, **kwargs):
+                    def run_owned(command, environment, stdout, stderr, receipt_path,
+                                  descriptor_path, descriptor_value, cohort):
                         tests = output / 'tests'
                         tests.mkdir()
                         (tests / 'case.json').write_text(json.dumps(receipt))
-                        return subprocess.CompletedProcess(command, 0)
+                        owner = {'runner': {'pid': 123, 'start_identity': {'boot_id': 'fixture',
+                                                                          'start_time_ticks': 1}},
+                                 'runner_reaped': True, 'interruptions': []}
+                        return subprocess.CompletedProcess(command, 0), owner
                     with patch.dict(os.environ, {}, clear=True), \
                          patch.object(qualification, 'verify', return_value=descriptor), \
-                         patch.object(qualification.subprocess, 'run', side_effect=run):
+                         patch.object(qualification, 'run_owned_qualification_runner', side_effect=run_owned):
                         code = qualification.run_cohort(args)
                     report = json.loads((output / 'report.json').read_text())
                     self.assertEqual(code, expected)
@@ -1081,6 +1109,158 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertEqual(report['runner_exit_code'], 0)
                     self.assertEqual(report['executed_test_count'], 1)
                     self.assertTrue(report['tests'][0]['passed'])
+
+    def test_qualification_signal_preserves_completed_case_and_cancels_active_before_queued_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / 'tools/bin'
+            tools.mkdir(parents=True)
+            (tools / 'python3').symlink_to(sys.executable)
+            starts = root / 'started.txt'
+            child_pid = root / 'child.pid'
+            fake_libtest = root / 'fake-libtest'
+            fake_libtest.write_text(
+                '#!' + sys.executable + '\n'
+                'import subprocess, sys, time\n'
+                "names = ['suite::complete', 'suite::active', 'suite::queued']\n"
+                "if '--list' in sys.argv:\n"
+                "    print(''.join(name + ': test\\n' for name in ([] if '--ignored' in sys.argv else names)))\n"
+                "    raise SystemExit(0)\n"
+                "name = sys.argv[sys.argv.index('--exact') + 1]\n"
+                f"open({str(starts)!r}, 'a').write(name + '\\n')\n"
+                "if name == 'suite::complete':\n"
+                "    print('test suite::complete ... ok')\n"
+                "    print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s')\n"
+                "    raise SystemExit(0)\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                f"open({str(child_pid)!r}, 'w').write(str(child.pid))\n"
+                'time.sleep(60)\n'
+            )
+            fake_libtest.chmod(0o755)
+            descriptor = {
+                'external_inputs': {'runtime_tools': {'path': str(root / 'tools')}},
+                'programs': {'runner': str(Path(__file__).resolve().parents[2] / 'build/rust/isolated-libtest.py'),
+                             'libtest': str(fake_libtest)},
+                'cohorts': {'interrupt': {'tests': ['suite::complete', 'suite::active', 'suite::queued'],
+                                          'expected_count': 3, 'timeout': 60, 'ignored': False,
+                                          'compiler_mode': 'direct'}},
+                'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                'profile': 'fixture', 'stdlib_mode': 'source-backed', 'startup_mode': 'prepared',
+                'environment': {},
+            }
+            descriptor_path = root / 'descriptor.json'
+            descriptor_path.write_text(json.dumps(descriptor))
+            output = root / 'output'
+            helper = root / 'qualification-owner.py'
+            helper.write_text(
+                'import importlib.util, os, sys\n'
+                'from pathlib import Path\n'
+                'from types import SimpleNamespace\n'
+                f'script = Path({str(SCRIPT)!r})\n'
+                'spec = importlib.util.spec_from_file_location("qualification_under_test", script)\n'
+                'module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)\n'
+                'descriptor = __import__("json").loads(Path(sys.argv[1]).read_text())\n'
+                'module.verify = lambda _: descriptor\n'
+                'module.execution_environment = lambda _: dict(os.environ)\n'
+                'args = SimpleNamespace(jobs=1, service_slice=None, delegated_service=False, '
+                'descriptor=Path(sys.argv[1]), cohort="interrupt", output=Path(sys.argv[2]), '
+                'foreground_jobs=None, preparation_jobs=None, compiler_mode=None, trace_profile=None)\n'
+                'raise SystemExit(module.run_cohort(args))\n'
+            )
+            owner = subprocess.Popen([sys.executable, str(helper), str(descriptor_path), str(output)],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            owner_identity = qualification.process_start_identity(owner.pid)
+            receipt_path = output / 'run-owner.json'
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if child_pid.exists() and receipt_path.exists():
+                    receipt = json.loads(receipt_path.read_text())
+                    if receipt.get('runner') and receipt.get('status') == 'running':
+                        break
+                time.sleep(0.05)
+            else:
+                owner.kill()
+                stdout, stderr = owner.communicate(timeout=5)
+                detail = []
+                for path in root.rglob('*'):
+                    if path.is_file() and not path.is_symlink() and path.stat().st_size < 20000:
+                        detail.append((str(path.relative_to(root)), path.read_text(errors='replace')))
+                self.fail(f'qualification runner did not reach active child: {stdout!r} {stderr!r}; '
+                          f'artifacts={detail!r}')
+            initial_receipt = json.loads(receipt_path.read_text())
+            self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(initial_receipt['owner']['pid'], owner.pid)
+            self.assertEqual(initial_receipt['owner']['start_identity'], owner_identity)
+            self.assertEqual(initial_receipt['descriptor_sha256'], qualification.sha256(descriptor_path))
+            self.assertEqual(initial_receipt['source_oid'], descriptor['source_oid'])
+            child = int(child_pid.read_text())
+            child_identity = qualification.process_start_identity(child)
+            os.kill(owner.pid, signal.SIGTERM)
+            time.sleep(0.05)
+            if owner.poll() is None:
+                os.kill(owner.pid, signal.SIGTERM)
+            returncode = owner.wait(timeout=15)
+            stdout, stderr = owner.communicate()
+            self.assertEqual(returncode, 128 + signal.SIGTERM, (stdout, stderr))
+            self.assertEqual(starts.read_text().splitlines(), ['suite::complete', 'suite::active'])
+            deadline = time.monotonic() + 5
+            child_gone = False
+            while time.monotonic() < deadline:
+                try:
+                    stat_fields = Path(f'/proc/{child}/stat').read_text().rsplit(')', 1)[1].split()
+                    child_gone = stat_fields[0] == 'Z' or qualification.process_start_identity(child) != child_identity
+                except (FileNotFoundError, ProcessLookupError, ValueError):
+                    child_gone = True
+                if child_gone:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(child_gone, 'the exact active case child remained alive')
+            receipt = json.loads(receipt_path.read_text())
+            self.assertEqual(receipt['status'], 'interrupted')
+            self.assertTrue(receipt['runner_reaped'])
+            self.assertEqual(receipt['runner_exit_code'], 128 + signal.SIGTERM)
+            self.assertTrue(receipt['interruptions'])
+            self.assertEqual(receipt['interruptions'][0]['forwarding_status'], 'forwarded')
+            self.assertTrue(receipt['interruption_receipts'], receipt)
+            interruption = receipt['interruption_receipts'][0]
+            self.assertEqual(interruption['status'], 'interrupted', receipt)
+            self.assertEqual(interruption['forwarding_status'], 'forwarded')
+            cases = {case['test']: case for case in interruption['case_cleanup']}
+            self.assertEqual(set(cases), {'suite::complete', 'suite::active'})
+            self.assertTrue(cases['suite::complete']['passed'])
+            self.assertEqual(cases['suite::complete']['exit_code'], 0)
+            self.assertEqual(cases['suite::complete']['executed_test_count'], 1)
+            self.assertFalse(cases['suite::active']['passed'])
+            self.assertEqual(cases['suite::active']['exit_code'], -signal.SIGKILL)
+            self.assertIsNone(cases['suite::active']['executed_test_count'])
+            self.assertEqual(cases['suite::active']['process_cleanup_status'], 'confirmed')
+            self.assertEqual(receipt['case_process_cleanup_status'], 'confirmed')
+            self.assertEqual({case['test'] for case in receipt['case_cleanup']},
+                             {'suite::complete', 'suite::active'})
+
+    def test_runner_spawn_failure_retains_private_owner_receipt(self):
+        self._owned_runner_patch.stop()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor_path = root / 'descriptor.json'
+            descriptor_path.write_text('{}')
+            output = root / 'output'
+            output.mkdir(mode=0o700)
+            receipt_path = output / 'run-owner.json'
+            descriptor = {'source_oid': 'a' * 40, 'harness_revision': 'b' * 40}
+            with patch.object(qualification.subprocess, 'Popen', side_effect=OSError('fixture spawn failure')):
+                with self.assertRaisesRegex(OSError, 'fixture spawn failure'):
+                    qualification.run_owned_qualification_runner(
+                        ['runner'], {}, io.BytesIO(), io.BytesIO(), receipt_path,
+                        descriptor_path, descriptor, 'fixture')
+            receipt = json.loads(receipt_path.read_text())
+            self.assertEqual(receipt['status'], 'runner_spawn_or_wait_failed')
+            self.assertIn('fixture spawn failure', receipt['error'])
+            self.assertIsNone(receipt['runner'])
+            self.assertFalse(receipt['runner_reaped'])
+            self.assertEqual(receipt['runner_reap_status'], 'not_started')
+            self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
 
     def test_runtime_tool_owner_checks_declared_executable_files(self):
         for name in ('nix-store', 'rg', 'find', 'sed'):
