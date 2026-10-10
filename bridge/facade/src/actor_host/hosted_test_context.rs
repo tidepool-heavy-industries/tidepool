@@ -2659,6 +2659,169 @@ mod tests {
         );
     }
 
+    async fn acknowledge_observed_host_shutdown(host: &mut HostedTestRuntime) -> HostTermination {
+        let termination = HostedTestRuntime::terminate(
+            host.stop.clone(),
+            host.outcome.clone(),
+            host.thread.take(),
+        )
+        .await;
+        assert!(termination.joined.is_ok(), "{:?}", termination.joined);
+        host.context.observer.executor_joined();
+        let cleanup = host.context.observer.cleanup_outcome();
+        assert_eq!(cleanup, CleanupOutcome::Confirmed);
+        if let Some(diagnostics) = &host.diagnostics {
+            diagnostics
+                .report(&ScenarioOutcome::Passed, &cleanup)
+                .unwrap();
+            tidepool_atomic_write::write_durable(
+                &diagnostics.root.join("native-fence-host-outcome.json"),
+                &serde_json::to_vec_pretty(&json!({
+                    "host_result": termination.result,
+                    "executor_joined": true,
+                    "cleanup": cleanup,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        termination
+    }
+
+    #[tokio::test]
+    async fn native_statement_refusal_keeps_real_host_and_provider_admission_usable() {
+        use super::super::test_campaign::{
+            hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+        };
+        use tidepool_runtime::session::recovery_store::{RecoveryDomainId, StoreDisposition};
+
+        let files = tempfile::tempdir().unwrap();
+        let settings = hosted_test_settings(&files, 1);
+        let (provider, mut requests) = hosted_script_provider();
+        let mut host = HostedTestRuntime::start(&settings, &provider)
+            .await
+            .unwrap();
+        host.input("Hold one real provider request across a native statement refusal.")
+            .await
+            .unwrap();
+        let root = harness::model::AgentPath("/root".into());
+        let mut pending = std::collections::VecDeque::new();
+        let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        let store = Arc::clone(&host.context.recovery_store);
+        let before = store.read_domain(RecoveryDomainId::Root).unwrap().unwrap();
+        let sql = rusqlite::Connection::open(store.path()).unwrap();
+        sql.execute_batch(
+            "CREATE TRIGGER hosted_native_refusal BEFORE UPDATE ON recovery_domains
+             BEGIN SELECT RAISE(ABORT, 'controlled native statement refusal'); END;",
+        )
+        .unwrap();
+        let next = tidepool_repr::Generation(before.allocation_ceiling.0.checked_add(1).unwrap());
+        assert!(matches!(
+            store.reserve_ceiling(RecoveryDomainId::Root, before.revision, next),
+            StoreDisposition::Refused(_)
+        ));
+        sql.execute_batch("DROP TRIGGER hosted_native_refusal;")
+            .unwrap();
+        assert!(!store.is_recovery_required());
+        store.ensure_ready().unwrap();
+        assert_eq!(
+            store.read_domain(RecoveryDomainId::Root).unwrap(),
+            Some(before)
+        );
+        assert!(host.context.actor.terminal().get().is_none());
+        first.finish();
+        host.input("Admit another actual request after the known native refusal.")
+            .await
+            .unwrap();
+        let second = host
+            .while_host_running(next_hosted_script_round(&mut requests, &mut pending, &root))
+            .await
+            .unwrap();
+        second.finish();
+        assert_eq!(
+            acknowledge_observed_host_shutdown(&mut host).await.result,
+            Some(Ok(()))
+        );
+    }
+
+    #[tokio::test]
+    async fn native_shared_store_fence_stops_real_host_without_another_provider_call() {
+        use super::super::test_campaign::{
+            hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+        };
+        use tidepool_runtime::session::recovery_store::{
+            RecoveryDomainId, StoreDisposition, StoreErrorKind,
+        };
+
+        let files = tempfile::tempdir().unwrap();
+        let settings = hosted_test_settings(&files, 1);
+        let (provider, mut requests) = hosted_script_provider();
+        let mut host = HostedTestRuntime::start(&settings, &provider)
+            .await
+            .unwrap();
+        host.input("Hold a real provider request while its native run owner becomes fenced.")
+            .await
+            .unwrap();
+        let root = harness::model::AgentPath("/root".into());
+        let mut pending = std::collections::VecDeque::new();
+        let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        let store = Arc::clone(&host.context.recovery_store);
+        let before = store.read_domain(RecoveryDomainId::Root).unwrap().unwrap();
+        let sql = rusqlite::Connection::open(store.path()).unwrap();
+        // SQLite rolls the transaction back before the owning store attempts
+        // its explicit rollback. That failure must fence this exact run owner.
+        sql.execute_batch(
+            "CREATE TRIGGER hosted_native_rollback_failure BEFORE UPDATE ON recovery_domains
+             BEGIN SELECT RAISE(ROLLBACK, 'controlled native rollback failure'); END;",
+        )
+        .unwrap();
+        let next = tidepool_repr::Generation(before.allocation_ceiling.0.checked_add(1).unwrap());
+        let StoreDisposition::RecoveryRequired(failure) =
+            store.reserve_ceiling(RecoveryDomainId::Root, before.revision, next)
+        else {
+            panic!("failed owner rollback must require authenticated native recovery");
+        };
+        sql.execute_batch("DROP TRIGGER hosted_native_rollback_failure;")
+            .unwrap();
+        assert_eq!(failure.kind, StoreErrorKind::RecoveryRequired);
+        assert!(store.is_recovery_required());
+        assert_eq!(store.ensure_ready().unwrap_err(), failure);
+        // Observe production's failure before requesting test shutdown. The
+        // host result and cleanup acknowledgement are independent outcomes.
+        let failed = tokio::time::timeout(SHUTDOWN_BUDGET, host.outcome.clone())
+            .await
+            .expect("the actual native fence terminates the production run")
+            .expect_err("a native fence cannot become a healthy host exit");
+        assert!(
+            failed.contains("requires authenticated recovery"),
+            "{failed}"
+        );
+        let termination = acknowledge_observed_host_shutdown(&mut host).await;
+        assert_eq!(termination.result, Some(Err(failed)));
+        assert_eq!(
+            host.context.actor.terminal().get().unwrap().kind,
+            exomonad_actor::ActorExitKind::Cancelled,
+            "recovery shutdown must not turn into an ordinary unexpected actor failure"
+        );
+        assert!(host
+            .context
+            .actor
+            .terminal()
+            .cleanup()
+            .unwrap()
+            .is_confirmed());
+        assert!(pending.is_empty());
+        assert!(
+            requests.try_recv().is_err(),
+            "no second provider call after the native fence"
+        );
+        assert!(
+            store.is_recovery_required(),
+            "removing the trigger does not heal a held owner"
+        );
+        drop(first);
+    }
+
     #[tokio::test]
     async fn scenario_panic_waits_for_cleanup_and_preserves_original_payload() {
         let directory = tempfile::tempdir().unwrap();
