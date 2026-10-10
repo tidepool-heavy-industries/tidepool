@@ -14,9 +14,9 @@ use std::sync::Arc;
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-// V7 preserves optional authored labels independently of canonical paths.
-// Earlier runs remain evidence and require an explicit migration to resume.
-const VERSION: u32 = 7;
+// V8 pins run-database and machine-domain revisions instead of file digests.
+// Earlier runs require their matching binaries.
+const VERSION: u32 = 8;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -248,17 +248,16 @@ impl DurableActorAdmission {
 /// additive diagnostic field under their owned record's unknown-field policy.
 pub type DurableActorTerminal = crate::ActorTerminal;
 
-/// Pins one exact observed public manifest revision. Runtime additionally
-/// validates the graph checksum, artifact closure and sealed bootstrap inventory.
+/// Pins the exact root domain and public owner observed at startup. Sibling
+/// machine publications do not alter this domain's identity or revision.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootStartupManifestPin {
     pub path: PathBuf,
-    pub checksum: String,
-    pub high_water: u64,
-    pub content_blake3: String,
-    pub public_content_blake3: String,
-    pub public_owner: tidepool_runtime::session::RecoveryPublicOwner,
+    pub database_id: [u8; 16],
+    pub domain_id: tidepool_runtime::session::RecoveryDomainId,
+    pub domain: tidepool_runtime::session::RecoveryDomainState,
+    pub public_owner: tidepool_runtime::session::RecoveryPublicOwnerState,
 }
 
 impl RootStartupManifestPin {
@@ -266,58 +265,44 @@ impl RootStartupManifestPin {
         path: &Path,
         owner: &tidepool_runtime::session::RecoveryPublicOwner,
     ) -> std::io::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
-        let mut public_content = value.clone();
-        let owner_value = serde_json::to_value(owner).map_err(std::io::Error::other)?;
-        let surfaces = public_content
-            .get_mut("public_surfaces")
-            .and_then(serde_json::Value::as_array_mut)
-            .ok_or_else(|| std::io::Error::other("manifest public surfaces are absent"))?;
-        let mut matched = 0;
-        for surface in surfaces {
-            if surface.get("owner") == Some(&owner_value) {
-                matched += 1;
-                let surface = surface
-                    .as_object_mut()
-                    .ok_or_else(|| std::io::Error::other("invalid public surface"))?;
-                surface.remove("owner");
-                surface.remove("epoch");
-            }
-        }
-        if matched != 1 {
-            return Err(std::io::Error::other(
-                "manifest requires exactly one pinned public owner",
-            ));
-        }
-        public_content
-            .as_object_mut()
-            .ok_or_else(|| std::io::Error::other("invalid manifest"))?
-            .remove("checksum");
-        let public_content = serde_json::to_vec(&public_content).map_err(std::io::Error::other)?;
+        let path = path.canonicalize()?;
+        let snapshot = tidepool_runtime::session::RunRecoveryStore::read_snapshot_at(
+            &path,
+            tidepool_runtime::session::RecoveryDomainId::Root,
+            Some(owner),
+        )
+        .map_err(std::io::Error::other)?
+        .ok_or_else(|| std::io::Error::other("root recovery domain is absent"))?;
+        let public_owner = snapshot
+            .public_owner
+            .ok_or_else(|| std::io::Error::other("root recovery public owner is absent"))?;
         Ok(Self {
-            path: path.canonicalize()?,
-            checksum: value
-                .get("checksum")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| std::io::Error::other("manifest checksum is absent"))?
-                .to_owned(),
-            high_water: value
-                .get("high_water")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| std::io::Error::other("manifest high water is absent"))?,
-            content_blake3: blake3::hash(&bytes).to_hex().to_string(),
-            public_content_blake3: blake3::hash(&public_content).to_hex().to_string(),
-            public_owner: owner.clone(),
+            path,
+            database_id: snapshot.database_id,
+            domain_id: snapshot.domain_id,
+            domain: snapshot.domain,
+            public_owner,
         })
     }
 
+    fn same_public_content(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.database_id == other.database_id
+            && self.domain_id == other.domain_id
+            && self.domain.lineage == other.domain.lineage
+            && self.domain.content_revision == other.domain.content_revision
+            && self.domain.allocation_ceiling == other.domain.allocation_ceiling
+            && self.domain.snapshot_root == other.domain.snapshot_root
+            && self.public_owner.surface_root == other.public_owner.surface_root
+    }
+
     fn validate(&self, run_root: &Path) -> std::io::Result<bool> {
-        if self.path.canonicalize()?.parent() != Some(run_root.canonicalize()?.as_path()) {
+        if self.domain_id != tidepool_runtime::session::RecoveryDomainId::Root
+            || self.path.canonicalize()?.parent() != Some(run_root.canonicalize()?.as_path())
+        {
             return Ok(false);
         }
-        Ok(&Self::capture_for_owner(&self.path, &self.public_owner)? == self)
+        Ok(&Self::capture_for_owner(&self.path, &self.public_owner.owner)? == self)
     }
 }
 
@@ -952,9 +937,11 @@ fn validate_startup(
                 .as_ref()
                 .and_then(|intent| intent.manifest.as_ref())
             {
-                if startup.manifest.as_ref().is_none_or(|manifest| {
-                    manifest.public_content_blake3 != original.public_content_blake3
-                }) {
+                if startup
+                    .manifest
+                    .as_ref()
+                    .is_none_or(|manifest| !manifest.same_public_content(original))
+                {
                     return Err(std::io::Error::other(
                         "unactivated startup rollforward changed original public content",
                     ));
@@ -976,7 +963,7 @@ fn validate_startup(
                 != startup
                     .manifest
                     .as_ref()
-                    .map(|manifest| &manifest.public_owner)
+                    .map(|manifest| &manifest.public_owner.owner)
             {
                 return Err(std::io::Error::other(
                     "startup manifest pin owner differs from admitted predecessor",
@@ -1271,7 +1258,7 @@ fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>
     let value: serde_json::Value = serde_json::from_str(line)?;
     let found = tidepool_repr::version_ladder::found_version(&value);
     if found != VERSION {
-        return Err("unsupported actor journal version; explicit migration required".into());
+        return Err("unsupported actor journal version; use its matching binary".into());
     }
     Ok(serde_json::from_value(value)?)
 }
@@ -1410,7 +1397,7 @@ mod tests {
     fn old_journal_versions_are_unsupported_and_remain_untouched() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        for version in [1, 2, 3, 4, 5, 6] {
+        for version in [1, 2, 3, 4, 5, 6, 7] {
             let path = directory.path().join(format!("v{version}.jsonl"));
             let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
             std::fs::write(&path, &bytes).unwrap();
@@ -1424,7 +1411,10 @@ mod tests {
         let legacy_path = directory.path().join("legacy-role.jsonl");
         std::fs::write(&legacy_path, format!("{legacy}\n")).unwrap();
         assert!(ActorRecoveryJournal::open_existing(&anchor, "legacy-role.jsonl").is_err());
-        assert_eq!(std::fs::read_to_string(&legacy_path).unwrap(), format!("{legacy}\n"));
+        assert_eq!(
+            std::fs::read_to_string(&legacy_path).unwrap(),
+            format!("{legacy}\n")
+        );
     }
 
     #[test]
@@ -1666,15 +1656,94 @@ mod tests {
         assert_eq!(journal.records().len(), 0);
     }
 
-    fn write_manifest(
+    struct LockedRun {
+        root: PathBuf,
+        _lock: std::fs::File,
+    }
+
+    impl tidepool_runtime::session::RecoveryRunAuthority for LockedRun {
+        fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+            Ok(root.canonicalize()? == self.root)
+        }
+    }
+
+    fn recovery_fixture(
         path: &Path,
         owner: &tidepool_runtime::session::RecoveryPublicOwner,
-        checksum: &str,
-        high_water: u64,
+        ceiling: u64,
+    ) -> (
+        Arc<tidepool_runtime::session::RunRecoveryStore>,
+        Arc<LockedRun>,
     ) {
-        let value = serde_json::json!({ "checksum": checksum, "high_water": high_water,
-            "public_surfaces": [{ "owner": owner, "epoch": 1, "declaration_root": null, "bindings": [], "source_instances": [] }] });
-        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        use tidepool_runtime::session::{
+            ModuleEnv, PersistentSession, RecoveryDomainId, RunRecoveryStore, SessionLib,
+        };
+        let root = path.parent().unwrap().canonicalize().unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("recovery-owner.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let authority = Arc::new(LockedRun {
+            root: root.clone(),
+            _lock: lock,
+        });
+        let store = Arc::new(RunRecoveryStore::create(path).unwrap());
+        let artifact_root = root.join("haskell-session");
+        let mut library = SessionLib::open(
+            SessionId(1),
+            &artifact_root,
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            library.attach_owned_recovery_domain(
+                Arc::clone(&store),
+                RecoveryDomainId::Root,
+                artifact_root,
+                authority.clone(),
+                settlement,
+            )
+        })
+        .unwrap();
+        library
+            .initialize_captured_declaration_high_water(tidepool_repr::Generation(ceiling))
+            .unwrap();
+        let mut session = PersistentSession::new(Some(library), 1024);
+        let public = session.mint_isolated_scope();
+        session
+            .initialize_durable_public_scope(owner.clone(), public)
+            .unwrap();
+        (store, authority)
+    }
+
+    struct JournalSuccessor {
+        run: Arc<LockedRun>,
+        receipt: Arc<DurableRootSuccessorAdmission>,
+    }
+
+    impl tidepool_runtime::session::RecoverySuccessorAuthority for JournalSuccessor {
+        fn validate_successor(
+            &self,
+            run_root: &Path,
+            predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
+            successor: &tidepool_runtime::session::RecoveryPublicOwner,
+            session: SessionId,
+            target: ScopeId,
+        ) -> std::io::Result<bool> {
+            use tidepool_runtime::session::RecoveryRunAuthority;
+            Ok(self.run.owns_run(run_root)?
+                && self.receipt.validate_successor(
+                    run_root,
+                    predecessor,
+                    successor,
+                    session,
+                    target,
+                )?)
+        }
     }
 
     fn startup_intent(
@@ -1707,8 +1776,8 @@ mod tests {
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let path = run.path().join("actors.jsonl");
         let actor = ActorRef::first(ActorId(33));
-        let root = descriptor("root")
-            .with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
+        let root =
+            descriptor("root").with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
         let intent = startup_intent(
             actor,
             &run.path().join("binding.json"),
@@ -1751,15 +1820,9 @@ mod tests {
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         let binding = run.path().join("binding.json");
-        let manifest = run.path().join("root-declarations.json");
-        std::fs::write(
-            &manifest,
-            br#"{"checksum":"exact-revision","high_water":7}"#,
-        )
-        .unwrap();
+        let manifest = run.path().join("recovery.sqlite");
         let path = tidepool_repr::ActorPath::parse("root/recovered").unwrap();
-        let root = descriptor("root")
-            .with_actor_path(path.clone());
+        let root = descriptor("root").with_actor_path(path.clone());
         let old = ActorRef::first(ActorId(33));
         // Explicit chain authority is independent of numeric identity adjacency.
         let next = ActorRef {
@@ -1779,7 +1842,7 @@ mod tests {
             .bind_application_conversation(old, initial.conversation.clone())
             .unwrap();
         let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(&path, 1).unwrap();
-        write_manifest(&manifest, &old_owner, "exact-revision", 7);
+        let (store, _authority) = recovery_fixture(&manifest, &old_owner, 7);
         let successor = startup_intent(
             next,
             &binding,
@@ -1838,7 +1901,19 @@ mod tests {
         assert!(journal
             .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
             .is_err());
-        write_manifest(&manifest, &old_owner, "changed", 7);
+        let revision = store
+            .read_domain(tidepool_runtime::session::RecoveryDomainId::Root)
+            .unwrap()
+            .unwrap()
+            .revision;
+        assert!(matches!(
+            store.reserve_ceiling(
+                tidepool_runtime::session::RecoveryDomainId::Root,
+                revision,
+                tidepool_repr::Generation(8),
+            ),
+            tidepool_runtime::session::StoreDisposition::Committed(_)
+        ));
         assert!(!proof
             .validate_successor(
                 run.path(),
@@ -1856,16 +1931,16 @@ mod tests {
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         let binding = run.path().join("binding.json");
-        let manifest = run.path().join("root-declarations.json");
+        let manifest = run.path().join("recovery.sqlite");
         let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root").unwrap(),
             1,
         )
         .unwrap();
-        write_manifest(&manifest, &old_owner, "revision", 0);
+        let (store, authority) = recovery_fixture(&manifest, &old_owner, 0);
         let pin = RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap();
-        let root = descriptor("root")
-            .with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
+        let root =
+            descriptor("root").with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
         let a = ActorRef::first(ActorId(1));
         let b = ActorRef {
             id: ActorId(5),
@@ -1910,18 +1985,16 @@ mod tests {
         assert!(journal
             .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
             .is_err());
-        let mut changed_manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
-        changed_manifest["public_surfaces"][0]["bindings"] =
-            serde_json::json!([{"name": "altered"}]);
-        std::fs::write(&manifest, serde_json::to_vec(&changed_manifest).unwrap()).unwrap();
         let mut changed_content = third.clone();
-        changed_content.manifest =
-            Some(RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap());
+        changed_content
+            .manifest
+            .as_mut()
+            .unwrap()
+            .domain
+            .content_revision = tidepool_runtime::session::StoreRevision(1);
         assert!(journal
             .admit_with_startup(c, &root, &[], Some(changed_content))
             .is_err());
-        write_manifest(&manifest, &old_owner, "revision", 0);
         journal
             .admit_with_startup(c, &root, &[], Some(third.clone()))
             .unwrap();
@@ -1963,7 +2036,47 @@ mod tests {
             12,
         )
         .unwrap();
-        write_manifest(&manifest, &c_owner, "new-owner-revision", 0);
+        use tidepool_runtime::session::{
+            ModuleEnv, PersistentSession, RecoveryDomainId, SessionLib,
+        };
+        let artifact_root = run.path().join("haskell-session");
+        let mut library = SessionLib::open(
+            SessionId(1),
+            &artifact_root,
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            library.attach_owned_recovery_domain(
+                Arc::clone(&store),
+                RecoveryDomainId::Root,
+                artifact_root,
+                authority.clone(),
+                settlement,
+            )
+        })
+        .unwrap();
+        let mut recovered = PersistentSession::new(Some(library), 1024);
+        let target = recovered.mint_isolated_scope();
+        assert_eq!(target, root.placement().lexical_scope);
+        recovered
+            .seal_recovery_initialization_scope(target)
+            .unwrap();
+        let placement = RootRecoveryPlacement::new(c, c_owner.clone(), root.placement());
+        let receipt = journal
+            .certify_root_successor(a, placement, Some("source"), &binding)
+            .unwrap();
+        recovered
+            .transfer_recovered_public_owner(
+                &old_owner,
+                c_owner.clone(),
+                target,
+                Arc::new(JournalSuccessor {
+                    run: authority,
+                    receipt,
+                }),
+            )
+            .unwrap();
         let c_pin = RootStartupManifestPin::capture_for_owner(&manifest, &c_owner).unwrap();
         assert!(journal
             .admit_with_startup(

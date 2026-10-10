@@ -28,14 +28,28 @@ pub trait RecoverySuccessorAuthority: Send + Sync {
     ) -> std::io::Result<bool>;
 }
 
-/// Issued only by the owning manifest reader, from the actual canonical file.
-/// Keeping this share keeps the configured run owner alive through hydration
-/// and publication staging; callers cannot supply a graph or lexical selector.
+/// The observed machine domain before attachment created any initial roots.
+/// An existing run database may contain only independent child domains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveredDomainPresence {
+    Absent,
+    Empty,
+    Published,
+}
+
+/// Retains the configured host lease and immutable demanded compiler receipts.
+/// The database path and the compiler artifact directory are separate facts.
 pub(super) struct OwnedRecoveryManifest {
     authority: Arc<dyn RecoveryRunAuthority>,
     root: PathBuf,
     path: PathBuf,
-    bytes_digest: Option<blake3::Hash>,
+    artifact_root: PathBuf,
+    contexts: parking_lot::Mutex<
+        BTreeMap<
+            tidepool_toolchain::exact_context::ContextRoot,
+            Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+        >,
+    >,
 }
 
 pub(super) fn same_manifest_owner(
@@ -50,58 +64,183 @@ pub(super) fn same_manifest_owner(
 }
 
 impl OwnedRecoveryManifest {
+    /// This check has no SQL work and is also used before consuming a held
+    /// generation lease. The retained host authority can revoke admission.
     pub(super) fn validate_owner(&self) -> Result<(), SessionError> {
-        let valid = self.authority.owns_run(&self.root).map_err(|error| {
-            SessionError::RecoveryManifest {
-                path: self.path.clone(),
-                detail: error.to_string(),
-            }
-        })?;
-        let escaped =
-            self.path.exists() && self.path.canonicalize().ok().as_ref() != Some(&self.path);
-        if !valid
-            || escaped
+        let invalid = |detail: String| SessionError::RecoveryManifest {
+            path: self.path.clone(),
+            detail,
+        };
+        if !self
+            .authority
+            .owns_run(&self.root)
+            .map_err(|error| invalid(error.to_string()))?
+            || self
+                .root
+                .canonicalize()
+                .map_err(|error| invalid(error.to_string()))?
+                != self.root
             || self
                 .path
-                .parent()
-                .and_then(|root| root.canonicalize().ok())
-                .as_ref()
-                != Some(&self.root)
+                .canonicalize()
+                .map_err(|error| invalid(error.to_string()))?
+                != self.path
+            || self.path.parent() != Some(self.root.as_path())
+            || self
+                .artifact_root
+                .canonicalize()
+                .map_err(|error| invalid(error.to_string()))?
+                != self.artifact_root
+            || !self.artifact_root.starts_with(&self.root)
         {
-            return Err(SessionError::RecoveryManifest {
-                path: self.path.clone(),
-                detail: "configured recovery owner no longer owns this canonical run".into(),
-            });
-        }
-        Ok(())
-    }
-
-    fn validate_read(&self) -> Result<(), SessionError> {
-        self.validate_owner()?;
-        let current = match std::fs::read(&self.path) {
-            Ok(bytes) => Some(blake3::hash(&bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(SessionError::RecoveryManifest {
-                    path: self.path.clone(),
-                    detail: error.to_string(),
-                })
-            }
-        };
-        if current != self.bytes_digest {
-            return Err(SessionError::RecoveryManifest {
-                path: self.path.clone(),
-                detail: "recovery manifest changed after its owned read".into(),
-            });
+            return Err(invalid(
+                "configured recovery owner no longer owns these canonical run paths".into(),
+            ));
         }
         Ok(())
     }
 }
 
+/// Authenticate the payload union once for this acquisition, then reissue each
+/// demanded context through the compiler inventory owner. Historical roots
+/// outside this set do not cause artifact reads or compiler reconstruction.
+fn hydrate_context_roots(
+    graph: &recovery::RecoveryGraph,
+    owner: &OwnedRecoveryManifest,
+    roots: &BTreeSet<tidepool_toolchain::exact_context::ContextRoot>,
+) -> Result<(), SessionError> {
+    owner.validate_owner()?;
+    let cached = owner.contexts.lock();
+    let demanded = roots
+        .iter()
+        .filter(|root| !cached.contains_key(*root))
+        .cloned()
+        .collect::<Vec<_>>();
+    drop(cached);
+    if demanded.is_empty() {
+        return Ok(());
+    }
+    let mut receipts = Vec::new();
+    let mut bindings = BTreeSet::new();
+    let mut edges = BTreeSet::new();
+    for root in demanded {
+        let receipt = graph
+            .context(&root)
+            .map_err(|error| recovery::graph_error(&owner.path, error))?;
+        let snapshot = receipt.snapshot();
+        let selection = snapshot
+            .graph_selection()
+            .map_err(|error| SessionError::RecoverySnapshot(Box::new(error)))?;
+        bindings.extend(selection.bindings.iter().copied());
+        edges.extend(
+            snapshot
+                .binding_dependencies()
+                .map_err(|error| SessionError::RecoverySnapshot(Box::new(error)))?,
+        );
+        receipts.push((receipt, selection));
+    }
+    let artifacts = bindings
+        .iter()
+        .map(|binding| binding.artifact)
+        .collect::<BTreeSet<_>>();
+    let mut products = Vec::new();
+    let mut interfaces = Vec::new();
+    let mut joins = Vec::new();
+    let mut values = Vec::new();
+    let mut descriptors = Vec::new();
+    for id in artifacts {
+        let artifact = graph
+            .artifact(id)
+            .map_err(|error| recovery::graph_error(&owner.path, error))?
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        descriptors.push(artifact.descriptor());
+        match artifact.as_ref() {
+            recovery::RecoveryArtifactClosure::Home(reference) => products.push(reference.clone()),
+            recovery::RecoveryArtifactClosure::ModuleInterface(reference) => {
+                interfaces.push(reference.clone())
+            }
+            recovery::RecoveryArtifactClosure::Join(reference) => joins.push(reference.clone()),
+            recovery::RecoveryArtifactClosure::ValueInterface(reference) => {
+                values.push(reference.clone())
+            }
+        }
+    }
+    let inventory = RecoveredArtifactInventory::capture_bound(
+        &owner.artifact_root,
+        &products,
+        &interfaces,
+        &joins,
+        &values,
+        &descriptors,
+        &bindings.into_iter().collect::<Vec<_>>(),
+        &edges.into_iter().collect::<Vec<_>>(),
+    )
+    .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
+    let mut restored = Vec::new();
+    for (receipt, selection) in receipts {
+        let snapshot = receipt.snapshot();
+        let mut context = inventory.context_with_graph_selection(
+            &selection,
+            &snapshot.compiler_roles(),
+            snapshot.lexical(),
+        )?;
+        if context.toolchain_identity_sha256() != snapshot.producer_sha256() {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        context.bind_snapshot_baseline(&receipt)?;
+        restored.push((receipt.root().clone(), Arc::new(context)));
+    }
+    owner.validate_owner()?;
+    owner.contexts.lock().extend(restored);
+    Ok(())
+}
+
+fn cached_context(
+    owner: &OwnedRecoveryManifest,
+    root: &tidepool_toolchain::exact_context::ContextRoot,
+) -> Result<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, SessionError> {
+    owner
+        .contexts
+        .lock()
+        .get(root)
+        .cloned()
+        .ok_or(SessionError::WrongPublicManifestTicket)
+}
+
 impl SessionLib {
-    /// Check an already attached run-owned manifest before reconciling an
-    /// external conversation binding. This observes the exact persisted owner
-    /// without minting a scope or transferring its incarnation.
+    pub fn recovered_domain_presence(&self) -> Result<RecoveredDomainPresence, SessionError> {
+        let state = self
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        state
+            .store
+            .ensure_ready()
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        state
+            .owner
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?
+            .validate_owner()?;
+        Ok(if !state.attached_existing_domain {
+            RecoveredDomainPresence::Absent
+        } else if state
+            .store
+            .has_public_owners(state.domain_id)
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?
+        {
+            RecoveredDomainPresence::Published
+        } else {
+            RecoveredDomainPresence::Empty
+        })
+    }
+
+    pub fn has_recovered_domain(&self) -> Result<bool, SessionError> {
+        Ok(self.recovered_domain_presence()? != RecoveredDomainPresence::Absent)
+    }
+
+    /// Observe the exact domain revision and keyed public owner without
+    /// minting a scope, transferring ownership, or expanding context roots.
     pub fn validate_recovered_public_owner(
         &self,
         expected: &RecoveryPublicOwner,
@@ -115,251 +254,194 @@ impl SessionLib {
             .as_ref()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         retained.validate_owner()?;
-        if state.unconfirmed.is_some() {
-            return Err(SessionError::WrongPublicManifestTicket);
-        }
-        let invalid = |detail: String| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail,
-        };
-        let bytes = std::fs::read(&state.path).map_err(|error| invalid(error.to_string()))?;
-        let read = recovery::read_v2_bytes(
-            &state.path,
-            state
-                .path
-                .parent()
-                .expect("attached canonical manifest parent"),
-            &bytes,
-            recovery::RecoveryReadPurpose::Metadata,
-        )
-        .map_err(|error| recovery::graph_error(&state.path, error))?
-        .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if !read.artifact_losses.is_empty()
-            || read.graph.checksum() != state.graph.checksum()
-            || read.graph.high_water() != state.graph.high_water()
+        let snapshot = state
+            .store
+            .read_snapshot_identity(state.domain_id, Some(expected))
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if snapshot.domain.revision != state.store_revision
+            || snapshot.domain.allocation_ceiling != state.allocation_ceiling
+            || snapshot.domain.lineage != state.graph.lineage()
+            || Some(&snapshot.domain.snapshot_root) != state.graph.domain_root()
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
+        let Some(current) = snapshot.public_owner else {
+            return Ok(false);
+        };
+        let matches = state.graph.public_owner_state(expected) == Some(&current);
         retained.validate_owner()?;
-        let matches = read
-            .graph
-            .public_surfaces()
-            .any(|surface| &surface.owner == expected);
         Ok(matches)
     }
 
     pub(super) fn recovered_public_compiler_context(
         &self,
-        owner: &RecoveryPublicOwner,
+        public_owner: &RecoveryPublicOwner,
     ) -> Result<
         Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
         SessionError,
     > {
+        if !self.validate_recovered_public_owner(public_owner)? {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
         let state = self
             .durable_graph
             .as_ref()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         let surface = state
             .graph
-            .surface(owner)
+            .surface(public_owner)
+            .map_err(|error| recovery::graph_error(&state.path, error))?
             .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if surface.compiler_context.artifact_refs.is_empty() {
-            // An explicit v9 empty selection grants no compiler context. A
-            // historical declaration node cannot widen this public surface.
+        let Some(root) = &surface.context_root else {
             return Ok(None);
-        }
-        let root = state
-            .path
-            .parent()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        let retained = state
+        };
+        let owner = state
             .owner
             .as_ref()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
-        retained.validate_owner()?;
-        let bytes = std::fs::read(&state.path)?;
-        let read = recovery::read_v2_bytes(
-            &state.path,
-            root,
-            &bytes,
-            recovery::RecoveryReadPurpose::Hydration,
-        )
-        .map_err(|error| recovery::graph_error(&state.path, error))?
-        .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if read.graph.checksum() != state.graph.checksum() || !read.artifact_losses.is_empty() {
-            return Err(SessionError::WrongPublicManifestTicket);
-        }
-        let inventory = read
-            .inventory
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        let context = surface.compiler_context.restore(&inventory)?;
-        retained.validate_owner()?;
-        Ok(Some(Arc::new(context)))
+        hydrate_context_roots(&state.graph, owner, &BTreeSet::from([root.clone()]))?;
+        Ok(Some(cached_context(owner, root)?))
     }
 
-    /// A path alone can initialize an empty graph, but cannot admit a retained
-    /// public surface. Production recovery uses the configured run owner.
-    pub fn attach_recovery_graph_v2(
+    /// Attach one exact machine-session domain under the configured run lease.
+    /// Root survives host reincarnation; independent Session domains are issued
+    /// once and never reopen another machine's identity.
+    pub fn attach_owned_recovery_domain(
         &mut self,
-        path: impl Into<PathBuf>,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<(), SessionError> {
-        self.attach_recovery_graph(path.into(), None, settlement)
-    }
-
-    pub fn attach_owned_recovery_graph_v3(
-        &mut self,
-        path: impl Into<PathBuf>,
+        store: Arc<RunRecoveryStore>,
+        domain: RecoveryDomainId,
+        artifact_root: PathBuf,
         authority: Arc<dyn RecoveryRunAuthority>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
-        self.attach_recovery_graph(path.into(), Some(authority), settlement)
-    }
-
-    fn attach_recovery_graph(
-        &mut self,
-        path: PathBuf,
-        authority: Option<Arc<dyn RecoveryRunAuthority>>,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<(), SessionError> {
+        let path = store.path().to_path_buf();
         let invalid = |detail: String| SessionError::RecoveryManifest {
             path: path.clone(),
             detail,
         };
-        if path.exists()
-            && path
-                .canonicalize()
-                .map_err(|error| invalid(error.to_string()))?
-                != path
-        {
-            return Err(invalid(
-                "recovery manifest must be the actual canonical run-owned file".into(),
-            ));
-        }
         if self.log.generation() != Generation(0) || self.durable_graph.is_some() {
             return Err(invalid(
-                "recovery must attach before declarations are admitted".into(),
+                "recovery must attach before declaration identities are admitted".into(),
             ));
         }
-        let parent = path
+        if let RecoveryDomainId::Session(id) = domain {
+            if id != self.id {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+        }
+        let root = path
             .parent()
-            .ok_or_else(|| invalid("recovery manifest has no run-owned parent directory".into()))?;
-        let root = parent
+            .ok_or_else(|| invalid("recovery store has no host run directory".into()))?
             .canonicalize()
             .map_err(|error| invalid(error.to_string()))?;
-        let path = root.join(
-            path.file_name()
-                .ok_or_else(|| invalid("recovery manifest has no file name".into()))?,
-        );
-        let invalid = |detail: String| SessionError::RecoveryManifest {
-            path: path.clone(),
-            detail,
-        };
-        if let Some(authority) = &authority {
-            if !authority
-                .owns_run(&root)
+        if path
+            .canonicalize()
+            .map_err(|error| invalid(error.to_string()))?
+            != path
+            || artifact_root
+                .canonicalize()
                 .map_err(|error| invalid(error.to_string()))?
-            {
-                return Err(invalid(
-                    "configured recovery owner does not own this canonical run".into(),
-                ));
-            }
-        }
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(invalid(error.to_string())),
-        };
-        let (graph, inventory) = match bytes
-            .as_ref()
-            .map(|bytes| {
-                recovery::read_v2_bytes(
-                    &path,
-                    &root,
-                    bytes,
-                    recovery::RecoveryReadPurpose::Hydration,
-                )
-            })
-            .transpose()
-            .map_err(|error| recovery::graph_error(&path, error))?
-            .flatten()
+                != artifact_root
+            || self
+                .root
+                .canonicalize()
+                .map_err(|error| invalid(error.to_string()))?
+                != artifact_root
         {
-            Some(read) if read.artifact_losses.is_empty() => (
-                read.graph,
-                read.inventory.ok_or_else(|| {
-                    invalid("recovery hydration lacks authenticated inventory".into())
-                })?,
-            ),
-            Some(_) => {
-                return Err(invalid(
-                    "recovery graph has unavailable or corrupt artifacts".into(),
-                ))
-            }
-            None if bytes.is_some() => {
-                return Err(invalid(
-                    "existing recovery manifest did not yield an exact graph".into(),
-                ))
-            }
-            None => {
-                let graph = recovery::RecoveryGraph::empty(self.id.0, self.id.0)
-                    .map_err(|error| invalid(error.to_string()))?;
-                let inventory = graph
-                    .capture_inventory(&root)
-                    .map_err(|error| invalid(error.to_string()))?;
-                (graph, inventory)
-            }
-        };
-        if authority.is_none() && !graph.public_surfaces().next().is_none() {
             return Err(invalid(
-                "retained public recovery requires its configured run owner".into(),
+                "recovery attachment requires its actual canonical store and compiler directory"
+                    .into(),
             ));
         }
-        let owner = authority.map(|authority| {
-            Arc::new(OwnedRecoveryManifest {
-                authority,
-                root: root.clone(),
-                path: path.clone(),
-                bytes_digest: bytes.as_ref().map(|bytes| blake3::hash(bytes)),
-            })
+        let owner = Arc::new(OwnedRecoveryManifest {
+            authority,
+            root,
+            path: path.clone(),
+            artifact_root: artifact_root.clone(),
+            contexts: Default::default(),
         });
-        if let Some(owner) = &owner {
-            owner.validate_read()?;
-        }
-        let recovered_log = self.hydrate_recovery_graph(&graph, &root, inventory, settlement)?;
-        if let Some(owner) = &owner {
-            owner.validate_read()?;
+        owner.validate_owner()?;
+        store
+            .ensure_ready()
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        let (graph, domain_state, attached_existing_domain) =
+            recovery::load_or_create_domain_graph(
+                Arc::clone(&store),
+                domain,
+                self.id.0,
+                self.log.generation(),
+            )?;
+        let recovered_log = self.hydrate_recovery_graph(
+            &graph,
+            &store,
+            &owner,
+            domain_state.allocation_ceiling,
+            settlement,
+        )?;
+        owner.validate_owner()?;
+        let current = store
+            .read_domain(domain)
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if current != domain_state {
+            return Err(SessionError::WrongPublicManifestTicket);
         }
         self.log = recovered_log;
+        self.generation_lease = None;
+        self.local_generation_issued = false;
         self.durable_graph = Some(DurableDeclarationGraph {
-            owner,
+            owner: Some(owner),
             path,
+            store,
+            domain_id: domain,
+            store_revision: domain_state.revision,
+            allocation_ceiling: domain_state.allocation_ceiling,
+            artifact_root,
+            attached_existing_domain,
             graph,
-            unconfirmed: Default::default(),
-            retained: Default::default(),
         });
         Ok(())
     }
     pub(super) fn hydrate_recovery_graph(
         &self,
         graph: &recovery::RecoveryGraph,
-        recovery_root: &Path,
-        inventory: RecoveredArtifactInventory,
+        store: &RunRecoveryStore,
+        owner: &OwnedRecoveryManifest,
+        allocation_ceiling: Generation,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclLog, SessionError> {
         let invalid = |detail: String| SessionError::RecoveryManifest {
-            path: recovery_root.to_path_buf(),
+            path: owner.path.clone(),
             detail,
         };
+        store
+            .ensure_ready()
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        graph
+            .load_public_surfaces()
+            .map_err(|error| recovery::graph_error(&owner.path, error))?;
+        let mut roots = BTreeSet::new();
+        for surface in graph.public_surfaces() {
+            if let Some(root) = &surface.context_root {
+                roots.insert(root.clone());
+            }
+            if let Some(generation) = surface.declaration_root {
+                let node = graph
+                    .node(generation)
+                    .map_err(|error| recovery::graph_error(&owner.path, error))?
+                    .ok_or_else(|| invalid("recovered public root is absent".into()))?;
+                roots.insert(node.context_root.clone());
+            }
+        }
+        hydrate_context_roots(graph, owner, &roots)?;
         let mut log = DeclLog::new();
-        if !log.restore_high_water(graph.high_water()) {
+        if !log.restore_high_water(allocation_ceiling) {
             return Err(invalid(
                 "could not restore burned declaration identities".into(),
             ));
         }
         for surface in graph.public_surfaces() {
-            // Required at Generation0 as well: surface roles can only be
-            // reissued after the complete immutable inventory was validated.
-            surface.compiler_context.restore(&inventory)?;
             let Some(generation) = surface.declaration_root else {
                 continue;
             };
@@ -368,7 +450,11 @@ impl SessionLib {
             }
             let node = graph
                 .node(generation)
+                .map_err(|error| recovery::graph_error(&owner.path, error))?
                 .ok_or_else(|| invalid("recovered public root is absent".into()))?;
+            let context = cached_context(owner, &node.context_root)?;
+            let lexical = context.lexical_graph().to_vec();
+            validate_recovery_native_markers(&node, &context).map_err(invalid)?;
             if node.lexical_roots.len() != 1 {
                 return Err(invalid(
                     "recovered declaration tip has no unique lexical root".into(),
@@ -420,7 +506,7 @@ impl SessionLib {
                         }
                     },
                     root: root.clone(),
-                    lexical: node.lexical.clone(),
+                    lexical: lexical.clone(),
                     exports,
                     instances,
                     family_closure,
@@ -428,8 +514,7 @@ impl SessionLib {
                 &self.extra_include,
                 settlement,
             )?);
-            let source_roots = node
-                .lexical
+            let source_roots = lexical
                 .iter()
                 .find(|lexical| lexical.owner == root)
                 .ok_or_else(|| invalid("recovered root lacks lexical edges".into()))?
@@ -439,18 +524,16 @@ impl SessionLib {
             let mut pending = source_roots.clone();
             while let Some(owner) = pending.pop() {
                 if reachable.insert(owner.clone()) {
-                    let lexical = node
-                        .lexical
+                    let source = lexical
                         .iter()
                         .find(|lexical| lexical.owner == owner)
                         .ok_or_else(|| invalid("recovered lexical surface is not closed".into()))?;
-                    pending.extend(lexical.imports.clone());
+                    pending.extend(source.imports.clone());
                 }
             }
             let source_surface = render::AdmittedDeclarationSurface {
                 roots: source_roots,
-                lexical: node
-                    .lexical
+                lexical: lexical
                     .iter()
                     .filter(|lexical| reachable.contains(&lexical.owner))
                     .cloned()
@@ -632,15 +715,22 @@ fn recovered_item(export: &DeclarationExport) -> ExportItem {
     }
 }
 
-/// Freeze the existing scoped compiler selection in the public manifest. The
-/// products, interfaces and dependency facts are materialized by their owners.
+/// Stage the exact scoped context and its selected artifact custody. The
+/// caller supplies the actual prior owner root for incremental materialization.
 pub(super) fn materialize_public_compiler_context(
     graph: &recovery::RecoveryGraph,
     root: &Path,
     context: Option<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
-) -> Result<(recovery::RecoveryGraph, recovery::RecoveryCompilerContext), SessionError> {
+    previous: Option<&tidepool_toolchain::exact_context::ContextRoot>,
+) -> Result<
+    (
+        recovery::RecoveryGraph,
+        Option<tidepool_toolchain::exact_context::ContextRoot>,
+    ),
+    SessionError,
+> {
     let Some(context) = context else {
-        return Ok((graph.clone(), recovery::RecoveryCompilerContext::default()));
+        return Ok((graph.clone(), None));
     };
     let invalid = |detail: String| SessionError::RecoveryManifest {
         path: root.to_path_buf(),
@@ -678,22 +768,299 @@ pub(super) fn materialize_public_compiler_context(
             .insert_artifact(artifact)
             .map_err(|error| invalid(error.to_string()))?;
     }
-    for binding in context.artifact_view().capture_graph_selection().bindings {
-        candidate.insert_artifact_binding(binding);
-    }
-    for (source, target, dependency) in context.artifact_view().binding_dependencies() {
-        candidate
-            .insert_binding_edge(recovery::RecoveryArtifactDependency {
-                source,
-                target,
-                dependency,
-            })
-            .map_err(|error| invalid(error.to_string()))?;
-    }
+    let context_root = candidate
+        .insert_context(context, previous)
+        .map_err(|error| recovery::graph_error(root, error))?;
     Ok((
         candidate
             .seal()
-            .map_err(|error| invalid(error.to_string()))?,
-        recovery::RecoveryCompilerContext::capture(context),
+            .map_err(|error| recovery::graph_error(root, error))?,
+        Some(context_root),
     ))
+}
+
+#[cfg(test)]
+mod lazy_tests {
+    use super::*;
+    use crate::session::recovery_test_fixture::RecoveryFixture;
+    use tidepool_testing::effect_surface::TestEffectSurface;
+
+    #[derive(Clone)]
+    struct EmptyOutput;
+    impl OutputSink for EmptyOutput {
+        fn drain(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn snapshot(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    fn library(root: &Path, effects: &TestEffectSurface) -> SessionLib {
+        SessionLib::open(
+            fresh_session_id(),
+            root.join("haskell-session"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec())
+    }
+
+    fn owner() -> RecoveryPublicOwner {
+        RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/lazy").unwrap(), 1).unwrap()
+    }
+
+    fn probe(
+        context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+        lexical_root: &tidepool_toolchain::declaration_join::ExactModuleIdentity,
+        effects: &TestEffectSurface,
+        root: &Path,
+        generation: u64,
+    ) -> serde_json::Value {
+        let imports = format!("import {}", lexical_root.module);
+        let templates = [TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: assemble_expression_module(
+                &insert_preamble_imports(effects.preamble(), &imports),
+                "__result",
+                effects.row(),
+                "{{TURN}}",
+                ExpressionLift::Pure,
+            ),
+        }];
+        let include = effects
+            .include_paths()
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let TurnResult::Expr { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: Some(Arc::new(
+                        tidepool_toolchain::declaration_join::ExactCompileContext::new(context),
+                    )),
+                    session_id: None,
+                    turn_text: "answer (41 :: Int)",
+                    templates: &templates,
+                    include: &include,
+                    session_root: root,
+                    inject_modules: &[],
+                    gen: generation,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
+        })
+        .unwrap() else {
+            panic!("the original probe must compile as an expression");
+        };
+        let mut resident = ResidentSession::from_persistent_for_test(
+            frunk::HNil,
+            EmptyOutput,
+            PersistentSession::new(None, 1024 * 1024),
+        );
+        let ResidentOutcome::Completed { result, .. } =
+            tidepool_testing::with_settlement(|settlement| {
+                resident.run_with_sites("immutable_context_probe", compiled.code(), settlement)
+            })
+            .unwrap()
+        else {
+            panic!("the original probe must finish");
+        };
+        result.to_json()
+    }
+
+    #[test]
+    fn cold_hydration_demands_only_selected_contexts_and_preserves_older_shadowed_native_context() {
+        tidepool_testing::eval_harness::require_extract();
+        let effects = TestEffectSurface::minimal(&[]).unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let fixture = RecoveryFixture::create(run.path());
+        let mut lib = library(run.path(), &effects);
+        tidepool_testing::with_settlement(|settlement| fixture.attach_root(&mut lib, settlement))
+            .unwrap();
+        let mut producer = PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = producer.mint_isolated_scope();
+        producer
+            .initialize_durable_public_scope(owner(), public)
+            .unwrap();
+        let execution = Arc::new(producer.begin_private_execution(public).unwrap());
+        let private = execution.private_scope();
+        tidepool_testing::with_settlement(|settlement| {
+            producer.define_scoped_in(
+                private,
+                &[include_str!("fixtures/recovery-original.hs")],
+                settlement,
+            )
+        })
+        .unwrap();
+        let old_tip = producer.lib().scope_tip(private);
+        let old_node = producer
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .graph
+            .node(old_tip)
+            .unwrap()
+            .unwrap();
+        let old_root = old_node.context_root.clone();
+        let old_lexical_root = old_node.lexical_roots[0].clone();
+        let old_selection = producer
+            .compile_view_in(private)
+            .unwrap()
+            .exact_declaration_context()
+            .unwrap()
+            .artifact_view()
+            .capture_graph_selection();
+        tidepool_testing::with_settlement(|settlement| {
+            producer.define_scoped_in(
+                private,
+                &["answer :: Int -> Int\nanswer value = value + 100"],
+                settlement,
+            )
+        })
+        .unwrap();
+        let intent = producer
+            .freeze_execution_intent(&execution, vec![], vec![])
+            .unwrap();
+        let CertifiedDeclarationPublication::Accepted(accepted) =
+            tidepool_testing::with_settlement(|settlement| {
+                producer
+                    .restage_declaration_publication(owner(), intent)
+                    .unwrap()
+                    .certify(settlement)
+            })
+            .unwrap()
+        else {
+            panic!("shadowed public declaration must be accepted");
+        };
+        assert_eq!(
+            producer
+                .publish_staged_public_manifest(
+                    accepted.stage().unwrap(),
+                    &PublicationDecision::new()
+                )
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
+        let current_tip = producer.lib().scope_tip(public);
+        let current_node = producer
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .graph
+            .node(current_tip)
+            .unwrap()
+            .unwrap();
+        let current_lexical_root = current_node.lexical_roots[0].clone();
+        let current_root = producer
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .graph
+            .surface(&owner())
+            .unwrap()
+            .unwrap()
+            .context_root
+            .clone()
+            .unwrap();
+        assert_ne!(old_root, current_root);
+        let authority = Arc::clone(&fixture.owner);
+        drop(producer);
+        drop(fixture);
+        let authored_tree = run.path().join("haskell-session/Tidepool/Session");
+        assert!(
+            authored_tree.is_dir(),
+            "the producer must have authored its session modules"
+        );
+        std::fs::remove_dir_all(authored_tree).unwrap();
+
+        let fixture = RecoveryFixture::reopen(Arc::clone(&authority));
+        let mut cold = library(run.path(), &effects);
+        tidepool_testing::with_settlement(|settlement| fixture.attach_root(&mut cold, settlement))
+            .unwrap();
+        let state = cold.durable_graph.as_ref().unwrap();
+        let retained = state.owner.as_ref().unwrap();
+        hydrate_context_roots(&state.graph, retained, &BTreeSet::from([old_root.clone()])).unwrap();
+        let older = cached_context(retained, &old_root).unwrap();
+        assert_eq!(
+            older.artifact_view().capture_graph_selection(),
+            old_selection
+        );
+        let newer = cold
+            .recovered_public_compiler_context(&owner())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            probe(older, &old_lexical_root, &effects, cold.include_dir(), 8001),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            probe(
+                newer,
+                &current_lexical_root,
+                &effects,
+                cold.include_dir(),
+                8002
+            ),
+            serde_json::json!(141)
+        );
+        drop(cold);
+        drop(fixture);
+
+        let database = run.path().join("recovery.sqlite");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM blocks WHERE cid=?1",
+                    [old_root.cid().to_bytes()]
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        let fixture = RecoveryFixture::reopen(Arc::clone(&authority));
+        let mut cold = library(run.path(), &effects);
+        tidepool_testing::with_settlement(|settlement| fixture.attach_root(&mut cold, settlement))
+            .unwrap();
+        assert!(cold.validate_recovered_public_owner(&owner()).unwrap());
+        let state = cold.durable_graph.as_ref().unwrap();
+        let error = hydrate_context_roots(
+            &state.graph,
+            state.owner.as_ref().unwrap(),
+            &BTreeSet::from([old_root.clone()]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, SessionError::RecoverySnapshot(error) if matches!(*error, tidepool_toolchain::exact_context::SnapshotError::MissingBlock(cid) if cid == *old_root.cid()))
+        );
+        drop(cold);
+        drop(fixture);
+
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM blocks WHERE cid=?1",
+                    [current_root.cid().to_bytes()]
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        let fixture = RecoveryFixture::reopen(authority);
+        let mut refused = library(run.path(), &effects);
+        assert!(tidepool_testing::with_settlement(
+            |settlement| fixture.attach_root(&mut refused, settlement)
+        )
+        .is_err());
+        assert!(refused.durable_graph.is_none());
+        assert_eq!(refused.generation(), Generation(0));
+    }
 }

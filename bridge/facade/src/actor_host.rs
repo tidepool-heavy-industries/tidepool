@@ -3442,7 +3442,7 @@ fn compile_root(
     }
     let mut library = SessionLib::open(session, &session_root, module_env)?
         .with_validation_include(include.clone());
-    root_declaration_recovery::attach(
+    let recovery_store = root_declaration_recovery::attach(
         &mut library,
         run_root,
         Arc::clone(&host_incarnation),
@@ -3501,6 +3501,7 @@ fn compile_root(
     let child_worktree_handler = worktree_handler.clone();
     let child_run_root = run_root.to_path_buf();
     let child_run_lease = Arc::clone(&host_incarnation);
+    let child_recovery_store = Arc::clone(&recovery_store);
     // This run's one shared image cache: installed on the forest
     // (`ResidentForest::with_image_registry`) so it is applied to every
     // session's engine, root and child alike, including each session's
@@ -3536,6 +3537,7 @@ fn compile_root(
         root_declaration_recovery::attach_child(
             &mut library,
             &child_run_root,
+            Arc::clone(&child_recovery_store),
             Arc::clone(&child_run_lease),
             settlement,
         )

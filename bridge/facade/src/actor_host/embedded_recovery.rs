@@ -34,8 +34,10 @@ impl EmbeddedStartupRecovery {
                 return Err("root startup changed its accepted source or binding path".into());
             }
         }
-        let path = run_root.join("root-declarations.json");
-        if !path.try_exists()? {
+        let path = super::root_declaration_recovery::store_path(run_root);
+        if library.recovered_domain_presence()?
+            != tidepool_runtime::session::RecoveredDomainPresence::Published
+        {
             if super::root_startup_chain(&records)?.iter().any(|record| {
                 record
                     .startup
@@ -46,7 +48,7 @@ impl EmbeddedStartupRecovery {
                         .as_ref()
                         .is_some_and(|application| application.conversation.is_some())
             }) {
-                return Err("root startup lost its retained public manifest".into());
+                return Err("root startup lost its retained public recovery domain".into());
             }
             return Ok(());
         }
@@ -64,7 +66,7 @@ impl EmbeddedStartupRecovery {
                 return Ok(());
             }
         }
-        Err("root manifest owner is outside the exact startup chain".into())
+        Err("root recovery domain owner is outside the exact startup chain".into())
     }
 
     pub(super) fn intent(
