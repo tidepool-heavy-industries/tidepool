@@ -95,10 +95,24 @@ pub(super) struct EmbeddedService {
     pub(super) runtime: Arc<EmbeddedHarnessRuntime>,
     pub(super) commands: mpsc::Receiver<QueuedCommand>,
     pub(super) control: ServerControl,
-    server: Option<JoinHandle<Result<(), String>>>,
+    server: EmbeddedServer,
     pub(super) address: std::net::SocketAddr,
     #[cfg(test)]
     test_transport: Option<TestResponsesTransport>,
+}
+
+enum EmbeddedServer {
+    Pending {
+        task: JoinHandle<Result<(), String>>,
+        phase: ServerPhase,
+    },
+    Settled(Result<(), String>),
+}
+
+#[derive(Clone, Copy)]
+enum ServerPhase {
+    Running,
+    Aborting,
 }
 
 #[cfg(test)]
@@ -229,7 +243,10 @@ impl EmbeddedService {
             runtime,
             commands,
             control,
-            server: Some(server),
+            server: EmbeddedServer::Pending {
+                task: server,
+                phase: ServerPhase::Running,
+            },
             address,
             #[cfg(test)]
             test_transport: None,
@@ -263,22 +280,30 @@ impl EmbeddedService {
     }
 
     pub(super) fn server_finished(&self) -> bool {
-        self.server.as_ref().is_some_and(JoinHandle::is_finished)
+        match &self.server {
+            EmbeddedServer::Pending { task, .. } => task.is_finished(),
+            EmbeddedServer::Settled(_) => true,
+        }
     }
 
     pub(super) async fn shutdown(&mut self) -> Result<(), String> {
-        let Some(server) = self.server.take() else {
-            return Ok(());
+        let (task, phase) = match &mut self.server {
+            EmbeddedServer::Pending { task, phase } => (task, phase),
+            EmbeddedServer::Settled(result) => return result.clone(),
         };
-        if !server.is_finished() {
-            server.abort();
+        if matches!(phase, ServerPhase::Running) && !task.is_finished() {
+            task.abort();
+            *phase = ServerPhase::Aborting;
         }
-        match server.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(error),
+        // Borrow the retained handle so cancelling an observer cannot detach
+        // the task. Publication follows the join without another await.
+        let result = match task.await {
+            Ok(result) => result,
             Err(error) if error.is_cancelled() => Ok(()),
             Err(error) => Err(error.to_string()),
-        }
+        };
+        self.server = EmbeddedServer::Settled(result.clone());
+        result
     }
 }
 
@@ -446,8 +471,8 @@ pub(super) async fn attach_selected_actor(
 
 impl Drop for EmbeddedService {
     fn drop(&mut self) {
-        if let Some(server) = &self.server {
-            server.abort();
+        if let EmbeddedServer::Pending { task, .. } = &self.server {
+            task.abort();
         }
     }
 }
@@ -805,6 +830,212 @@ pub(super) async fn submit_browser_command(
 mod shutdown_tests {
     use super::*;
     use harness::{engine::EngineError, model::RequestId};
+
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
+    use tokio::sync::oneshot;
+
+    async fn service_with_server(
+        files: &tempfile::TempDir,
+        server: JoinHandle<Result<(), String>>,
+    ) -> EmbeddedService {
+        let settings = crate::actor_host::test_campaign::hosted_test_settings(files, 1);
+        let mut service = EmbeddedService::prepare(files.path(), &settings)
+            .await
+            .unwrap();
+        let previous = std::mem::replace(
+            &mut service.server,
+            EmbeddedServer::Pending {
+                task: server,
+                phase: ServerPhase::Running,
+            },
+        );
+        let EmbeddedServer::Pending { task, .. } = previous else {
+            unreachable!()
+        };
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        service
+    }
+
+    #[derive(Clone, Copy)]
+    enum ServerOutcome {
+        Success,
+        Error,
+        Panic,
+    }
+
+    impl ServerOutcome {
+        fn finish(self) -> Result<(), String> {
+            match self {
+                Self::Success => Ok(()),
+                Self::Error => Err("retained server failure".into()),
+                Self::Panic => panic!("retained server panic"),
+            }
+        }
+        fn assert_result(self, result: &Result<(), String>) {
+            match self {
+                Self::Success => assert_eq!(result, &Ok(())),
+                Self::Error => assert_eq!(result, &Err("retained server failure".into())),
+                Self::Panic => assert!(result
+                    .as_ref()
+                    .unwrap_err()
+                    .contains("retained server panic")),
+            }
+        }
+    }
+
+    async fn cancelled_shutdown_history(outcome: ServerOutcome) {
+        let files = tempfile::tempdir().unwrap();
+        let (started, ready) = oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        // Hold one poll of the real task until the observer has been dropped.
+        // Abort requests cannot settle a task while its current poll is running.
+        let server = tokio::spawn(async move {
+            started.send(()).unwrap();
+            held.recv_timeout(Duration::from_secs(10)).unwrap();
+            outcome.finish()
+        });
+        ready.await.unwrap();
+        let mut service = service_with_server(&files, server).await;
+        assert!(!service.server_finished());
+        {
+            let mut shutdown = Box::pin(service.shutdown());
+            assert!(shutdown
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending());
+        }
+        assert!(!service.server_finished());
+        let retry_pending = {
+            let mut retry = Box::pin(service.shutdown());
+            retry
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        };
+        release.send(()).unwrap();
+        assert!(
+            retry_pending,
+            "retry must still observe the owned server task"
+        );
+        let result = tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap();
+        outcome.assert_result(&result);
+        assert!(service.server_finished());
+        for _ in 0..3 {
+            assert_eq!(service.shutdown().await, result);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_shutdown_retains_late_error() {
+        cancelled_shutdown_history(ServerOutcome::Error).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_shutdown_retains_late_panic() {
+        cancelled_shutdown_history(ServerOutcome::Panic).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_shutdown_retains_late_success() {
+        cancelled_shutdown_history(ServerOutcome::Success).await;
+    }
+
+    async fn finished_shutdown_history(outcome: ServerOutcome) {
+        let files = tempfile::tempdir().unwrap();
+        let server = tokio::spawn(async move { outcome.finish() });
+        let completion = server.abort_handle();
+        let mut service = service_with_server(&files, server).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !completion.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(service.server_finished());
+        let result = service.shutdown().await;
+        outcome.assert_result(&result);
+        for _ in 0..3 {
+            assert_eq!(service.shutdown().await, result);
+        }
+        assert!(service.server_finished());
+    }
+
+    #[tokio::test]
+    async fn finished_shutdown_repeats_error() {
+        finished_shutdown_history(ServerOutcome::Error).await;
+    }
+
+    #[tokio::test]
+    async fn finished_shutdown_repeats_panic() {
+        finished_shutdown_history(ServerOutcome::Panic).await;
+    }
+
+    #[tokio::test]
+    async fn finished_shutdown_repeats_success() {
+        finished_shutdown_history(ServerOutcome::Success).await;
+    }
+
+    #[tokio::test]
+    async fn requested_abort_repeats_success() {
+        let files = tempfile::tempdir().unwrap();
+        let (started, ready) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            started.send(()).unwrap();
+            std::future::pending::<Result<(), String>>().await
+        });
+        let mut service = service_with_server(&files, server).await;
+        ready.await.unwrap();
+        assert_eq!(service.shutdown().await, Ok(()));
+        assert!(service.server_finished());
+        for _ in 0..3 {
+            assert_eq!(service.shutdown().await, Ok(()));
+        }
+    }
+
+    struct TerminationNotice(Option<oneshot::Sender<()>>);
+    impl Drop for TerminationNotice {
+        fn drop(&mut self) {
+            self.0.take().unwrap().send(()).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn service_drop_terminates_server_before_and_after_abort() {
+        for begin_shutdown in [false, true] {
+            let files = tempfile::tempdir().unwrap();
+            let (started, ready) = oneshot::channel();
+            let (stopped, terminated) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let _notice = TerminationNotice(Some(stopped));
+                started.send(()).unwrap();
+                std::future::pending::<Result<(), String>>().await
+            });
+            let mut service = service_with_server(&files, server).await;
+            ready.await.unwrap();
+            if begin_shutdown {
+                let mut shutdown = Box::pin(service.shutdown());
+                assert!(matches!(
+                    shutdown
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop())),
+                    Poll::Pending
+                ));
+            }
+            drop(service);
+            tokio::time::timeout(Duration::from_secs(10), terminated)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn embedded_provider_choice_routes_actor_and_cell_clients() {
