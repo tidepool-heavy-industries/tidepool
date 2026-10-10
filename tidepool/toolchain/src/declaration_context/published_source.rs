@@ -686,7 +686,7 @@ mod tests {
             .unwrap();
             assert!(
                 recovery_inventory
-                    .context_with_published_roles(
+                    .context_with_roles(
                         &published.artifact_view().artifact_ids(),
                         &published
                             .artifact_view()

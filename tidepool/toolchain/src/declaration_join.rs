@@ -25,7 +25,6 @@ pub use crate::declaration_context::{
 mod recovery;
 pub use recovery::{
     certify_recovered_declaration_tip, certify_recovered_declaration_tip_in_context,
-    certify_recovered_declaration_tip_with_inventory,
     certify_recovered_declaration_tip_with_value_interfaces, RecoveredDeclarationTip,
     RecoveryDeclarationOrigin, RecoveryDeclarationSelection,
 };

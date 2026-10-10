@@ -1361,19 +1361,6 @@ impl RecoveredArtifactInventory {
                 "published source roles require the durable publication owner",
             ));
         }
-        self.context_with_published_roles(ids, groups, roles, lexical)
-    }
-
-    /// The owning versioned, checksummed publication graph restores source
-    /// selection policy after authenticating immutable original custody. This
-    /// does not replay source recipes or revalidate compile-time external input.
-    pub fn context_with_published_roles(
-        &self,
-        ids: &[ArtifactId],
-        groups: &[NativeGroupKey],
-        roles: &[CompilerInputRole],
-        lexical: Vec<ExactLexicalNode>,
-    ) -> Result<ExactDeclarationContext, CompileError> {
         let selected = groups.iter().copied().collect::<BTreeSet<_>>();
         if selected.len() != groups.len() {
             return Err(failure("duplicate recovered native group selection"));
@@ -1382,7 +1369,7 @@ impl RecoveredArtifactInventory {
     }
 
     /// Standalone callers explicitly request every authenticated original group.
-    /// Durable restoration uses `context_with_roles` with its recorded roles.
+    /// Exact durable restoration uses `context_with_graph_selection`.
     pub fn context_all_groups(
         &self,
         ids: &[crate::artifact_inventory::ArtifactId],
@@ -4403,7 +4390,7 @@ impl ExactDeclarationContext {
             Some((descriptors, dependencies)),
         )
         .map_err(failure)?;
-        inventory.context_with_published_roles(
+        inventory.context_with_roles(
             &inventory.entries.keys().copied().collect::<Vec<_>>(),
             native_groups,
             compiler_roles,
@@ -8752,6 +8739,7 @@ mod tests {
         assert_eq!(row[4], text("revision"));
         assert_eq!(row[5], text("input"));
         let view = selection.context().artifact_view();
+        let graph = view.capture_graph_selection();
         let inventory = RecoveredArtifactInventory {
             producer: issued.producer,
             entries: view
@@ -8760,19 +8748,24 @@ mod tests {
                 .map(|entry| (entry.descriptor.id, entry))
                 .collect(),
             recorded_inventory: true,
-            bindings: BTreeSet::new(),
-            binding_edges: Vec::new(),
+            bindings: graph.bindings.iter().copied().collect(),
+            binding_edges: view.binding_dependencies(),
             interfaces: view.interface_dependencies(),
         };
-        let ids = view
-            .descriptors()
-            .into_iter()
-            .map(|row| row.id)
-            .collect::<Vec<_>>();
-        let groups = view
-            .selected_native_groups()
-            .into_iter()
-            .collect::<Vec<_>>();
+        assert!(
+            inventory
+                .context_with_roles(
+                    &view.artifact_ids(),
+                    &view
+                        .selected_native_groups()
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                    &selection.context().compiler_input_roles(),
+                    selection.context().lexical.to_vec(),
+                )
+                .is_err(),
+            "flat custody cannot restore exact publication policy"
+        );
         let mut changed = selection.context().compiler_input_roles();
         if let CompilerInputRole::PublishedSourceOriginal {
             source_revision, ..
@@ -8784,9 +8777,8 @@ mod tests {
         }
         assert!(
             inventory
-                .context_with_published_roles(
-                    &ids,
-                    &groups,
+                .context_with_graph_selection(
+                    &graph,
                     &changed,
                     selection.context().lexical.to_vec()
                 )
@@ -8794,9 +8786,8 @@ mod tests {
             "a valid inventory cannot repair changed publication facts"
         );
         assert!(inventory
-            .context_with_published_roles(
-                &ids,
-                &groups,
+            .context_with_graph_selection(
+                &graph,
                 &selection.context().compiler_input_roles(),
                 selection.context().lexical.to_vec()
             )
@@ -8935,17 +8926,18 @@ mod tests {
                     0 => { context = context.with_published_source_originals(&selection).unwrap(); },
                     1 => {
                         let view = context.artifact_view();
+                        let graph = view.capture_graph_selection();
                         let inventory = RecoveredArtifactInventory {
                             producer: context.producer,
                             entries: view.entries().into_iter().map(|entry| (entry.descriptor.id, entry)).collect(),
                             recorded_inventory: true,
-            bindings: BTreeSet::new(), binding_edges: Vec::new(), interfaces: view.interface_dependencies(),
+            bindings: graph.bindings.iter().copied().collect(), binding_edges: view.binding_dependencies(), interfaces: view.interface_dependencies(),
                         };
                         let ids = view.descriptors().into_iter().map(|row| row.id).collect::<Vec<_>>();
                         let groups = view.selected_native_groups().into_iter().collect::<Vec<_>>();
                         let roles = context.compiler_input_roles();
                         proptest::prop_assert!(inventory.context_with_roles(&ids, &groups, &roles, context.lexical.to_vec()).is_err());
-                        context = inventory.context_with_published_roles(&ids, &groups, &roles, context.lexical.to_vec()).unwrap();
+                        context = inventory.context_with_graph_selection(&graph, &roles, context.lexical.to_vec()).unwrap();
                         let reopened = context.published_source_original_selections().unwrap();
                         proptest::prop_assert_eq!(reopened.len(), 1);
                         context = context.with_published_source_originals(&reopened[0]).unwrap();

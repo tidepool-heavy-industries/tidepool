@@ -119,38 +119,6 @@ pub fn certify_recovered_declaration_tip_with_value_interfaces(
     certify_recovered_declaration_tip_in_context(context, selection, includes, settlement)
 }
 
-pub fn certify_recovered_declaration_tip_with_inventory(
-    recovery_root: &Path,
-    products: &[crate::recovery_artifacts::RecoveryArtifactRef],
-    module_interfaces: &[crate::recovery_artifacts::RecoveryModuleInterfaceRef],
-    joins: &[crate::recovery_artifacts::RecoveryJoinRef],
-    values: &[crate::recovery_artifacts::RecoveryValueInterfaceRef],
-    descriptors: &[crate::artifact_inventory::ArtifactDescriptor],
-    dependencies: &[(
-        crate::artifact_inventory::ArtifactId,
-        crate::artifact_inventory::ArtifactId,
-        crate::artifact_inventory::ArtifactDependency,
-    )],
-    native_groups: &[crate::artifact_inventory::NativeGroupKey],
-    compiler_roles: &[crate::artifact_inventory::CompilerInputRole],
-    mut selection: RecoveryDeclarationSelection,
-    includes: &[PathBuf],
-    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
-) -> Result<RecoveredDeclarationTip, CompileError> {
-    let context = Arc::new(ExactDeclarationContext::capture_recovery_with_inventory(
-        recovery_root,
-        products,
-        module_interfaces,
-        joins,
-        values,
-        descriptors,
-        dependencies,
-        native_groups,
-        compiler_roles,
-        std::mem::take(&mut selection.lexical),
-    )?);
-    certify_recovered_declaration_tip_in_context(context, selection, includes, settlement)
-}
 /// Certify durable selectors against an already authenticated scoped inventory.
 /// The context retains original type evidence and exact native requirements;
 /// this inspection grants no recovered live value or binding lease.
