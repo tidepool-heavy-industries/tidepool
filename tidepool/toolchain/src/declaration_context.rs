@@ -6220,6 +6220,43 @@ pub(crate) fn certified_product_artifact_view_with_validation(
     demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ArtifactView, CompileError> {
+    certified_product_artifact_view_inner(
+        producer, products, interfaces, values, baseline, demand, validation, None,
+    )
+}
+
+pub(crate) fn certified_selected_product_artifact_view_with_validation(
+    producer: [u8; 32],
+    products: &[CertifiedRecoveryProduct],
+    interfaces: &[crate::certified_products::CertifiedModuleInterface],
+    values: &[CertifiedValueInterface],
+    baseline: Option<&ArtifactView>,
+    demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
+    validation: &mut PackageInterfaceValidation,
+    selection: &crate::certified_products::CertifiedSourceSelection,
+) -> Result<ArtifactView, CompileError> {
+    certified_product_artifact_view_inner(
+        producer,
+        products,
+        interfaces,
+        values,
+        baseline,
+        demand,
+        validation,
+        Some(selection),
+    )
+}
+
+pub(crate) fn certified_product_artifact_view_inner(
+    producer: [u8; 32],
+    products: &[CertifiedRecoveryProduct],
+    interfaces: &[crate::certified_products::CertifiedModuleInterface],
+    values: &[CertifiedValueInterface],
+    baseline: Option<&ArtifactView>,
+    demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
+    validation: &mut PackageInterfaceValidation,
+    selection: Option<&crate::certified_products::CertifiedSourceSelection>,
+) -> Result<ArtifactView, CompileError> {
     let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
     let mut entries = interfaces
         .iter()
@@ -6261,8 +6298,14 @@ pub(crate) fn certified_product_artifact_view_with_validation(
             originals = products.len(), reused_originals, original_entry_work = after - before,
             "original artifact entry custody");
     }
-    view.inventory()
-        .admit_shared_with_demand(&view, entries, demand)
+    match selection {
+        Some(selection) => view
+            .inventory()
+            .admit_certified_with_demand(&view, entries, demand, selection),
+        None => view
+            .inventory()
+            .admit_shared_with_demand(&view, entries, demand),
+    }
 }
 
 /// Segment-original entries were issued once from immutable canonical/native
@@ -6274,6 +6317,7 @@ pub(crate) fn certified_segment_artifact_view_with_validation(
     baseline: Option<&ArtifactView>,
     demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
     validation: &mut PackageInterfaceValidation,
+    selection: &crate::certified_products::CertifiedSourceSelection,
 ) -> Result<ArtifactView, CompileError> {
     if !Arc::ptr_eq(originals.operation(), &validation.inventory) {
         return Err(failure("segment artifacts have another accounting owner"));
@@ -6292,7 +6336,7 @@ pub(crate) fn certified_segment_artifact_view_with_validation(
     }
     entries.extend(originals.selected_value_entries(values).cloned());
     view.inventory()
-        .admit_shared_with_demand(&view, entries, demand)
+        .admit_certified_with_demand(&view, entries, demand, selection)
 }
 
 /// Admit only the inventory's selected dependency closure. Original byte custody

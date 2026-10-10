@@ -2421,6 +2421,47 @@ impl CertifiedSourceSelection {
         })
     }
 
+    /// Exact IDs are issued by the compiler namespace, independently of the
+    /// broader native product custody retained in an output packet.
+    pub(crate) fn artifact_ids_from_entries(
+        &self,
+        entries: &BTreeMap<
+            crate::artifact_inventory::ArtifactId,
+            Arc<crate::artifact_inventory::ArtifactEntry>,
+        >,
+    ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
+        use crate::artifact_inventory::ArtifactPayload;
+        let mut ids = BTreeSet::new();
+        for (_, selected) in self.visible_modules() {
+            let interface = selected.interface();
+            if !entries
+                .get(&interface)
+                .is_some_and(|entry| !matches!(entry.payload, ArtifactPayload::Original(_)))
+            {
+                return Err(CertificationError::Mismatch(
+                    "issued compiler interface artifact",
+                ));
+            }
+            ids.insert(interface);
+            if let Some(native) = selected.native() {
+                let mut matching = entries.iter().filter(|(_, entry)| {
+                    matches!(&entry.payload,
+                    ArtifactPayload::Original(product) if product.owner() == &native.owner)
+                });
+                let (id, _) = matching.next().ok_or(CertificationError::Mismatch(
+                    "issued compiler native artifact",
+                ))?;
+                if matching.next().is_some() {
+                    return Err(CertificationError::Mismatch(
+                        "ambiguous issued compiler native artifact",
+                    ));
+                }
+                ids.insert(*id);
+            }
+        }
+        Ok(ids)
+    }
+
     pub(crate) fn selected_original_closure(
         &self,
         view: &crate::artifact_inventory::ArtifactView,

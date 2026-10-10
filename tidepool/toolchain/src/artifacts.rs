@@ -3367,17 +3367,21 @@ fn seal_turn_outputs_with_validation(
                 compiler_inputs.as_ref().map(|input| &input.artifacts),
                 demand,
                 validation,
+                &certified.source_selection,
             )?
         }
-        None => crate::declaration_context::certified_product_artifact_view_with_validation(
-            producer,
-            &certified.recovery_products,
-            &certified.module_interfaces,
-            &certified.value_interfaces,
-            compiler_inputs.as_ref().map(|input| &input.artifacts),
-            demand,
-            validation,
-        )?,
+        None => {
+            crate::declaration_context::certified_selected_product_artifact_view_with_validation(
+                producer,
+                &certified.recovery_products,
+                &certified.module_interfaces,
+                &certified.value_interfaces,
+                compiler_inputs.as_ref().map(|input| &input.artifacts),
+                demand,
+                validation,
+                &certified.source_selection,
+            )?
+        }
     };
     certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
         &artifact_view,
@@ -4972,7 +4976,7 @@ fn compile_invocation_inner(
             .as_ref()
             .map(|request| request.compiler_inputs());
         artifacts.artifact_view =
-            crate::declaration_context::certified_product_artifact_view_with_validation(
+            crate::declaration_context::certified_selected_product_artifact_view_with_validation(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                     &producer,
                 )
@@ -4985,6 +4989,7 @@ fn compile_invocation_inner(
                     &target_imports,
                 ),
                 &mut validation,
+                &certified.source_selection,
             )?;
         certified.groups =
             crate::declaration_context::certify_artifact_view_groups_with_validation(

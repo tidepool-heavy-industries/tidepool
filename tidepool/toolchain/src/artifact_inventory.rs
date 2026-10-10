@@ -82,11 +82,22 @@ pub enum ArtifactBindingNode {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactGraphSelection {
+    pub selections: Vec<ArtifactSelectionPlan>,
     pub bindings: Vec<ArtifactBinding>,
     pub namespace: Vec<ArtifactBinding>,
     pub roots: Vec<ArtifactBinding>,
     pub native_groups: Vec<NativeGroupBinding>,
     pub native_custody: Vec<ArtifactBinding>,
+}
+
+/// Complete issued binding plan retained as a digest witness when a view
+/// selects only part of its closure. Payload validation remains independent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSelectionPlan {
+    pub selection: ArtifactSelectionId,
+    pub nodes: Vec<ArtifactBindingNode>,
+    pub dependencies: Vec<(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)>,
 }
 
 /// Content-bound original group selection. These serialized facts grant no
@@ -190,7 +201,7 @@ fn certified_target_source_groups(
 /// carrier custody does not promote hidden dependencies to explicit roots.
 enum ArtifactRootIntent<'a> {
     SuppliedArtifacts,
-    RetainedView(&'a ArtifactView),
+    Certified(&'a crate::certified_products::CertifiedSourceSelection),
 }
 
 /// Graph vertices retain one full artifact allocation separately from its
@@ -1126,6 +1137,8 @@ struct InventoryState {
     indices: BTreeMap<InventoryNodeKey, NodeIndex>,
     payloads: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     payload_bindings: BTreeMap<ArtifactId, usize>,
+    selection_plans: BTreeMap<ArtifactSelectionId, Arc<ArtifactSelectionPlan>>,
+    selection_nodes: BTreeMap<ArtifactSelectionId, usize>,
     roots: BTreeMap<InventoryNodeKey, usize>,
     graph_visits: AtomicU64,
     view_queries: AtomicU64,
@@ -1411,36 +1424,56 @@ pub struct ArtifactInventoryMetrics {
 }
 
 fn selection_identity(
-    plan: &BTreeMap<LogicalNodeKey, BTreeSet<(LogicalNodeKey, ArtifactDependency)>>,
+    plan: &BTreeMap<InventoryNodeKey, BTreeSet<(InventoryNodeKey, ArtifactDependency)>>,
+    own: ArtifactSelectionId,
 ) -> ArtifactSelectionId {
+    let normalize = |key: InventoryNodeKey| {
+        let binding = key.binding();
+        if binding.selection == own {
+            key.logical().bind(ArtifactSelectionId([0; 32]))
+        } else {
+            key
+        }
+    };
+    let canonical = plan
+        .iter()
+        .map(|(key, edges)| {
+            (
+                normalize(*key),
+                edges
+                    .iter()
+                    .map(|(target, edge)| (normalize(*target), edge.clone()))
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut digest = Sha256::new();
-    digest.update(b"Tidepool exact artifact binding v1\0");
-    for (source, edges) in plan {
-        digest.update(source.artifact().0);
-        match source {
-            LogicalNodeKey::Artifact(_) => digest.update([0]),
-            LogicalNodeKey::Group(group) => {
-                digest.update([1]);
-                digest.update(group.original_ordinal.to_be_bytes());
-            }
-        }
-        digest.update((edges.len() as u64).to_be_bytes());
-        for (target, edge) in edges {
-            digest.update(target.artifact().0);
-            match target {
-                LogicalNodeKey::Artifact(_) => digest.update([0]),
-                LogicalNodeKey::Group(group) => {
-                    digest.update([1]);
-                    digest.update(group.original_ordinal.to_be_bytes());
-                }
-            }
-            let bytes = serde_json::to_vec(edge).expect("closed dependency schema");
-            digest.update((bytes.len() as u64).to_be_bytes());
-            digest.update(bytes);
-        }
+    digest.update(b"Tidepool exact artifact binding v2\0");
+    for (key, edges) in canonical {
+        let bytes = serde_json::to_vec(&(key, edges)).expect("closed binding schema");
+        digest.update((bytes.len() as u64).to_be_bytes());
+        digest.update(bytes);
     }
     ArtifactSelectionId(digest.finalize().into())
 }
+fn capture_selection_plan(
+    plan: &BTreeMap<InventoryNodeKey, BTreeSet<(InventoryNodeKey, ArtifactDependency)>>,
+    selection: ArtifactSelectionId,
+) -> ArtifactSelectionPlan {
+    ArtifactSelectionPlan {
+        selection,
+        nodes: plan.keys().copied().collect(),
+        dependencies: plan
+            .iter()
+            .flat_map(|(source, edges)| {
+                edges
+                    .iter()
+                    .map(|(target, edge)| (*source, *target, edge.clone()))
+            })
+            .collect(),
+    }
+}
+
 fn install_binding_plan(
     state: &mut InventoryState,
     entries: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
@@ -1484,6 +1517,10 @@ fn install_binding_plan(
     for key in &additions {
         let index = state.graph.add_node(*key);
         state.indices.insert(*key, index);
+        *state
+            .selection_nodes
+            .entry(key.binding().selection)
+            .or_default() += 1;
         if matches!(key, InventoryNodeKey::Artifact(_)) {
             *state.payload_bindings.entry(key.artifact()).or_default() += 1;
         }
@@ -1585,6 +1622,34 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         demand: NativeArtifactDemand<'_>,
     ) -> Result<ArtifactView, CompileError> {
+        self.admit_shared_with_intent(
+            parent,
+            entries,
+            demand,
+            ArtifactRootIntent::SuppliedArtifacts,
+        )
+    }
+    pub(crate) fn admit_certified_with_demand(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        demand: NativeArtifactDemand<'_>,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) -> Result<ArtifactView, CompileError> {
+        self.admit_shared_with_intent(
+            parent,
+            entries,
+            demand,
+            ArtifactRootIntent::Certified(selection),
+        )
+    }
+    fn admit_shared_with_intent(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        demand: NativeArtifactDemand<'_>,
+        intent: ArtifactRootIntent<'_>,
+    ) -> Result<ArtifactView, CompileError> {
         let groups = match demand {
             NativeArtifactDemand::ScopeInterfaces => BTreeSet::new(),
             NativeArtifactDemand::AllGroups => entries
@@ -1623,13 +1688,7 @@ impl ArtifactInventory {
                 groups
             }
         };
-        self.admit_selected(
-            parent,
-            entries,
-            groups,
-            false,
-            ArtifactRootIntent::SuppliedArtifacts,
-        )
+        self.admit_selected(parent, entries, groups, false, intent)
     }
     /// Persisted keys are checked against full certified bytes and exact closure.
     pub(crate) fn admit_recovery_selection(
@@ -1660,18 +1719,13 @@ impl ArtifactInventory {
         if entries.is_empty() && groups.is_empty() {
             return Ok(parent.clone());
         }
-        let mut materialization_parents = Vec::new();
-        let (retained_roots, native_custody) = match root_intent {
-            ArtifactRootIntent::SuppliedArtifacts => (None, Vec::new()),
-            ArtifactRootIntent::RetainedView(source) => {
-                source
-                    .collect_materializations(&mut materialization_parents, &mut BTreeSet::new())?;
-                (
-                    Some(source.roots().to_vec()),
-                    source.native_custody().to_vec(),
-                )
-            }
+        let materialization_parents = Vec::new();
+        let certified_selection = match root_intent {
+            ArtifactRootIntent::Certified(selection) => Some(selection),
+            _ => None,
         };
+        let retained_roots: Option<Vec<InventoryNodeKey>> = None;
+        let native_custody = Vec::<ArtifactBinding>::new();
         let mut expanded = entries;
         let mut implicit = Vec::new();
         for entry in &expanded {
@@ -1738,45 +1792,168 @@ impl ArtifactInventory {
             .map(|(id, entry)| (*id, Arc::clone(entry)))
             .collect::<BTreeMap<_, _>>();
         selected.extend(supplied.clone());
+        let namespace_ids = match certified_selection {
+            Some(issued) => Some(
+                issued
+                    .artifact_ids_from_entries(&selected)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
+            ),
+            None => None,
+        };
+        if let Some(ids) = &namespace_ids {
+            selected.retain(|id, entry| {
+                ids.contains(id)
+                    || match &entry.payload {
+                        ArtifactPayload::Original(product) => {
+                            !parent_ids.contains(id)
+                                && product.module_interface().is_some_and(|canonical| {
+                                    ids.contains(
+                                        &ArtifactEntry::canonical(canonical.clone()).descriptor.id,
+                                    )
+                                })
+                        }
+                        _ => false,
+                    }
+            });
+            // Historical originals keep their issuer's exact bindings. An
+            // unowned historical product cannot borrow an ambient graph path.
+            for (id, entry) in &supplied {
+                if matches!(entry.payload, ArtifactPayload::Original(_))
+                    && !selected.contains_key(id)
+                    && !parent_ids.contains(id)
+                {
+                    return Err(failure(
+                        "historical original lacks its issuing bound closure",
+                    ));
+                }
+            }
+        }
         let owners = SelectedOwners::new(&state, &selected, &parent_ids)?;
         let mut selected_groups = native_groups(parent_nodes);
         selected_groups.extend(groups.iter().copied());
+        if namespace_ids.is_some() {
+            selected_groups.retain(|group| selected.contains_key(&group.artifact));
+        }
         let (planned, closed_groups) = owners.planned_edges(&state, &selected, &selected_groups)?;
         if exact && closed_groups != selected_groups {
             return Err(failure(
                 "recovered native group closure differs from certified demand",
             ));
         }
-        let selection = selection_identity(&planned);
-        let namespace = selected
-            .keys()
-            .map(|id| {
+        // Reuse inherited bindings only while their entire qualified outgoing
+        // edge set matches the newly issued namespace. Changes propagate through
+        // parents; unrelated inherited vertices are never rebound or orphaned.
+        let provisional = ArtifactSelectionId([0; 32]);
+        let mut inherited = BTreeMap::new();
+        for (key, expected) in &planned {
+            let id = key.artifact();
+            let Some(binding) = parent.namespace().get(&id).copied() else {
+                continue;
+            };
+            let candidate = match key {
+                LogicalNodeKey::Artifact(_) => InventoryNodeKey::Artifact(binding),
+                LogicalNodeKey::Group(group) => InventoryNodeKey::Group(NativeGroupBinding {
+                    binding,
+                    original_ordinal: group.original_ordinal,
+                }),
+            };
+            let Some(index) = state.indices.get(&candidate) else {
+                continue;
+            };
+            let actual = state
+                .graph
+                .edges(*index)
+                .map(|edge| (state.graph[edge.target()].logical(), edge.weight().clone()))
+                .collect::<BTreeSet<_>>();
+            if &actual == expected {
+                inherited.insert(*key, candidate);
+            }
+        }
+        loop {
+            let mut invalid = Vec::new();
+            for (key, candidate) in &inherited {
+                let actual = state
+                    .graph
+                    .edges(state.indices[candidate])
+                    .map(|edge| (state.graph[edge.target()], edge.weight().clone()))
+                    .collect::<BTreeSet<_>>();
+                let expected = planned[key]
+                    .iter()
+                    .map(|(target, edge)| {
+                        (
+                            inherited
+                                .get(target)
+                                .copied()
+                                .unwrap_or_else(|| target.bind(provisional)),
+                            edge.clone(),
+                        )
+                    })
+                    .collect::<BTreeSet<_>>();
+                if actual != expected {
+                    invalid.push(*key);
+                }
+            }
+            if invalid.is_empty() {
+                break;
+            }
+            for key in invalid {
+                inherited.remove(&key);
+            }
+        }
+        let provisional_plan = planned
+            .iter()
+            .map(|(key, edges)| {
                 (
-                    *id,
-                    ArtifactBinding {
-                        artifact: *id,
-                        selection,
-                    },
+                    inherited
+                        .get(key)
+                        .copied()
+                        .unwrap_or_else(|| key.bind(provisional)),
+                    edges
+                        .iter()
+                        .map(|(target, edge)| {
+                            (
+                                inherited
+                                    .get(target)
+                                    .copied()
+                                    .unwrap_or_else(|| target.bind(provisional)),
+                                edge.clone(),
+                            )
+                        })
+                        .collect::<BTreeSet<_>>(),
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let mut bound = BTreeMap::new();
-        for (key, dependencies) in planned {
-            bound.insert(
-                key.bind(selection),
-                dependencies
-                    .into_iter()
-                    .map(|(target, edge)| (target.bind(selection), edge))
-                    .collect::<BTreeSet<_>>(),
-            );
-        }
+        let selection = selection_identity(&provisional_plan, provisional);
+        let resolve = |key: LogicalNodeKey| {
+            inherited
+                .get(&key)
+                .copied()
+                .unwrap_or_else(|| key.bind(selection))
+        };
+        let bound = planned
+            .iter()
+            .map(|(key, edges)| {
+                (
+                    resolve(*key),
+                    edges
+                        .iter()
+                        .map(|(target, edge)| (resolve(*target), edge.clone()))
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let namespace = selected
+            .keys()
+            .filter(|id| namespace_ids.as_ref().is_none_or(|ids| ids.contains(id)))
+            .map(|id| (*id, resolve(LogicalNodeKey::Artifact(*id)).binding()))
+            .collect::<BTreeMap<_, _>>();
         let roots = retained_roots.unwrap_or_else(|| {
-            supplied
+            selected
                 .keys()
                 .copied()
                 .map(LogicalNodeKey::Artifact)
-                .chain(groups.iter().copied().map(LogicalNodeKey::Group))
-                .map(|key| key.bind(selection))
+                .chain(selected_groups.iter().copied().map(LogicalNodeKey::Group))
+                .map(resolve)
                 .collect()
         });
         // The prior selected closure stays immutable and independently owned.
@@ -1792,7 +1969,22 @@ impl ArtifactInventory {
             })
             .map(|(id, entry)| (*id, Arc::clone(entry)))
             .collect();
+        let witness = bound
+            .keys()
+            .any(|key| key.binding().selection == selection)
+            .then(|| Arc::new(capture_selection_plan(&bound, selection)));
+        if witness.as_ref().is_some_and(|witness| {
+            state
+                .selection_plans
+                .get(&selection)
+                .is_some_and(|previous| previous != witness)
+        }) {
+            return Err(failure("selection digest has differing exact plans"));
+        }
         install_binding_plan(&mut state, &selected, &bound)?;
+        if let Some(witness) = witness {
+            state.selection_plans.insert(selection, witness);
+        }
         for key in roots.iter().copied().chain(
             native_custody
                 .iter()
@@ -1871,6 +2063,47 @@ impl ArtifactInventory {
                 .insert((*target, edge.clone()))
             {
                 return Err(failure("duplicate bound recovery edge"));
+            }
+        }
+        let mut witnesses = BTreeMap::new();
+        for witness in &selection.selections {
+            let mut complete = witness
+                .nodes
+                .iter()
+                .copied()
+                .map(|key| (key, BTreeSet::new()))
+                .collect::<BTreeMap<_, _>>();
+            if complete.len() != witness.nodes.len() {
+                return Err(failure("duplicate selection witness node"));
+            }
+            for (source, target, edge) in &witness.dependencies {
+                if !complete.contains_key(target) {
+                    return Err(failure("selection witness target missing"));
+                }
+                if !complete
+                    .get_mut(source)
+                    .ok_or_else(|| failure("selection witness source missing"))?
+                    .insert((*target, edge.clone()))
+                {
+                    return Err(failure("duplicate selection witness edge"));
+                }
+            }
+            if selection_identity(&complete, witness.selection) != witness.selection
+                || witnesses
+                    .insert(witness.selection, (Arc::new(witness.clone()), complete))
+                    .is_some()
+            {
+                return Err(failure(
+                    "selection witness digest differs from exact binding plan",
+                ));
+            }
+        }
+        for (source, edges) in &plan {
+            let (_, witness) = witnesses
+                .get(&source.binding().selection)
+                .ok_or_else(|| failure("issued binding plan missing"))?;
+            if witness.get(source) != Some(edges) {
+                return Err(failure("retained edges differ from issued binding plan"));
             }
         }
         let mut state = self.0.lock().expect("inventory lock");
@@ -1968,7 +2201,19 @@ impl ArtifactInventory {
         if reachable.len() != plan.len() {
             return Err(failure("bound recovery includes unreachable bindings"));
         }
+        for (id, (witness, _)) in &witnesses {
+            if state
+                .selection_plans
+                .get(id)
+                .is_some_and(|previous| previous != witness)
+            {
+                return Err(failure("selection digest has differing exact plans"));
+            }
+        }
         install_binding_plan(&mut state, &entries, &plan)?;
+        for (id, (witness, _)) in witnesses {
+            state.selection_plans.insert(id, witness);
+        }
         for key in roots.iter().copied().chain(
             selection
                 .native_custody
@@ -2154,6 +2399,16 @@ impl Drop for ViewLease {
             let index = state.indices.remove(id).expect("indexed artifact");
             state.graph.remove_node(index);
             state.reclaimed_nodes += 1;
+            let scope = id.binding().selection;
+            let count = state
+                .selection_nodes
+                .get_mut(&scope)
+                .expect("selection node count");
+            *count -= 1;
+            if *count == 0 {
+                state.selection_nodes.remove(&scope);
+                state.selection_plans.remove(&scope);
+            }
             if let InventoryNodeKey::Artifact(id) = id {
                 let count = state
                     .payload_bindings
@@ -2532,6 +2787,19 @@ impl ArtifactView {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let nodes = &self.read_projection(&state).nodes;
         ArtifactGraphSelection {
+            selections: nodes
+                .iter()
+                .map(|key| key.binding().selection)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|selection| {
+                    (**state
+                        .selection_plans
+                        .get(&selection)
+                        .expect("issued selection plan"))
+                    .clone()
+                })
+                .collect(),
             bindings: nodes
                 .iter()
                 .filter_map(|key| match key {
@@ -3030,9 +3298,11 @@ impl ArtifactView {
     }
 
     fn retain_projected_materializations(&self, mut retained: Self) -> Result<Self, CompileError> {
-        Arc::get_mut(&mut retained.lease)
-            .expect("new selection lease")
-            .namespace = self.namespace();
+        if retained.lease.namespace.is_empty() {
+            Arc::get_mut(&mut retained.lease)
+                .expect("new selection lease")
+                .namespace = self.namespace();
+        }
         {
             let state = self.lease.inventory.0.lock().expect("inventory lock");
             let selected = artifact_ids(&admitted_closure(
@@ -3185,13 +3455,13 @@ impl ArtifactView {
                 materialization: Mutex::new(BTreeMap::new()),
             }))
         } else {
-            self.lease.inventory.admit_selected(
-                self,
+            let imported = self.lease.inventory.recover_selection(
+                &self.lease.inventory.empty_view(),
                 other.entries(),
-                other.selected_native_groups(),
-                true,
-                ArtifactRootIntent::RetainedView(other),
-            )
+                &other.capture_graph_selection(),
+                &other.binding_dependencies(),
+            )?;
+            self.merge(&imported)
         }
     }
     /// Reuse only this view's exact completed native carrier. Demand and graph
@@ -4662,6 +4932,7 @@ mod tests {
             original_input_identity: "input".into(),
             selection: ExactArtifactSelection(Arc::new(ExactArtifactSelectionFacts {
                 graph: ArtifactGraphSelection {
+                    selections: vec![],
                     bindings: vec![
                         ArtifactBinding {
                             artifact: ArtifactId([4; 32]),
