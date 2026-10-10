@@ -332,6 +332,7 @@ where
             mut launch_worktrees,
             record_workspace,
             seed,
+            exit_destination,
         } = child;
         let checkpoint_lease = checkpoint_admission
             .as_ref()
@@ -380,7 +381,7 @@ where
             None => {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "workspace admission is unavailable".into(),
-                ))
+                ));
             }
         };
         // The child may carry declarations that import a helper published by
@@ -504,6 +505,7 @@ where
         } else {
             ResidentKernelBehavior::child(descriptor, environment.clone(), entry, launch_worktrees)
         };
+        behavior.exit_destination = exit_destination;
         behavior.child_placement_custody = Some(continuation.placement_custody.clone());
         behavior.admitted_checkpoint = checkpoint_admission.clone();
         behavior.prepared_workspace = prepared_workspace;

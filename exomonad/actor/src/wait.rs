@@ -24,7 +24,7 @@ pub(crate) fn decode_wait_target(
     request: &HaskellValue,
     table: &DataConTable,
 ) -> Result<ActorRef, ActorWaitError> {
-    let ActorReq::ActorWaitWith((actor_id, incarnation)) = ActorReq::from_value(request, table)?
+    let ActorReq::ActorWaitWith(_, (actor_id, incarnation)) = ActorReq::from_value(request, table)?
     else {
         return Err(ActorWaitError::UnexpectedRequest);
     };
@@ -35,7 +35,7 @@ pub(crate) fn decode_poll_target(
     request: &HaskellValue,
     table: &DataConTable,
 ) -> Result<ActorRef, ActorWaitError> {
-    let ActorReq::ActorPollWith((actor_id, incarnation)) = ActorReq::from_value(request, table)?
+    let ActorReq::ActorPollWith(_, (actor_id, incarnation)) = ActorReq::from_value(request, table)?
     else {
         return Err(ActorWaitError::UnexpectedRequest);
     };
@@ -58,8 +58,8 @@ pub(crate) fn decode_address(actor_id: i64, incarnation: i64) -> Result<ActorRef
 
 impl tidepool_bridge::sealed::ToHaskellSealed for ActorTerminal {}
 
-/// Stream immutable terminal metadata. Successful domain data remains in the
-/// shared Haskell exit cell carried by the exact actor reference.
+/// Stream native terminal metadata for generic Rust actors. Typed Haskell exit
+/// observation uses the independently retained result snapshot.
 impl ToHaskell for ActorTerminal {
     fn visit(
         &self,
@@ -80,6 +80,16 @@ impl ToHaskell for ActorTerminal {
         }
         visitor.end_constructor()
     }
+}
+
+#[derive(tidepool_bridge_derive::ToHaskell)]
+pub(crate) enum ExitObservationFailure {
+    #[haskell(module = "Tidepool.Internal.ActorExit", name = "Failed")]
+    Failed(String),
+    #[haskell(module = "Tidepool.Internal.ActorExit", name = "Cancelled")]
+    Cancelled(String),
+    #[haskell(module = "Tidepool.Internal.ActorExit", name = "Unavailable")]
+    Unavailable(String),
 }
 
 #[cfg(test)]

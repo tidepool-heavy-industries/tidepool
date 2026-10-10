@@ -859,6 +859,8 @@ test-suite native-helper-contract
     Tidepool.Effects.Core
     Tidepool.FilePath
     Tidepool.Internal.RequestSite
+    Tidepool.Internal.ActorRef
+    Tidepool.Internal.ActorExit
     Tidepool.Patch
     Tidepool.Prelude
     Tidepool.QQ.Fmt.Runtime
@@ -891,6 +893,8 @@ test-suite pinned-source-contract
     Tidepool.Effects.Core
     Tidepool.FilePath
     Tidepool.Internal.RequestSite
+    Tidepool.Internal.ActorRef
+    Tidepool.Internal.ActorExit
     Tidepool.Patch
     Tidepool.Prelude
     Tidepool.QQ.Fmt.Runtime

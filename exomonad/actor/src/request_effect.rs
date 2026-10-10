@@ -293,6 +293,7 @@ pub(crate) struct RequestReservation {
 }
 
 pub(crate) struct RequestSubmission {
+    pub destination: crate::owned_result::RequestResultDestination,
     pub continuation: ResidentHole,
     pub request: RequestId,
     pub target: ActorRef,
@@ -481,16 +482,24 @@ impl ToHaskell for RequestAnswer {
                 emit!("ResponseStarting", detail)
             }
             Self::Response(Err(error)) => {
-                let rejected = tidepool_bridge::get_qualified(table, "Tidepool.Agent.Reply.Internal.ResponseRejected", 1)
-                    .ok_or_else(|| BridgeError::UnknownDataConName("ResponseRejected".into()))?;
-                let unavailable = tidepool_bridge::get_qualified(table, "Tidepool.Agent.Reply.Internal.ResponseUnavailable", 1)
-                    .ok_or_else(|| BridgeError::UnknownDataConName("ResponseUnavailable".into()))?;
+                let rejected = tidepool_bridge::get_qualified(
+                    table,
+                    "Tidepool.Agent.Reply.Internal.ResponseRejected",
+                    1,
+                )
+                .ok_or_else(|| BridgeError::UnknownDataConName("ResponseRejected".into()))?;
+                let unavailable = tidepool_bridge::get_qualified(
+                    table,
+                    "Tidepool.Agent.Reply.Internal.ResponseUnavailable",
+                    1,
+                )
+                .ok_or_else(|| BridgeError::UnknownDataConName("ResponseUnavailable".into()))?;
                 visitor.begin_constructor(unavailable, 1)?;
                 visitor.begin_constructor(rejected, 1)?;
                 error.visit(table, visitor)?;
                 visitor.end_constructor()?;
                 visitor.end_constructor()
-            },
+            }
             Self::Cancel(Ok(crate::CancelRequestOutcome::Requested)) => {
                 emit!("CancellationRequested")
             }
