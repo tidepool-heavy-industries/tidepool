@@ -1,6 +1,11 @@
 //! Checkpoint retirement keeps the actor shutdown deadline and retry evidence.
 
 use super::*;
+use crate::{
+    ActorCapabilities, ActorPersistencePolicy, ActorPlacement, CheckpointRefusal,
+    CheckpointSourceLayer, CleanupComponentOutcome,
+};
+use std::time::Duration;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{ContextCheckpointBoundary, ModuleEnv, SessionLib};
