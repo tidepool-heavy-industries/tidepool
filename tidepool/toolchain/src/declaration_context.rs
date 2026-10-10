@@ -1475,7 +1475,8 @@ impl RetainedArtifactMaterialization {
 
 #[derive(Clone)]
 struct RetainedArtifactRow {
-    owned_inputs: BTreeMap<original_inputs::OriginalInputKind, crate::owned_input_arena::OwnedInputSlice>,
+    owned_inputs:
+        BTreeMap<original_inputs::OriginalInputKind, crate::owned_input_arena::OwnedInputSlice>,
     _directory: Arc<tempfile::TempDir>,
     interface: ExactIfaceArtifact,
     interface_evidence: Value,
@@ -1540,7 +1541,7 @@ impl RetainedArtifactRow {
             if let Some(core) = canonical.core_bytes() {
                 parts.push(OriginalInputPart {
                     kind: Kind::Core,
-                transport: self.owned_inputs[&Kind::Core].clone(),
+                    transport: self.owned_inputs[&Kind::Core].clone(),
                     path: PathBuf::from(string(&fields[3])?),
                     sha256: string(&fields[4])?.to_owned(),
                     bytes: core.len() as u64,
@@ -2602,6 +2603,32 @@ impl ExactProductAdmission<'_> {
 }
 
 impl ExactCompilationRequest {
+    pub(crate) fn input_transport_files(&self) -> Vec<Arc<std::fs::File>> {
+        let Some(materialization) = &self.materialization else {
+            return Vec::new();
+        };
+        let metadata = &self.inputs.compiler.metadata;
+        let mut files = BTreeMap::new();
+        for row in materialization.selected_rows(metadata).into_values() {
+            for slice in row.owned_inputs.values() {
+                let file = slice.compiler_file_lease();
+                files.insert(Arc::as_ptr(&file) as usize, file);
+            }
+        }
+        let graph_paths = materialization.graph_path_refs();
+        for entry in metadata.entries.values() {
+            if let ArtifactPayload::Original(product) = &entry.payload {
+                if let Some(graph) = product.execution_source() {
+                    if let Some(owned) = graph_paths.get(&graph.digest()) {
+                        let file = owned.transport.compiler_file_lease();
+                        files.insert(Arc::as_ptr(&file) as usize, file);
+                    }
+                }
+            }
+        }
+        files.into_values().collect()
+    }
+
     pub(crate) fn context(&self) -> &Arc<ExactDeclarationContext> {
         &self.inputs.context
     }
@@ -5502,7 +5529,15 @@ impl ExactDeclarationContext {
                 }
                 result
             })?;
-        self.prepare_compilation_from_metadata(root, producer, None, inputs, &scaffold, None, RequestInputTransport::DurableFiles)
+        self.prepare_compilation_from_metadata(
+            root,
+            producer,
+            None,
+            inputs,
+            &scaffold,
+            None,
+            RequestInputTransport::DurableFiles,
+        )
     }
 
     pub(crate) fn prepare_compilation_with_authorization(
@@ -5617,7 +5652,9 @@ impl ExactDeclarationContext {
             .cloned()
             .collect::<Vec<_>>();
         let mut rows = BTreeMap::new();
-        let mut arena_builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(1024 * 1024 * 1024).map_err(failure)?;
+        let mut arena_builder =
+            crate::owned_input_arena::OwnedInputArenaBuilder::new(1024 * 1024 * 1024)
+                .map_err(failure)?;
         let mut pending_inputs = BTreeMap::new();
         let mut acquired_inputs = BTreeMap::new();
         for entry in &new_entries {
@@ -5626,12 +5663,16 @@ impl ExactDeclarationContext {
                 ArtifactPayload::Original(product) => product.module_interface(),
                 ArtifactPayload::Interface(..) => None,
             };
-            if let Some(custody) = canonical.and_then(|canonical| canonical.catalog_input_custody()) {
+            if let Some(custody) = canonical.and_then(|canonical| canonical.catalog_input_custody())
+            {
                 acquired_inputs.insert(entry.descriptor.id, custody.owned_inputs.clone());
                 continue;
             }
             for (kind, bytes) in original_inputs::entry_payloads(entry) {
-                pending_inputs.insert((entry.descriptor.id, kind), arena_builder.append(bytes).map_err(failure)?);
+                pending_inputs.insert(
+                    (entry.descriptor.id, kind),
+                    arena_builder.append(bytes).map_err(failure)?,
+                );
             }
         }
         let mut validation = PackageInterfaceValidation::default();
@@ -5668,7 +5709,9 @@ impl ExactDeclarationContext {
             rows.insert(
                 entry.descriptor.id,
                 RetainedArtifactRow {
-                    owned_inputs: acquired_inputs.remove(&entry.descriptor.id).unwrap_or_default(),
+                    owned_inputs: acquired_inputs
+                        .remove(&entry.descriptor.id)
+                        .unwrap_or_default(),
                     _directory: Arc::clone(&directory),
                     interface: artifact.interface,
                     interface_evidence,
@@ -5745,20 +5788,45 @@ impl ExactDeclarationContext {
             &mut scope_written_bytes,
         )?;
         let mut pending_graphs = BTreeMap::new();
+        let mut graph_transports = BTreeMap::new();
         for entry in &entries {
             if let ArtifactPayload::Original(product) = &entry.payload {
                 if let Some(graph) = product.execution_source() {
-                    if !inherited_graphs.contains(&graph.digest()) && graph_paths.contains_key(&graph.digest()) && !pending_graphs.contains_key(&graph.digest()) {
-                        pending_graphs.insert(graph.digest(), arena_builder.append(graph.bytes()).map_err(failure)?);
+                    if !inherited_graphs.contains(&graph.digest())
+                        && graph_paths.contains_key(&graph.digest())
+                        && !pending_graphs.contains_key(&graph.digest())
+                    {
+                        if let Some(slice) = product
+                            .module_interface()
+                            .and_then(|canonical| canonical.catalog_input_custody())
+                            .and_then(|custody| {
+                                custody
+                                    .owned_inputs
+                                    .get(&original_inputs::OriginalInputKind::Graph)
+                                    .cloned()
+                            })
+                        {
+                            graph_transports.insert(graph.digest(), slice);
+                        } else if !graph_transports.contains_key(&graph.digest()) {
+                            pending_graphs.insert(
+                                graph.digest(),
+                                arena_builder.append(graph.bytes()).map_err(failure)?,
+                            );
+                        }
                     }
                 }
             }
         }
         let arena = arena_builder.finish().map_err(failure)?;
         for ((id, kind), pending) in pending_inputs {
-            rows.get_mut(&id).expect("new materialization row").owned_inputs.insert(kind, arena.issue_slice(pending).map_err(failure)?);
+            rows.get_mut(&id)
+                .expect("new materialization row")
+                .owned_inputs
+                .insert(kind, arena.issue_slice(pending).map_err(failure)?);
         }
-        let graph_transports = pending_graphs.into_iter().map(|(digest,pending)| Ok((digest,arena.issue_slice(pending).map_err(failure)?))).collect::<Result<BTreeMap<_,_>,CompileError>>()?;
+        for (digest, pending) in pending_graphs {
+            graph_transports.insert(digest, arena.issue_slice(pending).map_err(failure)?);
+        }
         let work = validation.work();
         tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_immutable_materialization",
             retained_entries = inherited_row_count, new_entries = new_entries.len(),
@@ -5982,48 +6050,50 @@ impl ExactDeclarationContext {
             #[cfg(test)]
             RequestInputTransport::DurableFiles => Value::Array(vec![text("fresh-files")]),
             RequestInputTransport::OwnedArena => {
-        let image_producer = CanonicalProducerIdentity::from_producer_bytes(producer).hex();
-        let mut arenas = original_inputs::OriginalInputArenaTable::default();
-        let images = metadata
-            .entries
-            .values()
-            .map(|entry| {
-                let row = selected_rows[&entry.descriptor.id];
-                let mut parts = row.original_input_parts(entry)?;
-                if let ArtifactPayload::Original(product) = &entry.payload {
-                    if let Some(graph) = product
-                        .execution_source()
-                        .filter(|graph| admitted_graphs.contains(&hex(&graph.digest())))
-                    {
-                        parts.push(original_inputs::OriginalInputPart {
-                            kind: original_inputs::OriginalInputKind::Graph,
-                            transport: graph_paths[&graph.digest()].transport.clone(),
-                            path: graph_paths[&graph.digest()].path.clone(),
-                            sha256: hex(&graph.digest()),
-                            bytes: graph.bytes().len() as u64,
-                        });
-                    }
-                }
-                // Inherited rows own the unchanged materialized aliases. A new
-                // admission can strengthen provenance for equal bytes, so the
-                // receiving image observes the current selected payload owner.
-                let original_origins = match &entry.payload {
-                    ArtifactPayload::Canonical(interface) => interface.original_input_origins(),
-                    ArtifactPayload::Original(product) => product
-                        .module_interface()
-                        .and_then(|interface| interface.original_input_origins()),
-                    ArtifactPayload::Interface(..) => None,
-                };
-                original_inputs::encode_image(
-                    &image_producer,
-                    &entry.descriptor.owner.unit,
-                    &entry.descriptor.owner.module,
-                    parts,
-                    original_origins,
-                    &mut arenas,
-                )
-            })
-            .collect::<Result<Vec<_>, CompileError>>()?;
+                let image_producer = CanonicalProducerIdentity::from_producer_bytes(producer).hex();
+                let mut arenas = original_inputs::OriginalInputArenaTable::default();
+                let images = metadata
+                    .entries
+                    .values()
+                    .map(|entry| {
+                        let row = selected_rows[&entry.descriptor.id];
+                        let mut parts = row.original_input_parts(entry)?;
+                        if let ArtifactPayload::Original(product) = &entry.payload {
+                            if let Some(graph) = product
+                                .execution_source()
+                                .filter(|graph| admitted_graphs.contains(&hex(&graph.digest())))
+                            {
+                                parts.push(original_inputs::OriginalInputPart {
+                                    kind: original_inputs::OriginalInputKind::Graph,
+                                    transport: graph_paths[&graph.digest()].transport.clone(),
+                                    path: graph_paths[&graph.digest()].path.clone(),
+                                    sha256: hex(&graph.digest()),
+                                    bytes: graph.bytes().len() as u64,
+                                });
+                            }
+                        }
+                        // Inherited rows own the unchanged materialized aliases. A new
+                        // admission can strengthen provenance for equal bytes, so the
+                        // receiving image observes the current selected payload owner.
+                        let original_origins = match &entry.payload {
+                            ArtifactPayload::Canonical(interface) => {
+                                interface.original_input_origins()
+                            }
+                            ArtifactPayload::Original(product) => product
+                                .module_interface()
+                                .and_then(|interface| interface.original_input_origins()),
+                            ArtifactPayload::Interface(..) => None,
+                        };
+                        original_inputs::encode_image(
+                            &image_producer,
+                            &entry.descriptor.owner.unit,
+                            &entry.descriptor.owner.module,
+                            parts,
+                            original_origins,
+                            &mut arenas,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, CompileError>>()?;
                 arenas.acquisition(images)?
             }
         };
@@ -8105,7 +8175,7 @@ mod tests {
         let value: Value =
             ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
                 .unwrap();
-        let fields = row(&value, 9).unwrap();
+        let fields = row(&value, EXACT_SCOPE_SCHEMA_FIELDS).unwrap();
         assert_eq!(string(&fields[2]).unwrap(), hex(&expected));
         assert_eq!(row(&fields[8], 2).unwrap()[1], text(hex(&expected)));
         let mut foreign = request.artifacts.clone();
@@ -8120,6 +8190,18 @@ mod tests {
         let request = context
             .prepare_fixture_compilation(packet.path(), &producer)
             .unwrap();
+        let encoded = std::fs::read(&request.manifest).unwrap();
+        let manifest: Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(
+            manifest.as_array().unwrap()[10],
+            Value::Array(vec![text("fresh-files")])
+        );
+        assert!(
+            !encoded
+                .windows(b"/proc/".len())
+                .any(|bytes| bytes == b"/proc/"),
+            "persistable fixture must never serialize a process-owned arena endpoint"
+        );
         let paths = request
             .artifacts
             .iter()

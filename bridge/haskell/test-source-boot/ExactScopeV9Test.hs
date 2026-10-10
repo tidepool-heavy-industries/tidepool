@@ -48,7 +48,7 @@ exactScopeChecksFor kind manifest = do
     (fail "current mutation adapter changed the genuine exact-scope envelope")
   case scopeCodecAcquisition fixture of
     Just FreshCodecInputs -> pure ()
-    Just (ContinueCodecOriginals _) -> pure ()
+    Just (ContinueCodecOriginals _ _) -> pure ()
     Nothing -> fail "production exact-scope issuer emitted an unknown acquisition variant"
   unless (Map.keysSet (scopeInterfaceEvidence scope) == Set.fromList
       [(exactUnit iface,exactModule iface) | (iface,_,_) <- scopeInterfaces scope])
@@ -100,7 +100,7 @@ exactScopeChecksFor kind manifest = do
               (replace 1 (TString (T.pack path)) role))
         BS.writeFile path bytes
         refuse manifest expected (evidence replacement)
-  forM_ ["2","4","6","7","8","9","10","11"] $ \version ->
+  forM_ ["2","4","6","7","8","9","10","11","12"] $ \version ->
     refuse manifest "unsupported exact scope" (scopeCodecTerm (replaceScopeCodecField ScopeCodecVersion (TString version) fixture))
   forM_ [8,9] $ \count ->
     refuse manifest "unsupported exact scope" (TList (take count fields))

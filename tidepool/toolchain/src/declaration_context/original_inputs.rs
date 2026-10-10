@@ -92,34 +92,76 @@ pub(crate) struct OriginalInputPart {
 pub(crate) struct OriginalInputArenaTable(BTreeMap<PathBuf, (usize, u64)>);
 
 impl OriginalInputArenaTable {
-    fn location(&mut self, slice: &crate::owned_input_arena::OwnedInputSlice) -> Result<Value, CompileError> {
+    fn location(
+        &mut self,
+        slice: &crate::owned_input_arena::OwnedInputSlice,
+    ) -> Result<Value, CompileError> {
         let next = self.0.len();
-        if next >= 4096 { return Err(super::failure("original input arena table exceeds bound")); }
-        let (index, extent) = self.0.entry(slice.endpoint().to_owned()).or_insert((next, slice.arena_len()));
-        if *extent != slice.arena_len() { return Err(super::failure("conflicting original input arena extent")); }
-        Ok(Value::Array(vec![Value::Integer((*index as u64).into()), Value::Integer(slice.offset().into())]))
+        if next >= 4096 && !self.0.contains_key(slice.endpoint()) {
+            return Err(super::failure("original input arena table exceeds bound"));
+        }
+        let (index, extent) = self
+            .0
+            .entry(slice.endpoint().to_owned())
+            .or_insert((next, slice.arena_len()));
+        if *extent != slice.arena_len() {
+            return Err(super::failure("conflicting original input arena extent"));
+        }
+        Ok(Value::Array(vec![
+            Value::Integer((*index as u64).into()),
+            Value::Integer(slice.offset().into()),
+        ]))
     }
 
     pub(crate) fn acquisition(self, images: Vec<Value>) -> Result<Value, CompileError> {
         let mut descriptors = vec![Value::Null; self.0.len()];
         for (endpoint, (index, extent)) in self.0 {
-            descriptors[index] = Value::Array(vec![super::path_value(&endpoint)?, Value::Integer(extent.into())]);
+            descriptors[index] = Value::Array(vec![
+                super::path_value(&endpoint)?,
+                Value::Integer(extent.into()),
+            ]);
         }
-        Ok(Value::Array(vec![super::text("continue-originals"), Value::Array(descriptors), Value::Array(images)]))
+        Ok(Value::Array(vec![
+            super::text("continue-originals"),
+            Value::Array(descriptors),
+            Value::Array(images),
+        ]))
     }
 }
 
-pub(crate) fn entry_payloads(entry: &crate::artifact_inventory::ArtifactEntry) -> Vec<(OriginalInputKind, &[u8])> {
+pub(crate) fn entry_payloads(
+    entry: &crate::artifact_inventory::ArtifactEntry,
+) -> Vec<(OriginalInputKind, &[u8])> {
     use crate::artifact_inventory::ArtifactPayload;
     let (interface, packages, canonical) = match &entry.payload {
-        ArtifactPayload::Original(product) => (product.interface_bytes(), product.package_imports_bytes(), product.module_interface()),
-        ArtifactPayload::Canonical(interface) => (interface.interface_bytes(), interface.package_imports_bytes(), Some(interface)),
-        ArtifactPayload::Interface(interface, _) => (interface.interface_bytes(), interface.package_imports_bytes(), None),
+        ArtifactPayload::Original(product) => (
+            product.interface_bytes(),
+            product.package_imports_bytes(),
+            product.module_interface(),
+        ),
+        ArtifactPayload::Canonical(interface) => (
+            interface.interface_bytes(),
+            interface.package_imports_bytes(),
+            Some(interface),
+        ),
+        ArtifactPayload::Interface(interface, _) => (
+            interface.interface_bytes(),
+            interface.package_imports_bytes(),
+            None,
+        ),
     };
-    let mut parts = vec![(OriginalInputKind::Interface, interface), (OriginalInputKind::Packages, packages)];
+    let mut parts = vec![
+        (OriginalInputKind::Interface, interface),
+        (OriginalInputKind::Packages, packages),
+    ];
     if let Some(canonical) = canonical {
-        parts.push((OriginalInputKind::Certificate, canonical.certificate_bytes()));
-        if let Some(core) = canonical.core_bytes() { parts.push((OriginalInputKind::Core, core)); }
+        parts.push((
+            OriginalInputKind::Certificate,
+            canonical.certificate_bytes(),
+        ));
+        if let Some(core) = canonical.core_bytes() {
+            parts.push((OriginalInputKind::Core, core));
+        }
     }
     if let ArtifactPayload::Original(product) = &entry.payload {
         parts.push((OriginalInputKind::Native, product.product_bytes()));
@@ -146,8 +188,12 @@ pub(crate) fn encode_image(
         return Err(failure("ambiguous original input image parts"));
     }
     for part in &parts {
-        if !part.path.is_absolute() || part.bytes == 0 || part.bytes > part.kind.byte_limit()
-            || part.bytes != part.transport.len() || part.sha256 != hex(&part.transport.sha256()) {
+        if !part.path.is_absolute()
+            || part.bytes == 0
+            || part.bytes > part.kind.byte_limit()
+            || part.bytes != part.transport.len()
+            || part.sha256 != hex(&part.transport.sha256())
+        {
             return Err(failure("invalid original input image part"));
         }
     }

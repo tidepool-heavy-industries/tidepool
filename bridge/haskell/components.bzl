@@ -576,6 +576,7 @@ def declare_haskell_components():
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
+        "QuickCheck",
         "bytestring",
         "cborg",
         "containers",
@@ -593,6 +594,7 @@ def declare_haskell_components():
         "-rtsopts"
     ]),
         linker_flags = haskell_component_link_flags([
+        "QuickCheck",
         "bytestring",
         "cborg",
         "containers",

@@ -435,8 +435,8 @@ originalProductRootsProofWith projectedDemand = do
             ,TString "/fixture/Source.hi",seal,seal,seal,seal,TList [],TList []
             ,TString "/fixture/Source.packages",seal,TString "/fixture/Source.tpmod",TList []
             ,TList [TString "module",TString "/fixture/module.cbor",seal,TString "/fixture/Core",seal]]
-          packet = TList [TString "TPMCAN",TString "10",TList [],TList [],TList [row]
-            ,TList [TList [],TList []],seal]
+          packet = TList [TString "TPMCAN",TString "11",TList [],TList [],TList [row]
+            ,TList [TList [],TList []],seal,TList [TString "fresh-files"]]
       BS.writeFile path (toStrictByteString (encodeTerm packet))
       readModuleCandidates path >>= \case
         Right [candidate] -> pure candidate

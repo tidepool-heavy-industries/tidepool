@@ -654,6 +654,7 @@ executable source-boot-child
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
     ghc-boot >= 9.12 && < 9.13,
+    QuickCheck >= 2.14 && < 2.16,
     containers,
     bytestring,
     cborg,

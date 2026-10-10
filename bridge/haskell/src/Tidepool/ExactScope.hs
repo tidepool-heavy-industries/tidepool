@@ -61,8 +61,8 @@ import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
 import GHC.Unit.Module.ModIface (ModIface)
-import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
-import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), ownedArenaRange, continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
+import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -77,7 +77,7 @@ import Tidepool.ModuleCandidates
 import Tidepool.ExecutionSource
   ( ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceRef(..), ExecutionSourceNode(..), decodeExecutionSourceDescriptors, decodeExecutionSourceReferences
-  , readExecutionSourceGraphsWithFacts, decodeExecutionSourceGraph, executionSourceGraphsFit
+  , readExecutionSourceGraphsWithFacts, decodeExecutionSourceBody, executionSourceGraphsFit
   , ExecutionSourceFailure(..), executionIdentityKey, executionSourceClosure, executionSourceOriginalNode
   , executionSourceOriginalClosure )
 import Tidepool.LocalNativeDeclaration
@@ -87,8 +87,8 @@ import Tidepool.PackageWitness
   , revalidateAdmittedPackageImports, validateAdmittedPackageSelection )
 import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition)
 import Tidepool.NativeOriginalCensus
-  ( OriginalNativeCensus, readOriginalNativeCensusWith, nativeCensusOwner
-  , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups
+  ( OriginalNativeCensus, readOriginalNativeCensusWith, decodeOriginalNativeCensusBody, nativeCensusOwner
+  , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups, nativeCensusSelectionMatches
   , nativeCensusRequirements, nativeCensusCanonicalCertificate )
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, finalizedValueInterfaceSeals, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
@@ -461,8 +461,7 @@ validateNativeSelection :: ExactProduct -> ExactProduct -> OriginalNativeCensus 
 validateNativeSelection selected full census = do
   unless (selected {originalGroups=[]} == full {originalGroups=[]})
     (fail "selected native product differs from its admitted full carrier")
-  expected <- either fail pure (selectNativeCensusGroups census (map originalOrdinal (originalGroups selected)))
-  unless (originalGroups selected == expected)
+  unless (nativeCensusSelectionMatches census (originalGroups selected))
     (fail "selected native groups differ from their authenticated census")
 
 newtype NativeOrdinalSelection = NativeOrdinalSelection [Word]
@@ -477,7 +476,7 @@ admitOriginalCensusUsing :: (FilePath -> String -> IO OriginalNativeCensus) -> S
   -> Map.Map InterfaceOwner ExactInterfaceEvidence -> [OfferedNativeProduct]
   -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
 admitOriginalCensusUsing readFacts producer evidence offered = Map.fromList <$> forM offered
-  (\(selected,NativeOrdinalSelection ordinals,(path,sha)) -> do
+  (\(selected,_,(path,sha)) -> do
     native <- readFacts path sha
     let key = (originalUnit selected,originalModule selected)
         expectedOwner = (originalUnit selected,originalModule selected,originalVersion selected,
@@ -490,7 +489,6 @@ admitOriginalCensusUsing readFacts producer evidence offered = Map.fromList <$> 
         , nativeCensusCanonicalCertificate native == Just (canonicalCertificateSha256 proof)
         , nativeCensusRequirements native == canonicalRequirements proof -> pure ()
       _ -> fail ("original native certification differs from its canonical owner: " ++ show key)
-    _ <- either fail pure (selectNativeCensusGroups native ordinals)
     let full = selected {originalGroups=nativeCensusExactGroups native}
     pure (key,AdmittedOriginalCensus path sha full native))
 
@@ -1163,9 +1161,10 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
              unless (artifactSha256 token == sha) (fail "exact input differs from its selected seal")
              pure (artifactBytes token)
        graphs <- readExecutionSourceGraphsWithFacts (\sha artifact -> do
-         payload <- readVerified artifact (64 * 1024 * 1024) sha
+         token <- readToken artifact (64 * 1024 * 1024)
+         either fail pure (checkArtifactSeal sha token)
          memoOriginalFact timing "original_inputs.graph" graphsState sha
-           (either fail pure (decodeExecutionSourceGraph sha payload))) path descriptors
+           (either fail pure (decodeExecutionSourceBody token))) path descriptors
        let OfferedScope producer semantic rows lexical products references purpose types published = offered
        forM_ rows $ \(iface,packages,_) -> do
          _ <- readInput (exactPath iface) (32 * 1024 * 1024)
@@ -1187,9 +1186,10 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
          _ <- readVerified (originalProductPath product) (64 * 1024 * 1024) (originalProductSha256 product)
          pure ()
        census <- admitOriginalCensusUsing (\artifact sha -> do
-         _ <- readVerified artifact (32 * 1024 * 1024) sha
+         token <- readToken artifact (32 * 1024 * 1024)
+         either fail pure (checkArtifactSeal sha token)
          memoOriginalFact timing "original_inputs.census" nativeState sha
-           (readOriginalNativeCensusWith readInput artifact sha)) producer evidence nativeDescriptors
+           (decodeOriginalNativeCensusBody sha token)) producer evidence nativeDescriptors
        selectedProducts <- selectedCensusProducts nativeDescriptors census
        roots <- extendAdmittedPackageImportsWithFacts (\(iface,artifact,sha) -> do
          payload <- readVerified artifact (4 * 1024 * 1024) sha
@@ -1447,16 +1447,43 @@ validateCandidateCanonicalInterfaceProof producer interfaces candidate = do
       | exactSha256 iface == candidateInterfaceSha256 candidate
       , packageSha == candidatePackageImportsSha256 candidate
       , Set.fromList (exactRequirements iface) == Set.fromList (candidateInterfaceRequirements candidate) -> do
-          result <- validateCanonicalProof producer interfaces key (candidateCertificatePath descriptor)
-            (candidateCertificateSha256 descriptor) (Just (candidateCoreDescriptor descriptor))
-          pure $ result >>= \proof -> do
+          result <- try (do
+            let reader = case candidateInputCustody candidate of
+                  Nothing -> readBoundedFile
+                  Just custody -> \path bound -> do
+                    bytes <- capturedRequestInput custody path (expectedSeal path)
+                    unless (BS.length bytes <= bound) (fail "candidate captured artifact exceeds bound")
+                    pure bytes
+                expectedSeal path
+                  | path == candidateCertificatePath descriptor = candidateCertificateSha256 descriptor
+                  | path == fst (candidateCoreDescriptor descriptor) = snd (candidateCoreDescriptor descriptor)
+                  | otherwise = case [(sha) | (iface,packages,sha) <- interfaces, packages == path] ++
+                      [exactSha256 iface | (iface,_,_) <- interfaces, exactPath iface == path] of
+                      [sha] -> sha
+                      _ -> ""
+            let verified path bound sha = case candidateInputCustody candidate of
+                  Nothing -> verifyInputWith readBoundedFile path bound sha
+                  Just custody -> do
+                    token <- capturedRequestInputToken custody path sha
+                    unless (BS.length (artifactBytes token) <= bound) (fail "candidate captured artifact exceeds bound")
+                    pure (artifactBytes token)
+                certificate descriptor' = verified (descriptorCertificatePath descriptor') (4*1024*1024)
+                  (descriptorCertificateSha256 descriptor') >>= decodeCertificateBytes
+            proofs <- validateCanonicalInterfacesUsing reader verified certificate producer interfaces Map.empty
+              [(key,CanonicalInterfaceDescriptor (candidateCertificatePath descriptor)
+                (candidateCertificateSha256 descriptor) (Just (uncurry CanonicalCoreArtifact (candidateCoreDescriptor descriptor))) CandidateCarrier)]
+            proof <- maybe (fail "candidate canonical owner disappeared") pure (Map.lookup key proofs)
+            pure proof)
+            :: IO (Either IOException CanonicalInterfaceProof)
+          pure $ either (Left . show) Right result >>= \proof -> do
             unless (candidateProducerSha256 candidate == producer
                 && canonicalSourceSha256 proof == candidateSourceSha256 candidate
                 && Map.keys (canonicalRequirements proof) == candidateInterfaceRequirements candidate)
               (Left "candidate canonical proof differs from source, producer or requirements")
-            pure proof
-              {proofNativeInput=Just (candidateProductPath candidate,candidateProductSha256 candidate)
-              ,proofExecutionGraphs=maybe [] fst (candidateExecutionSources candidate)}
+            let complete = proof
+                  {proofNativeInput=Just (candidateProductPath candidate,candidateProductSha256 candidate)
+                  ,proofExecutionGraphs=maybe [] fst (candidateExecutionSources candidate)}
+            pure (maybe complete (\custody -> bindCanonicalProofInputs custody complete) (candidateInputCustody candidate))
     _ -> pure (Left "candidate canonical proof lacks its selected exact interface")
 
 validateCanonicalInterfaces

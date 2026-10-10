@@ -6,6 +6,10 @@ import CandidateExecutionSourcesTest (executionScopeDescriptorChecks)
 
 import ExactScopeV9Test (exactScopeChecks, nativeOriginChecks, candidateCanonicalChecks)
 
+import Test.QuickCheck (quickCheckWithResult, stdArgs, maxSuccess, forAll, sublistOf, choose, classify, conjoin, counterexample, isSuccess)
+import Tidepool.OwnedInputTransport (decodeInputAcquisition)
+import Tidepool.NativeOriginalCensus (readOriginalNativeCensus, nativeCensusExactGroups, selectNativeCensusGroups)
+
 import SourceBootFixtureSupport
 
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
@@ -610,8 +614,8 @@ exactScopeBinders = withScratch $ \work -> do
           fail "exact original group conversion changed binder identities or group order"
       refused groups = do
         result <- readGroups groups
-        unless (case result of Left reason -> "duplicate exact original binders" `isInfixOf` reason; Right _ -> False) $
-          fail "exact scope accepted duplicate original binder identity"
+        unless (case result of Left reason -> "expected word" `isInfixOf` reason || "expected uint" `isInfixOf` reason || "expected" `isInfixOf` reason; Right _ -> False) $
+          fail "exact scope accepted request-supplied native binder outlines"
       answer = binder "value" "answer" Nothing
       sameSpelling = [answer, binder "type" "answer" Nothing
         , binder "value" "answer" (Just "RecordA"), binder "value" "answer" (Just "RecordB")]
@@ -3052,14 +3056,9 @@ originalNativeAvailabilityChecks environment scope emitted = do
           | (T.unpack unit,T.unpack name) == owner -> TList
             [text (originalUnit selected),text (originalModule selected),text (originalVersion selected)
             ,text (originalIfaceSha256 selected),text (originalProductSha256 selected)
-            ,text (originalProductPath selected),TList (map groupTerm (originalGroups selected)),descriptor]
+            ,text (originalProductPath selected),TList (map (TInteger . fromIntegral . originalOrdinal) (originalGroups selected)),descriptor]
         _ -> entry
       text = TString . T.pack
-      identityTerm value = TList [TString (symbolUnit value),TString (symbolModule value)
-        ,TString (symbolNamespace value),TString (symbolOccurrence value),maybe TNull TString (symbolRecordParent value)]
-      groupTerm group = TList [TInteger (fromIntegral (originalOrdinal group))
-        ,TList (map identityTerm (originalBinders group))
-        ,TList [TList [identityTerm identity,TBool required] | (identity,required) <- originalGlobals group]]
       requireInvalid action = action >>= \case
         Left _ -> pure ()
         Right _ -> fail "altered native selection retained its admitted census"
@@ -3072,9 +3071,6 @@ originalNativeAvailabilityChecks environment scope emitted = do
       && not (null (originalBinders group))) full of
     group : _ -> pure group
     [] -> fail "native selection fixture needs a genuine native reference"
-  (reference,required,remaining) <- case originalGlobals selected of
-    (reference,required) : remaining -> pure (reference,required,remaining)
-    [] -> fail "selected native group lost its reference"
   selectedScope <- replaceOwner (snapshot {originalGroups=[selected]}) >>= either fail pure
   zeroScope <- replaceOwner (snapshot {originalGroups=[]}) >>= either fail pure
   let row groups = [(fst owner,snd owner,groups)]
@@ -3112,12 +3108,7 @@ originalNativeAvailabilityChecks environment scope emitted = do
   -- Serialized mutations reach admission against the issuer's original census.
   let altered group = replaceOwner (snapshot {originalGroups=[group]})
       absentOrdinal = 1 + foldr (max . originalOrdinal) 0 full
-      changedReference = reference {symbolOccurrence=symbolOccurrence reference <> "_changed"}
-  forM_ [ selected {originalOrdinal=absentOrdinal}
-        , selected {originalBinders=[]}
-        , selected {originalGlobals=(changedReference,required):remaining}
-        , selected {originalGlobals=(reference,not required):remaining}
-        ] (requireInvalid . altered)
+  requireInvalid (altered (selected {originalOrdinal=absentOrdinal}))
   requireInvalid (replaceOwner (snapshot {originalGroups=[selected,selected]}))
   let changedDigest value = case value of
         '0':rest -> '1':rest
@@ -3131,9 +3122,6 @@ originalNativeAvailabilityChecks environment scope emitted = do
         ] (requireInvalid . replaceOwner)
   requireInvalid (readScopeVariant selectedScope (\fields -> take 3 fields
     ++ [TString (T.pack (changedDigest (scopeProducerSha256 selectedScope)))] ++ drop 4 fields))
-  let normalized = selected {originalGlobals=reverse (originalGlobals selected) ++ [(reference,required)]}
-  normalizedScope <- altered normalized >>= either fail pure
-  revalidateExactScope environment normalizedScope >>= either fail pure
   productBytes <- BS.readFile (originalProductPath snapshot)
   (BS.writeFile (originalProductPath snapshot) (BS.snoc productBytes 0)
       >> revalidateExactScope environment selectedScope >>= \case
@@ -3188,6 +3176,25 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
     _ -> fail "native census control lacks an actual HOME v5 certificate"
   unless (digest nativeBytes == descriptorSha && encode nativeTerm == nativeBytes) $
     fail "actual HOME v5 bytes did not retain their canonical roundtrip and SHA"
+  indexed <- readOriginalNativeCensus descriptorPath descriptorSha
+  let groups = nativeCensusExactGroups indexed
+      ordinals = map originalOrdinal groups
+      absent = 1 + maximum (0:ordinals)
+  property <- quickCheckWithResult stdArgs {maxSuccess=128} $ forAll (sublistOf groups) $ \selection ->
+    let requested = map originalOrdinal selection
+    in classify (null selection) "zero selected groups"
+      $ classify (not (null selection) && length selection < length groups) "proper selected projection"
+      $ conjoin
+        [ counterexample "ordinal projection differs from independently selected original facts"
+            (selectNativeCensusGroups indexed requested == Right selection)
+        , counterexample "ordinal projection changed caller order"
+            (selectNativeCensusGroups indexed (reverse requested) == Right (reverse selection))
+        , counterexample "absent ordinal acquired native authority"
+            (case selectNativeCensusGroups indexed [absent] of Left _ -> True; Right _ -> False)
+        , counterexample "duplicate ordinal acquired duplicate native authority"
+            (case requested of [] -> True; ordinal:_ -> case selectNativeCensusGroups indexed (ordinal:requested) of Left _ -> True; Right _ -> False)
+        ]
+  unless (isSuccess property) (fail "authenticated native census ordinal projection property failed")
   zero <- readAltered "zero-selection" (\case
       [unit,name,version,iface,productSha,path,_,descriptor] ->
         pure [unit,name,version,iface,productSha,path,TList [],descriptor]
@@ -3805,6 +3812,7 @@ candidateRequestSitedSiblingsAt work = do
 -- requirement; malformed controls mutate only the issued packet.
 candidateCompactInventory :: IO ()
 candidateCompactInventory = withScratch $ \work -> do
+  ownedInputTransportCodecChecks
   let identity = SymbolIdentity "main" "Fixture" "value" "entry" Nothing
       identities = [identity,identity {symbolRecordParent=Just "Parent"}
         ,identity {symbolUnit="other"},identity {symbolModule="Other"}
@@ -3826,7 +3834,7 @@ candidateCompactInventory = withScratch $ \work -> do
   issuedPath <- writeCandidateCodecFixture work CompactCandidateInventory
   issued <- readCodecTerm issuedPath
   (symbols,globalTable,rows,fields) <- case issued of
-    TList values@[TString "TPMCAN",TString "10",symbols,globalTable,TList rows,_,_] ->
+    TList values@[TString "TPMCAN",TString "11",symbols,globalTable,TList rows,_,_,_] ->
       pure (symbols,globalTable,rows,values)
     _ -> fail "production compact fixture has another candidate envelope"
   let envelope symbolTable globals' rows' = TList (replace 2 symbolTable
@@ -3881,7 +3889,7 @@ candidateCompactInventory = withScratch $ \work -> do
   _ <- readModuleCandidates expandedPath >>= either fail pure
   expanded <- readCodecTerm expandedPath
   expandedAggregate <- case expanded of
-    TList values@[_,_,_,_,TList [TList row],_,_] -> pure (TList
+    TList values@[_,_,_,_,TList [TList row],_,_,_] -> pure (TList
       (replace 4 (TList [TList row,TList (replace 1 (TString "Other") row)]) values))
     _ -> fail "production expanded-bound fixture has another candidate envelope"
   refuse "expanded-aggregate" "expanded candidate inventory exceeds" expandedAggregate
@@ -3892,6 +3900,56 @@ candidateCompactInventory = withScratch $ \work -> do
   where
     replace index value fields = [if ordinal == index then value else field
       | (ordinal,field) <- zip [0::Int ..] fields]
+
+-- This exercises framing only: decoding a descriptor does not open its FD or
+-- issue a canonical proof. Artifact admission separately authenticates bytes.
+ownedInputTransportCodecChecks :: IO ()
+ownedInputTransportCodecChecks = do
+  let text = TString . T.pack
+      seal = replicate 64 '0'
+      owner = [text seal,text "main",text "WireFixture"]
+      imageKey bytes = digest (toStrictByteString (encodeTerm (TList
+        ([text "TPORIGINALINPUT1"] ++ owner ++
+          [TList [TList [text "iface",text seal,TInt bytes]]]))))
+      part bytes index offset = TList [text "iface",text "/logical/iface.hi",text seal
+        ,TInt bytes,TList [text "/original/iface.hi"],TList [TInt index,TInteger offset]]
+      image bytes index offset = TList (owner ++ [text (imageKey bytes),TList [part bytes index offset]])
+      arena extent = TList [text "/proc/1/fd/3",TInteger extent]
+      envelope arenas images = TList [text "continue-originals",TList arenas,TList images]
+      valid = envelope [arena 4096] [image 16 0 8]
+      decode value = deserialiseFromBytes decodeInputAcquisition
+        (BSL.fromStrict (toStrictByteString (encodeTerm value)))
+      accepted value = case decode value of Right (remaining,_) -> BSL.null remaining; Left _ -> False
+      refuse label value = when (accepted value) (fail ("owned transport parser accepted " ++ label))
+  unless (accepted valid) (fail "owned transport parser refused a bounded indexed range")
+  forM_ [("absent arena",envelope [] [image 16 0 8])
+        ,("absent index",envelope [arena 4096] [image 16 1 8])
+        ,("negative offset",envelope [arena 4096] [image 16 0 (-1)])
+        ,("overflowing offset",envelope [arena 4096] [image 16 0 (2^(64::Int)-1)])
+        ,("range outside extent",envelope [arena 16] [image 16 0 1])
+        ,("zero part",envelope [arena 16] [image 0 0 0])
+        ,("duplicate endpoint",envelope [arena 4096,arena 4096] [image 16 0 8])
+        ,("excessive extent",envelope [arena (2^(63::Int))] [image 16 0 8])
+        ,("duplicate owner",envelope [arena 4096] [image 16 0 8,image 16 0 8])
+        ,("legacy acquisition",TList [text "continue-originals",TList [image 16 0 8]])] $
+    uncurry refuse
+  forM_ ["/tmp/arena","/proc/self/fd/3","/proc/01/fd/3","/proc/1/fd/03","/proc/0/fd/3"] $ \endpoint ->
+    refuse "noncanonical endpoint" (envelope [TList [text endpoint,TInt 4096]] [image 16 0 8])
+  case valid of
+    TList [tag,arenas,TList [TList fields]] -> do
+      forM_ [0,1,2,3] $ \index -> refuse "changed image identity"
+        (TList [tag,arenas,TList [TList [if position==index then text "changed" else field
+          | (position,field) <- zip [0::Int ..] fields]]])
+    _ -> fail "owned transport test envelope changed shape"
+  result <- quickCheckWithResult stdArgs {maxSuccess=128} $
+    forAll ((,,) <$> choose (0,4096) <*> choose (0,8192) <*> choose (0,4096)) $
+      \(extent,offset,bytes) ->
+        let expected = bytes > 0 && offset + bytes <= extent
+            value = envelope [arena extent] [image (fromInteger bytes) 0 offset]
+        in classify expected "bounded range" $ classify (not expected) "range refusal" $
+          counterexample (show (extent,offset,bytes)) (accepted value == expected)
+  unless (isSuccess result) (fail "owned transport framing disagreed with independent range arithmetic")
+  putStrLn "owned input transport: 128 range cases, index/extent/overflow/zero/endpoint/owner/identity/legacy refusals passed"
 
 candidateGhcLoad :: IO ()
 candidateGhcLoad = withTiming $ withScratch $ \work -> do

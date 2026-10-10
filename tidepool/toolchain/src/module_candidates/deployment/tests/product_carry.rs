@@ -405,7 +405,7 @@ fn borrow_catalog(
 }
 
 #[test]
-fn acquired_catalog_borrows_originals_and_detached_views_keep_their_paths() {
+fn acquired_catalog_borrows_captured_bytes_and_detached_views_keep_transport() {
     use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory};
     let fixture = Fixture::with_modules_and_execution(&["Library"], true);
     let counter = DecodeCounter::new();
@@ -423,6 +423,21 @@ fn acquired_catalog_borrows_originals_and_detached_views_keep_their_paths() {
         .canonical_root
         .join(&custody.canonical.interface.interface_path);
     let graph_path = custody.graph.as_ref().unwrap().1.clone();
+    let endpoint = custody.owned_inputs
+        [&crate::declaration_context::original_inputs::OriginalInputKind::Interface]
+        .endpoint()
+        .to_owned();
+    let captured_parts = custody
+        .owned_inputs
+        .iter()
+        .map(|(kind, slice)| (*kind, read_owned_slice(slice)))
+        .collect::<BTreeMap<_, _>>();
+    fs::write(&private_interface, b"changed private alias").unwrap();
+    fs::write(&canonical_path, b"changed canonical alias").unwrap();
+    fs::remove_file(&graph_path).unwrap();
+    for (kind, slice) in &custody.owned_inputs {
+        assert_eq!(read_owned_slice(slice), captured_parts[kind]);
+    }
     let catalog_paths = fixture.catalog().modules[0].clone();
     let mutable = fixture.output.join(&catalog_paths.interface.path);
     fs::write(&mutable, b"changed deployment interface").unwrap();
@@ -433,7 +448,13 @@ fn acquired_catalog_borrows_originals_and_detached_views_keep_their_paths() {
     let continued_original = &continued.by_owner[&("u".into(), "Library".into())];
     assert_eq!(continued_original.iface_path, private_interface);
     assert_eq!(continued_original.product.bytes(), original.product.bytes());
-    assert_eq!(fs::read(&private_interface).unwrap(), expected_interface);
+    assert_eq!(
+        read_owned_slice(
+            &custody.owned_inputs
+                [&crate::declaration_context::original_inputs::OriginalInputKind::Interface]
+        ),
+        expected_interface
+    );
     assert_eq!(counter.count(), 1, "borrowing neither reloads nor decodes");
     let entry = ArtifactEntry::canonical(original.original_module_interface.clone());
     let id = entry.descriptor.id;
@@ -454,8 +475,16 @@ fn acquired_catalog_borrows_originals_and_detached_views_keep_their_paths() {
     );
     assert!(private_interface.is_file());
     assert!(canonical_path.is_file());
-    assert!(graph_path.is_file());
+    assert!(!graph_path.exists());
+    assert!(
+        endpoint.exists(),
+        "detached original keeps its physical arena after run owner release"
+    );
     drop(detached);
+    assert!(
+        !endpoint.exists(),
+        "last selected custody releases captured transport"
+    );
     assert!(
         !private_interface.exists(),
         "last certified original releases owned compiler paths"
@@ -566,12 +595,18 @@ fn acquired_catalog_history_separates_source_drift_from_original_image_drift() {
         "::acquired_catalog_history_separates_source_drift_from_original_image_drift"
     ));
     let configured_cases = config.cases;
-    let partitions = std::cell::RefCell::new([0usize; 8]);
+    let partitions = std::cell::RefCell::new([0usize; 13]);
     let mut runner = TestRunner::new(config);
-    let result = runner.run(&proptest::collection::vec(0u8..8, 1..16), |actions| {
-        let fixture = Fixture::new();
+    let result = runner.run(&proptest::collection::vec(0u8..13, 1..20), |actions| {
+        let fixture = Fixture::with_modules_and_execution(&["Library"], true);
         let package = Arc::new(fixture.load().unwrap());
         let before = package.records[0].products.clone();
+        let artifacts = package.records[0].artifacts().unwrap();
+        let captured_parts = artifacts
+            .owned_inputs
+            .iter()
+            .map(|(kind, slice)| (*kind, read_owned_slice(slice)))
+            .collect::<BTreeMap<_, _>>();
         let reference = &fixture.catalog().modules[0];
         for action in actions {
             partitions.borrow_mut()[usize::from(action)] += 1;
@@ -587,13 +622,32 @@ fn acquired_catalog_history_separates_source_drift_from_original_image_drift() {
                 6 => fixture
                     .output
                     .join(&reference.module_interface.core.as_ref().unwrap().path),
-                _ => fixture.output.join(&reference.interface.path),
+                7 => fixture.output.join(&reference.interface.path),
+                8 => artifacts.interface.clone(),
+                9 => artifacts.product.clone(),
+                10 => artifacts
+                    .canonical_root
+                    .join(&artifacts.canonical.core.as_ref().unwrap().path),
+                11 => artifacts
+                    .canonical_root
+                    .join(&artifacts.canonical.certificate_path),
+                _ => artifacts.graph.as_ref().unwrap().1.clone(),
             };
             let original = fs::read(&path).ok();
             let mut changed = original.clone().unwrap_or_default();
             changed.extend_from_slice(b"\nchanged\n");
             fs::write(&path, changed).unwrap();
-            proptest::prop_assert!(fixture.load().is_err());
+            if action < 8 {
+                proptest::prop_assert!(fixture.load().is_err());
+            } else {
+                proptest::prop_assert!(
+                    fixture.load().is_ok(),
+                    "unrelated old private aliases cannot revoke a new catalog acquisition"
+                );
+            }
+            for (kind, slice) in &artifacts.owned_inputs {
+                proptest::prop_assert_eq!(read_owned_slice(slice), captured_parts[kind].as_slice());
+            }
             let borrowed = borrow_catalog(&package);
             if action <= 1 {
                 proptest::prop_assert!(borrowed.is_err());
@@ -747,7 +801,7 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
         let image_rows = |path: &Path| {
             let scope: ciborium::value::Value =
                 ciborium::de::from_reader(fs::read(path).unwrap().as_slice()).unwrap();
-            scope.as_array().unwrap()[10].as_array().unwrap()[1]
+            scope.as_array().unwrap()[10].as_array().unwrap()[2]
                 .as_array()
                 .unwrap()
                 .clone()
@@ -1248,4 +1302,15 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
         }
         drop(incoming_selected);
     }
+}
+
+fn read_owned_slice(slice: &crate::owned_input_arena::OwnedInputSlice) -> Vec<u8> {
+    use sha2::Digest;
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(slice.endpoint()).unwrap();
+    file.seek(SeekFrom::Start(slice.offset())).unwrap();
+    let mut bytes = vec![0; slice.len() as usize];
+    file.read_exact(&mut bytes).unwrap();
+    assert_eq!(sha2::Sha256::digest(&bytes).as_slice(), slice.sha256());
+    bytes
 }

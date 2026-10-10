@@ -2036,13 +2036,27 @@ fn select_records(
     select_records_inner(endpoint_identity, include, scratch, records, None)
 }
 
-enum CandidateInputTransport { OwnedArena, #[cfg(test)] DurableFiles }
+enum CandidateInputTransport {
+    OwnedArena,
+    #[cfg(test)]
+    DurableFiles,
+}
 
 fn select_records_inner<R: Into<CandidateRecord>>(
-    endpoint_identity: &[u8], include: &[PathBuf], scratch: &Path,
-    records: Vec<(R, CandidateOrigin)>, context: Option<&ExactCandidateContext>,
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+    records: Vec<(R, CandidateOrigin)>,
+    context: Option<&ExactCandidateContext>,
 ) -> Option<CandidateSet> {
-    select_records_inner_with_transport(endpoint_identity, include, scratch, records, context, CandidateInputTransport::OwnedArena)
+    select_records_inner_with_transport(
+        endpoint_identity,
+        include,
+        scratch,
+        records,
+        context,
+        CandidateInputTransport::OwnedArena,
+    )
 }
 
 fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
@@ -2856,10 +2870,17 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
     );
     let (acquisition, input_transport) = match transport {
         #[cfg(test)]
-        CandidateInputTransport::DurableFiles => (Value::Array(vec![Value::Text("fresh-files".into())]),Vec::new()),
-        CandidateInputTransport::OwnedArena => candidate_owned_acquisition(&value, &by_owner, endpoint_identity)?,
+        CandidateInputTransport::DurableFiles => (
+            Value::Array(vec![Value::Text("fresh-files".into())]),
+            Vec::new(),
+        ),
+        CandidateInputTransport::OwnedArena => {
+            candidate_owned_acquisition(&value, &by_owner, endpoint_identity)?
+        }
     };
-    let Value::Array(mut fields) = value else { return None; };
+    let Value::Array(mut fields) = value else {
+        return None;
+    };
     fields[7] = acquisition;
     let value = Value::Array(fields);
     let mut encoded = Vec::new();
@@ -2940,58 +2961,128 @@ fn protected_native_closure(
 
 fn candidate_owned_acquisition(
     envelope: &Value,
-    bundles: &BTreeMap<(String,String),CandidateBundle>,
+    bundles: &BTreeMap<(String, String), CandidateBundle>,
     producer: &[u8],
-) -> Option<(Value,Vec<crate::owned_input_arena::OwnedInputSlice>)> {
-    use crate::declaration_context::original_inputs::{OriginalInputKind as Kind, OriginalInputPart, OriginalInputArenaTable, encode_image};
+) -> Option<(Value, Vec<crate::owned_input_arena::OwnedInputSlice>)> {
+    use crate::declaration_context::original_inputs::{
+        encode_image, OriginalInputArenaTable, OriginalInputKind as Kind, OriginalInputPart,
+    };
     let fields = envelope.as_array()?;
     let rows = fields[4].as_array()?;
     let graphs = fields[5].as_array()?[0].as_array()?;
-    let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(1024 * 1024 * 1024).ok()?;
+    let mut builder =
+        crate::owned_input_arena::OwnedInputArenaBuilder::new(1024 * 1024 * 1024).ok()?;
     let mut pending = Vec::new();
+    let mut pending_graphs = BTreeMap::new();
+    let mut graph_receivers = BTreeMap::<[u8; 32], Vec<(String, String)>>::new();
     let mut acquired = BTreeMap::new();
     let mut aliases = BTreeMap::new();
     for row in rows {
         let row = row.as_array()?;
-        let key = (row[0].as_text()?.to_owned(),row[1].as_text()?.to_owned());
+        let key = (row[0].as_text()?.to_owned(), row[1].as_text()?.to_owned());
         let bundle = &bundles[&key];
         let canonical = &bundle.original_module_interface;
         let evidence = row[15].as_array()?;
-        let mut parts = vec![(Kind::Interface,PathBuf::from(row[4].as_text()?),canonical.interface_bytes()),
-            (Kind::Packages,PathBuf::from(row[11].as_text()?),canonical.package_imports_bytes()),
-            (Kind::Native,PathBuf::from(row[13].as_text()?),bundle.product.bytes()),
-            (Kind::Certificate,PathBuf::from(evidence[1].as_text()?),canonical.certificate_bytes()),
-            (Kind::Core,PathBuf::from(evidence[3].as_text()?),canonical.core_bytes()?)];
+        let mut parts = vec![
+            (
+                Kind::Interface,
+                PathBuf::from(row[4].as_text()?),
+                canonical.interface_bytes(),
+            ),
+            (
+                Kind::Packages,
+                PathBuf::from(row[11].as_text()?),
+                canonical.package_imports_bytes(),
+            ),
+            (
+                Kind::Native,
+                PathBuf::from(row[13].as_text()?),
+                bundle.product.bytes(),
+            ),
+            (
+                Kind::Certificate,
+                PathBuf::from(evidence[1].as_text()?),
+                canonical.certificate_bytes(),
+            ),
+            (
+                Kind::Core,
+                PathBuf::from(evidence[3].as_text()?),
+                canonical.core_bytes()?,
+            ),
+        ];
         if bundle.execution_admitted {
             if let Some(execution) = &bundle.original_execution {
                 let digest = hex(&execution.graph.digest());
-                let graph_path = graphs.iter().find_map(|row| {let row=row.as_array()?; (row[0].as_text()? == digest).then(||PathBuf::from(row[1].as_text().unwrap()))})?;
-                parts.push((Kind::Graph,graph_path,execution.graph.bytes()));
+                let graph_path = graphs.iter().find_map(|row| {
+                    let row = row.as_array()?;
+                    (row[0].as_text()? == digest).then(|| PathBuf::from(row[1].as_text().unwrap()))
+                })?;
+                parts.push((Kind::Graph, graph_path, execution.graph.bytes()));
             }
         }
-        for (kind,path,bytes) in parts {
-            aliases.insert((key.clone(),kind),path);
-            if let Some(slice) = canonical.catalog_input_custody().and_then(|custody|custody.owned_inputs.get(&kind).cloned()) {
-                acquired.insert((key.clone(),kind),slice);
+        for (kind, path, bytes) in parts {
+            aliases.insert((key.clone(), kind), path);
+            if let Some(slice) = canonical
+                .catalog_input_custody()
+                .and_then(|custody| custody.owned_inputs.get(&kind).cloned())
+            {
+                acquired.insert((key.clone(), kind), slice);
+            } else if kind == Kind::Graph {
+                let digest = bundle.original_execution.as_ref()?.graph.digest();
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    pending_graphs.entry(digest)
+                {
+                    entry.insert(builder.append(bytes).ok()?);
+                }
+                graph_receivers.entry(digest).or_default().push(key.clone());
             } else {
-                pending.push((key.clone(),kind,builder.append(bytes).ok()?));
+                pending.push((key.clone(), kind, builder.append(bytes).ok()?));
             }
         }
     }
     let arena = builder.finish().ok()?;
-    for (key,kind,pending) in pending {acquired.insert((key,kind),arena.issue_slice(pending).ok()?);}
+    for (key, kind, pending) in pending {
+        acquired.insert((key, kind), arena.issue_slice(pending).ok()?);
+    }
+    for (digest, pending) in pending_graphs {
+        let slice = arena.issue_slice(pending).ok()?;
+        for key in graph_receivers.remove(&digest)? {
+            acquired.insert((key, Kind::Graph), slice.clone());
+        }
+    }
     let mut table = OriginalInputArenaTable::default();
     let mut leases = Vec::new();
-    let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer).hex();
+    let producer =
+        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer).hex();
     let mut images = Vec::new();
-    for (key,bundle) in bundles {
-        let parts = acquired.iter().filter(|((owner,_),_)| owner == key).map(|((owner,kind),slice)| {
-            leases.push(slice.clone());
-            OriginalInputPart { kind:*kind,path:aliases[&(owner.clone(),*kind)].clone(),sha256:hex(slice.sha256()),bytes:slice.len(),transport:slice.clone() }
-        }).collect();
-        images.push(encode_image(&producer,&key.0,&key.1,parts,bundle.original_module_interface.original_input_origins(),&mut table).ok()?);
+    for (key, bundle) in bundles {
+        let parts = acquired
+            .iter()
+            .filter(|((owner, _), _)| owner == key)
+            .map(|((owner, kind), slice)| {
+                leases.push(slice.clone());
+                OriginalInputPart {
+                    kind: *kind,
+                    path: aliases[&(owner.clone(), *kind)].clone(),
+                    sha256: hex(slice.sha256()),
+                    bytes: slice.len(),
+                    transport: slice.clone(),
+                }
+            })
+            .collect();
+        images.push(
+            encode_image(
+                &producer,
+                &key.0,
+                &key.1,
+                parts,
+                bundle.original_module_interface.original_input_origins(),
+                &mut table,
+            )
+            .ok()?,
+        );
     }
-    Some((table.acquisition(images).ok()?,leases))
+    Some((table.acquisition(images).ok()?, leases))
 }
 
 /// Encoding data is separate from the retained executable candidate set.
@@ -4451,7 +4542,7 @@ pub(crate) mod tests {
         let manifest: Value =
             ciborium::de::from_reader(fs::File::open(&selected.manifest_path).unwrap()).unwrap();
         let fields = manifest.as_array().unwrap();
-        assert_eq!(fields[1].as_text(), Some("10"));
+        assert_eq!(fields[1].as_text(), Some("11"));
         let row = fields[4].as_array().unwrap()[0].as_array().unwrap();
         assert_eq!(row.len(), 16);
         let original = fs::read(row[13].as_text().unwrap()).unwrap();
@@ -4603,8 +4694,8 @@ pub(crate) mod tests {
         let manifest: Value =
             ciborium::de::from_reader(fs::File::open(&selected.manifest_path).unwrap()).unwrap();
         let fields = manifest.as_array().unwrap();
-        assert_eq!(fields.len(), 7);
-        assert_eq!(fields[1].as_text(), Some("10"));
+        assert_eq!(fields.len(), 8);
+        assert_eq!(fields[1].as_text(), Some("11"));
         let parcel = fields[5].as_array().unwrap();
         assert_eq!(parcel.len(), 2);
         let descriptors = parcel[0].as_array().unwrap();
@@ -5426,8 +5517,8 @@ pub(crate) mod tests {
             panic!("candidate manifest envelope")
         };
         assert_eq!(fields[0].as_text(), Some("TPMCAN"));
-        assert_eq!(fields[1].as_text(), Some("10"));
-        assert_eq!(fields.len(), 7);
+        assert_eq!(fields[1].as_text(), Some("11"));
+        assert_eq!(fields.len(), 8);
         assert_eq!(fields[2], Value::Array(vec![]));
         assert_eq!(fields[3], Value::Array(vec![]));
         assert_eq!(fields[4], Value::Array(vec![]));

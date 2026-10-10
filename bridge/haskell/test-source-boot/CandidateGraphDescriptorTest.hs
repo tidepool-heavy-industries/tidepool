@@ -27,7 +27,7 @@ candidateGraphDescriptorChecks scopePath candidatePath = do
   scope <- readExactScope scopePath >>= either fail pure
   bytes <- BS.readFile candidatePath
   fields <- decode bytes >>= row 7
-  unless (take 2 fields == [TString "TPMCAN", TString "10"])
+  unless (take 2 fields == [TString "TPMCAN", TString "11"])
     (fail "descriptor fixture requires the genuine current candidate format")
   nativeRows <- values (fields !! 4)
   mapM_ (row 16) nativeRows

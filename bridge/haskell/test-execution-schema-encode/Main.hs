@@ -46,34 +46,34 @@ candidateManifestChecks = do
             <> encodeString "/tmp/Fixture.finalized.cbor" <> encodeString digest
             <> encodeString "/tmp/Fixture.core" <> encodeString digest
           manifest version items = toStrictByteString
-            (encodeListLen 7 <> encodeString "TPMCAN" <> encodeString version
+            (encodeListLen 8 <> encodeString "TPMCAN" <> encodeString version
               <> encodeListLen 0 <> encodeListLen 0
               <> encodeListLen (fromIntegral (length items)) <> mconcat items
-              <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0 <> encodeString digest)
+              <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0 <> encodeString digest <> encodeListLen 1 <> encodeString "fresh-files")
       -- Structural decoding does not authenticate or promote these descriptors.
       let validCandidate = candidate "/tmp/Fixture.hs" "/tmp/Fixture.tpmod"
-      BS.writeFile path (manifest "10" [validCandidate])
+      BS.writeFile path (manifest "11" [validCandidate])
       valid <- readModuleCandidates path
       assert (case valid of Right [_] -> True; _ -> False)
         "bounded module candidate manifest did not decode"
-      forM_ ["6", "7", "8", "9"] $ \version -> do
+      forM_ ["6", "7", "8", "9", "10"] $ \version -> do
         BS.writeFile path (manifest version [validCandidate])
         old <- readModuleCandidates path
         assert (case old of Left _ -> True; _ -> False)
           "candidate manifest accepted an unsupported version"
-      BS.writeFile path (manifest "10" [candidate "/tmp/Fixture.hs" "relative.tpmod"])
+      BS.writeFile path (manifest "11" [candidate "/tmp/Fixture.hs" "relative.tpmod"])
       relativeProduct <- readModuleCandidates path
       assert (case relativeProduct of Left _ -> True; _ -> False)
         "candidate manifest accepted a relative original product path"
-      BS.writeFile path (BS.snoc (manifest "10" [validCandidate]) 0)
+      BS.writeFile path (BS.snoc (manifest "11" [validCandidate]) 0)
       trailing <- readModuleCandidates path
       assert (case trailing of Left _ -> True; _ -> False)
         "candidate manifest accepted trailing bytes"
-      BS.writeFile path (manifest "10" [validCandidate, validCandidate])
+      BS.writeFile path (manifest "11" [validCandidate, validCandidate])
       duplicate <- readModuleCandidates path
       assert (case duplicate of Left _ -> True; _ -> False)
         "candidate manifest accepted duplicate owners"
-      BS.writeFile path (manifest "10" [candidate "relative.hs" "/tmp/Fixture.tpmod"])
+      BS.writeFile path (manifest "11" [candidate "relative.hs" "/tmp/Fixture.tpmod"])
       relative <- readModuleCandidates path
       assert (case relative of Left _ -> True; _ -> False)
         "candidate manifest accepted a relative source path")

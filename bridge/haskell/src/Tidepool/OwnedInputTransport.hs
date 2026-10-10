@@ -12,9 +12,11 @@ import Control.Monad (replicateM, unless, when)
 import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.Set qualified as Set
+import Data.IntMap.Strict qualified as IntMap
 import Data.Text qualified as T
 import Numeric (showHex)
-import System.FilePath (isAbsolute)
+import System.FilePath (isAbsolute, splitDirectories)
+import Text.Read (readMaybe)
 import Tidepool.RequestInputs (OriginalInputReference(..), ownedArenaRange)
 
 data OriginalInputKind = InputInterface | InputPackages | InputCertificate
@@ -57,10 +59,12 @@ decodeInputAcquisition = do
       arenas <- bounded 4096 $ do
         array 2
         endpoint <- absolute
+        unless (canonicalArenaEndpoint endpoint) (fail "owned arena endpoint is not a canonical proc FD path")
         extent <- decodeWord64
         unless (extent <= 9223372036854775807) (fail "owned arena extent exceeds host range")
         pure (endpoint,toInteger extent)
       unique "original input arena endpoints" (map fst arenas)
+      let indexedArenas = IntMap.fromList (zip [0..] arenas)
       images <- bounded 4096 $ do
         array 5
         producer <- digestField
@@ -86,7 +90,8 @@ decodeInputAcquisition = do
           index <- decodeWord
           offset <- decodeWord64
           unless (index < fromIntegral (length arenas)) (fail "owned input arena index is absent")
-          let (endpoint,extent) = arenas !! fromIntegral index
+          (endpoint,extent) <- maybe (fail "owned input arena index is absent") pure
+            (IntMap.lookup (fromIntegral index) indexedArenas)
           unless (toInteger offset + toInteger bytes <= extent) (fail "owned input range leaves its arena")
           transport <- either fail pure (ownedArenaRange endpoint extent (toInteger offset))
           pure (kind,OriginalInputReference path sha (fromIntegral bytes) origins transport)
@@ -130,3 +135,14 @@ unique label values = unless (Set.size (Set.fromList values) == length values) (
 
 digest :: BS.ByteString -> String
 digest = concatMap (\byte -> let digits = showHex byte "" in replicate (2-length digits) '0' ++ digits) . BS.unpack . SHA.hash
+
+canonicalArenaEndpoint :: FilePath -> Bool
+canonicalArenaEndpoint path = case splitDirectories path of
+  ["/","proc",pid,"fd",fd] -> positive pid && nonnegative fd
+  _ -> False
+  where
+    number value = case readMaybe value :: Maybe Integer of
+      Just parsed | show parsed == value -> Just parsed
+      _ -> Nothing
+    positive value = maybe False (>0) (number value)
+    nonnegative value = maybe False (>=0) (number value)

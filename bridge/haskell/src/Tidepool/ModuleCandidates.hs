@@ -193,7 +193,7 @@ readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest pa
                   readExecutionSourceGraphsWithFacts (\sha artifact -> do
                     token <- readToken artifact (64 * 1024 * 1024)
                     either fail pure (checkArtifactSeal sha token)
-                    either fail pure (decodeExecutionSourceBody sha token)) path descriptors
+                    either fail pure (decodeExecutionSourceBody token)) path descriptors
                 pure (map (\candidate -> candidate {candidateInputCustody=Just custody}) <$>
                   attachExecutionSources exactGraphs graphs references producer candidates)
         | otherwise -> pure (Left "candidate manifest has trailing bytes"))

@@ -430,7 +430,10 @@ pub(super) struct DecodedDeploymentRecord {
 #[derive(Debug)]
 pub(crate) struct DeploymentArtifactPaths {
     _directories: Vec<Arc<tempfile::TempDir>>,
-    pub(crate) owned_inputs: BTreeMap<crate::declaration_context::original_inputs::OriginalInputKind, crate::owned_input_arena::OwnedInputSlice>,
+    pub(crate) owned_inputs: BTreeMap<
+        crate::declaration_context::original_inputs::OriginalInputKind,
+        crate::owned_input_arena::OwnedInputSlice,
+    >,
     pub(super) interface: PathBuf,
     pub(super) packages: PathBuf,
     pub(super) product: PathBuf,
@@ -904,21 +907,83 @@ impl DeploymentModulePackage {
         let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(1024 * 1024 * 1024)
             .map_err(|_| ModulePackageError::Format("catalog input arena"))?;
         let mut pending = Vec::new();
+        let mut graph_pending = BTreeMap::new();
         for record in &self.records {
-            let canonical = record.module_interface_proof.as_ref().ok_or(ModulePackageError::Format("canonical input custody"))?;
-            let mut parts: Vec<(Kind, &[u8])> = vec![(Kind::Interface, &record.interface), (Kind::Packages, &record.package_imports),
-                (Kind::Native, &record.products), (Kind::Census, &record.original_certification),
-                (Kind::Certificate, canonical.certificate_bytes())];
-            if let Some(core) = canonical.core_bytes() { parts.push((Kind::Core,core)); }
-            if let Some(graph) = &record.execution_source { parts.push((Kind::Graph, graph.bytes())); }
-            pending.push(parts.into_iter().map(|(kind,bytes)| Ok((kind,builder.append(bytes)
-                .map_err(|_| ModulePackageError::Format("catalog input arena part"))?))).collect::<Result<Vec<_>,ModulePackageError>>()?);
+            let canonical = record
+                .module_interface_proof
+                .as_ref()
+                .ok_or(ModulePackageError::Format("canonical input custody"))?;
+            let mut parts: Vec<(Kind, &[u8])> = vec![
+                (Kind::Interface, &record.interface),
+                (Kind::Packages, &record.package_imports),
+                (Kind::Native, &record.products),
+                (Kind::Census, &record.original_certification),
+                (Kind::Certificate, canonical.certificate_bytes()),
+            ];
+            if let Some(core) = canonical.core_bytes() {
+                parts.push((Kind::Core, core));
+            }
+            if let Some(graph) = &record.execution_source {
+                if !graph_pending.contains_key(&graph.digest()) {
+                    graph_pending.insert(
+                        graph.digest(),
+                        builder
+                            .append(graph.bytes())
+                            .map_err(|_| ModulePackageError::Format("catalog graph arena part"))?,
+                    );
+                }
+            }
+            pending.push(
+                parts
+                    .into_iter()
+                    .map(|(kind, bytes)| {
+                        Ok((
+                            kind,
+                            builder.append(bytes).map_err(|_| {
+                                ModulePackageError::Format("catalog input arena part")
+                            })?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ModulePackageError>>()?,
+            );
         }
-        let arena = builder.finish().map_err(|_| ModulePackageError::Format("catalog input arena seals"))?;
-        let slices = pending.into_iter().map(|parts| parts.into_iter().map(|(kind,pending)| Ok((kind,arena.issue_slice(pending)
-            .map_err(|_| ModulePackageError::Format("catalog input arena slice"))?))).collect::<Result<BTreeMap<_,_>,ModulePackageError>>()).collect::<Result<Vec<_>,_>>()?;
-        for ((record, files), owned_inputs) in self.records.iter().zip(&self.catalog.modules).zip(slices) {
+        let arena = builder
+            .finish()
+            .map_err(|_| ModulePackageError::Format("catalog input arena seals"))?;
+        let graphs = graph_pending
+            .into_iter()
+            .map(|(digest, pending)| {
+                Ok((
+                    digest,
+                    arena
+                        .issue_slice(pending)
+                        .map_err(|_| ModulePackageError::Format("catalog graph arena slice"))?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, ModulePackageError>>()?;
+        let slices = pending
+            .into_iter()
+            .map(|parts| {
+                parts
+                    .into_iter()
+                    .map(|(kind, pending)| {
+                        Ok((
+                            kind,
+                            arena.issue_slice(pending).map_err(|_| {
+                                ModulePackageError::Format("catalog input arena slice")
+                            })?,
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, ModulePackageError>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for ((record, files), mut owned_inputs) in
+            self.records.iter().zip(&self.catalog.modules).zip(slices)
+        {
             crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
+            if let Some(graph) = &record.execution_source {
+                owned_inputs.insert(Kind::Graph, graphs[&graph.digest()].clone());
+            }
             let native_directory =
                 PathBuf::from("native").join(super::hex(&record.original_owner.module_version));
             let interface = write_ref(
