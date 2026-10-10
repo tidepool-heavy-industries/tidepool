@@ -9,7 +9,7 @@ module Tidepool.CompilerProducts
   , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProducts, prepareOriginalProductsWithExecutor
   , requireOriginalExecutableGlobals
   , writeCertifiedProductsKeepingWithOriginals
-  , StagedOriginalProducts, stagedCertifiedOriginalProducts
+  , StagedOriginalProducts, stagedOriginalEntryOrdinal, stagedFinalizedArtifacts
   , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
   , publishStagedOriginalProducts, retainStagedProgramProducts
   , prepareCompilerProjectionContext, prepareCompilerProjectionContextForEnvironment, exactProgramProductVersionFromDigest
@@ -35,7 +35,7 @@ import Data.Maybe (mapMaybe, isJust, fromMaybe, isNothing)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Word (Word64)
+import Data.Word (Word32, Word64)
 import GHC.Tc.Types (tcg_mod)
 import GHC.Types.Name (Name)
 import GHC.Types.Var (Id)
@@ -204,8 +204,17 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
 data StagedOriginalProducts = StagedOriginalProducts
   CertifiedOriginalProducts FilePath BS.ByteString FreshOutputSeals
 
-stagedCertifiedOriginalProducts :: StagedOriginalProducts -> CertifiedOriginalProducts
-stagedCertifiedOriginalProducts (StagedOriginalProducts certified _ _ _) = certified
+stagedOriginalEntryOrdinal :: StagedOriginalProducts -> SymbolIdentity -> IO Word32
+stagedOriginalEntryOrdinal (StagedOriginalProducts certified _ _ _) entry = case
+  [Execution.projectedOriginalOrdinal group | original <- certifiedOriginalProducts certified
+    , let (unit,owner,_,groups) = moduleProductInput original
+    , unit == symbolUnit entry, owner == symbolModule entry
+    , group <- groups, entry `elem` Execution.projectedBinders group] of
+    [ordinal] -> pure ordinal
+    _ -> fail "typed item entry has no unique compiler-issued original group"
+
+stagedFinalizedArtifacts :: StagedOriginalProducts -> FinalizedModuleArtifacts
+stagedFinalizedArtifacts (StagedOriginalProducts certified _ _ _) = certifiedFinalizedArtifacts certified
 
 data PreparedProductContext = PreparedProductContext
   { preparedProductInventory :: PreparedModuleProducts
@@ -997,19 +1006,9 @@ retainProgramProducts = retainProgramProductsWithPublication Nothing
 retainStagedProgramProducts
   :: FilePath -> PreparedPipelineResult
   -> StagedOriginalProducts -> String -> ExactScope -> IO ExactScope
-retainStagedProgramProducts directory prepared staged target initial =
+retainStagedProgramProducts directory prepared (StagedOriginalProducts certified path bytes seals) target initial =
   retainProgramProductsWithPublication
-    (Just (stagedCertificatePath staged,stagedCertificateBytes staged,stagedOutputSeals staged))
-    directory prepared (stagedCertifiedOriginalProducts staged) target initial
-
-stagedCertificatePath :: StagedOriginalProducts -> FilePath
-stagedCertificatePath (StagedOriginalProducts _ path _ _) = path
-
-stagedCertificateBytes :: StagedOriginalProducts -> BS.ByteString
-stagedCertificateBytes (StagedOriginalProducts _ _ bytes _) = bytes
-
-stagedOutputSeals :: StagedOriginalProducts -> FreshOutputSeals
-stagedOutputSeals (StagedOriginalProducts _ _ _ seals) = seals
+    (Just (path,bytes,seals)) directory prepared certified target initial
 
 retainProgramProductsWithPublication
   :: Maybe (FilePath,BS.ByteString,FreshOutputSeals) -> FilePath -> PreparedPipelineResult

@@ -80,7 +80,8 @@ import Tidepool.CompilerProducts
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, currentReconciledOriginalProducts
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, stagedCertifiedOriginalProducts
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
+  , stagedOriginalEntryOrdinal, stagedFinalizedArtifacts
   , retainStagedProgramProducts, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest, retainProgramProducts, programLexicalRequirements, programSourceRequirements )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
@@ -1514,8 +1515,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
               Nothing (map T.pack (prWarnings result)) [outputArtifact]
             writePreparedArtifacts itemDirectory [outputArtifact]
             writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory (paProgram outputArtifact)
-            ordinal <- typedEntryOriginalOrdinal (stagedCertifiedOriginalProducts sharedProducts)
-              (preparedRootIdentity (typedItemRoot item))
+            ordinal <- stagedOriginalEntryOrdinal sharedProducts (preparedRootIdentity (typedItemRoot item))
             BS.writeFile (itemDirectory </> "turn.cbor") (encodeTurnOut turn)
             writeTypedItemReceipt itemDirectory scope itemAdmission rendered typedPlan
               (preparedRootIdentity (typedSegmentOriginalRoot typed)) (preparedRootIdentity (typedItemRoot item)) ordinal
@@ -1524,7 +1524,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
           when (null emitted) (fail "typed segment emitted no items")
           extended <- retainStagedProgramProducts directory prepared sharedProducts sourceOwner scope
           retainedImports <- retainProgramSourceImports (programSourceImports state) prepared
-            (certifiedFinalizedArtifacts (stagedCertifiedOriginalProducts sharedProducts)) extended
+            (stagedFinalizedArtifacts sharedProducts) extended
           let completedState = recordTypedSegment finalized typedPlan expressionObservations captureSignatures rendered
                 state {programExact=extended,programSourceImports=retainedImports}
           next <- foldM (\current (generation,captures) ->
@@ -1552,15 +1552,6 @@ encodeTypedSegmentPlan plan =
         LetItem marker captures -> text "let" <> text "" <> text "" <> text marker <> names captures
         ObservationItem probe observation -> text "observation" <> text "" <> text probe <> text observation <> names []
     names values = encodeListLen (fromIntegral (length values)) <> foldMap text values
-
-typedEntryOriginalOrdinal :: CertifiedOriginalProducts -> SymbolIdentity -> IO Word32
-typedEntryOriginalOrdinal certified entry = case
-  [Execution.projectedOriginalOrdinal group | original <- certifiedOriginalProducts certified
-    , let (unit,owner,_,groups) = moduleProductInput original
-    , unit == symbolUnit entry, owner == symbolModule entry
-    , group <- groups, entry `elem` Execution.projectedBinders group] of
-    [ordinal] -> pure ordinal
-    _ -> fail "typed item entry has no unique compiler-issued original group"
 
 writeTypedItemReceipt :: FilePath -> ExactScope -> CheckedItemAdmission -> String
   -> TypedSegmentPlan -> SymbolIdentity -> SymbolIdentity -> Word32 -> IO ()
