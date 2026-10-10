@@ -174,6 +174,7 @@ impl CompilerWorkClose {
 #[derive(Clone, Debug)]
 pub(crate) struct CompilerWorkReceipt {
     close: Arc<Mutex<CompilerWorkClose>>,
+    attempts: Arc<Mutex<Vec<tidepool_runtime::CompilerTransactionClose>>>,
     cancellation: Option<tidepool_runtime::CompilerTransactionCancellation>,
 }
 
@@ -181,6 +182,7 @@ impl CompilerWorkReceipt {
     pub(crate) fn pending() -> Self {
         Self {
             close: Arc::new(Mutex::new(CompilerWorkClose::Pending)),
+            attempts: Arc::new(Mutex::new(Vec::new())),
             cancellation: Some(tidepool_runtime::CompilerTransactionCancellation::new()),
         }
     }
@@ -192,6 +194,7 @@ impl CompilerWorkReceipt {
     pub(crate) fn observation_only(&self) -> Self {
         Self {
             close: Arc::clone(&self.close),
+            attempts: Arc::clone(&self.attempts),
             cancellation: None,
         }
     }
@@ -236,13 +239,13 @@ impl CompilerWorkTicket {
             .clone()
     }
 
-    pub(crate) fn run<T>(self, action: impl FnOnce() -> T) -> T {
+    pub(crate) fn run<T>(self, action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T) -> T {
         self.run_with_close(action).action
     }
 
     pub(crate) fn run_with_close<T>(
         self,
-        action: impl FnOnce() -> T,
+        action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
     ) -> tidepool_runtime::CompilerTransactionOutcome<T> {
         self.run_for_workload_with_close(
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
@@ -255,7 +258,7 @@ impl CompilerWorkTicket {
     pub(crate) fn run_for_workload<T>(
         self,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
-        action: impl FnOnce() -> T,
+        action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
     ) -> T {
         self.run_for_workload_with_close(workload, action).action
     }
@@ -263,16 +266,17 @@ impl CompilerWorkTicket {
     fn run_for_workload_with_close<T>(
         self,
         workload: tidepool_toolchain::artifacts::CompileWorkload,
-        action: impl FnOnce() -> T,
+        action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
     ) -> tidepool_runtime::CompilerTransactionOutcome<T> {
         let cancellation = self.cancellation();
+        let attempts = Arc::clone(&self.receipt.attempts);
         tidepool_toolchain::artifacts::with_compiler_transaction_cancellable_for_workload(
             workload,
             cancellation,
             move |close| {
                 self.consume(tidepool_runtime::CompilerTransactionOutcome { action: (), close })
             },
-            action,
+            || action(&mut |close| attempts.lock().push(close)),
         )
     }
 
@@ -280,7 +284,16 @@ impl CompilerWorkTicket {
         mut self,
         outcome: tidepool_runtime::CompilerTransactionOutcome<T>,
     ) -> T {
-        *self.receipt.close.lock() = CompilerWorkClose::Settled(outcome.close);
+        let mut close = outcome.close;
+        for observed in self.receipt.attempts.lock().drain(..) {
+            if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) = observed {
+                if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(previous) = close {
+                    evidence.earlier.push(previous);
+                }
+                close = tidepool_runtime::CompilerTransactionClose::Unconfirmed(evidence);
+            }
+        }
+        *self.receipt.close.lock() = CompilerWorkClose::Settled(close);
         self.settled = true;
         self.owner.close_settled();
         outcome.action
@@ -306,6 +319,24 @@ pub struct CompilerPreparationOwner {
 impl CompilerPreparationOwner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Admit synchronous preparation through the same retained cleanup owner.
+    /// The recipient is borrowed by every helper; the ticket settles on unwind.
+    pub fn run<T>(
+        &mut self,
+        action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
+    ) -> CompilerPreparationOutcome<Result<T, crate::ResidentActorWorkbenchError>> {
+        let mut admission = PreparationAdmissionGuard {
+            owner: self.retained.clone(),
+            completed: false,
+        };
+        let cleanup = self.cleanup();
+        let owner = crate::resident_workbench::CompilerCloseOwner::Initialization(self.retained.clone());
+        let action = owner.register_work().map(|ticket| ticket.run(action));
+        admission.completed = true;
+        drop(admission);
+        CompilerPreparationOutcome { action, cleanup }
     }
 
     pub fn cleanup(&self) -> CompilerPreparationCleanup {

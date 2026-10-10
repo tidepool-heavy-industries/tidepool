@@ -3537,9 +3537,9 @@ where
     /// declarations survive across a child run on a different node.
     pub fn define_scoped(
         &mut self,
-        decls: &[&str],
-    ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.define_scoped_in(ScopeId::ROOT, decls)
+        decls: &[&str], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<tidepool_repr::Generation, SessionError> {
+        self.define_scoped_in(ScopeId::ROOT, decls, settlement)
     }
 
     /// Scoped [`Self::define_scoped`]: append to `scope`'s own decl tip, which
@@ -3549,9 +3549,9 @@ where
     pub fn define_scoped_in(
         &mut self,
         scope: ScopeId,
-        decls: &[&str],
-    ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.state.define_scoped_in(scope, decls)
+        decls: &[&str], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<tidepool_repr::Generation, SessionError> {
+        self.state.define_scoped_in(scope, decls, settlement)
     }
 
     /// Commit declarations against frontend-owned imports without recording
@@ -3560,10 +3560,10 @@ where
         &mut self,
         scope: ScopeId,
         decls: &[&str],
-        imports: &SourceImports,
-    ) -> Result<tidepool_repr::Generation, SessionError> {
+        imports: &SourceImports, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<tidepool_repr::Generation, SessionError> {
         self.state
-            .define_scoped_with_imports_in(scope, decls, imports)
+            .define_scoped_with_imports_in(scope, decls, imports, settlement)
     }
 
     pub fn stage_declarations_in(
@@ -3571,10 +3571,10 @@ where
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         imports: &super::SourceImports,
-        source_layer: &[PathBuf],
-    ) -> Result<super::StagedDeclaration, SessionError> {
+        source_layer: &[PathBuf], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<super::StagedDeclaration, SessionError> {
         self.state
-            .stage_declarations_in(scope, receipt, imports, source_layer)
+            .stage_declarations_in(scope, receipt, imports, source_layer, settlement)
     }
 
     /// The checkout-only half of staging a declaration off-checkout: see
@@ -3599,10 +3599,10 @@ where
         &mut self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
-        imports: &SourceImports,
-    ) -> Result<super::DeclarationPlaneCommit, SessionError> {
+        imports: &SourceImports, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<super::DeclarationPlaneCommit, SessionError> {
         self.state
-            .commit_declaration_receipt_in(scope, receipt, imports)
+            .commit_declaration_receipt_in(scope, receipt, imports, settlement)
     }
 
     pub fn adopt_staged_declaration_in(
@@ -3744,8 +3744,8 @@ where
         source: SessionVarId,
         alias: &BoundBinder,
         generation: Generation,
-        lease: &BindingLease,
-    ) -> Result<super::ValuePlaneCommit, ResidentError> {
+        lease: &BindingLease, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<super::ValuePlaneCommit, ResidentError> {
         self.settle_dropped_custody();
         if !self.state.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope).into());
@@ -3803,8 +3803,7 @@ where
                 defining_expr: None,
                 scope,
             },
-            source,
-        )?;
+            source, settlement)?;
         self.state.set_val_gen(generation);
         self.advance_public_visibility(scope);
         if let Some(provenance) = provenance {
@@ -6794,8 +6793,8 @@ where
         generation: Generation,
         bound: &[(&BoundBinder, PreparedHandle)],
         checked: Option<&CheckedTurnCompletion>,
-        interface_source: ValueInterfaceSource,
-    ) -> Result<(), ResidentError> {
+        interface_source: ValueInterfaceSource, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<(), ResidentError> {
         if let ValueInterfaceSource::Staged(staged) = &interface_source {
             let validated = self
                 .state
@@ -6882,7 +6881,7 @@ where
             self.state
                 .bind_checked_private_values_in(completion, scope, entries, &binders)?;
         } else {
-            self.state.bind_replacing_decls_in(scope, entries)?;
+            self.state.bind_replacing_decls_in(scope, entries, settlement)?;
         }
         // Ordinary fragments retain their established filesystem interface
         // contract. Checked settlements register their sealed artifact instead.
