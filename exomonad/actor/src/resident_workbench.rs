@@ -14624,7 +14624,7 @@ pub(crate) mod request_tests {
                 PrivateExecutionPublication::Manifest {
                     commit,
                     ..
-                } if matches!((commit, expected),
+                } if matches!((&commit, &expected),
                     (tidepool_runtime::session::PublicManifestCommit::Ephemeral,
                      tidepool_runtime::session::PublicManifestCommit::Ephemeral)
                     | (tidepool_runtime::session::PublicManifestCommit::Durable,
