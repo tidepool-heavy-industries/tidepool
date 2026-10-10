@@ -48,6 +48,18 @@ check that the new safeguard detects or prevents the original failure.
 A mock supplied with the correct answer cannot establish that production
 constructs it correctly.
 
+For each exposed invalid state, consider whether the owning API can make it
+unrepresentable: sum types for mutually exclusive phases, opaque constructors
+for issued facts, and parsing external data into a complete admitted value.
+Pair fields that must exist together; retain independent optional capabilities
+as optional. A proposed type repair must identify the production constructors
+and consumers it changes, the bad construction or transition it prevents, and
+the checks that still require runtime evidence. Delegate a bounded type-design
+review when this needs independent investigation, coordinating with the repair
+owner. A wrapper around unchecked data or an ignored cleanup callback does not
+enforce an invariant. Test transitions, failure and recovery through the owning
+API; use compile-fail checks where an API restriction is itself the contract.
+
 Use a bug or code smell to expand property coverage beyond the failing line.
 Inspect the surrounding component and its immediate conceptual neighbors: the
 producer and consumer of the same fact, alternate operations over the same state,
