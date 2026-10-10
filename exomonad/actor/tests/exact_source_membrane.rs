@@ -19,11 +19,15 @@ fn actor_context_carries_an_exact_facade_into_an_isolated_compile_view() {
         .expect("open declaration plane")
         .with_validation_include(vec![stdlib]);
     let mut session = PersistentSession::new(Some(lib), 1 << 20);
-    session
-        .define_scoped(&["data Public = Public Int\n\
+    tidepool_testing::with_settlement(|settlement| {
+        session.define_scoped(
+            &["data Public = Public Int\n\
              data Secret = Secret\n\
-             reveal (Public n) = n"])
-        .expect("define source module");
+             reveal (Public n) = n"],
+            settlement,
+        )
+    })
+    .expect("define source module");
 
     let surface = session
         .exact_exports_in(ScopeId::ROOT, &["Public", "reveal"])

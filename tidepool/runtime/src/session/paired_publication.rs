@@ -2310,9 +2310,10 @@ mod tests {
         let value =
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "%%", 601);
         let value_id = value.id;
-        session
-            .bind_replacing_decl_in(a.private_scope(), value)
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            session.bind_replacing_decl_in(a.private_scope(), value, settlement)
+        })
+        .unwrap();
         let private_tip = tip(session.lib(), session.lib().scope_tip(a.private_scope()))
             .unwrap()
             .unwrap();

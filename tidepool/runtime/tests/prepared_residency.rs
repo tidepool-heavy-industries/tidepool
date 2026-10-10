@@ -1151,10 +1151,12 @@ fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
     // A declaration captures the carrier binding by name -- `define_scoped`
     // auto-imports every currently-visible value's exact `Val.G<g>` module,
     // so the committed `Lib.G<g>` source now names this stub generation.
-    notebook
-        .session
-        .define_scoped(&["capturedUse = capturedCarrier"])
-        .expect("declaration captures the carrier binding");
+    tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .define_scoped(&["capturedUse = capturedCarrier"], settlement)
+    })
+    .expect("declaration captures the carrier binding");
 
     // Retire the carrier binding: it must both stop being excluded from
     // `--inject-val` bookkeeping under its own generation AND delete its

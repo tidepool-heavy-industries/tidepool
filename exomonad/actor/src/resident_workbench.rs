@@ -12374,7 +12374,7 @@ pub(crate) mod request_tests {
                 .scope(async move {
                     let ticket = register_compiler_work().unwrap();
                     spawn_blocking_in_span(move || {
-                        ticket.run(|| {
+                        ticket.run(|_settlement| {
                             entered.send(()).unwrap();
                             proceed.recv_timeout(Duration::from_secs(5)).unwrap();
                             // This is the real source-observation owner. Interruption
@@ -12424,7 +12424,7 @@ pub(crate) mod request_tests {
             .scope(async move {
                 let ticket = register_compiler_work().unwrap();
                 spawn_blocking_in_span(move || {
-                    ticket.run(|| tidepool_toolchain::cache::source_root_manifest(&root))
+                    ticket.run(|_settlement| tidepool_toolchain::cache::source_root_manifest(&root))
                 })
                 .await
                 .unwrap()
@@ -12450,7 +12450,7 @@ pub(crate) mod request_tests {
         let (entered, observed) = tokio::sync::oneshot::channel();
         let (release, proceed) = std::sync::mpsc::channel();
         let task = spawn_blocking_in_span(move || {
-            ticket.run(|| {
+            ticket.run(|_settlement| {
                 entered.send(()).unwrap();
                 proceed.recv_timeout(Duration::from_secs(5)).unwrap();
                 tidepool_extract_cmd::compiler_host_checkpoint()
@@ -12497,7 +12497,7 @@ pub(crate) mod request_tests {
         .unwrap();
         let root = directory.path().to_path_buf();
         let work = spawn_blocking_in_span(move || {
-            ticket.run(|| {
+            ticket.run(|_settlement| {
                 entered.send(()).unwrap();
                 proceed.recv_timeout(Duration::from_secs(5)).unwrap();
                 tidepool_toolchain::cache::source_root_manifest(&root)
@@ -12549,7 +12549,7 @@ pub(crate) mod request_tests {
                 // Exercise the same admission boundary as every real compiler spawn.
                 let ticket = register_compiler_work().unwrap();
                 let native = spawn_blocking_in_span(move || {
-                    let action = ticket.run(|| {
+                    let action = ticket.run(|_settlement| {
                         entered.send(()).unwrap();
                         proceed
                             .recv_timeout(std::time::Duration::from_secs(5))
@@ -12615,7 +12615,7 @@ pub(crate) mod request_tests {
             spawn_blocking_in_span(move || {
                 let action = ticket.run_for_workload(
                     tidepool_extract_cmd::CompileWorkload::Preparation,
-                    || {
+                    |_settlement| {
                         entered.send(()).unwrap();
                         proceed
                             .recv_timeout(std::time::Duration::from_secs(5))

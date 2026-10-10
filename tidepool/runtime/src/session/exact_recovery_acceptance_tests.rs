@@ -506,7 +506,10 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
     session.bind_in(private, existing).unwrap();
     let mut entry = prepared::tests::rooted_publication_fixture(&mut session, "answer", 4414);
     entry.scope = private;
-    session.bind_replacing_decl_in(private, entry).unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        session.bind_replacing_decl_in(private, entry, settlement)
+    })
+    .unwrap();
     let generation = session.lib().scope_tip(private);
     let authored_owner = session
         .lib()

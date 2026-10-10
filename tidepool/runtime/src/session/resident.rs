@@ -3537,8 +3537,9 @@ where
     /// declarations survive across a child run on a different node.
     pub fn define_scoped(
         &mut self,
-        decls: &[&str], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<tidepool_repr::Generation, SessionError> {
+        decls: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<tidepool_repr::Generation, SessionError> {
         self.define_scoped_in(ScopeId::ROOT, decls, settlement)
     }
 
@@ -3549,8 +3550,9 @@ where
     pub fn define_scoped_in(
         &mut self,
         scope: ScopeId,
-        decls: &[&str], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<tidepool_repr::Generation, SessionError> {
+        decls: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<tidepool_repr::Generation, SessionError> {
         self.state.define_scoped_in(scope, decls, settlement)
     }
 
@@ -3560,8 +3562,9 @@ where
         &mut self,
         scope: ScopeId,
         decls: &[&str],
-        imports: &SourceImports, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<tidepool_repr::Generation, SessionError> {
+        imports: &SourceImports,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<tidepool_repr::Generation, SessionError> {
         self.state
             .define_scoped_with_imports_in(scope, decls, imports, settlement)
     }
@@ -3571,8 +3574,9 @@ where
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         imports: &super::SourceImports,
-        source_layer: &[PathBuf], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<super::StagedDeclaration, SessionError> {
+        source_layer: &[PathBuf],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<super::StagedDeclaration, SessionError> {
         self.state
             .stage_declarations_in(scope, receipt, imports, source_layer, settlement)
     }
@@ -3599,8 +3603,9 @@ where
         &mut self,
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
-        imports: &SourceImports, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<super::DeclarationPlaneCommit, SessionError> {
+        imports: &SourceImports,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<super::DeclarationPlaneCommit, SessionError> {
         self.state
             .commit_declaration_receipt_in(scope, receipt, imports, settlement)
     }
@@ -3744,8 +3749,9 @@ where
         source: SessionVarId,
         alias: &BoundBinder,
         generation: Generation,
-        lease: &BindingLease, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<super::ValuePlaneCommit, ResidentError> {
+        lease: &BindingLease,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<super::ValuePlaneCommit, ResidentError> {
         self.settle_dropped_custody();
         if !self.state.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope).into());
@@ -3803,7 +3809,9 @@ where
                 defining_expr: None,
                 scope,
             },
-            source, settlement)?;
+            source,
+            settlement,
+        )?;
         self.state.set_val_gen(generation);
         self.advance_public_visibility(scope);
         if let Some(provenance) = provenance {
@@ -6793,8 +6801,9 @@ where
         generation: Generation,
         bound: &[(&BoundBinder, PreparedHandle)],
         checked: Option<&CheckedTurnCompletion>,
-        interface_source: ValueInterfaceSource, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<(), ResidentError> {
+        interface_source: ValueInterfaceSource,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<(), ResidentError> {
         if let ValueInterfaceSource::Staged(staged) = &interface_source {
             let validated = self
                 .state
@@ -6881,7 +6890,8 @@ where
             self.state
                 .bind_checked_private_values_in(completion, scope, entries, &binders)?;
         } else {
-            self.state.bind_replacing_decls_in(scope, entries, settlement)?;
+            self.state
+                .bind_replacing_decls_in(scope, entries, settlement)?;
         }
         // Ordinary fragments retain their established filesystem interface
         // contract. Checked settlements register their sealed artifact instead.
@@ -9474,13 +9484,15 @@ mod authored_publication_tests {
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
         let d = session.begin_private_execution(public).unwrap();
-        let d_generation = session
-            .define_scoped_with_imports_in(
+        let d_generation = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 d.private_scope(),
                 &["d :: Int -> Int\nd x = x + 41\n{-# NOINLINE d #-}"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let original_d = session
             .state
             .lib()
@@ -9532,13 +9544,15 @@ mod authored_publication_tests {
                 .unwrap(),
             public_d
         );
-        let e_generation = session
-            .define_scoped_with_imports_in(
+        let e_generation = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 e.private_scope(),
                 &["e :: Int -> Int\ne x = d x + 1\n{-# NOINLINE e #-}"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let original_e = session
             .state
             .lib()
@@ -9769,13 +9783,15 @@ mod authored_publication_tests {
         lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
             .unwrap();
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
-        session
-            .define_scoped_with_imports_in(
+        tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 ScopeId::ROOT,
                 &["seed :: Int\nseed = 1"],
                 &super::super::SourceImports::new(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let private = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
         let scope = private.private_scope();
         session.run_context.lexical_scope = scope;
@@ -10130,11 +10146,16 @@ mod authored_publication_tests {
         })
         .unwrap()
         .unwrap();
-        let staged = session
-            .stage_declarations_in(ScopeId::ROOT, &receipt, &SourceImports::new(), &[])
-            .unwrap_or_else(|error| {
-                panic!("stage against the actual binding environment: {error:?}")
-            });
+        let staged = tidepool_testing::with_settlement(|settlement| {
+            session.stage_declarations_in(
+                ScopeId::ROOT,
+                &receipt,
+                &SourceImports::new(),
+                &[],
+                settlement,
+            )
+        })
+        .unwrap_or_else(|error| panic!("stage against the actual binding environment: {error:?}"));
         assert_eq!(staged.generation(), Generation(1));
         let before = session
             .public_visibility_snapshot_in(ScopeId::ROOT)
@@ -10181,13 +10202,15 @@ mod authored_publication_tests {
         assert_eq!(before.declaration_tip, Generation(0));
         assert_eq!(before.bindings, vec![("answer".into(), original)]);
         session.state.lib_mut().fail_recovery_durability_once = true;
-        let error = session
-            .define_scoped_with_imports_in(
+        let error = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 ScopeId::ROOT,
                 &["answer :: Int\nanswer = 42"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap_err();
+        })
+        .unwrap_err();
         // Direct define must first publish its identity reservation. At that
         // boundary no authored product or visibility replacement exists yet.
         assert!(
@@ -10257,15 +10280,17 @@ mod authored_publication_tests {
 
         // Retrying confirmed direct source is new admission: slot1 stays burned,
         // and actual validated adoption at slot2 alone evicts the live value.
-        let committed = session
-            .define_scoped_with_imports_in(
+        let committed = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 ScopeId::ROOT,
                 &["answer :: Int\nanswer = 42"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap_or_else(|error| {
-                panic!("confirmed direct retry must adopt the real declaration: {error:?}")
-            });
+        })
+        .unwrap_or_else(|error| {
+            panic!("confirmed direct retry must adopt the real declaration: {error:?}")
+        });
         assert_eq!(committed, Generation(2));
         assert!(session.state.resolve_in(ScopeId::ROOT, "answer").is_none());
         assert!(session
@@ -10383,13 +10408,15 @@ mod authored_publication_tests {
         // validation or adoption. Its uncertainty must not claim a declaration
         // commit, and the burned identity must remain unavailable afterward.
         session.state.lib_mut().fail_recovery_durability_once = true;
-        let error = session
-            .define_scoped_with_imports_in(
+        let error = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 private,
                 &["answer :: Int\nanswer = 42"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap_err();
+        })
+        .unwrap_err();
         assert!(
             matches!(&error, SessionError::RecoveryManifest { .. }),
             "{error:?}"
@@ -10430,9 +10457,10 @@ mod authored_publication_tests {
         })
         .unwrap()
         .unwrap();
-        let staged = session
-            .stage_declarations_in(private, &receipt, &SourceImports::new(), &[])
-            .unwrap();
+        let staged = tidepool_testing::with_settlement(|settlement| {
+            session.stage_declarations_in(private, &receipt, &SourceImports::new(), &[], settlement)
+        })
+        .unwrap();
         assert_eq!(staged.generation(), Generation(2));
         session.state.lib_mut().fail_recovery_durability_once = true;
         let error = session.adopt_staged_declaration_in(staged).unwrap_err();

@@ -239,7 +239,10 @@ impl CompilerWorkTicket {
             .clone()
     }
 
-    pub(crate) fn run<T>(self, action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T) -> T {
+    pub(crate) fn run<T>(
+        self,
+        action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
+    ) -> T {
         self.run_with_close(action).action
     }
 
@@ -286,7 +289,8 @@ impl CompilerWorkTicket {
     ) -> T {
         let mut close = outcome.close;
         for observed in self.receipt.attempts.lock().drain(..) {
-            if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) = observed {
+            if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) = observed
+            {
                 if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(previous) = close {
                     evidence.earlier.push(previous);
                 }
@@ -332,7 +336,8 @@ impl CompilerPreparationOwner {
             completed: false,
         };
         let cleanup = self.cleanup();
-        let owner = crate::resident_workbench::CompilerCloseOwner::Initialization(self.retained.clone());
+        let owner =
+            crate::resident_workbench::CompilerCloseOwner::Initialization(self.retained.clone());
         let action = owner.register_work().map(|ticket| ticket.run(action));
         admission.completed = true;
         drop(admission);
@@ -871,7 +876,7 @@ mod tests {
                 let _native = tidepool_runtime::spawn_blocking_in_span(move || {
                     ticket.run_for_workload(
                         tidepool_toolchain::artifacts::CompileWorkload::Preparation,
-                        || {
+                        |_settlement| {
                             proceed
                                 .recv_timeout(std::time::Duration::from_secs(5))
                                 .unwrap()
