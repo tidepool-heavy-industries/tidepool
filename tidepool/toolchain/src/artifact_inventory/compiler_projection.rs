@@ -296,10 +296,16 @@ impl CompilerInputProjection {
         &self,
         metadata: &ArtifactMetadataSnapshot,
     ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
+        self.entries_from_artifacts(&metadata.artifacts)
+    }
+
+    pub(crate) fn entries_from_artifacts(
+        &self,
+        artifacts: &BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
+    ) -> Result<BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>, CompileError> {
         let mut selected = BTreeMap::new();
         for (owner, role) in &self.roles {
-            let interface = metadata
-                .artifacts
+            let interface = artifacts
                 .get(&role.interface())
                 .ok_or_else(|| failure("compiler interface role is outside retained custody"))?;
             if &interface.descriptor.owner != owner || interface.is_native() {
@@ -308,7 +314,7 @@ impl CompilerInputProjection {
             let entry = match role.original() {
                 None => interface,
                 Some(id) => {
-                    let original = metadata.artifacts.get(&id).ok_or_else(|| {
+                    let original = artifacts.get(&id).ok_or_else(|| {
                         failure("compiler original offer is outside retained custody")
                     })?;
                     let ArtifactPayload::Original(product) = &original.payload else {
@@ -341,10 +347,7 @@ impl CompilerInputProjection {
                     })
                 })?;
                 if entry.interface_seals.get(required).is_some_and(|seal| {
-                    metadata.artifacts[&role.interface()]
-                        .descriptor
-                        .interface_sha256
-                        != *seal
+                    artifacts[&role.interface()].descriptor.interface_sha256 != *seal
                 }) {
                     return Err(admission_failure(
                         ArtifactInventoryFailure::InterfaceSealMismatch {

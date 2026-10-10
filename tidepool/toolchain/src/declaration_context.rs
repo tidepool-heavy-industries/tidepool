@@ -5086,11 +5086,12 @@ impl ExactDeclarationContext {
         }
         let entries = entries.into_iter().map(Arc::new).collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
-        self.inventory = self
-            .inventory
-            .inventory()
-            .admit_shared(&self.inventory, entries)?;
-        self.compiler_projection = self.compiler_projection.merge(&issued)?;
+        let projection = self.compiler_projection.merge(&issued)?;
+        self.inventory =
+            self.inventory
+                .inventory()
+                .admit_projected(&self.inventory, entries, &projection)?;
+        self.compiler_projection = projection;
         self.lexical = lexical;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         self.finish()
@@ -5177,15 +5178,9 @@ impl ExactDeclarationContext {
             .into_iter()
             .collect::<Vec<_>>();
         let compiler_artifacts = self.artifact_view().select_roots(compiler_roots.clone())?;
-        let artifacts = self.artifact_view().select_roots(
-            compiler_roots
-                .into_iter()
-                .chain(self.artifact_view().entries().iter().filter_map(|entry| {
-                    matches!(entry.payload, ArtifactPayload::Original(_))
-                        .then_some(entry.descriptor.id)
-                }))
-                .collect(),
-        )?;
+        let artifacts = self
+            .artifact_view()
+            .retain_original_custody(&compiler_artifacts)?;
         Ok(RetainedValueSourceSurface {
             artifacts,
             compiler_artifacts,

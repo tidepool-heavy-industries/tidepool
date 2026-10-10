@@ -236,6 +236,7 @@ fn certified_target_source_groups(
 enum ArtifactRootIntent<'a> {
     SuppliedArtifacts,
     Certified(&'a crate::certified_products::CertifiedSourceSelection),
+    Projected(&'a CompilerInputProjection),
 }
 
 /// Graph vertices retain one full artifact allocation separately from its
@@ -1689,6 +1690,21 @@ impl ArtifactInventory {
             ArtifactRootIntent::Certified(selection),
         )
     }
+    /// The compiler-role owner supplies the exact namespace before adding
+    /// authenticated interface facts. Historical parents remain independent custody.
+    pub(crate) fn admit_projected(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        projection: &CompilerInputProjection,
+    ) -> Result<ArtifactView, CompileError> {
+        self.admit_shared_with_intent(
+            parent,
+            entries,
+            NativeArtifactDemand::ScopeInterfaces,
+            ArtifactRootIntent::Projected(projection),
+        )
+    }
     fn admit_shared_with_intent(
         &self,
         parent: &ArtifactView,
@@ -1766,10 +1782,6 @@ impl ArtifactInventory {
             return Ok(parent.clone());
         }
         let materialization_parents = Vec::new();
-        let certified_selection = match root_intent {
-            ArtifactRootIntent::Certified(selection) => Some(selection),
-            _ => None,
-        };
         let retained_roots: Option<Vec<InventoryNodeKey>> = None;
         let native_custody = Vec::<ArtifactBinding>::new();
         let mut expanded = entries;
@@ -1880,13 +1892,25 @@ impl ArtifactInventory {
             .map(|(id, entry)| (*id, Arc::clone(entry)))
             .collect::<BTreeMap<_, _>>();
         selected.extend(supplied.clone());
-        let namespace_ids = match certified_selection {
-            Some(issued) => Some(
+        let namespace_ids = match root_intent {
+            ArtifactRootIntent::Certified(issued) => Some(
                 issued
                     .artifact_ids_from_entries(&selected)
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
             ),
-            None => None,
+            ArtifactRootIntent::Projected(projection) => {
+                projection.entries_from_artifacts(&selected)?;
+                let ids = projection
+                    .roles()
+                    .into_iter()
+                    .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+                    .collect::<BTreeSet<_>>();
+                if ids.iter().any(|id| !selected.contains_key(id)) {
+                    return Err(failure("projected namespace lacks authenticated artifact"));
+                }
+                Some(ids)
+            }
+            ArtifactRootIntent::SuppliedArtifacts => None,
         };
         if let Some(ids) = &namespace_ids {
             selected.retain(|id, entry| {
@@ -3531,6 +3555,53 @@ impl ArtifactView {
         }
         Ok(retained)
     }
+    /// Preserve every source-owned original binding and already selected group
+    /// as byte/native custody, without resolving payload IDs into compiler roles.
+    pub(crate) fn retain_original_custody(&self, selected: &Self) -> Result<Self, CompileError> {
+        if !Arc::ptr_eq(&self.lease.inventory.0, &selected.lease.inventory.0) {
+            return Err(failure(
+                "original custody selection belongs to another inventory",
+            ));
+        }
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &self.read_projection(&state).nodes;
+        let selected_nodes = &selected.read_projection(&state).nodes;
+        if !selected_nodes.is_subset(owned) {
+            return Err(failure("original custody selection exceeds retained graph"));
+        }
+        let mut roots = selected.roots().iter().copied().collect::<BTreeSet<_>>();
+        roots.extend(
+            owned
+                .iter()
+                .filter(|node| {
+                    matches!(
+                        state.payloads[&node.artifact()].payload,
+                        ArtifactPayload::Original(_)
+                    )
+                })
+                .copied(),
+        );
+        let custody = selected.native_custody().to_vec();
+        let namespace = selected.namespace();
+        drop(state);
+        let mut retained = self.lease.inventory.retain(
+            roots.into_iter().collect(),
+            custody,
+            Vec::new(),
+            Vec::new(),
+        );
+        Arc::get_mut(&mut retained.lease)
+            .expect("new original custody lease")
+            .namespace = namespace.clone();
+        let mut retained = self.retain_projected_materializations(retained)?;
+        // An empty selected namespace is also an issued fact, never a request
+        // to inherit the source's broader compiler roles.
+        Arc::get_mut(&mut retained.lease)
+            .expect("new original custody lease")
+            .namespace = namespace;
+        Ok(retained)
+    }
+
     /// Narrow the compiler namespace using already-issued roles while retaining
     /// every exact historical binding and its physical custody independently.
     pub(crate) fn with_compiler_projection(
