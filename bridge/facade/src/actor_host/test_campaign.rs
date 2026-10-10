@@ -88,8 +88,31 @@ pub(super) fn commit_workspace(workspace: &std::path::Path) {
     .unwrap();
 }
 
+/// Commands use the tool directory supplied by the declared runtime resource.
+pub(super) fn configure_command_path(config: &mut ActorHostConfig) {
+    let nix = std::path::PathBuf::from(
+        std::env::var_os("EXOMONAD_NIX_BIN")
+            .expect("the runtime tools are declared test resources"),
+    );
+    let tools = nix
+        .parent()
+        .expect("the declared Nix executable has its tool directory");
+    assert!(
+        tools.join("bwrap").is_file(),
+        "the declared runtime tools include bubblewrap"
+    );
+    config.pane_environment.insert(
+        "PATH".into(),
+        tools
+            .to_str()
+            .expect("the declared runtime tool directory is UTF-8")
+            .into(),
+    );
+}
+
 /// Select the shell record explicitly for tests of the hosted command tools.
 pub(super) fn configure_shell_workspace(config: &mut ActorHostConfig) {
+    configure_command_path(config);
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(&authored).unwrap();
     std::fs::write(

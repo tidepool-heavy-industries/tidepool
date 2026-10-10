@@ -380,9 +380,10 @@ async fn command_cleanup(host: &HostedTestRuntime, actor: ActorRef) {
 
 fn prepared_default_sol_workspace(config: &mut ActorHostConfig) {
     super::scaffold_admission_tests::prepared_scaffold(config);
+    super::test_campaign::configure_command_path(config);
     let owner = exomonad_node::command_resources::CommandResources::delegated(
         exomonad_node::command_resources::CommandResourcePolicy {
-            general_bytes: 512 * 1024 * 1024,
+            general_bytes: 2 * exomonad_node::command_resources::GIB,
             protected_bytes: 0,
             swap_max_bytes: 0,
             ..Default::default()
@@ -480,7 +481,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             child = next(host, &mut requests, &mut pending, &child_path).await;
             let shell = child.settled_output("recursive-default-bash");
             assert_eq!(shell["status"], "committed", "{shell}");
-            assert_eq!(shell["value"]["successful"], true, "{shell}");
+            assert_eq!(shell["items"][0]["value"]["successful"], true, "{shell}");
             assert!(
                 shell.to_string().contains("captured-default-shell"),
                 "{shell}"
@@ -647,7 +648,7 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
         };
         let shell = child.settled_output("fresh-default-bash");
         assert_eq!(shell["status"], "committed", "{shell}");
-        assert_eq!(shell["value"]["successful"], true, "{shell}");
+        assert_eq!(shell["items"][0]["value"]["successful"], true, "{shell}");
         assert!(shell.to_string().contains("fresh-default-shell"), "{shell}");
         child.call("fresh-default-reply", "respond (\"fresh-default-native-reply\" :: Text)");
         let child = tokio::select! {
