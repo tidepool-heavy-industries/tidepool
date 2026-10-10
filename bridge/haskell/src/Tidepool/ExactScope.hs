@@ -45,7 +45,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Char (isHexDigit)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef', writeIORef)
 import Data.List (isPrefixOf)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -259,19 +259,29 @@ data CanonicalInterfaceProof = CanonicalInterfaceProof
 -- silently reconstruct a fresh-output set from the final scope inventory.
 newtype FreshOutputSeals = FreshOutputSeals [(FilePath,String,Maybe Int)]
 
+-- At most 128 retained candidates issue three copies; 128 local finalized
+-- owners issue three payloads plus one canonical certificate; and 4096
+-- completed value interfaces issue two payloads. The fixed inventory writes
+-- add fewer than ten entries; 16384 covers that schema-derived sum.
+maxFreshOutputEntries :: Int
+maxFreshOutputEntries = 16384
+
+-- Match the default request-capture guard. More specific producers impose
+-- tighter per-kind and aggregate limits before issuing these terminal seals.
+maxFreshOutputBytes :: Integer
+maxFreshOutputBytes = 4 * 1024 * 1024 * 1024
+
 emptyFreshOutputSeals :: FreshOutputSeals
 emptyFreshOutputSeals = FreshOutputSeals []
 
 freshOutputSealsFromWrites :: [(FilePath,BS.ByteString)] -> Either String FreshOutputSeals
 freshOutputSealsFromWrites writes
-  | any ((> 1) . length) (filter (not . allEqual) (Map.elems grouped)) =
+  | any (not . allEqual) (Map.elems grouped) =
       Left "fresh output writer issued conflicting bytes for one path"
-  | length unique > 4096 = Left "fresh output inventory exceeds its entry bound"
-  | sum (map (BS.length . snd) unique) > 512 * 1024 * 1024 =
-      Left "fresh output inventory exceeds its byte bound"
+  | length unique > maxFreshOutputEntries = Left "fresh output inventory exceeds its entry bound"
+  | totalBytes > maxFreshOutputBytes = Left "fresh output inventory exceeds its byte bound"
   | any (BS.null . snd) unique = Left "fresh output inventory contains an empty artifact"
-  | otherwise = Right (FreshOutputSeals
-      [(path,digest bytes,Just (BS.length bytes)) | (path,bytes) <- unique])
+  | otherwise = Right (FreshOutputSeals [(path,digest bytes,Just (BS.length bytes)) | (path,bytes) <- unique])
   where
     grouped = Map.fromListWith (++) [(path,[bytes]) | (path,bytes) <- writes]
     allEqual [] = True
@@ -279,17 +289,24 @@ freshOutputSealsFromWrites writes
     unique = Map.toAscList (Map.mapMaybe first grouped)
     first [] = Nothing
     first (bytes:_) = Just bytes
+    totalBytes = sum (map (toInteger . BS.length . snd) unique)
 
 appendFreshOutputSeals :: FreshOutputSeals -> FreshOutputSeals -> Either String FreshOutputSeals
 appendFreshOutputSeals (FreshOutputSeals left) (FreshOutputSeals right)
-  | length joined > 4096 = Left "fresh output inventory exceeds its entry bound"
-  | sum [maybe 0 id bound | (_,_,bound) <- joined] > 512 * 1024 * 1024 =
-      Left "fresh output inventory exceeds its byte bound"
-  | length paths /= Set.size (Set.fromList paths) = Left "fresh output inventory repeats a path"
+  | conflicts = Left "fresh output seals conflict for one path"
+  | length joined > maxFreshOutputEntries = Left "fresh output inventory exceeds its entry bound"
+  | totalBytes > maxFreshOutputBytes = Left "fresh output inventory exceeds its byte bound"
   | otherwise = Right (FreshOutputSeals joined)
   where
-    joined = left ++ right
-    paths = [path | (path,_,_) <- joined]
+    grouped = Map.fromListWith (++) [(path,[(sha,bound)]) | (path,sha,bound) <- left ++ right]
+    consistent [] = Nothing
+    consistent (first:rest)
+      | all (== first) rest = Just first
+      | otherwise = Nothing
+    joined = [(path,sha,bound) | (path,records) <- Map.toAscList grouped
+      , Just (sha,bound) <- [consistent records]]
+    conflicts = any (isNothing . consistent) (Map.elems grouped)
+    totalBytes = sum [toInteger size | (_,_,Just size) <- joined]
 
 -- Metadata validation grants no executable bytes. Promotion and exact-scope
 -- admission bind a proof to the single budgeted request input owner.

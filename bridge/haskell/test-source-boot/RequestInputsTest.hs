@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl, freshOutputSealSetLaws) where
 
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -9,7 +9,7 @@ import Control.Monad (foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.List (isInfixOf, isPrefixOf, nub, stripPrefix, tails)
+import Data.List (isInfixOf, isPrefixOf, nub, permutations, stripPrefix, tails)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -42,9 +42,10 @@ import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ExactScope
   ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
   , scopeInterfaces, scopeModuleInterfaceProofs, readExactScope, revalidateExactScope
+  , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
   , writeCheckedExactCompilation, writeRetainedExactCompilation
   , writeRetainedExactCompilationWithOutputsAndPublication
-  , freshOutputSealsFromWrites
+  , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
@@ -973,3 +974,35 @@ requestInputBoundaries = withScratch $ \directory -> do
     :: IO (Either AsyncException ((),RequestOriginalInputs))
   unless (case cancelled of Left ThreadKilled -> True; _ -> False)
     (fail "capture admission converted asynchronous cancellation")
+
+freshOutputSealSetLaws :: IO ()
+freshOutputSealSetLaws = withScratch $ \work -> do
+  let firstPath = work </> "first-output.bin"
+      secondPath = work </> "second-output.bin"
+      firstBytes = BS.pack [1,2,3]
+      secondBytes = BS.pack [4,5,6]
+      conflictingBytes = BS.pack [9,8,7]
+      seal writes = freshOutputSealsFromWrites writes
+      merged seals = foldM appendFreshOutputSeals emptyFreshOutputSeals seals
+  first <- either fail pure (seal [(firstPath,firstBytes)])
+  second <- either fail pure (seal [(secondPath,secondBytes)])
+  duplicateFirst <- either fail pure (seal [(firstPath,firstBytes),(firstPath,firstBytes)])
+  conflict <- either fail pure (seal [(firstPath,conflictingBytes)])
+  forM_ (permutations [(firstPath,firstBytes),(secondPath,secondBytes),(firstPath,firstBytes)]) $ \ordered ->
+    case seal ordered of
+      Left reason -> fail ("same-content output grouping depended on input order: " ++ reason)
+      Right _ -> pure ()
+  forM_ (permutations [first,duplicateFirst,second]) $ \ordered -> do
+    joined <- either fail pure (merged ordered)
+    case appendFreshOutputSeals joined conflict of
+      Left _ -> pure ()
+      Right _ -> fail "merged output set lost same-path conflict detection"
+  case seal [(firstPath,firstBytes),(firstPath,conflictingBytes)] of
+    Left _ -> pure ()
+    Right _ -> fail "seal factory accepted conflicting writes to one path"
+  case appendFreshOutputSeals first conflict of
+    Left _ -> pure ()
+    Right _ -> fail "seal union accepted conflicting content for one path"
+  _ <- either fail pure (appendFreshOutputSeals emptyFreshOutputSeals first)
+  _ <- either fail pure (appendFreshOutputSeals second emptyFreshOutputSeals)
+  pure ()

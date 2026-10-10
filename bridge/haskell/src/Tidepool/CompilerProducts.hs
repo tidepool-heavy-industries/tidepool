@@ -92,9 +92,10 @@ import Tidepool.ExecutionSource
   , executionSourceInheritedOwners, ExecutionSourceRef(..), executionSourceProspectiveReferences )
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, LocalFinalizedAdmission
+  ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, captureFinalizedModuleArtifactsWithOutputs
+  , materializeFinalizedModuleArtifactsWithOutputs, LocalFinalizedAdmission
   , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedSourceSha256
-  , finalizedMaterializedOutputBytes )
+  )
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult(..), pprAcceptedCandidates, PipelineResult(..), PreparedModuleObserver(..), PreparedModuleCompletionInputs(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
@@ -668,10 +669,10 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
     timing <- readTimingEnabled
     let dependencies = preparedFreshDependencies prepared
     issued <- traverse (admitCurrentOriginalProducts originalInterfaces outDir prepared) productContext
-    finalized <- case issued >>= preparedCurrentOriginalInventory of
-      Just inventory -> materializeFinalizedModuleArtifacts outDir (currentOriginalFinalized inventory)
+    (finalized,finalizedOutputs) <- case issued >>= preparedCurrentOriginalInventory of
+      Just inventory -> materializeFinalizedModuleArtifactsWithOutputs outDir (currentOriginalFinalized inventory)
       Nothing -> timeDetailPhase timing "module_products" "capture_finalization" $
-        captureFinalizedModuleArtifacts originalInterfaces hscEnv
+        captureFinalizedModuleArtifactsWithOutputs originalInterfaces hscEnv
           (pprFinalizedModules prepared) (pprPackageImports prepared) dependencies outDir
     let inventory = issued >>= preparedCurrentOriginalInventory
         availability = maybe Map.empty currentOriginalAvailability inventory
@@ -745,7 +746,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         captureFinalizedSourceOriginals compilation (pprAcceptedCandidates prepared)
           (unitString (moduleUnit owner),moduleNameString (moduleName owner)) finalized finalDependencies
     outputSeals <- either fail pure $ freshOutputSealsFromWrites
-      (finalizedMaterializedOutputBytes finalized
+      (finalizedOutputs
         ++ inventoryOutputs
         ++ [(outDir </> "dependencies.json",dependencyBytes)]
         ++ executionOutput
