@@ -6020,7 +6020,7 @@ mod tests {
                         if kind
                             == tidepool_toolchain::checked_cell::CheckedItemKind::Expression =>
                     {
-                        resident.run_observation_with_sites(
+                        tidepool_testing::with_settlement(|settlement| resident.run_observation_with_sites(
                             compiled.code(),
                             binder,
                             reservation.generation(),
@@ -6028,20 +6028,20 @@ mod tests {
                                 == Some(
                                     tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
                                 ),
-                        )
+                         settlement))
                     }
-                    [binder] => resident.run_bind_with_sites(
+                    [binder] => tidepool_testing::with_settlement(|settlement| resident.run_bind_with_sites(
                         &binder.name,
                         compiled.code(),
                         binder,
                         reservation.generation(),
-                    ),
-                    binders => resident.run_projected_bind_with_sites(
+                     settlement)),
+                    binders => tidepool_testing::with_settlement(|settlement| resident.run_projected_bind_with_sites(
                         "checkedHome",
                         compiled.code(),
                         binders,
                         reservation.generation(),
-                    ),
+                     settlement)),
                 }
                 .unwrap();
                 assert!(
@@ -7586,23 +7586,27 @@ mod tests {
                     .is_err());
             }
             if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Bind {
-                resident
-                    .run_bind_with_sites(
+                tidepool_testing::with_settlement(|settlement| {
+                    resident.run_bind_with_sites(
                         &bound[0].name,
                         compiled.code(),
                         &bound[0],
                         reservation.generation(),
+                        settlement,
                     )
-                    .unwrap();
+                })
+                .unwrap();
             } else {
-                resident
-                    .run_observation_with_sites(
+                tidepool_testing::with_settlement(|settlement| {
+                    resident.run_observation_with_sites(
                         compiled.code(),
                         &bound[0],
                         reservation.generation(),
                         false,
+                        settlement,
                     )
-                    .unwrap();
+                })
+                .unwrap();
             }
             assert_eq!(
                 protected.snapshot().compiler_prefix().next_item(),
@@ -8187,14 +8191,16 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(resident
-            .run_bind_with_sites(
+        assert!(
+            tidepool_testing::with_settlement(|settlement| resident.run_bind_with_sites(
                 "edited",
                 compiled.code(),
                 &edited[0],
-                view.next_value_generation()
-            )
-            .is_err());
+                view.next_value_generation(),
+                settlement
+            ))
+            .is_err()
+        );
         assert!(
             !resident.prepared_machine_ready(),
             "edited binder metadata reached native install"
@@ -8206,14 +8212,16 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let outcome = resident
-            .run_observation_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            resident.run_observation_with_sites(
                 expression_compiled.code(),
                 &expression_bound[0],
                 expression_reservation.generation(),
                 false,
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         match outcome {
             crate::session::ResidentOutcome::Completed { .. }
             | crate::session::ResidentOutcome::BindingsCommitted { .. } => {}
@@ -8233,28 +8241,32 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let outcome = resident
-            .run_bind_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            resident.run_bind_with_sites(
                 "checked",
                 compiled.code(),
                 &bound[0],
                 view.next_value_generation(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert!(matches!(
             outcome,
             crate::session::ResidentOutcome::Completed { .. }
                 | crate::session::ResidentOutcome::BindingsCommitted { .. }
         ));
         assert_eq!(binding_prefix.snapshot().compiler_prefix().next_item(), 1);
-        assert!(resident
-            .run_bind_with_sites(
+        assert!(
+            tidepool_testing::with_settlement(|settlement| resident.run_bind_with_sites(
                 "replayed",
                 compiled.code(),
                 &bound[0],
-                view.next_value_generation()
-            )
-            .is_err());
+                view.next_value_generation(),
+                settlement
+            ))
+            .is_err()
+        );
     }
 
     use super::*;
@@ -9670,7 +9682,7 @@ mod compiler_packet_replay {
     //! Source and recipe hashes are diagnostic inputs. The parser, runtime admission,
     //! compiler endpoint and product issuers create every new authority below.
 
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use serde::Deserialize;

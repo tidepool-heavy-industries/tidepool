@@ -4178,7 +4178,11 @@ mod tests {
                 return Ok(OwnedActorTask::serial(
                     move |mut behavior: Self, context| {
                         Box::pin(async move {
-                            let result = behavior.resume(&context).await.map_err(|error| {
+                            let result = tidepool_testing::with_settlement(|settlement| {
+                                behavior.resume(&context, settlement)
+                            })
+                            .await
+                            .map_err(|error| {
                                 KernelInvocationFailure::Failed {
                                     receipts: Vec::new(),
                                     actor: context.identity(),

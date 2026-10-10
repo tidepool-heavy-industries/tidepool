@@ -2590,9 +2590,16 @@ async fn composition_root_child_session_factory_runs_a_cell() {
                         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
                     )
                     .expect("a freshly bootstrapped machine accepts actor execution context");
-                let outcome = child_machine
-        .run_with_sites("exomonad_root_driver", campaign.program.code())
-        .expect("the driver cell the root itself bootstraps with also runs on a child machine");
+                let outcome = tidepool_testing::with_settlement(|settlement| {
+                    child_machine.run_with_sites(
+                        "exomonad_root_driver",
+                        campaign.program.code(),
+                        settlement,
+                    )
+                })
+                .expect(
+                    "the driver cell the root itself bootstraps with also runs on a child machine",
+                );
                 assert!(
         matches!(
             outcome,

@@ -110,9 +110,10 @@ async fn expansion_fences_immediate_handler_before_callback_input() {
     .unwrap() else {
         panic!("display callback fixture must compile as a bind");
     };
-    let outcome = session
-        .run_with_sites("displayCallbackFixture", compiled.code())
-        .unwrap();
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        session.run_with_sites("displayCallbackFixture", compiled.code(), settlement)
+    })
+    .unwrap();
     let machines = Arc::new(ActorMachineRegistry::<ImmediatePrintProbe, CapturedOutput>::new());
     machines.insert_idle(session_id, Box::new(session));
     let runner = ResidentActorRunner::new(machines, source);

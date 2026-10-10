@@ -144,9 +144,10 @@ async fn run_record_case(source: &str, discriminator: u32) {
         EffectRunPolicy::SuspendAll,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
-    let outcome = machine
-        .run_with_sites("record_dynamic_sources", compiled.code())
-        .expect("first actor boundary");
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        machine.run_with_sites("record_dynamic_sources", compiled.code(), settlement)
+    })
+    .expect("first actor boundary");
     let descriptor = ActorDescriptor::new(
         "record-dynamic-sources",
         ActorPlacement {

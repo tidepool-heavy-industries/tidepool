@@ -3162,7 +3162,10 @@ mod tests {
             defining_expr: None,
             scope: public,
         };
-        session.publish_alias_in(public, alias, id).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            session.publish_alias_in(public, alias, id, settlement)
+        })
+        .unwrap();
         let captured_lease = session.retain_lexical_scope(public).unwrap();
         drop(bytes);
         drop(scratch);

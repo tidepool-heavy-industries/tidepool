@@ -13907,14 +13907,15 @@ pub(crate) mod request_tests {
                                 .mount_checked_host_input(&carrier, wrong, settlement)),
                             Err(ResidentError::UnsupportedCheckedTurn)
                         ));
-                        assert!(session
+                        assert!(tidepool_testing::with_settlement(|settlement| session
                             .run_bind_with_sites(
                                 "host prototype must never execute",
                                 carrier.code(),
                                 binder,
-                                tidepool_repr::Generation(u64::MAX)
-                            )
-                            .is_err());
+                                tidepool_repr::Generation(u64::MAX),
+                                settlement
+                            ))
+                        .is_err());
                         assert_eq!(session.residency(), residency);
                         assert!(session
                             .current_binding_in(context.placement.lexical_scope, &binder.name)
@@ -13968,14 +13969,15 @@ pub(crate) mod request_tests {
                             .mount_checked_host_input(&carrier, wrong, settlement)),
                         Err(ResidentError::UnsupportedCheckedTurn)
                     ));
-                    assert!(session
+                    assert!(tidepool_testing::with_settlement(|settlement| session
                         .run_bind_with_sites(
                             "host placeholder must never execute",
                             carrier.code(),
                             binder,
-                            reservation.generation()
-                        )
-                        .is_err());
+                            reservation.generation(),
+                            settlement
+                        ))
+                    .is_err());
                     assert!(Arc::ptr_eq(&before, &reservation.prefix().snapshot()));
                     assert_eq!(before.compiler_prefix().next_item(), 0);
                     assert_eq!(session.residency(), residency);
@@ -15704,7 +15706,8 @@ pub(crate) mod request_tests {
             .unwrap()
             .expect("original native dispatcher");
         assert!(matches!(
-            session.resume(hole, ()).unwrap(),
+            tidepool_testing::with_settlement(|settlement| session.resume(hole, (), settlement))
+                .unwrap(),
             ResidentOutcome::Completed { .. }
         ));
         let machines = Arc::new(ActorMachineRegistry::new());
@@ -15787,7 +15790,8 @@ pub(crate) mod request_tests {
             .unwrap()
             .expect("installed dispatcher");
         assert!(matches!(
-            session.resume(hole, ()).unwrap(),
+            tidepool_testing::with_settlement(|settlement| session.resume(hole, (), settlement))
+                .unwrap(),
             ResidentOutcome::Completed { .. }
         ));
         let machines = Arc::new(ActorMachineRegistry::new());
@@ -17141,7 +17145,7 @@ pub(crate) mod request_tests {
                 inject_modules: &[], gen: 1, verdict: None, target: None, retained_imports: &[],
             }, settlement)).unwrap();
             let TurnResult::Bind { bound, compiled, .. } = turn else { panic!("installer bind") };
-            assert!(matches!(session.run_bind_with_sites("installer_capture", compiled.code(), &bound[0], tidepool_repr::Generation(1)).unwrap(), ResidentOutcome::Completed { .. }));
+            assert!(matches!(tidepool_testing::with_settlement(|settlement| session.run_bind_with_sites("installer_capture", compiled.code(), &bound[0], tidepool_repr::Generation(1), settlement)).unwrap(), ResidentOutcome::Completed { .. }));
             let installer = Arc::new(session.retain_binding_custody_in(
                 context.placement.lexical_scope,
                 &bound[0].name,
@@ -18128,14 +18132,16 @@ pub(crate) mod request_tests {
         let [binder] = bound.as_slice() else {
             panic!("{text:?} bound {} names", bound.len());
         };
-        let outcome = session
-            .run_bind_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            session.run_bind_with_sites(
                 "transfer_custody_test",
                 compiled.code(),
                 binder,
                 tidepool_repr::Generation(generation),
+                settlement,
             )
-            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+        })
+        .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
             "{text:?}: {outcome:?}"
@@ -18540,9 +18546,10 @@ pub(crate) mod request_tests {
             EffectRunPolicy::SuspendAll,
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         );
-        let mut outcome = session
-            .run_with_sites("nested-named", compiled.code())
-            .unwrap();
+        let mut outcome = tidepool_testing::with_settlement(|settlement| {
+            session.run_with_sites("nested-named", compiled.code(), settlement)
+        })
+        .unwrap();
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(session_id, Box::new(session));
         let source = ActorWorkbenchSource::new(preamble, surface.include_paths().to_vec());
@@ -18786,14 +18793,16 @@ pub(crate) mod request_tests {
         let [verifier_binder] = verifier_binders.as_slice() else {
             panic!("source verifier must have one compiler-issued binder")
         };
-        let verified = observer
-            .run_bind_with_sites(
+        let verified = tidepool_testing::with_settlement(|settlement| {
+            observer.run_bind_with_sites(
                 "source-verifier",
                 verifier.code(),
                 verifier_binder,
                 tidepool_repr::Generation(1),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert!(matches!(verified, ResidentOutcome::Completed { .. }));
         let source_verifier = observer
             .retain_binding_custody("sourceVerifier")
@@ -18852,9 +18861,10 @@ pub(crate) mod request_tests {
             .unwrap();
         let baseline = publisher.value_handle_count();
         let hole = suspend(
-            publisher
-                .run_with_sites("wrong-progress", wrong.code())
-                .unwrap(),
+            tidepool_testing::with_settlement(|settlement| {
+                publisher.run_with_sites("wrong-progress", wrong.code(), settlement)
+            })
+            .unwrap(),
         );
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
@@ -18891,9 +18901,10 @@ pub(crate) mod request_tests {
             "refused publication cannot enqueue a source event"
         );
         let hole = suspend(
-            publisher
-                .run_with_sites("correct-progress", note.code())
-                .unwrap(),
+            tidepool_testing::with_settlement(|settlement| {
+                publisher.run_with_sites("correct-progress", note.code(), settlement)
+            })
+            .unwrap(),
         );
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
@@ -18928,9 +18939,10 @@ pub(crate) mod request_tests {
             .0
             .unwrap();
         let hole = suspend(
-            publisher
-                .run_with_sites("wrong-progress-retry", wrong.code())
-                .unwrap(),
+            tidepool_testing::with_settlement(|settlement| {
+                publisher.run_with_sites("wrong-progress-retry", wrong.code(), settlement)
+            })
+            .unwrap(),
         );
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
@@ -18974,9 +18986,10 @@ pub(crate) mod request_tests {
             .present_with_progress_type(target, request_without_progress, None)
             .unwrap();
         let hole = suspend(
-            publisher
-                .run_with_sites("absent-progress-contract", note.code())
-                .unwrap(),
+            tidepool_testing::with_settlement(|settlement| {
+                publisher.run_with_sites("absent-progress-contract", note.code(), settlement)
+            })
+            .unwrap(),
         );
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
@@ -19001,9 +19014,10 @@ pub(crate) mod request_tests {
         // The erased representations are equal, but the observer's nominal
         // witness differs. The common resume path must refuse BEFORE importing.
         let warm = suspend(
-            observer
-                .run_with_sites("observer-publication-image", note.code())
-                .unwrap(),
+            tidepool_testing::with_settlement(|settlement| {
+                observer.run_with_sites("observer-publication-image", note.code(), settlement)
+            })
+            .unwrap(),
         );
         tidepool_testing::with_settlement(|settlement| {
             observer.abort(
@@ -19015,9 +19029,10 @@ pub(crate) mod request_tests {
         .unwrap();
         let observer_handles = observer.value_handle_count();
         let observer_hole = suspend(
-            observer
-                .run_with_sites("wrong-observer", wrong_observer.code())
-                .unwrap(),
+            tidepool_testing::with_settlement(|settlement| {
+                observer.run_with_sites("wrong-observer", wrong_observer.code(), settlement)
+            })
+            .unwrap(),
         );
         let machines = Arc::new(ActorMachineRegistry::new());
         machines.insert_idle(publisher_id, Box::new(publisher));
@@ -19063,9 +19078,10 @@ pub(crate) mod request_tests {
             let outcome = runner
                 .access
                 .with_host_machine(label, observer_id, None, move |session, _| {
-                    session
-                        .run_with_sites(label, compiled.code())
-                        .map_err(Into::into)
+                    tidepool_testing::with_settlement(|settlement| {
+                        session.run_with_sites(label, compiled.code(), settlement)
+                    })
+                    .map_err(Into::into)
                 })
                 .await
                 .unwrap();
@@ -19166,9 +19182,14 @@ pub(crate) mod request_tests {
                 publisher_id,
                 None,
                 move |session, _| {
-                    session
-                        .run_with_sites("correct-observer", correct_observer.code())
-                        .map_err(Into::into)
+                    tidepool_testing::with_settlement(|settlement| {
+                        session.run_with_sites(
+                            "correct-observer",
+                            correct_observer.code(),
+                            settlement,
+                        )
+                    })
+                    .map_err(Into::into)
                 },
             )
             .await
@@ -19218,7 +19239,9 @@ pub(crate) mod request_tests {
                 None,
                 move |session, _| {
                     let ResidentOutcome::Suspended { hole, .. } =
-                        session.run_with_sites("later-note", note.code())?
+                        tidepool_testing::with_settlement(|settlement| {
+                            session.run_with_sites("later-note", note.code(), settlement)
+                        })?
                     else {
                         panic!("later publication must suspend")
                     };
@@ -19293,9 +19316,14 @@ pub(crate) mod request_tests {
                     observer_id,
                     None,
                     move |session, _| {
-                        session
-                            .run_with_sites("captured-note", retained_observer.code())
-                            .map_err(Into::into)
+                        tidepool_testing::with_settlement(|settlement| {
+                            session.run_with_sites(
+                                "captured-note",
+                                retained_observer.code(),
+                                settlement,
+                            )
+                        })
+                        .map_err(Into::into)
                     },
                 )
                 .await
@@ -20551,10 +20579,11 @@ pub(crate) mod request_tests {
             panic!("scope delimiter captures live callback")
         };
         let body_realm = RealmId::fresh();
-        let body = runner
-            .run_rooted_entry(context.clone(), callback, body_realm)
-            .await
-            .unwrap();
+        let body = tidepool_testing::with_settlement(|settlement| {
+            runner.run_rooted_entry(context.clone(), callback, body_realm, settlement)
+        })
+        .await
+        .unwrap();
         let boundary = runner
             .capture_boundary(context.clone(), body, body_realm)
             .await
@@ -20947,14 +20976,16 @@ pub(crate) mod request_tests {
             receiver_interface.owner(),
             tidepool_repr::SessionModule::val(reservation.generation())
         );
-        let outcome = session
-            .run_projected_bind_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            session.run_projected_bind_with_sites(
                 "activationReceiverFixture",
                 receiver.code(),
                 &bound,
                 reservation.generation(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert!(matches!(outcome, ResidentOutcome::BindingsCommitted { .. }));
         let intent = session.freeze_private_execution(&execution).unwrap();
         let tidepool_runtime::session::ExecutionPublication::Bindings(publication) = session
@@ -21005,14 +21036,20 @@ pub(crate) mod request_tests {
             other => panic!("native activation fixture must suspend: {other:?}"),
         };
         let mut reservation = suspend(
-            session
-                .run_with_sites("originalActivationRequests", producer.code())
-                .unwrap(),
+            tidepool_testing::with_settlement(|settlement| {
+                session.run_with_sites("originalActivationRequests", producer.code(), settlement)
+            })
+            .unwrap(),
         );
         let mut inputs = Vec::new();
         let requests = if renderer_values { 20 } else { 2 };
         for request in 1_i64..=requests {
-            let submission = suspend(session.resume(reservation, Ok::<i64, ()>(request)).unwrap());
+            let submission = suspend(
+                tidepool_testing::with_settlement(|settlement| {
+                    session.resume(reservation, Ok::<i64, ()>(request), settlement)
+                })
+                .unwrap(),
+            );
             let payload = session
                 .live_payload_handle(submission.cont_id())
                 .unwrap()
@@ -21050,7 +21087,10 @@ pub(crate) mod request_tests {
                 .expect("original authenticated input site");
             inputs.push((activation, input));
             assert!(session.parked_holes().contains(&submission.cont_id()));
-            let next = session.resume(submission, Ok::<(), ()>(())).unwrap();
+            let next = tidepool_testing::with_settlement(|settlement| {
+                session.resume(submission, Ok::<(), ()>(()), settlement)
+            })
+            .unwrap();
             if request < requests {
                 reservation = suspend(next);
             } else {

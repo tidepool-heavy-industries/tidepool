@@ -9153,8 +9153,8 @@ pub(super) mod tests {
                 .unwrap();
             let mut alias_value = shared_value;
             alias_value.identity.occurrence = "alias".into();
-            state
-                .publish_alias_in(
+            tidepool_testing::with_settlement(|settlement| {
+                state.publish_alias_in(
                     original_scope,
                     BindingEntry {
                         name: BindingName("alias".into()),
@@ -9166,8 +9166,10 @@ pub(super) mod tests {
                         scope: original_scope,
                     },
                     original_id,
+                    settlement,
                 )
-                .unwrap();
+            })
+            .unwrap();
             let sibling_value = state
                 .resolve_in(original_scope, "alias")
                 .unwrap()

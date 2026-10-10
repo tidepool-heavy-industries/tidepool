@@ -211,15 +211,16 @@ impl Notebook {
         let imports = compiled.prepared.globals().len();
         let before = self.session.codegen_totals().unwrap_or((0, 0));
         let run_started = Instant::now();
-        let outcome = self
-            .session
-            .run_bind_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            self.session.run_bind_with_sites(
                 "unit_cost_bind",
                 compiled.code(),
                 binder,
                 Generation(self.generation),
+                settlement,
             )
-            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+        })
+        .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
         let run = run_started.elapsed();
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
@@ -252,10 +253,11 @@ impl Notebook {
         let TurnResult::Expr { compiled, .. } = self.compile(text) else {
             panic!("{text:?} did not classify as an expression");
         };
-        let outcome = self
-            .session
-            .run_with_sites("unit_cost_expression", compiled.code())
-            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            self.session
+                .run_with_sites("unit_cost_expression", compiled.code(), settlement)
+        })
+        .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
         let ResidentOutcome::Completed { result, .. } = outcome else {
             panic!("{text:?} did not complete: {outcome:?}");
         };

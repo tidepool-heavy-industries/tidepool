@@ -6157,8 +6157,8 @@ mod maintained_binding_lifetime_properties {
         alias_value.identity = alias_identity.clone();
         let alias_shares_source_handle = alias_value.handle == source_handle;
         let alias_id = SessionVarId::from_extract(ALIAS_ID);
-        state
-            .publish_alias_in(
+        tidepool_testing::with_settlement(|settlement| {
+            state.publish_alias_in(
                 owner,
                 BindingEntry {
                     name: tidepool_repr::BindingName("alias".into()),
@@ -6170,8 +6170,10 @@ mod maintained_binding_lifetime_properties {
                     scope: owner,
                 },
                 source_id,
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         support.aliases += 1;
         support.shared_handle_bindings += usize::from(alias_shares_source_handle);
 

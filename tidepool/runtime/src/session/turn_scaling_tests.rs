@@ -1894,21 +1894,29 @@ where
                     Some(index),
                     |resident| {
                         if bound.is_empty() {
-                            resident.run_with_sites(label, compiled.code())
+                            tidepool_testing::with_settlement(|settlement| {
+                                resident.run_with_sites(label, compiled.code(), settlement)
+                            })
                         } else if bound.len() == 1 {
-                            resident.run_bind_with_sites(
-                                &bound[0].name,
-                                compiled.code(),
-                                &bound[0],
-                                reservation.generation(),
-                            )
+                            tidepool_testing::with_settlement(|settlement| {
+                                resident.run_bind_with_sites(
+                                    &bound[0].name,
+                                    compiled.code(),
+                                    &bound[0],
+                                    reservation.generation(),
+                                    settlement,
+                                )
+                            })
                         } else {
-                            resident.run_projected_bind_with_sites(
-                                label,
-                                compiled.code(),
-                                &bound,
-                                reservation.generation(),
-                            )
+                            tidepool_testing::with_settlement(|settlement| {
+                                resident.run_projected_bind_with_sites(
+                                    label,
+                                    compiled.code(),
+                                    &bound,
+                                    reservation.generation(),
+                                    settlement,
+                                )
+                            })
                         }
                     },
                 )?;
@@ -1920,12 +1928,15 @@ where
                     &format!("{label}.native_observe"),
                     Some(index),
                     |resident| {
-                        resident.run_observation_with_sites(
-                            compiled.code(),
-                            &bound[0],
-                            reservation.generation(),
-                            false,
-                        )
+                        tidepool_testing::with_settlement(|settlement| {
+                            resident.run_observation_with_sites(
+                                compiled.code(),
+                                &bound[0],
+                                reservation.generation(),
+                                false,
+                                settlement,
+                            )
+                        })
                     },
                 );
                 assert_eq!(

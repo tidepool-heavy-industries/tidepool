@@ -8470,12 +8470,15 @@ mod authored_publication_tests {
         };
         let before = prefix.snapshot();
         let public_bindings = resident.workbench_bindings_in(public);
-        let outcome = resident.run_bind_with_sites(
-            "checkedPublication",
-            compiled.code(),
-            &bound[0],
-            reservation.generation(),
-        );
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            resident.run_bind_with_sites(
+                "checkedPublication",
+                compiled.code(),
+                &bound[0],
+                reservation.generation(),
+                settlement,
+            )
+        });
         drop(restore);
         let error = outcome.err().expect("interface publication must fail");
         let ResidentError::Session(SessionError::Io(error)) = error else {
@@ -9903,11 +9906,11 @@ mod authored_publication_tests {
             ..occupied.clone()
         };
         assert!(matches!(
-            session.run_projected_bind_with_sites("projected", code.clone(), &[fresh, occupied.clone()], Generation(408)),
+            tidepool_testing::with_settlement(|settlement| session.run_projected_bind_with_sites("projected", code.clone(), &[fresh, occupied.clone()], Generation(408), settlement)),
             Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id
         ));
         assert!(matches!(
-            session.run_bind_with_sites("replacement", code.clone(), &occupied, Generation(408)),
+            tidepool_testing::with_settlement(|settlement| session.run_bind_with_sites("replacement", code.clone(), &occupied, Generation(408), settlement)),
             Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id
         ));
         assert!(matches!(
@@ -10124,7 +10127,13 @@ mod authored_publication_tests {
         // Refused routes cannot consume the item reservation. Its authenticated
         // bind route still executes and alone advances the sealed prefix.
         assert!(matches!(
-            session.run_bind_with_sites("checked bind", code, page, generation),
+            tidepool_testing::with_settlement(|settlement| session.run_bind_with_sites(
+                "checked bind",
+                code,
+                page,
+                generation,
+                settlement
+            )),
             Ok(ResidentOutcome::Completed { .. })
         ));
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);

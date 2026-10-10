@@ -1885,7 +1885,10 @@ mod tests {
             .unwrap();
         let selection = base.selected_facts().unwrap();
         let CertifiedDeclarationPublication::Accepted(oracle) =
-            base.certify_new_join(selection).unwrap()
+            tidepool_testing::with_settlement(|settlement| {
+                base.certify_new_join(selection, settlement)
+            })
+            .unwrap()
         else {
             panic!("independent GHC join refused")
         };
@@ -1988,7 +1991,7 @@ mod tests {
             }
             let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(intent.clone()).unwrap() else { panic!("authored publication") };
             let selection = base.selected_facts().unwrap();
-            let CertifiedDeclarationPublication::Accepted(oracle) = base.certify_new_join(selection).unwrap() else { panic!("GHC oracle refused") };
+            let CertifiedDeclarationPublication::Accepted(oracle) = tidepool_testing::with_settlement(|settlement| base.certify_new_join(selection, settlement)).unwrap() else { panic!("GHC oracle refused") };
             let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(intent.clone()).unwrap() else { panic!("authored publication") };
             let reused = accepted(base);
             proptest::prop_assert_eq!(matches!(&reused.receipt, PublicationEvidence::ReusedProjection { .. }), !contended, "full changed public snapshot must force a new join");
@@ -2979,7 +2982,7 @@ mod tests {
             }],
         )
         .unwrap();
-        let scratch = tempfile::tempdir().unwrap();
+        let scratch = Arc::new(tempfile::tempdir().unwrap());
         let artifacts = context.materialize(scratch.path()).unwrap().artifacts;
         let original = artifacts
             .iter()
@@ -3000,12 +3003,16 @@ mod tests {
             .occurrence
             .push_str("Missing");
         let CertifiedDeclarationJoin::Rejected(receipt) =
-            tidepool_toolchain::declaration_join::certify_declaration_join(
-                input,
-                &context,
-                &first.base.includes,
-                &first.base.session_root,
-            )
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::declaration_join::certify_declaration_join(
+                    input,
+                    &context,
+                    &first.base.includes,
+                    &first.base.session_root,
+                    scratch.clone(),
+                    settlement,
+                )
+            })
             .unwrap()
         else {
             panic!("expected protected inventory rejection");

@@ -1087,9 +1087,10 @@ async fn resident_await_watch_case(case: WatchCase) {
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         );
         Some(
-            machine
-                .run_with_sites("resident_await_watch_policy", compiled.code())
-                .expect("first policy boundary"),
+            tidepool_testing::with_settlement(|settlement| {
+                machine.run_with_sites("resident_await_watch_policy", compiled.code(), settlement)
+            })
+            .expect("first policy boundary"),
         )
     };
     let descriptor = ActorDescriptor::new(
@@ -1689,9 +1690,10 @@ async fn resident_cleanup_case(fail_hook: bool) {
         EffectRunPolicy::SuspendAll,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
-    let outcome = machine
-        .run_with_sites("resident_local_policy", compiled.code())
-        .expect("first policy boundary");
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        machine.run_with_sites("resident_local_policy", compiled.code(), settlement)
+    })
+    .expect("first policy boundary");
     let descriptor = ActorDescriptor::new(
         "resident-local-policy",
         ActorPlacement {
@@ -1713,9 +1715,10 @@ async fn resident_cleanup_case(fail_hook: bool) {
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         )
         .expect("independent root scope");
-    let sibling_outcome = machine
-        .run_with_sites("resident_sibling_policy", compiled.code())
-        .expect("sibling policy boundary");
+    let sibling_outcome = tidepool_testing::with_settlement(|settlement| {
+        machine.run_with_sites("resident_sibling_policy", compiled.code(), settlement)
+    })
+    .expect("sibling policy boundary");
     let sibling_descriptor = ActorDescriptor::new(
         "sibling",
         ActorPlacement {

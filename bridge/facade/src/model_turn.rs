@@ -705,14 +705,16 @@ mod tests {
         let first = completed.start(caller, request(false)).unwrap();
         let operation: OperationId =
             serde_json::from_str(first["call_id"].as_str().unwrap()).unwrap();
-        completed
-            .resume(
+        tidepool_testing::with_settlement(|settlement| {
+            completed.resume(
                 caller,
                 first["invocation"].as_str().unwrap(),
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("actual completed result")),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let original = completed
             .store
             .replay_tool_output_operation(&operation)
@@ -749,7 +751,9 @@ mod tests {
             json!({"status":"refused","kind":"unknown_tool","error":"bad","tool":"foreign"}),
         ] {
             assert!(matches!(
-                service.resume(caller, token, call, invalid),
+                tidepool_testing::with_settlement(
+                    |settlement| service.resume(caller, token, call, invalid, settlement)
+                ),
                 Err(ModelBoundaryError::ModelRejected(_))
             ));
             assert!(matches!(
@@ -763,9 +767,16 @@ mod tests {
             ));
         }
         let authored = json!({"error":"ordinary authored output","status":"refused"});
-        let finished = service
-            .resume(caller, token, call, callback_reply(authored.clone()))
-            .unwrap();
+        let finished = tidepool_testing::with_settlement(|settlement| {
+            service.resume(
+                caller,
+                token,
+                call,
+                callback_reply(authored.clone()),
+                settlement,
+            )
+        })
+        .unwrap();
         assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
         let operation: OperationId = serde_json::from_str(call).unwrap();
         let recorded = service
@@ -794,14 +805,16 @@ mod tests {
             let caller = PrincipalId::new(1, 2);
             let first = service.start(caller, request(false)).unwrap();
             let call = first["call_id"].as_str().unwrap();
-            let finished = service
-                .resume(
+            let finished = tidepool_testing::with_settlement(|settlement| {
+                service.resume(
                     caller,
                     first["invocation"].as_str().unwrap(),
                     call,
                     refusal.clone(),
+                    settlement,
                 )
-                .unwrap();
+            })
+            .unwrap();
             assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
             let operation: OperationId = serde_json::from_str(call).unwrap();
             let recorded = service
@@ -881,38 +894,51 @@ mod tests {
             .is_err());
         let first = service.start(caller, request(false)).unwrap();
         let token = first["invocation"].as_str().unwrap();
-        assert!(service
-            .resume(caller, token, "wrong", callback_reply(json!("result")))
-            .is_err());
-        assert!(service
-            .resume(
+        assert!(
+            tidepool_testing::with_settlement(|settlement| service.resume(
+                caller,
+                token,
+                "wrong",
+                callback_reply(json!("result")),
+                settlement
+            ))
+            .is_err()
+        );
+        assert!(
+            tidepool_testing::with_settlement(|settlement| service.resume(
                 PrincipalId::SYSTEM,
                 token,
                 "call-1",
-                callback_reply(json!("result"))
-            )
-            .is_err());
+                callback_reply(json!("result")),
+                settlement
+            ))
+            .is_err()
+        );
         let nested = service.start(caller, request(false)).unwrap();
         assert_eq!(nested["receipt"]["outcome"]["kind"], "text");
-        let finished = service
-            .resume(
+        let finished = tidepool_testing::with_settlement(|settlement| {
+            service.resume(
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("nested result")),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert_eq!(finished["receipt"]["parent_cell"], "retained-cell");
         assert_eq!(finished["receipt"]["outcome"]["kind"], "exhausted");
         assert!(finished["receipt"].get("transcript").is_none());
-        assert!(service
-            .resume(
+        assert!(
+            tidepool_testing::with_settlement(|settlement| service.resume(
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
-                callback_reply(json!("duplicate"))
-            )
-            .is_err());
+                callback_reply(json!("duplicate")),
+                settlement
+            ))
+            .is_err()
+        );
     }
     #[test]
     fn reused_provider_call_ids_cannot_resume_a_later_operation() {
@@ -926,9 +952,16 @@ mod tests {
         let first = service.start(caller, request(true)).unwrap();
         let token = first["invocation"].as_str().unwrap();
         let first_id = first["call_id"].as_str().unwrap();
-        let first_hook = service
-            .resume(caller, token, first_id, callback_reply(json!("first")))
-            .unwrap();
+        let first_hook = tidepool_testing::with_settlement(|settlement| {
+            service.resume(
+                caller,
+                token,
+                first_id,
+                callback_reply(json!("first")),
+                settlement,
+            )
+        })
+        .unwrap();
         let second = service
             .annotate(
                 caller,
@@ -943,25 +976,36 @@ mod tests {
         let second_operation: OperationId = serde_json::from_str(second_id).unwrap();
         assert_eq!(first_operation.call, second_operation.call);
         assert_ne!(first_operation.request, second_operation.request);
-        assert!(service
-            .resume(
+        assert!(
+            tidepool_testing::with_settlement(|settlement| service.resume(
                 caller,
                 token,
                 first_id,
-                callback_reply(json!("late duplicate"))
-            )
-            .is_err());
-        assert!(service
-            .resume(
+                callback_reply(json!("late duplicate")),
+                settlement
+            ))
+            .is_err()
+        );
+        assert!(
+            tidepool_testing::with_settlement(|settlement| service.resume(
                 caller,
                 token,
                 "call-1",
-                callback_reply(json!("unqualified"))
+                callback_reply(json!("unqualified")),
+                settlement
+            ))
+            .is_err()
+        );
+        let second_hook = tidepool_testing::with_settlement(|settlement| {
+            service.resume(
+                caller,
+                token,
+                second_id,
+                callback_reply(json!("second")),
+                settlement,
             )
-            .is_err());
-        let second_hook = service
-            .resume(caller, token, second_id, callback_reply(json!("second")))
-            .unwrap();
+        })
+        .unwrap();
         assert_eq!(second_hook["operation"], second["call_id"]);
         let finished = service
             .annotate(
@@ -985,14 +1029,16 @@ mod tests {
         let first = service.start(caller, request(true)).unwrap();
         let token = first["invocation"].as_str().unwrap();
         let semantic = json!({"answer":42,"error":"ordinary authored output","status":"refused"});
-        let hook = service
-            .resume(
+        let hook = tidepool_testing::with_settlement(|settlement| {
+            service.resume(
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(semantic.clone()),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let control: ModelControlStep = serde_json::from_value(hook.clone()).unwrap();
         let ModelControlStep::ModelHook { value, output, .. } = control else {
             panic!("expected after-tool continuation")
@@ -1030,14 +1076,16 @@ mod tests {
         let caller = PrincipalId::new(1, 2);
         let first = service.start(caller, request(true)).unwrap();
         let token = first["invocation"].as_str().unwrap();
-        let hook = service
-            .resume(
+        let hook = tidepool_testing::with_settlement(|settlement| {
+            service.resume(
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("original")),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert_eq!(hook["kind"], "hook");
         assert_eq!(hook["value"], json!("original"));
         let operation = hook["operation"].as_str().unwrap();
@@ -1083,14 +1131,16 @@ mod tests {
         let token = first["invocation"].as_str().unwrap();
         service.cancel();
         assert!(service.start(caller, request(false)).is_err());
-        let finished = service
-            .resume(
+        let finished = tidepool_testing::with_settlement(|settlement| {
+            service.resume(
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("completed after close")),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert_eq!(finished["receipt"]["outcome"]["kind"], "cancelled");
     }
     #[test]
@@ -1104,14 +1154,16 @@ mod tests {
         let caller = PrincipalId::new(1, 2);
         let first = service.start(caller, request(true)).unwrap();
         let token = first["invocation"].as_str().unwrap();
-        let hook = service
-            .resume(
+        let hook = tidepool_testing::with_settlement(|settlement| {
+            service.resume(
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("result")),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         service
             .annotate(
                 caller,
@@ -1141,14 +1193,16 @@ mod tests {
         let caller = PrincipalId::new(1, 2);
         let first = service.start(caller, request(true)).unwrap();
         let token = first["invocation"].as_str().unwrap();
-        let hook = service
-            .resume(
+        let hook = tidepool_testing::with_settlement(|settlement| {
+            service.resume(
                 caller,
                 token,
                 first["call_id"].as_str().unwrap(),
                 callback_reply(json!("original")),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert!(service
             .annotate(
                 caller,
@@ -1185,7 +1239,13 @@ mod tests {
         let token = first["invocation"].as_str().unwrap();
         let operation = first["call_id"].as_str().unwrap();
         assert!(matches!(
-            foreign.resume(caller, token, operation, callback_reply(json!("foreign"))),
+            tidepool_testing::with_settlement(|settlement| foreign.resume(
+                caller,
+                token,
+                operation,
+                callback_reply(json!("foreign")),
+                settlement
+            )),
             Err(ModelBoundaryError::ModelRejected(_))
         ));
         assert!(matches!(
@@ -1194,9 +1254,16 @@ mod tests {
         ));
         assert!(foreign.registry.lock().unwrap().is_empty());
         assert!(foreign.budget.get().is_none());
-        let finished = owner
-            .resume(caller, token, operation, callback_reply(json!("original")))
-            .unwrap();
+        let finished = tidepool_testing::with_settlement(|settlement| {
+            owner.resume(
+                caller,
+                token,
+                operation,
+                callback_reply(json!("original")),
+                settlement,
+            )
+        })
+        .unwrap();
         assert_eq!(finished["receipt"]["outcome"]["kind"], "text");
     }
 }

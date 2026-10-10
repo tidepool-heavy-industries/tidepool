@@ -476,8 +476,14 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         )
         .unwrap();
-    let ResidentOutcome::Completed { result, .. } = resident
-        .run_with_sites("public_scoped_original_dependency", compiled.code())
+    let ResidentOutcome::Completed { result, .. } =
+        tidepool_testing::with_settlement(|settlement| {
+            resident.run_with_sites(
+                "public_scoped_original_dependency",
+                compiled.code(),
+                settlement,
+            )
+        })
         .unwrap()
     else {
         panic!("dependent declaration must execute its retained original");
@@ -1097,8 +1103,14 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
             .unwrap();
         // All three scopes select the same exact immutable declaration root.
         // Reuse its compiled pure probe; mutable resident execution stays fresh.
-        let ResidentOutcome::Completed { result, .. } = resident
-            .run_with_sites("recovered_original_dependency", compiled.code())
+        let ResidentOutcome::Completed { result, .. } =
+            tidepool_testing::with_settlement(|settlement| {
+                resident.run_with_sites(
+                    "recovered_original_dependency",
+                    compiled.code(),
+                    settlement,
+                )
+            })
             .unwrap()
         else {
             panic!("real recovered original dependency must execute in each selected scope");
@@ -1202,14 +1214,16 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
                 ..SessionRunContext::ROOT
             })
             .unwrap();
-        let outcome = resident
-            .run_bind_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            resident.run_bind_with_sites(
                 &binder.name,
                 compiled.code(),
                 binder,
                 reservation.generation(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert!(
             matches!(
                 outcome,
