@@ -131,7 +131,7 @@ executionSourceFileCustodyChecks graph = bracket newRoot removePathForcibly $ \r
       graphPath = owner </> "execution.cbor"
       sha = executionGraphSha256 graph
       descriptors = [(sha, graphPath)]
-      readScope known = readExecutionSourceGraphs (RetainedScopeGraphFiles manifest) known descriptors
+      readScope known = readExecutionSourceGraphs manifest known descriptors
       reject label action = do
         result <- try action :: IO (Either IOException [ExecutionSourceGraph])
         case result of
@@ -143,24 +143,17 @@ executionSourceFileCustodyChecks graph = bracket newRoot removePathForcibly $ \r
   forM_ [[], [graph]] $ \known -> do
     actual <- readScope known
     unless (actual == [graph]) (fail "retained parent graph transport changed the original payload")
-  forM_ [[],[graph]] $ \known -> do
-    actual <- readExecutionSourceGraphs (CandidateGraphFiles manifest) known descriptors
-    unless (actual == [graph]) (fail "candidate transport lost acquired parent graph custody")
   reject "another advertised digest"
-    (readExecutionSourceGraphs (RetainedScopeGraphFiles manifest) [] [(replicate 64 '0', graphPath)])
+    (readExecutionSourceGraphs manifest [] [(replicate 64 '0', graphPath)])
   reject "duplicate graph descriptors"
-    (readExecutionSourceGraphs (RetainedScopeGraphFiles manifest) [] (descriptors ++ descriptors))
+    (readExecutionSourceGraphs manifest [] (descriptors ++ descriptors))
   reject "relative retained graph path"
-    (readExecutionSourceGraphs (RetainedScopeGraphFiles manifest) [] [(sha, "execution.cbor")])
+    (readExecutionSourceGraphs manifest [] [(sha, "execution.cbor")])
   BS.writeFile graphPath (BS.reverse (executionGraphBytes graph))
   reject "corrupted new graph" (readScope [])
   reject "corrupted previously captured graph" (readScope [graph])
-  reject "corrupted acquired candidate graph"
-    (readExecutionSourceGraphs (CandidateGraphFiles manifest) [graph] descriptors)
   removePathForcibly owner
   reject "expired parent graph custody" (readScope [])
-  reject "expired acquired candidate graph custody"
-    (readExecutionSourceGraphs (CandidateGraphFiles manifest) [] descriptors)
   where
     newRoot = do
       temporary <- getTemporaryDirectory

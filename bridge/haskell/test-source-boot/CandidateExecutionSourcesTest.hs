@@ -354,8 +354,8 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
         , Just (graphs,_) <- [candidateExecutionSources candidate]]
   unless (map withoutParcel sharedOffer == map withoutParcel offered) $
     fail "shared exact graph inventory changed a candidate identity, artifact, import or group"
-  candidateCustody <- readDescriptorCustody (CandidateGraphFiles candidatePath) parcel
-  scopeCustody <- readDescriptorCustody (RetainedScopeGraphFiles sourceScopePath) allOriginals
+  candidateCustody <- readDescriptorCustody candidatePath parcel
+  scopeCustody <- readDescriptorCustody sourceScopePath allOriginals
   unless (graphCustody candidateCustody == graphCustody offeredGraphs
       && graphCustody scopeCustody == graphCustody (scopeExecutionGraphs originalScope)) $
     fail "candidate or scope graph files differ from their authenticated inventory"

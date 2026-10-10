@@ -11,7 +11,7 @@ module Tidepool.ExecutionSource
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
   , executionSourceProspectiveReferences
   , executionNodeOriginalResolutions
-  , ExecutionSourceFiles(..), decodeExecutionSourceDescriptors, readExecutionSourceGraphs, readExecutionSourceGraphsWith, readExecutionSourceGraphsWithFacts, executionSourceGraphsFit
+  , decodeExecutionSourceDescriptors, readExecutionSourceGraphs, readExecutionSourceGraphsWith, readExecutionSourceGraphsWithFacts, executionSourceGraphsFit
   , executionSourceGraphBytesLimit
   , WorkerExecutionSource(..), SourceRecipeUnavailable(..), encodeWorkerExecutionSource
   ) where
@@ -538,21 +538,14 @@ decodeExecutionSourceDescriptors = do
   pure descriptors
 
 -- Exact scopes carry file paths issued by the Rust immutable artifact owner;
--- the request retains its complete parent custody. Candidate offers still own
--- request-local graph copies. File placement never establishes graph authority.
-data ExecutionSourceFiles
-  = RetainedScopeGraphFiles FilePath
-  | CandidateGraphFiles FilePath
-
+-- the request retains its issuing artifact custody. Candidate offers transport
+-- those same owned paths. File placement never establishes graph authority.
 -- Capture one graph at a time after checking the complete retained byte budget.
 -- The file paths transport bytes; only their authenticated graph digests and
 -- original references can establish product compatibility.
-readExecutionSourceGraphs :: ExecutionSourceFiles -> [ExecutionSourceGraph]
+readExecutionSourceGraphs :: FilePath -> [ExecutionSourceGraph]
   -> [(String, FilePath)] -> IO [ExecutionSourceGraph]
-readExecutionSourceGraphs files known descriptors = do
-  let manifest = case files of
-        RetainedScopeGraphFiles path -> path
-        CandidateGraphFiles path -> path
+readExecutionSourceGraphs manifest known descriptors = do
   unless (isAbsolute manifest && length descriptors <= executionSourceGraphsLimit
       && Set.size (Set.fromList (map fst descriptors)) == length descriptors)
     (fail "invalid original execution graph descriptor inventory")
