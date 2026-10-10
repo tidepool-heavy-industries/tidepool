@@ -553,7 +553,7 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
     use tidepool_codegen::scope::ScopeId;
     use tidepool_runtime::session::{
         insert_preamble_imports, resident_workbench_templates, turn::run_turn, PersistentSession,
-        SessionRunContext, TurnRequest, TurnResult,
+        TurnRequest, TurnResult,
     };
 
     tidepool_testing::eval_harness::require_extract();
@@ -613,13 +613,16 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
     else {
         panic!("native mailbox payload bindings")
     };
-    let TurnResult::Expr {
-        compiled: receiver, ..
+    let TurnResult::Bind {
+        compiled: receiver,
+        bound: receiver_bound,
+        ..
     } = compile(
-        r#"(do
+        r#"mailboxReceiver <- pure ((\(_ :: Int) -> do
   send (Core.ActorInstallShutdownWith 0 (\reason -> (send (Core.Print (Text.pack (show (reason :: Int)))) :: Eff '[Core.Console] ())))
+  send Core.ActorReadyWith
   Actor.serve @() @Maybe () (\() request -> case request of Just value -> pure (value, ()); Nothing -> error "unused mailbox request")
-  ) :: Eff '[Core.ActorKernel, Core.ActorLocal Maybe, Core.Console] ()"#,
+  ) :: Int -> Eff '[Core.ActorKernel, Core.ActorLocal Maybe, Core.Console] ())"#,
         2,
     )
     else {
@@ -677,21 +680,20 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
             resource_scope: RealmId::fresh(),
             lexical_scope: session.mint_isolated_scope(),
         };
-        session
-            .set_actor_execution(
-                SessionRunContext {
-                    lexical_scope: placement.lexical_scope,
-                    resource_scope: placement.resource_scope,
-                    ..SessionRunContext::ROOT
-                },
-                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        tidepool_testing::with_settlement(|settlement| {
+            session.run_projected_bind_with_sites(
+                "native-mailbox-receiver",
+                receiver.code(),
+                &receiver_bound,
+                tidepool_repr::Generation(2),
+                settlement,
             )
-            .unwrap();
-        let prepared = tidepool_testing::with_settlement(|settlement| {
-            session.run_with_sites("native-mailbox-receiver", receiver.code(), settlement)
         })
         .unwrap();
+        let entry = session
+            .retain_binding_custody("mailboxReceiver")
+            .unwrap()
+            .unwrap();
         let (forest, _deployments) = ResidentForest::new(
             ActorWorkbenchSource::new(preamble.clone(), include.clone()),
             session_id,
@@ -699,13 +701,19 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
             None,
             crate::Incarnation::FIRST,
         );
-        let (recipient, recipient_task) = forest
-            .admit_root(
+        let (recipient, recipient_task) = crate::local_actor::spawn_local_actor_in_directory(
+            None,
+            ResidentKernelBehavior::with_boot(
                 ActorDescriptor::new("native-mailbox-recipient", placement),
-                prepared,
-            )
-            .await
-            .unwrap();
+                forest.environment.clone(),
+                ResidentBoot::Entry(entry),
+                Vec::new(),
+            ),
+            forest.incarnation,
+            forest.directory.clone(),
+        )
+        .await
+        .unwrap();
         *target.lock() = Some(recipient.terminal().clone());
         let caller_placement = forest
             .environment
