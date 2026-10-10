@@ -712,6 +712,8 @@ fn certify_authored_declaration_inner(
         includes,
         session_root,
         Some(toolchain_identity_sha256),
+        Arc::new(_scratch),
+        settlement,
     )?;
     let inventories = match outcome.decision {
         JoinDecision::Accepted => outcome
@@ -1084,6 +1086,24 @@ impl RejectedJoin {
     }
 }
 
+fn require_owned_artifact_paths(
+    artifacts: &[DeclarationArtifact],
+    directory: &tempfile::TempDir,
+) -> Result<(), CompileError> {
+    let root = directory.path().canonicalize()?;
+    for path in artifacts.iter().flat_map(|artifact| {
+        std::iter::once(&artifact.interface.path)
+            .chain(artifact.product.iter().map(|product| &product.path))
+    }) {
+        if !path.canonicalize()?.starts_with(&root) {
+            return Err(contract(
+                "declaration input path lies outside its retained directory",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate the exact owned implementation closure and retain a sealed result.
 /// Rejection is also bound to the request; runtime owns its staleness decision.
 pub fn certify_declaration_join(
@@ -1091,7 +1111,10 @@ pub fn certify_declaration_join(
     context: &ExactDeclarationContext,
     includes: &[PathBuf],
     session_root: &Path,
+    input_directory: Arc<tempfile::TempDir>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedDeclarationJoin, CompileError> {
+    require_owned_artifact_paths(&input.artifacts, &input_directory)?;
     context.validate_artifacts(&input.artifacts)?;
     for (index, write) in input.writes.iter().enumerate() {
         if write.generation == 0
@@ -1111,6 +1134,8 @@ pub fn certify_declaration_join(
         session_root,
         &[],
         Some(context.toolchain_identity_sha256()),
+        input_directory,
+        settlement,
     )?;
     let outcome = decode_declaration_join_outcome(&input, &execution.receipt)?;
     context.validate_artifacts(&input.artifacts)?;
@@ -1161,10 +1186,20 @@ pub fn validate_declaration_join(
     includes: &[PathBuf],
     session_root: &Path,
     inject_modules: &[String],
+    input_directory: Arc<tempfile::TempDir>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<DeclarationJoinOutcome, CompileError> {
+    require_owned_artifact_paths(&input.artifacts, &input_directory)?;
     let encoded = encode_declaration_join(input)?;
-    let execution =
-        execute_declaration_operation(&encoded, includes, session_root, inject_modules, None)?;
+    let execution = execute_declaration_operation(
+        &encoded,
+        includes,
+        session_root,
+        inject_modules,
+        None,
+        input_directory,
+        settlement,
+    )?;
     decode_declaration_join_outcome(input, &execution.receipt)
 }
 
@@ -1836,8 +1871,10 @@ fn execute_declaration_operation(
     session_root: &Path,
     inject_modules: &[String],
     expected_producer: Option<[u8; 32]>,
+    input_directory: Arc<tempfile::TempDir>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<DeclarationExecution, CompileError> {
-    let scratch = tempfile::tempdir()?;
+    let scratch = Arc::new(tempfile::tempdir()?);
     let manifest = scratch.path().join("declaration-join.cbor");
     let receipt = scratch.path().join("declaration-join.json");
     std::fs::write(&manifest, encoded)?;
@@ -1854,7 +1891,7 @@ fn execute_declaration_operation(
     let endpoint = command
         .bind()
         .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
-    crate::toolchain::admit_bound_endpoint(&endpoint)
+    let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
         .map_err(|error| contract(error.to_string()))?;
     let producer =
         crate::artifact_inventory::CanonicalProducerIdentity::from_compiler(endpoint.identity())
@@ -1864,10 +1901,12 @@ fn execute_declaration_operation(
             "declaration operation producer differs from owned artifact producer",
         ));
     }
-    crate::paths::apply_build_products_dir(&mut command, &endpoint);
-    let run = endpoint
-        .execute(&command)
-        .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
+    crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
+    let run = endpoint.execute_with_input_directories(
+        &command,
+        vec![scratch.clone(), input_directory],
+        |close| settlement(close),
+    )?;
     crate::diag::decode_extract_result(
         run.output.status.success(),
         &run.output.stdout,
@@ -1917,8 +1956,17 @@ pub fn inspect_declaration_artifacts(
     artifacts: &[DeclarationArtifact],
     includes: &[PathBuf],
     session_root: &Path,
+    input_directory: Arc<tempfile::TempDir>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<DeclarationInventoryOutcome, CompileError> {
-    inspect_declaration_artifacts_with_producer(artifacts, includes, session_root, None)
+    inspect_declaration_artifacts_with_producer(
+        artifacts,
+        includes,
+        session_root,
+        None,
+        input_directory,
+        settlement,
+    )
 }
 
 fn inspect_declaration_artifacts_with_producer(
@@ -1926,10 +1974,20 @@ fn inspect_declaration_artifacts_with_producer(
     includes: &[PathBuf],
     session_root: &Path,
     expected_producer: Option<[u8; 32]>,
+    input_directory: Arc<tempfile::TempDir>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<DeclarationInventoryOutcome, CompileError> {
+    require_owned_artifact_paths(artifacts, &input_directory)?;
     let encoded = encode_declaration_inventory(artifacts)?;
-    let execution =
-        execute_declaration_operation(&encoded, includes, session_root, &[], expected_producer)?;
+    let execution = execute_declaration_operation(
+        &encoded,
+        includes,
+        session_root,
+        &[],
+        expected_producer,
+        input_directory,
+        settlement,
+    )?;
     decode_declaration_inventory_outcome(artifacts, &execution.receipt)
 }
 
@@ -1989,8 +2047,46 @@ pub fn decode_declaration_inventory_outcome(
 
 #[cfg(test)]
 mod authored_tests {
+    fn certify_recovered_declaration_tip_in_context(
+        context: Arc<ExactDeclarationContext>,
+        selection: RecoveryDeclarationSelection,
+        includes: &[PathBuf],
+    ) -> Result<RecoveredDeclarationTip, CompileError> {
+        crate::artifacts::test_support::with_settlement(|recipient| {
+            super::certify_recovered_declaration_tip_in_context(
+                context, selection, includes, recipient,
+            )
+        })
+    }
+
     use super::*;
     use tidepool_repr::Generation;
+
+    #[test]
+    fn declaration_inventory_refuses_paths_outside_the_retained_directory_before_binding() {
+        let inputs = tempfile::tempdir().unwrap();
+        let unrelated = Arc::new(tempfile::tempdir().unwrap());
+        let interface = inputs.path().join("Original.hi");
+        std::fs::write(&interface, b"interface bytes").unwrap();
+        let artifacts = vec![DeclarationArtifact {
+            interface: ExactIfaceArtifact {
+                unit: "main".into(),
+                module: "Original".into(),
+                path: interface,
+                sha256: sha256(b"interface bytes"),
+                requirements: Vec::new(),
+            },
+            product: None,
+        }];
+        let error =
+            inspect_declaration_artifacts(&artifacts, &[], inputs.path(), unrelated, &mut |_| {
+                panic!("unowned inputs must not bind a compiler")
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, CompileError::ExtractFailed(ref message) if message.contains("outside its retained directory"))
+        );
+    }
 
     #[test]
     fn authored_certification_refuses_different_source_before_compilation() {
@@ -2496,7 +2592,7 @@ mod authored_tests {
             "native authored originals must not advertise source replay"
         );
         assert!(!certificate.product().product_bytes().is_empty());
-        let worker_root = tempfile::tempdir().unwrap();
+        let worker_root = Arc::new(tempfile::tempdir().unwrap());
         let unselected =
             ExactDeclarationContext::new(&[certificate.clone()], &[], Vec::new()).unwrap();
         assert_ne!(context.semantic_sha256(), unselected.semantic_sha256());
@@ -2543,13 +2639,19 @@ mod authored_tests {
             .head
             .occurrence
             .push_str("Missing");
-        let CertifiedDeclarationJoin::Rejected(rejected) = certify_declaration_join(
-            rejected_input.clone(),
-            &context,
-            &[source_root.path().to_path_buf()],
-            source_root.path(),
-        )
-        .unwrap() else {
+        let CertifiedDeclarationJoin::Rejected(rejected) =
+            crate::artifacts::test_support::with_settlement(|settlement| {
+                certify_declaration_join(
+                    rejected_input.clone(),
+                    &context,
+                    &[source_root.path().to_path_buf()],
+                    source_root.path(),
+                    worker_root.clone(),
+                    settlement,
+                )
+            })
+            .unwrap()
+        else {
             panic!("expected fenced rejection")
         };
         assert_eq!(rejected.input(), &rejected_input);
@@ -2559,13 +2661,19 @@ mod authored_tests {
             sha256(&encode_declaration_join(&rejected_input).unwrap())
         );
         assert_eq!(rejected.toolchain_identity_sha256(), expected_producer);
-        let CertifiedDeclarationJoin::Accepted(accepted) = certify_declaration_join(
-            input,
-            &context,
-            &[source_root.path().to_path_buf()],
-            source_root.path(),
-        )
-        .unwrap() else {
+        let CertifiedDeclarationJoin::Accepted(accepted) =
+            crate::artifacts::test_support::with_settlement(|settlement| {
+                certify_declaration_join(
+                    input,
+                    &context,
+                    &[source_root.path().to_path_buf()],
+                    source_root.path(),
+                    worker_root.clone(),
+                    settlement,
+                )
+            })
+            .unwrap()
+        else {
             panic!("expected accepted owned join")
         };
         assert_eq!(accepted.request_sha256(), expected_request);
@@ -2757,7 +2865,7 @@ mod authored_tests {
             assert_eq!(retained.product_bytes(), original.product_bytes());
             assert_eq!(retained.interface_bytes(), original.interface_bytes());
         }
-        let next_worker = tempfile::tempdir().unwrap();
+        let next_worker = Arc::new(tempfile::tempdir().unwrap());
         let next_anchors = next_context.materialize(next_worker.path()).unwrap();
         let snapshot = |owner: &ExactModuleIdentity| {
             let artifact = next_anchors
@@ -2795,13 +2903,19 @@ mod authored_tests {
             expected_exports: fresh_certificate.lexical_exports().to_vec(),
             expected_instances: selected_instances,
         };
-        let CertifiedDeclarationJoin::Accepted(next_join) = certify_declaration_join(
-            next_input,
-            &next_context,
-            &[fresh_root.path().to_path_buf()],
-            fresh_root.path(),
-        )
-        .unwrap() else {
+        let CertifiedDeclarationJoin::Accepted(next_join) =
+            crate::artifacts::test_support::with_settlement(|settlement| {
+                certify_declaration_join(
+                    next_input,
+                    &next_context,
+                    &[fresh_root.path().to_path_buf()],
+                    fresh_root.path(),
+                    next_worker.clone(),
+                    settlement,
+                )
+            })
+            .unwrap()
+        else {
             panic!("expected second accepted join after source-hidden authored certification")
         };
         assert_eq!(next_join.context().joined_interfaces().len(), 1);
@@ -2877,7 +2991,7 @@ mod authored_tests {
         ordinary_evidence.cache_safe = false;
         ordinary_evidence.selection_complete = false;
         assert!(!ordinary_evidence.valid(downstream));
-        let next_worker = tempfile::tempdir().unwrap();
+        let next_worker = Arc::new(tempfile::tempdir().unwrap());
         let exact = extended.materialize(next_worker.path()).unwrap();
         extended.validate_artifacts(&exact.artifacts).unwrap();
         let mut corrupted = exact.artifacts.clone();

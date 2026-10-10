@@ -12,7 +12,30 @@ fn fixture(root: &Path, name: &str, source: &str) {
 
 #[test]
 fn exact_join_round_trips_actual_worker_and_source_hidden_consumers() {
-    let scratch = tempfile::tempdir().unwrap();
+    use tidepool_extract_cmd::CompilerTransactionClose;
+    let observation = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recipient = observation.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        exact_join_with_settlement(&mut |close| recipient.lock().unwrap().push(close))
+    }));
+    let closes = observation.lock().unwrap();
+    assert!(
+        closes.iter().all(|close| matches!(
+            close,
+            CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted
+        )),
+        "unconfirmed compiler close: {closes:?}"
+    );
+    drop(closes);
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn exact_join_with_settlement(
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+) {
+    let scratch = std::sync::Arc::new(tempfile::tempdir().unwrap());
     let root = scratch.path();
     fixture(root, "Common", include_str!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/exact-isolation/Common.hs"));
     fixture(root, "Old", include_str!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/exact-isolation/Old.hs"));
@@ -63,7 +86,9 @@ fn exact_join_round_trips_actual_worker_and_source_hidden_consumers() {
         .unwrap();
     }
     let includes = vec![root.to_owned()];
-    let inventory = inspect_declaration_artifacts(&artifacts, &includes, root).unwrap();
+    let inventory =
+        inspect_declaration_artifacts(&artifacts, &includes, root, scratch.clone(), settlement)
+            .unwrap();
     assert_eq!(inventory.decision, JoinDecision::Accepted);
     let inventories = inventory.inventories.unwrap();
     assert_eq!(inventories.len(), 3);
@@ -140,7 +165,9 @@ fn exact_join_round_trips_actual_worker_and_source_hidden_consumers() {
         artifacts: artifacts.clone(),
         family_closure: inventory.family_closure.unwrap(),
     };
-    let accepted = validate_declaration_join(&input, &includes, root, &[]).unwrap();
+    let accepted =
+        validate_declaration_join(&input, &includes, root, &[], scratch.clone(), settlement)
+            .unwrap();
     assert_eq!(accepted.decision, JoinDecision::Accepted);
     assert_eq!(
         accepted.expected_public_version,
@@ -153,7 +180,9 @@ fn exact_join_round_trips_actual_worker_and_source_hidden_consumers() {
     );
     let mut changed = input.clone();
     changed.artifacts[0].interface.sha256 = "0".repeat(64);
-    let rejected = validate_declaration_join(&changed, &includes, root, &[]).unwrap();
+    let rejected =
+        validate_declaration_join(&changed, &includes, root, &[], scratch.clone(), settlement)
+            .unwrap();
     assert!(matches!(
         rejected.decision,
         JoinDecision::Rejected {
