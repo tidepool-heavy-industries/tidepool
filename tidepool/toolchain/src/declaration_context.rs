@@ -142,6 +142,35 @@ struct ProtectedScaffoldRequirements {
 pub(crate) struct OriginalCompilerInputs {
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
+    native_original_requirements: Vec<crate::artifact_inventory::NativeOriginalRequirement>,
+}
+
+/// Carry choices already issued by each input before their custody is merged.
+/// An original with no bound group must remain availability only; the merged
+/// view cannot supply a new choice for it.
+fn carry_native_original_requirements(
+    projection: &CompilerInputProjection,
+    preferred: &[crate::artifact_inventory::NativeOriginalRequirement],
+) -> Vec<crate::artifact_inventory::NativeOriginalRequirement> {
+    use crate::artifact_inventory::NativeOriginalRequirement;
+    let mut requirements = Vec::new();
+    for role in projection.roles() {
+        if let Some(requirement) = NativeOriginalRequirement::from_role(role.clone()) {
+            if !requirements.contains(&requirement) {
+                requirements.push(requirement);
+            }
+            continue;
+        }
+        let Some(original) = role.original() else {
+            continue;
+        };
+        for requirement in preferred.iter().filter(|fact| fact.original == original) {
+            if !requirements.contains(requirement) {
+                requirements.push(requirement.clone());
+            }
+        }
+    }
+    requirements
 }
 
 impl OriginalCompilerInputs {
@@ -221,11 +250,23 @@ impl OriginalCompilerInputs {
         selection: &crate::certified_products::CertifiedSourceSelection,
         artifacts: &ArtifactView,
     ) -> Result<Self, CompileError> {
+        let projection = selection
+            .compiler_projection(artifacts)
+            .map_err(compiler_evidence_failure)?;
+        let preferred = selection
+            .native_original_requirements()
+            .cloned()
+            .collect::<Vec<_>>();
+        let native_original_requirements =
+            crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+                &projection,
+                artifacts,
+                &preferred,
+            )?;
         Ok(Self {
-            projection: selection
-                .compiler_projection(artifacts)
-                .map_err(compiler_evidence_failure)?,
+            projection,
             artifacts: artifacts.clone(),
+            native_original_requirements,
         })
     }
 
@@ -312,9 +353,21 @@ impl OriginalCompilerInputs {
             &mut validation,
         )
         .map_err(compiler_evidence_failure)?;
+        let preferred = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+            &context.compiler_projection,
+            &context.inventory,
+            &[],
+        )?;
+        let native_original_requirements =
+            crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+                &projection,
+                &artifacts,
+                &preferred,
+            )?;
         Ok(Self {
             projection,
             artifacts,
+            native_original_requirements,
         })
     }
 
@@ -347,9 +400,12 @@ impl OriginalCompilerInputs {
         }
         let projection = self.projection.within_view(support);
         projection.validate(support)?;
+        let native_original_requirements =
+            carry_native_original_requirements(&projection, &self.native_original_requirements);
         Ok(Self {
             projection,
             artifacts: support.clone(),
+            native_original_requirements,
         })
     }
 
@@ -357,9 +413,14 @@ impl OriginalCompilerInputs {
         let projection = self.projection.merge(&other.projection)?;
         let artifacts = self.artifacts.merge(&other.artifacts)?;
         projection.validate(&artifacts)?;
+        let mut preferred = self.native_original_requirements.clone();
+        preferred.extend(other.native_original_requirements.iter().cloned());
+        let native_original_requirements =
+            carry_native_original_requirements(&projection, &preferred);
         Ok(Self {
             projection,
             artifacts,
+            native_original_requirements,
         })
     }
 }
@@ -368,6 +429,8 @@ pub(crate) struct RequestCompilerInputs {
     pub(crate) projection: CompilerInputProjection,
     pub(crate) metadata: ArtifactMetadataSnapshot,
     pub(crate) artifacts: ArtifactView,
+    pub(crate) native_original_requirements:
+        Vec<crate::artifact_inventory::NativeOriginalRequirement>,
     declaration_semantic_sha256: [u8; 32],
     original_sources: crate::certified_products::RetainedOriginalSources,
 }
@@ -407,9 +470,17 @@ impl ProtectedScaffoldRequirements {
             tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.merge")
                 .entered();
         let mut projection = context.compiler_projection.merge(&self.projection)?;
+        let mut native_original_requirements =
+            crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+                &projection,
+                context.artifact_view(),
+                &[],
+            )?;
         let (artifacts, metadata) = match private {
             Some(private) => {
                 projection = projection.merge(&private.projection)?;
+                native_original_requirements
+                    .extend(private.native_original_requirements.iter().cloned());
                 let artifacts = context.artifact_view().merge(&private.artifacts)?;
                 let metadata = artifacts.metadata_snapshot();
                 (artifacts, metadata)
@@ -419,10 +490,13 @@ impl ProtectedScaffoldRequirements {
         drop(merge_span);
         let metadata = tracing::debug_span!(target: "exomonad_harness::timing", "exact.compiler_inputs.project")
             .in_scope(|| projection.project_metadata(metadata))?;
+        let native_original_requirements =
+            carry_native_original_requirements(&projection, &native_original_requirements);
         Ok(RequestCompilerInputs {
             projection,
             metadata,
             artifacts,
+            native_original_requirements,
             declaration_semantic_sha256,
             original_sources: Default::default(),
         })
