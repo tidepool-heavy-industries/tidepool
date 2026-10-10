@@ -1321,10 +1321,25 @@ mod tests {
             queries: &[],
             effects: None,
         };
-        assert!(run_admitted_inspections(request(), &first, &inputs)
+        assert!(
+            tidepool_testing::with_settlement(|settlement| run_admitted_inspections(
+                request(),
+                &first,
+                &inputs,
+                settlement
+            ))
             .unwrap()
-            .is_empty());
-        assert!(run_admitted_inspections(request(), &second, &inputs).is_err());
+            .is_empty()
+        );
+        assert!(
+            tidepool_testing::with_settlement(|settlement| run_admitted_inspections(
+                request(),
+                &second,
+                &inputs,
+                settlement
+            ))
+            .is_err()
+        );
     }
     use super::*;
     use tidepool_testing::eval_harness;

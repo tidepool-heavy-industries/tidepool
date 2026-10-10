@@ -218,10 +218,11 @@ impl Notebook {
     /// Install the immutable artifact afresh on every turn. Compilation is
     /// shared; mutable heap state and program retirement are still exercised.
     fn expression(&mut self, compiled: &CompiledTurn) {
-        let outcome = self
-            .session
-            .run_with_sites("residency_expression", compiled.code())
-            .expect("prepared expression runs");
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            self.session
+                .run_with_sites("residency_expression", compiled.code(), settlement)
+        })
+        .expect("prepared expression runs");
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
             "{outcome:?}"
@@ -238,15 +239,16 @@ impl Notebook {
         let [binder] = bound.as_slice() else {
             panic!("{text:?} bound {} names", bound.len());
         };
-        let outcome = self
-            .session
-            .run_bind_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            self.session.run_bind_with_sites(
                 "residency_bind",
                 compiled.code(),
                 binder,
                 Generation(self.generation),
+                settlement,
             )
-            .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
+        })
+        .unwrap_or_else(|error| panic!("{text:?} failed to run: {error}"));
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
             "{text:?} did not complete: {outcome:?}"
@@ -281,18 +283,21 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
 
     let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
     let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
-    let ResidentOutcome::Suspended { hole, .. } = notebook
-        .session
-        .run_with_sites("response_rejection", success.code())
-        .unwrap()
-    else {
+    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .run_with_sites("response_rejection", success.code(), settlement)
+    })
+    .unwrap() else {
         panic!("Console request must suspend");
     };
     let roots = notebook.session.persistent_roots_count();
-    let error = notebook
-        .session
-        .resume_classified(hole.clone(), MalformedAnswer)
-        .unwrap_err();
+    let error = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .resume_classified(hole.clone(), MalformedAnswer, settlement)
+    })
+    .unwrap_err();
     assert!(
         matches!(error, ResidentResumeError::Rejected(ResidentError::Prepared(
         PreparedRuntimeError::AnswerRejected { source: BridgeError::UnknownDataConName(ref name), .. }
@@ -302,35 +307,50 @@ fn structural_resume_classifies_rejection_and_consumed_failure() {
     assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
     assert_eq!(notebook.session.persistent_roots_count(), roots);
     assert!(matches!(
-        notebook.session.resume_classified(hole, ()).unwrap(),
+        tidepool_testing::with_settlement(|settlement| notebook.session.resume_classified(
+            hole,
+            (),
+            settlement
+        ))
+        .unwrap(),
         ResidentOutcome::Completed { .. }
     ));
     assert!(notebook.session.parked_holes().is_empty());
 
     let failure = notebook
         .prepare_expression("say \"pause\" >> (error \"after response\" :: Eff '[Console] Int)");
-    let ResidentOutcome::Suspended { hole, .. } = notebook
-        .session
-        .run_with_sites("consumed_response", failure.code())
-        .unwrap()
-    else {
+    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .run_with_sites("consumed_response", failure.code(), settlement)
+    })
+    .unwrap() else {
         panic!("Console request must suspend before its failure");
     };
-    let error = notebook.session.resume_classified(hole, ()).unwrap_err();
+    let error = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.resume_classified(hole, (), settlement)
+    })
+    .unwrap_err();
     assert!(
         matches!(error, ResidentResumeError::Consumed(_)),
         "{error:?}"
     );
     assert!(notebook.session.parked_holes().is_empty());
-    let ResidentOutcome::Suspended { hole, .. } = notebook
-        .session
-        .run_with_sites("after_consumed_failure", success.code())
-        .unwrap()
-    else {
+    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .run_with_sites("after_consumed_failure", success.code(), settlement)
+    })
+    .unwrap() else {
         panic!("the session must remain usable after a consumed failure");
     };
     assert!(matches!(
-        notebook.session.resume_classified(hole, ()).unwrap(),
+        tidepool_testing::with_settlement(|settlement| notebook.session.resume_classified(
+            hole,
+            (),
+            settlement
+        ))
+        .unwrap(),
         ResidentOutcome::Completed { .. }
     ));
 }
@@ -342,11 +362,12 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
     let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
     notebook.bind("held <- pure ()");
     let success = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
-    let ResidentOutcome::Suspended { hole, .. } = notebook
-        .session
-        .run_with_sites("framed_rejection", success.code())
-        .unwrap()
-    else {
+    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .run_with_sites("framed_rejection", success.code(), settlement)
+    })
+    .unwrap() else {
         panic!("Console request must suspend");
     };
     let held = notebook
@@ -354,35 +375,37 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
         .retain_binding_custody("held")
         .expect("retain independent binding custody")
         .unwrap();
-    let error = notebook
-        .session
-        .resume_framed_custody_classified(
+    let error = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.resume_framed_custody_classified(
             hole.clone(),
             &held,
             tidepool_repr::DataConId(u64::MAX),
             Vec::new(),
+            settlement,
         )
-        .unwrap_err();
+    })
+    .unwrap_err();
     assert!(
         matches!(error, ResidentResumeError::Rejected(_)),
         "{error:?}"
     );
     assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
     assert!(matches!(
-        notebook
+        tidepool_testing::with_settlement(|settlement| notebook
             .session
-            .resume_handle_classified(hole, held)
-            .unwrap(),
+            .resume_handle_classified(hole, held, settlement))
+        .unwrap(),
         ResidentOutcome::Completed { .. }
     ));
 
     let failure = notebook
         .prepare_expression("say \"pause\" >> (error \"after handle\" :: Eff '[Console] Int)");
-    let ResidentOutcome::Suspended { hole, .. } = notebook
-        .session
-        .run_with_sites("consumed_handle", failure.code())
-        .unwrap()
-    else {
+    let ResidentOutcome::Suspended { hole, .. } = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .run_with_sites("consumed_handle", failure.code(), settlement)
+    })
+    .unwrap() else {
         panic!("Console request must suspend before its failure");
     };
     let held = notebook
@@ -390,10 +413,12 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
         .retain_binding_custody("held")
         .expect("retain independent binding custody")
         .unwrap();
-    let error = notebook
-        .session
-        .resume_handle_classified(hole, held)
-        .unwrap_err();
+    let error = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .resume_handle_classified(hole, held, settlement)
+    })
+    .unwrap_err();
     assert!(
         matches!(error, ResidentResumeError::Consumed(_)),
         "{error:?}"
@@ -441,10 +466,16 @@ fn parcel_crosses_two_resident_sessions_sharing_one_image_registry() {
     };
     let generation = Generation(left.generation);
     let install = |notebook: &mut Notebook| {
-        let outcome = notebook
-            .session
-            .run_bind_with_sites("shared_held", compiled.code(), binder, generation)
-            .expect("install the original immutable binding in an independent machine");
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            notebook.session.run_bind_with_sites(
+                "shared_held",
+                compiled.code(),
+                binder,
+                generation,
+                settlement,
+            )
+        })
+        .expect("install the original immutable binding in an independent machine");
         assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
         notebook.generation = generation.0;
         notebook.injected.push(binder.module.clone());
@@ -756,15 +787,14 @@ fn resident_turn_carries_worker_certified_import_owners() {
         panic!("first turn must bind one value");
     };
     assert!(matches!(
-        notebook
-            .session
-            .run_bind_with_sites(
-                "certified_first_turn",
-                first.into_code(),
-                binder,
-                Generation(notebook.generation),
-            )
-            .expect("first certified turn runs"),
+        tidepool_testing::with_settlement(|settlement| notebook.session.run_bind_with_sites(
+            "certified_first_turn",
+            first.into_code(),
+            binder,
+            Generation(notebook.generation),
+            settlement
+        ))
+        .expect("first certified turn runs"),
         ResidentOutcome::Completed { .. }
     ));
     notebook.injected.push(binder.module.clone());
@@ -790,15 +820,14 @@ fn resident_turn_carries_worker_certified_import_owners() {
         panic!("second turn must bind one value");
     };
     assert!(matches!(
-        notebook
-            .session
-            .run_bind_with_sites(
-                "certified_second_turn",
-                compiled.into_code(),
-                binder,
-                Generation(notebook.generation),
-            )
-            .expect("second certified turn runs"),
+        tidepool_testing::with_settlement(|settlement| notebook.session.run_bind_with_sites(
+            "certified_second_turn",
+            compiled.into_code(),
+            binder,
+            Generation(notebook.generation),
+            settlement
+        ))
+        .expect("second certified turn runs"),
         ResidentOutcome::Completed { .. }
     ));
 }
@@ -834,11 +863,13 @@ fn certified_resident_turn_compiles_off_checkout_then_installs() {
     let compiled = pending
         .compile_off_checkout()
         .expect("off-checkout compile");
-    let outcome = notebook
-        .session
-        .revalidate_and_run_prepared(compiled)
-        .expect("certified split install")
-        .expect("unchanged public view");
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .revalidate_and_run_prepared(compiled, settlement)
+    })
+    .expect("certified split install")
+    .expect("unchanged public view");
     assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
 }
 
@@ -997,62 +1028,66 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     // and one job payload, all with NO further GHC compile -------------
 
     let gen_a = tidepool_repr::Generation(notebook.generation);
-    let binder_a = notebook
-        .session
-        .mount_carrier_in(
+    let binder_a = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "carriedA",
             gen_a,
             &json_carrier,
             HostPayload::Json(&serde_json::json!({"tag": "A"})),
+            settlement,
         )
-        .expect("mount first carrier payload");
+    })
+    .expect("mount first carrier payload");
     notebook.injected.push(binder_a.module.clone());
 
     notebook.generation += 1;
     let gen_b = tidepool_repr::Generation(notebook.generation);
-    let binder_b = notebook
-        .session
-        .mount_carrier_in(
+    let binder_b = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "carriedB",
             gen_b,
             &json_carrier,
             HostPayload::Json(&serde_json::json!({"tag": "B"})),
+            settlement,
         )
-        .expect("mount second carrier payload");
+    })
+    .expect("mount second carrier payload");
     notebook.injected.push(binder_b.module.clone());
 
     notebook.generation += 1;
     let gen_text = tidepool_repr::Generation(notebook.generation);
-    let binder_text = notebook
-        .session
-        .mount_carrier_in(
+    let binder_text = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "carriedText",
             gen_text,
             &text_carrier,
             HostPayload::Text("hello-carrier-text"),
+            settlement,
         )
-        .expect("mount text carrier payload");
+    })
+    .expect("mount text carrier payload");
     notebook.injected.push(binder_text.module.clone());
 
     notebook.generation += 1;
     let gen_job = tidepool_repr::Generation(notebook.generation);
-    let binder_job = notebook
-        .session
-        .mount_carrier_in(
+    let binder_job = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "carriedJob",
             gen_job,
             &job_carrier,
             HostPayload::Job("job-command"),
+            settlement,
         )
-        .expect("mount job carrier payload");
+    })
+    .expect("mount job carrier payload");
     notebook.injected.push(binder_job.module.clone());
 
     // Every stub generation must never be offered as --inject-val (no .hi
@@ -1084,10 +1119,12 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     ) else {
         panic!("reading all four carried values must compile as an expression");
     };
-    let outcome = notebook
-        .session
-        .run_with_sites("read_all_carried", compiled.into_code())
-        .expect("read all carried values");
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .run_with_sites("read_all_carried", compiled.into_code(), settlement)
+    })
+    .expect("read all carried values");
     assert!(
         matches!(outcome, ResidentOutcome::Completed { .. }),
         "all four payload and constructor assertions must complete: {outcome:?}"
@@ -1128,17 +1165,18 @@ fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
 
     notebook.generation += 1;
     let gen = Generation(notebook.generation);
-    let binder = notebook
-        .session
-        .mount_carrier_in(
+    let binder = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "capturedCarrier",
             gen,
             &carrier,
             HostPayload::Json(&serde_json::json!({"tag": "captured"})),
+            settlement,
         )
-        .expect("mount carrier binding");
+    })
+    .expect("mount carrier binding");
     notebook.injected.push(binder.module.clone());
 
     let stub_path = notebook
@@ -1150,10 +1188,12 @@ fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
     // A declaration captures the carrier binding by name -- `define_scoped`
     // auto-imports every currently-visible value's exact `Val.G<g>` module,
     // so the committed `Lib.G<g>` source now names this stub generation.
-    notebook
-        .session
-        .define_scoped(&["capturedUse = capturedCarrier"])
-        .expect("declaration captures the carrier binding");
+    tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .define_scoped(&["capturedUse = capturedCarrier"], settlement)
+    })
+    .expect("declaration captures the carrier binding");
 
     // Retire the carrier binding: it must both stop being excluded from
     // `--inject-val` bookkeeping under its own generation AND delete its
@@ -1228,17 +1268,18 @@ fn failed_carrier_mount_leaves_no_stub_source() {
         .session
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
-    let error = notebook
-        .session
-        .mount_carrier_in(
+    let error = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "unmountable",
             gen,
             &carrier,
             HostPayload::Job("wrong nominal payload"),
+            settlement,
         )
-        .expect_err("a wrong payload kind must refuse before mutation");
+    })
+    .expect_err("a wrong payload kind must refuse before mutation");
     assert!(matches!(error, ResidentError::UnsupportedCheckedTurn));
 
     assert_eq!(notebook.session.residency(), residency);
@@ -1399,17 +1440,18 @@ impl Incarnation {
         use tidepool_runtime::session::HostPayload;
         self.generation += 1;
         let gen = tidepool_repr::Generation(self.generation);
-        let binder = self
-            .session
-            .mount_carrier_in(
+        let binder = tidepool_testing::with_settlement(|settlement| {
+            self.session.mount_carrier_in(
                 &self.root,
                 ScopeId::ROOT,
                 name,
                 gen,
                 carrier,
                 HostPayload::Json(value),
+                settlement,
             )
-            .expect("mount json carrier payload");
+        })
+        .expect("mount json carrier payload");
         self.injected.push(binder.module.clone());
         binder
     }
@@ -1529,10 +1571,12 @@ fn different_incarnations_sharing_one_root_do_not_cross_read_same_named_generati
     ) else {
         panic!("reading the carried value must compile as an expression");
     };
-    let outcome = second
-        .session
-        .run_with_sites("read_second_incarnation", compiled.into_code())
-        .expect("read second incarnation's carried value");
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        second
+            .session
+            .run_with_sites("read_second_incarnation", compiled.into_code(), settlement)
+    })
+    .expect("read second incarnation's carried value");
     assert!(
         matches!(outcome, ResidentOutcome::Completed { .. }),
         "the second incarnation's own payload assertion must complete: {outcome:?}"
@@ -1579,10 +1623,14 @@ fn fifty_accumulated_session_stubs_read_back_correctly_across_repeat_compiles() 
         else {
             panic!("reading all 50 carried values must compile as an expression");
         };
-        let outcome = incarnation
-            .session
-            .run_with_sites("read_fifty_carried", compiled.into_code())
-            .unwrap_or_else(|error| panic!("attempt {attempt}: read all 50 values: {error}"));
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            incarnation.session.run_with_sites(
+                "read_fifty_carried",
+                compiled.into_code(),
+                settlement,
+            )
+        })
+        .unwrap_or_else(|error| panic!("attempt {attempt}: read all 50 values: {error}"));
         assert!(
             matches!(outcome, ResidentOutcome::Completed { .. }),
             "attempt {attempt}: all 50 ordered payload assertions must complete: {outcome:?}"

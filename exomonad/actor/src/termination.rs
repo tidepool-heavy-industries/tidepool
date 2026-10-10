@@ -1062,7 +1062,7 @@ mod tests {
                 let _native = tidepool_runtime::spawn_blocking_in_span(move || {
                     ticket.run_for_workload(
                         tidepool_toolchain::artifacts::CompileWorkload::Preparation,
-                        || {
+                        |_settlement| {
                             proceed
                                 .recv_timeout(std::time::Duration::from_secs(5))
                                 .unwrap()

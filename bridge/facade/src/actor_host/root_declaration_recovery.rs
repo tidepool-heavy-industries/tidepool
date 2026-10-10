@@ -147,7 +147,10 @@ mod tests {
             .unwrap(),
         );
         let mut root_library = library(run.path());
-        attach(&mut root_library, run.path(), lease.clone()).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            attach(&mut root_library, run.path(), lease.clone(), settlement)
+        })
+        .unwrap();
         root_library
             .initialize_captured_declaration_high_water(tidepool_repr::Generation(3))
             .unwrap();
@@ -161,7 +164,10 @@ mod tests {
                 .join(id.0.to_string());
             let mut child =
                 SessionLib::open(id, &child_root, ModuleEnv::standalone_default()).unwrap();
-            attach_child(&mut child, run.path(), lease.clone()).unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                attach_child(&mut child, run.path(), lease.clone(), settlement)
+            })
+            .unwrap();
             assert_eq!(child.generation(), tidepool_repr::Generation(0));
             child
                 .initialize_captured_declaration_high_water(tidepool_repr::Generation(high_water))
@@ -196,7 +202,13 @@ mod tests {
             .join("haskell-session-children")
             .join(id.0.to_string());
         let mut child = SessionLib::open(id, &child_root, ModuleEnv::standalone_default()).unwrap();
-        assert!(attach_child(&mut child, foreign.path(), lease.clone()).is_err());
+        assert!(tidepool_testing::with_settlement(|settlement| attach_child(
+            &mut child,
+            foreign.path(),
+            lease.clone(),
+            settlement
+        ))
+        .is_err());
         assert!(!child_root.join("declarations.json").exists());
         let wrong_root = owned
             .path()
@@ -208,7 +220,13 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        assert!(attach_child(&mut wrong, owned.path(), lease).is_err());
+        assert!(tidepool_testing::with_settlement(|settlement| attach_child(
+            &mut wrong,
+            owned.path(),
+            lease,
+            settlement
+        ))
+        .is_err());
         assert!(!wrong_root.join("declarations.json").exists());
     }
 
@@ -222,7 +240,10 @@ mod tests {
             .unwrap(),
         );
         let mut library = library(run.path());
-        attach(&mut library, run.path(), Arc::clone(&lease)).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            attach(&mut library, run.path(), Arc::clone(&lease), settlement)
+        })
+        .unwrap();
         drop(lease);
         assert!(HostIncarnationLease::claim(
             &tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap()
@@ -246,7 +267,13 @@ mod tests {
             .unwrap(),
         );
         let mut library = library(unrelated.path());
-        assert!(attach(&mut library, unrelated.path(), lease).is_err());
+        assert!(tidepool_testing::with_settlement(|settlement| attach(
+            &mut library,
+            unrelated.path(),
+            lease,
+            settlement
+        ))
+        .is_err());
         assert!(!unrelated.path().join("root-declarations.json").exists());
     }
 
@@ -263,7 +290,13 @@ mod tests {
             .unwrap(),
         );
         let mut library = library(run.path());
-        assert!(attach(&mut library, run.path(), lease).is_err());
+        assert!(tidepool_testing::with_settlement(|settlement| attach(
+            &mut library,
+            run.path(),
+            lease,
+            settlement
+        ))
+        .is_err());
         assert_eq!(std::fs::read(&path).unwrap(), legacy);
     }
     #[test]
@@ -279,7 +312,15 @@ mod tests {
         let first_owner =
             RecoveryPublicOwner::new(&root_path(), first_lease.incarnation().0).unwrap();
         let mut first_library = library(run.path());
-        attach(&mut first_library, run.path(), Arc::clone(&first_lease)).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            attach(
+                &mut first_library,
+                run.path(),
+                Arc::clone(&first_lease),
+                settlement,
+            )
+        })
+        .unwrap();
         let mut first = PersistentSession::new(Some(first_library), 1024);
         let public = first.mint_isolated_scope();
         assert_eq!(
@@ -305,7 +346,15 @@ mod tests {
             RecoveryPublicOwner::new(&root_path(), successor_lease.incarnation().0).unwrap();
         assert_ne!(first_owner, successor_owner);
         let mut successor_library = library(run.path());
-        attach(&mut successor_library, run.path(), successor_lease).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            attach(
+                &mut successor_library,
+                run.path(),
+                successor_lease,
+                settlement,
+            )
+        })
+        .unwrap();
         let mut successor = PersistentSession::new(Some(successor_library), 1024);
         assert!(successor.recover_public_scope(&successor_owner).is_err());
         let recovered = successor.recover_public_scope(&first_owner).unwrap();

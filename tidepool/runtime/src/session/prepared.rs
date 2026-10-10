@@ -7965,7 +7965,10 @@ pub(super) mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
@@ -9881,8 +9884,8 @@ pub(super) mod tests {
                 .unwrap();
             let mut alias_value = shared_value;
             alias_value.identity.occurrence = "alias".into();
-            state
-                .publish_alias_in(
+            tidepool_testing::with_settlement(|settlement| {
+                state.publish_alias_in(
                     original_scope,
                     BindingEntry {
                         name: BindingName("alias".into()),
@@ -9894,8 +9897,10 @@ pub(super) mod tests {
                         scope: original_scope,
                     },
                     original_id,
+                    settlement,
                 )
-                .unwrap();
+            })
+            .unwrap();
             let sibling_value = state
                 .resolve_in(original_scope, "alias")
                 .unwrap()
@@ -12895,7 +12900,10 @@ pub(super) mod tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         let mut state = super::super::PersistentSession::new(Some(lib), 1024);
         let producer = producer_program();
         let top = producer.entry();

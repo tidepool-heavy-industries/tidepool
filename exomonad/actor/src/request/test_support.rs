@@ -101,18 +101,23 @@ impl Fixture {
         let include = view.include_paths(&include);
         let paths = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         let compile = |source: &str, gen| {
-            run_turn(TurnRequest {
-                exact_context: None,
-                session_id: None,
-                turn_text: source,
-                templates: &templates,
-                include: &paths,
-                session_root: view.session_root(),
-                inject_modules: &[],
-                gen,
-                verdict: None,
-                target: None,
-                retained_imports: &[],
+            tidepool_testing::with_settlement(|settlement| {
+                run_turn(
+                    TurnRequest {
+                        exact_context: None,
+                        session_id: None,
+                        turn_text: source,
+                        templates: &templates,
+                        include: &paths,
+                        session_root: view.session_root(),
+                        inject_modules: &[],
+                        gen,
+                        verdict: None,
+                        target: None,
+                        retained_imports: &[],
+                    },
+                    settlement,
+                )
             })
             .expect("compile immutable result fixture through original native issuer")
         };
@@ -147,14 +152,14 @@ impl Fixture {
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         );
         assert!(matches!(
-            resident
-                .run_projected_bind_with_sites(
-                    "result-fixture-native-bindings",
-                    receiver.code(),
-                    &bound,
-                    Generation(1),
-                )
-                .unwrap(),
+            tidepool_testing::with_settlement(|settlement| resident.run_projected_bind_with_sites(
+                "result-fixture-native-bindings",
+                receiver.code(),
+                &bound,
+                Generation(1),
+                settlement
+            ))
+            .unwrap(),
             ResidentOutcome::BindingsCommitted { .. }
         ));
         Self {
@@ -166,17 +171,24 @@ impl Fixture {
 
     fn submission(&mut self, request: RequestId) -> (ResidentHole, HaskellValue, u64) {
         let (reservation, _) = suspended(
-            self.resident
-                .run_with_sites("result-fixture-request", self.producer.code())
-                .unwrap(),
+            tidepool_testing::with_settlement(|settlement| {
+                self.resident.run_with_sites(
+                    "result-fixture-request",
+                    self.producer.code(),
+                    settlement,
+                )
+            })
+            .unwrap(),
         );
         let (submission, payload) = suspended(
-            self.resident
-                .resume(
+            tidepool_testing::with_settlement(|settlement| {
+                self.resident.resume(
                     reservation,
                     Ok::<i64, ()>(i64::try_from(request.0).unwrap()),
+                    settlement,
                 )
-                .unwrap(),
+            })
+            .unwrap(),
         );
         let RepliesReq::SubmitRequestWith(_, site, _, _, _) =
             RepliesReq::from_value(&payload, self.resident.data_con_table()).unwrap()
@@ -219,28 +231,40 @@ impl Fixture {
             .unwrap()
             .unwrap();
         let (activation, _) = suspended(
-            self.resident
-                .run_rooted_application(
+            tidepool_testing::with_settlement(|settlement| {
+                self.resident.run_rooted_application(
                     "result-fixture-receiver",
                     &receiver,
                     &payload,
                     RealmId::ROOT,
                     None,
+                    settlement,
                 )
-                .unwrap(),
+            })
+            .unwrap(),
         );
         let reply = self
             .resident
             .retain_binding_custody("resultRegistryScalar")
             .unwrap()
             .unwrap();
-        let (publication, _) = suspended(self.resident.resume_handle(activation, reply).unwrap());
+        let (publication, _) = suspended(
+            tidepool_testing::with_settlement(|settlement| {
+                self.resident.resume_handle(activation, reply, settlement)
+            })
+            .unwrap(),
+        );
         let captured = self
             .resident
             .capture_result_publication(&publication, site, RealmId::ROOT)
             .unwrap();
         assert!(matches!(
-            self.resident.resume(publication, ()).unwrap(),
+            tidepool_testing::with_settlement(|settlement| self.resident.resume(
+                publication,
+                (),
+                settlement
+            ))
+            .unwrap(),
             ResidentOutcome::Completed { .. }
         ));
         captured
@@ -252,15 +276,17 @@ impl Fixture {
             .retain_binding_custody("resultRegistryVerifier")
             .unwrap()
             .unwrap();
-        let ResidentOutcome::Completed { result, .. } = self
-            .resident
-            .run_rooted_application(
-                "force-retained-result",
-                &verifier,
-                snapshot.value(),
-                RealmId::ROOT,
-                None,
-            )
+        let ResidentOutcome::Completed { result, .. } =
+            tidepool_testing::with_settlement(|settlement| {
+                self.resident.run_rooted_application(
+                    "force-retained-result",
+                    &verifier,
+                    snapshot.value(),
+                    RealmId::ROOT,
+                    None,
+                    settlement,
+                )
+            })
             .unwrap()
         else {
             panic!("result force must complete")

@@ -4246,7 +4246,7 @@ mod checkpoint_scope_tests {
         conflict.id = id;
         let roots = session.persistent_roots_count();
         assert!(matches!(
-            session.bind_replacing_decls(vec![first, conflict]),
+            tidepool_testing::with_settlement(|settlement| session.bind_replacing_decls(vec![first, conflict], settlement)),
             Err(SessionError::InvalidBindingIdentity(error)) if error.id == id
         ));
         assert_eq!(
@@ -4282,7 +4282,7 @@ mod checkpoint_scope_tests {
         let roots = session.persistent_roots_count();
         let revision = session.bindings.mutation_revision();
         assert!(matches!(
-            session.bind_replacing_decls(vec![first, second]),
+            tidepool_testing::with_settlement(|settlement| session.bind_replacing_decls(vec![first, second], settlement)),
             Err(SessionError::InvalidBindingIdentity(error)) if error.id == id
         ));
         assert_eq!(session.bindings.mutation_revision(), revision);
@@ -4309,8 +4309,10 @@ mod checkpoint_scope_tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_recovery_graph_v2(root.join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.join("declarations.json"), settlement)
+        })
+        .unwrap();
         PersistentSession::new(Some(lib), 1024)
     }
 
@@ -4330,10 +4332,13 @@ mod checkpoint_scope_tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(
-            root.join("declarations.json"),
-            Arc::new(RunOwner(root.canonicalize().unwrap())),
-        )
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(
+                root.join("declarations.json"),
+                Arc::new(RunOwner(root.canonicalize().unwrap())),
+                settlement,
+            )
+        })
         .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
@@ -5759,7 +5764,10 @@ mod checkpoint_scope_tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024);
         let first = session.mint_scope(ScopeId::ROOT).unwrap();
         let second = session.mint_scope(ScopeId::ROOT).unwrap();
@@ -6149,8 +6157,8 @@ mod maintained_binding_lifetime_properties {
         alias_value.identity = alias_identity.clone();
         let alias_shares_source_handle = alias_value.handle == source_handle;
         let alias_id = SessionVarId::from_extract(ALIAS_ID);
-        state
-            .publish_alias_in(
+        tidepool_testing::with_settlement(|settlement| {
+            state.publish_alias_in(
                 owner,
                 BindingEntry {
                     name: tidepool_repr::BindingName("alias".into()),
@@ -6162,8 +6170,10 @@ mod maintained_binding_lifetime_properties {
                     scope: owner,
                 },
                 source_id,
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         support.aliases += 1;
         support.shared_handle_bindings += usize::from(alias_shares_source_handle);
 

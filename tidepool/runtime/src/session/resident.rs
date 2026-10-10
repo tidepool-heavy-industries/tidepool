@@ -8447,23 +8447,32 @@ mod custody_release_tests {
         );
         let before = destination.value_handle_count();
         for outcome in [
-            destination.resume_framed_custody_classified(
-                hole.clone(),
-                &foreign,
-                DataConId(0),
-                vec![],
-            ),
-            destination.resume_framed_custody_sources_classified(
-                hole.clone(),
-                &foreign,
-                DataConId(0),
-                Vec::<i64>::new(),
-            ),
-            destination.resume_nested_custody_classified(
-                hole.clone(),
-                &foreign,
-                vec![DataConId(0)],
-            ),
+            tidepool_testing::with_settlement(|settlement| {
+                destination.resume_framed_custody_classified(
+                    hole.clone(),
+                    &foreign,
+                    DataConId(0),
+                    vec![],
+                    settlement,
+                )
+            }),
+            tidepool_testing::with_settlement(|settlement| {
+                destination.resume_framed_custody_sources_classified(
+                    hole.clone(),
+                    &foreign,
+                    DataConId(0),
+                    Vec::<i64>::new(),
+                    settlement,
+                )
+            }),
+            tidepool_testing::with_settlement(|settlement| {
+                destination.resume_nested_custody_classified(
+                    hole.clone(),
+                    &foreign,
+                    vec![DataConId(0)],
+                    settlement,
+                )
+            }),
         ] {
             assert!(matches!(
                 outcome,
@@ -8471,7 +8480,9 @@ mod custody_release_tests {
             ));
         }
         assert!(matches!(
-            destination.resume_handle_classified(hole, foreign),
+            tidepool_testing::with_settlement(
+                |settlement| destination.resume_handle_classified(hole, foreign, settlement)
+            ),
             Err(ResidentResumeError::Rejected(ResidentError::ForeignCustody))
         ));
         source.settle_dropped_custody();
@@ -8494,13 +8505,14 @@ mod custody_release_tests {
             host_authority: None,
         };
         assert!(matches!(
-            destination.mount_compiled_binding_in(
+            tidepool_testing::with_settlement(|settlement| destination.mount_compiled_binding_in(
                 ScopeId::ROOT,
                 &binder,
                 Generation(47),
                 &DataConTable::default(),
-                foreign
-            ),
+                foreign,
+                settlement
+            )),
             Err(ResidentError::ForeignCustody)
         ));
         assert_eq!(destination.value_handle_count(), before);
@@ -8649,14 +8661,16 @@ mod custody_release_tests {
         );
         let before = session.value_handle_count();
         assert!(matches!(
-            session.resume_framed_binding_sources_classified(
-                &hole,
-                ScopeId::ROOT,
-                "x",
-                id,
-                DataConId(0),
-                Vec::<i64>::new()
-            ),
+            tidepool_testing::with_settlement(|settlement| session
+                .resume_framed_binding_sources_classified(
+                    &hole,
+                    ScopeId::ROOT,
+                    "x",
+                    id,
+                    DataConId(0),
+                    Vec::<i64>::new(),
+                    settlement
+                )),
             Err(ResidentResumeError::Rejected(
                 ResidentError::WrongContinuation { .. }
             ))
@@ -8673,42 +8687,47 @@ mod custody_release_tests {
                 ..SessionRunContext::ROOT
             })
             .unwrap();
-        assert!(session
+        assert!(tidepool_testing::with_settlement(|settlement| session
             .resume_framed_binding_sources_classified(
                 &hole,
                 ScopeId::ROOT,
                 "x",
                 id,
                 DataConId(0),
-                Vec::<i64>::new()
-            )
-            .unwrap()
-            .is_none());
+                Vec::<i64>::new(),
+                settlement
+            ))
+        .unwrap()
+        .is_none());
         let foreign_scope = session.mint_isolated_scope();
         let foreign_id = bind_fixture(&mut session, foreign_scope, 45);
         assert!(matches!(
-            session.resume_framed_binding_sources_classified(
-                &hole,
-                foreign_scope,
-                "x",
-                foreign_id,
-                DataConId(0),
-                Vec::<i64>::new()
-            ),
+            tidepool_testing::with_settlement(|settlement| session
+                .resume_framed_binding_sources_classified(
+                    &hole,
+                    foreign_scope,
+                    "x",
+                    foreign_id,
+                    DataConId(0),
+                    Vec::<i64>::new(),
+                    settlement
+                )),
             Err(ResidentResumeError::Rejected(ResidentError::Prepared(
                 PreparedRuntimeError::SourceScopeAdmission
             )))
         ));
         session.retire_scope(foreign_scope);
         assert!(matches!(
-            session.resume_framed_binding_sources_classified(
-                &hole,
-                foreign_scope,
-                "x",
-                foreign_id,
-                DataConId(0),
-                Vec::<i64>::new()
-            ),
+            tidepool_testing::with_settlement(|settlement| session
+                .resume_framed_binding_sources_classified(
+                    &hole,
+                    foreign_scope,
+                    "x",
+                    foreign_id,
+                    DataConId(0),
+                    Vec::<i64>::new(),
+                    settlement
+                )),
             Err(ResidentResumeError::Rejected(ResidentError::Session(
                 SessionError::DeadScope(_)
             )))
@@ -8809,10 +8828,13 @@ mod authored_publication_tests {
         let admission = state
             .admit_planned_cell_for_execution(
                 execution.clone(),
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(specification.clone()),
-                    &(view.include_paths(effects.include_paths())),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(specification.clone()),
+                        &(view.include_paths(effects.include_paths())),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
@@ -8869,12 +8891,15 @@ mod authored_publication_tests {
         };
         let before = prefix.snapshot();
         let public_bindings = resident.workbench_bindings_in(public);
-        let outcome = resident.run_bind_with_sites(
-            "checkedPublication",
-            compiled.code(),
-            &bound[0],
-            reservation.generation(),
-        );
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            resident.run_bind_with_sites(
+                "checkedPublication",
+                compiled.code(),
+                &bound[0],
+                reservation.generation(),
+                settlement,
+            )
+        });
         drop(restore);
         let error = outcome.err().expect("interface publication must fail");
         let ResidentError::Session(SessionError::Io(error)) = error else {
@@ -9131,7 +9156,10 @@ mod authored_publication_tests {
                 StartupCompileIdentity::Fixture,
             )
             .unwrap();
-        session.run_startup_entry(entry).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            session.run_startup_entry(entry, settlement)
+        })
+        .unwrap();
         (root, session)
     }
 
@@ -9170,7 +9198,10 @@ mod authored_publication_tests {
         let b = b.compile_off_checkout().unwrap();
         let a = a.compile_off_checkout().unwrap();
         let Some(ResidentOutcome::Completed { result, .. }) =
-            session.revalidate_and_run_prepared(a).unwrap()
+            tidepool_testing::with_settlement(|settlement| {
+                session.revalidate_and_run_prepared(a, settlement)
+            })
+            .unwrap()
         else {
             panic!("original binding capsule must complete");
         };
@@ -9188,7 +9219,10 @@ mod authored_publication_tests {
         assert_eq!(original.defining_generation(), Some(41));
         assert_eq!(original.type_display.as_deref(), Some("Int"));
         let Some(ResidentOutcome::Completed { result, .. }) =
-            session.revalidate_and_run_prepared(b).unwrap()
+            tidepool_testing::with_settlement(|settlement| {
+                session.revalidate_and_run_prepared(b, settlement)
+            })
+            .unwrap()
         else {
             panic!("value capsule must complete");
         };
@@ -9243,7 +9277,10 @@ mod authored_publication_tests {
             "preparation does not run an authored entry"
         );
         assert!(
-            session.run_startup_entry(entry).is_err(),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            )
+            .is_err(),
             "the original native entry fails when consumed"
         );
     }
@@ -9265,7 +9302,9 @@ mod authored_publication_tests {
             .quiesce_and_collect_now()
             .unwrap();
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Ok(ResidentOutcome::Completed { .. })
         ));
         let entry = session
@@ -9278,7 +9317,9 @@ mod authored_publication_tests {
         );
         session.state.bind(binding).unwrap();
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::StaleStartupEntry)
         ));
     }
@@ -9351,8 +9392,10 @@ mod authored_publication_tests {
             let mut lib = SessionLib::open(id, source, ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-            lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-                .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+            })
+            .unwrap();
             lib
         };
         let mut producer = PersistentSession::new(
@@ -9364,19 +9407,24 @@ mod authored_publication_tests {
             .initialize_durable_public_scope(owner(1), public)
             .unwrap();
         let admission = producer.begin_private_execution(public).unwrap();
-        producer
-            .define_scoped_in(
+        tidepool_testing::with_settlement(|settlement| {
+            producer.define_scoped_in(
                 admission.private_scope(),
                 &[include_str!("fixtures/recovery-original.hs")],
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let intent = producer
             .freeze_execution_intent(&admission, vec![], vec![])
             .unwrap();
-        let CertifiedDeclarationPublication::Accepted(accepted) = producer
-            .restage_declaration_publication(owner(1), intent)
-            .unwrap()
-            .certify()
+        let CertifiedDeclarationPublication::Accepted(accepted) =
+            tidepool_testing::with_settlement(|settlement| {
+                producer
+                    .restage_declaration_publication(owner(1), intent)
+                    .unwrap()
+                    .certify(settlement)
+            })
             .unwrap()
         else {
             panic!("original declarations must publish");
@@ -9475,7 +9523,9 @@ mod authored_publication_tests {
                 .quiesce_and_collect_now()
                 .unwrap();
             assert!(matches!(
-                session.run_startup_entry(entry),
+                tidepool_testing::with_settlement(
+                    |settlement| session.run_startup_entry(entry, settlement)
+                ),
                 Ok(ResidentOutcome::Completed { .. })
             ));
             assert_eq!(session.outstanding_custody(), 0);
@@ -9499,7 +9549,9 @@ mod authored_publication_tests {
             .state
             .retire_failed_turn_source_instances(ScopeId::ROOT, &keys));
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::StaleStartupEntry)
         ));
         session.state.require_prepared().unwrap().unpin(producer);
@@ -9513,7 +9565,9 @@ mod authored_publication_tests {
             .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
             .unwrap();
         assert!(matches!(
-            foreign.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| foreign.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::ForeignCustody)
         ));
         session.settle_dropped_custody();
@@ -9527,7 +9581,9 @@ mod authored_publication_tests {
             })
             .unwrap();
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::StaleStartupEntry)
         ));
         session.set_run_context(SessionRunContext::ROOT).unwrap();
@@ -9543,7 +9599,9 @@ mod authored_publication_tests {
             })
             .unwrap();
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::StaleStartupEntry)
         ));
     }
@@ -9617,7 +9675,9 @@ mod authored_publication_tests {
             compile_identity: StartupCompileIdentity::Fixture,
         };
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            session.run_startup_entry(entry)
+            tidepool_testing::with_settlement(|settlement| {
+                session.run_startup_entry(entry, settlement)
+            })
         }))
         .expect_err("output Clone panics before native execution");
         assert_eq!(
@@ -9998,8 +10058,10 @@ mod authored_publication_tests {
         )
         .unwrap()
         .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+        })
+        .unwrap();
         let mut session =
             TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(lib));
         let public = session.state.mint_scope(ScopeId::ROOT).unwrap();
@@ -10012,13 +10074,15 @@ mod authored_publication_tests {
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
         let d = session.begin_private_execution(public).unwrap();
-        let d_generation = session
-            .define_scoped_with_imports_in(
+        let d_generation = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 d.private_scope(),
                 &["d :: Int -> Int\nd x = x + 41\n{-# NOINLINE d #-}"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let original_d = session
             .state
             .lib()
@@ -10033,7 +10097,9 @@ mod authored_publication_tests {
         else {
             panic!("certified D must produce a declaration publication");
         };
-        let CertifiedDeclarationPublication::Accepted(joined) = base.certify().unwrap() else {
+        let CertifiedDeclarationPublication::Accepted(joined) =
+            tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap()
+        else {
             panic!("certified D join rejected");
         };
         assert_eq!(
@@ -10070,13 +10136,15 @@ mod authored_publication_tests {
                 .unwrap(),
             public_d
         );
-        let e_generation = session
-            .define_scoped_with_imports_in(
+        let e_generation = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 e.private_scope(),
                 &["e :: Int -> Int\ne x = d x + 1\n{-# NOINLINE e #-}"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let original_e = session
             .state
             .lib()
@@ -10101,7 +10169,9 @@ mod authored_publication_tests {
         else {
             panic!("certified E must produce a declaration publication");
         };
-        let CertifiedDeclarationPublication::Accepted(joined) = base.certify().unwrap() else {
+        let CertifiedDeclarationPublication::Accepted(joined) =
+            tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap()
+        else {
             panic!("certified E join rejected");
         };
         assert_eq!(
@@ -10262,11 +10332,11 @@ mod authored_publication_tests {
             ..occupied.clone()
         };
         assert!(matches!(
-            session.run_projected_bind_with_sites("projected", code.clone(), &[fresh, occupied.clone()], Generation(408)),
+            tidepool_testing::with_settlement(|settlement| session.run_projected_bind_with_sites("projected", code.clone(), &[fresh, occupied.clone()], Generation(408), settlement)),
             Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id
         ));
         assert!(matches!(
-            session.run_bind_with_sites("replacement", code.clone(), &occupied, Generation(408)),
+            tidepool_testing::with_settlement(|settlement| session.run_bind_with_sites("replacement", code.clone(), &occupied, Generation(408), settlement)),
             Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == id
         ));
         assert!(matches!(
@@ -10305,16 +10375,20 @@ mod authored_publication_tests {
             SessionLib::open(SessionId(993), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(effects.include_paths().to_vec());
-        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+        })
+        .unwrap();
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
-        session
-            .define_scoped_with_imports_in(
+        tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 ScopeId::ROOT,
                 &["seed :: Int\nseed = 1"],
                 &super::super::SourceImports::new(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let private = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
         let scope = private.private_scope();
         session.run_context.lexical_scope = scope;
@@ -10347,10 +10421,13 @@ mod authored_publication_tests {
         let admission = session
             .admit_planned_cell_for_execution(
                 private,
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(specification.clone()),
-                    &(includes.clone()),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(specification.clone()),
+                        &(includes.clone()),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
@@ -10405,33 +10482,47 @@ mod authored_publication_tests {
         ));
 
         assert!(matches!(
-            session.mount_json_binding_in(
+            tidepool_testing::with_settlement(|settlement| session.mount_json_binding_in(
                 scope,
                 page,
                 generation,
                 code.clone(),
-                &serde_json::Value::Null
-            ),
+                &serde_json::Value::Null,
+                settlement
+            )),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
         assert!(matches!(
-            session.mount_text_binding_in(scope, page, generation, code.clone(), "host value"),
+            tidepool_testing::with_settlement(|settlement| session.mount_text_binding_in(
+                scope,
+                page,
+                generation,
+                code.clone(),
+                "host value",
+                settlement
+            )),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
         assert!(matches!(
-            session.mount_typed_binding_in(
+            tidepool_testing::with_settlement(|settlement| session.mount_typed_binding_in(
                 scope,
                 page,
                 generation,
                 code.clone(),
                 HostBindingType::TEXT,
-                &()
-            ),
+                &(),
+                settlement
+            )),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
         assert!(matches!(
-            session.mount_host_value_in(scope, page, generation, code.clone(), |_, _, _| panic!(
-                "unsupported checked recipe must not build a host value"
+            tidepool_testing::with_settlement(|settlement| session.mount_host_value_in(
+                scope,
+                page,
+                generation,
+                code.clone(),
+                |_, _, _| panic!("unsupported checked recipe must not build a host value"),
+                settlement
             )),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
@@ -10462,7 +10553,13 @@ mod authored_publication_tests {
         // Refused routes cannot consume the item reservation. Its authenticated
         // bind route still executes and alone advances the sealed prefix.
         assert!(matches!(
-            session.run_bind_with_sites("checked bind", code, page, generation),
+            tidepool_testing::with_settlement(|settlement| session.run_bind_with_sites(
+                "checked bind",
+                code,
+                page,
+                generation,
+                settlement
+            )),
             Ok(ResidentOutcome::Completed { .. })
         ));
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
@@ -10473,8 +10570,10 @@ mod authored_publication_tests {
         let mut lib = SessionLib::open(SessionId(991), root, ModuleEnv::standalone_default())
             .unwrap()
             .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(root.join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.join("declarations.json"), settlement)
+        })
+        .unwrap();
         lib
     }
 
@@ -10579,10 +10678,11 @@ mod authored_publication_tests {
             current
         );
         let residency = session.residency();
-        assert!(session
-            .revalidate_and_run_prepared(compiled)
-            .unwrap()
-            .is_none());
+        assert!(tidepool_testing::with_settlement(
+            |settlement| session.revalidate_and_run_prepared(compiled, settlement)
+        )
+        .unwrap()
+        .is_none());
         assert_eq!(session.residency(), residency);
         assert_eq!(
             session
@@ -10661,17 +10761,24 @@ mod authored_publication_tests {
         let root = tempfile::tempdir().unwrap();
         let lib = authored_lib(root.path());
         let mut session = resident_with_replaced_binding(lib);
-        let receipt = session
-            .state
-            .lib()
-            .declaration_receipt(&["answer :: Int\nanswer = 42"])
-            .unwrap()
-            .unwrap();
-        let staged = session
-            .stage_declarations_in(ScopeId::ROOT, &receipt, &SourceImports::new(), &[])
-            .unwrap_or_else(|error| {
-                panic!("stage against the actual binding environment: {error:?}")
-            });
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session
+                .state
+                .lib()
+                .declaration_receipt(&["answer :: Int\nanswer = 42"], settlement)
+        })
+        .unwrap()
+        .unwrap();
+        let staged = tidepool_testing::with_settlement(|settlement| {
+            session.stage_declarations_in(
+                ScopeId::ROOT,
+                &receipt,
+                &SourceImports::new(),
+                &[],
+                settlement,
+            )
+        })
+        .unwrap_or_else(|error| panic!("stage against the actual binding environment: {error:?}"));
         assert_eq!(staged.generation(), Generation(1));
         let before = session
             .public_visibility_snapshot_in(ScopeId::ROOT)
@@ -10718,13 +10825,15 @@ mod authored_publication_tests {
         assert_eq!(before.declaration_tip, Generation(0));
         assert_eq!(before.bindings, vec![("answer".into(), original)]);
         session.state.lib_mut().fail_recovery_durability_once = true;
-        let error = session
-            .define_scoped_with_imports_in(
+        let error = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 ScopeId::ROOT,
                 &["answer :: Int\nanswer = 42"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap_err();
+        })
+        .unwrap_err();
         // Direct define must first publish its identity reservation. At that
         // boundary no authored product or visibility replacement exists yet.
         assert!(
@@ -10794,15 +10903,17 @@ mod authored_publication_tests {
 
         // Retrying confirmed direct source is new admission: slot1 stays burned,
         // and actual validated adoption at slot2 alone evicts the live value.
-        let committed = session
-            .define_scoped_with_imports_in(
+        let committed = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 ScopeId::ROOT,
                 &["answer :: Int\nanswer = 42"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap_or_else(|error| {
-                panic!("confirmed direct retry must adopt the real declaration: {error:?}")
-            });
+        })
+        .unwrap_or_else(|error| {
+            panic!("confirmed direct retry must adopt the real declaration: {error:?}")
+        });
         assert_eq!(committed, Generation(2));
         assert!(session.state.resolve_in(ScopeId::ROOT, "answer").is_none());
         assert!(session
@@ -10875,13 +10986,16 @@ mod authored_publication_tests {
             SessionLib::open(SessionId(997), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_owned_recovery_graph_v3(
-            root.path().join("declarations.json"),
-            Arc::new(RunOwner {
-                root: root.path().canonicalize().unwrap(),
-                _lock: lock,
-            }),
-        )
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(
+                root.path().join("declarations.json"),
+                Arc::new(RunOwner {
+                    root: root.path().canonicalize().unwrap(),
+                    _lock: lock,
+                }),
+                settlement,
+            )
+        })
         .unwrap();
         let mut session =
             ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
@@ -10920,13 +11034,15 @@ mod authored_publication_tests {
         // validation or adoption. Its uncertainty must not claim a declaration
         // commit, and the burned identity must remain unavailable afterward.
         session.state.lib_mut().fail_recovery_durability_once = true;
-        let error = session
-            .define_scoped_with_imports_in(
+        let error = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_with_imports_in(
                 private,
                 &["answer :: Int\nanswer = 42"],
                 &SourceImports::new(),
+                settlement,
             )
-            .unwrap_err();
+        })
+        .unwrap_err();
         assert!(
             matches!(&error, SessionError::RecoveryManifest { .. }),
             "{error:?}"
@@ -10959,15 +11075,18 @@ mod authored_publication_tests {
         assert!(readiness.is_ready());
         assert!(sibling.is_ready());
 
-        let receipt = session
-            .state
-            .lib()
-            .declaration_receipt(&["answer :: Int\nanswer = 42"])
-            .unwrap()
-            .unwrap();
-        let staged = session
-            .stage_declarations_in(private, &receipt, &SourceImports::new(), &[])
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session
+                .state
+                .lib()
+                .declaration_receipt(&["answer :: Int\nanswer = 42"], settlement)
+        })
+        .unwrap()
+        .unwrap();
+        let staged = tidepool_testing::with_settlement(|settlement| {
+            session.stage_declarations_in(private, &receipt, &SourceImports::new(), &[], settlement)
+        })
+        .unwrap();
         assert_eq!(staged.generation(), Generation(2));
         session.state.lib_mut().fail_recovery_durability_once = true;
         let error = session.adopt_staged_declaration_in(staged).unwrap_err();
@@ -11242,7 +11361,7 @@ mod compiled_provenance_plan_tests {
                 modules: vec![], heads: vec![], inputs: vec![], input_type_witnesses: vec![],
                 reply_declaration: None, request_type_signatures: None,
             }).collect::<Vec<_>>();
-            let code = super::turn::CompiledTurn::from_prepared(Arc::new(tidepool_repr::execution_schema::testing::prepare(tidepool_repr::execution_schema::testing::wire_program()).unwrap()), DataConTable::new(), Default::default(), sites.clone()).unwrap().into_code();
+            let code = crate::session::turn::CompiledTurn::from_prepared(Arc::new(tidepool_repr::execution_schema::testing::prepare(tidepool_repr::execution_schema::testing::wire_program()).unwrap()), DataConTable::new(), Default::default(), sites.clone()).unwrap().into_code();
             let plan = CompiledProvenancePlan::build(&code).unwrap();
             let expected = sites.into_iter().map(|site| (site.site, site)).collect::<BTreeMap<_, _>>();
             for _ in 0..copies {

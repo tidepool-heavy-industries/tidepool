@@ -71,8 +71,14 @@ fn library(id: u64, source: &Path, manifest: &Path, include: &[PathBuf]) -> Sess
     let mut lib = SessionLib::open(SessionId(id), source, ModuleEnv::standalone_default())
         .unwrap()
         .with_validation_include(include.to_vec());
-    lib.attach_owned_recovery_graph_v3(manifest, run_owner(manifest.parent().unwrap()))
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        lib.attach_owned_recovery_graph_v3(
+            manifest,
+            run_owner(manifest.parent().unwrap()),
+            settlement,
+        )
+    })
+    .unwrap();
     lib
 }
 
@@ -107,8 +113,10 @@ fn adopt_recovery_declaration(
         reserved_declaration_modules: Vec::new(),
     });
     let include = view.include_paths(effects.include_paths());
-    let plan =
-        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include).unwrap();
+    let plan = tidepool_testing::with_settlement(|settlement| {
+        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)
+    })
+    .unwrap();
     let admission = session
         .admit_planned_cell_for_execution(
             execution,
@@ -208,8 +216,10 @@ fn recovered_owner_validation_retains_and_revalidates_the_actual_run_authority()
         ModuleEnv::standalone_default(),
     )
     .unwrap();
-    lib.attach_owned_recovery_graph_v3(&manifest, retained.clone())
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        lib.attach_owned_recovery_graph_v3(&manifest, retained.clone(), settlement)
+    })
+    .unwrap();
     let mut session = PersistentSession::new(Some(lib), 1024);
     let public = session.mint_isolated_scope();
     session
@@ -302,9 +312,14 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
     let execution = session.begin_private_execution(public).unwrap();
     let private = execution.private_scope();
     let public_before = session.public_visibility_snapshot_in(public).unwrap();
-    let original = session
-        .define_scoped_in(private, &[include_str!("fixtures/recovery-original.hs")])
-        .expect("public declaration API certifies its first original");
+    let original = tidepool_testing::with_settlement(|settlement| {
+        session.define_scoped_in(
+            private,
+            &[include_str!("fixtures/recovery-original.hs")],
+            settlement,
+        )
+    })
+    .expect("public declaration API certifies its first original");
     let original_owner = session
         .lib()
         .log
@@ -320,9 +335,14 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
         .lexical_graph()
         .iter()
         .all(|node| node.owner.module != original_owner.module));
-    let dependent = session
-        .define_scoped_in(private, &[include_str!("fixtures/recovery-dependent.hs")])
-        .expect("public declaration API reuses the selected original behind its lexical join");
+    let dependent = tidepool_testing::with_settlement(|settlement| {
+        session.define_scoped_in(
+            private,
+            &[include_str!("fixtures/recovery-dependent.hs")],
+            settlement,
+        )
+    })
+    .expect("public declaration API reuses the selected original behind its lexical join");
     let certificate = session.lib().log.certified_authored_at(dependent).unwrap();
     assert!(certificate
         .recovery_products()
@@ -347,9 +367,10 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
 
     let private_before = session.public_visibility_snapshot_in(private).unwrap();
     let high_water = session.lib().generation();
-    let rejected = session
-        .define_scoped_in(private, &["bad :: Int\nbad = True"])
-        .expect_err("ill-typed public declaration is refused during validation");
+    let rejected = tidepool_testing::with_settlement(|settlement| {
+        session.define_scoped_in(private, &["bad :: Int\nbad = True"], settlement)
+    })
+    .expect_err("ill-typed public declaration is refused during validation");
     assert!(matches!(rejected, SessionError::ValidationFailed(_)));
     assert_eq!(session.lib().scope_tip(private), dependent);
     assert!(session.lib().generation() > high_water);
@@ -367,9 +388,14 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
         Some(public_before)
     );
 
-    session
-        .retract_many_in(private, &["answer".into(), "HiddenResult".into()])
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        session.retract_many_in(
+            private,
+            &["answer".into(), "HiddenResult".into()],
+            settlement,
+        )
+    })
+    .unwrap();
     let view = session.compile_view_in(private).unwrap();
     let context = view.exact_declaration_context().unwrap().clone();
     assert!(context
@@ -450,8 +476,14 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         )
         .unwrap();
-    let ResidentOutcome::Completed { result, .. } = resident
-        .run_with_sites("public_scoped_original_dependency", compiled.code())
+    let ResidentOutcome::Completed { result, .. } =
+        tidepool_testing::with_settlement(|settlement| {
+            resident.run_with_sites(
+                "public_scoped_original_dependency",
+                compiled.code(),
+                settlement,
+            )
+        })
         .unwrap()
     else {
         panic!("dependent declaration must execute its retained original");
@@ -475,9 +507,14 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
         .unwrap();
     let admission = session.begin_private_execution(public).unwrap();
     let private = admission.private_scope();
-    session
-        .define_scoped_in(private, &[include_str!("fixtures/recovery-original.hs")])
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        session.define_scoped_in(
+            private,
+            &[include_str!("fixtures/recovery-original.hs")],
+            settlement,
+        )
+    })
+    .unwrap();
     // A previously materialized value remains visible while this next binding
     // moves from the declaration environment into the binding store.
     let mut existing = prepared::tests::rooted_publication_fixture(&mut session, "existing", 4413);
@@ -485,7 +522,10 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
     session.bind_in(private, existing).unwrap();
     let mut entry = prepared::tests::rooted_publication_fixture(&mut session, "answer", 4414);
     entry.scope = private;
-    session.bind_replacing_decl_in(private, entry).unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        session.bind_replacing_decl_in(private, entry, settlement)
+    })
+    .unwrap();
     let generation = session.lib().scope_tip(private);
     let authored_owner = session
         .lib()
@@ -518,7 +558,10 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
         )
         .unwrap();
     let before = session.public_visibility_snapshot_in(private).unwrap();
-    session.retract_in(private, "absent").unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        session.retract_in(private, "absent", settlement)
+    })
+    .unwrap();
     assert_eq!(
         session.public_visibility_snapshot_in(private).unwrap(),
         before
@@ -526,10 +569,13 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
     let intent = session
         .freeze_execution_intent(&admission, vec![], vec![])
         .unwrap();
-    let CertifiedDeclarationPublication::Accepted(accepted) = session
-        .restage_declaration_publication(owner(1), intent)
-        .unwrap()
-        .certify()
+    let CertifiedDeclarationPublication::Accepted(accepted) =
+        tidepool_testing::with_settlement(|settlement| {
+            session
+                .restage_declaration_publication(owner(1), intent)
+                .unwrap()
+                .certify(settlement)
+        })
         .unwrap()
     else {
         panic!("materialized declaration retraction must publish");
@@ -583,19 +629,24 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         &effects,
         include_str!("fixtures/recovery-dependent.hs"),
     );
-    producer
-        .retract_in(admission.private_scope(), "HiddenResult")
-        .unwrap();
-    producer
-        .retract_in(admission.private_scope(), "answer")
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        producer.retract_in(admission.private_scope(), "HiddenResult", settlement)
+    })
+    .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        producer.retract_in(admission.private_scope(), "answer", settlement)
+    })
+    .unwrap();
     let intent = producer
         .freeze_execution_intent(&admission, vec![], vec![])
         .unwrap();
-    let CertifiedDeclarationPublication::Accepted(accepted) = producer
-        .restage_declaration_publication(owner(1), intent)
-        .unwrap()
-        .certify()
+    let CertifiedDeclarationPublication::Accepted(accepted) =
+        tidepool_testing::with_settlement(|settlement| {
+            producer
+                .restage_declaration_publication(owner(1), intent)
+                .unwrap()
+                .certify(settlement)
+        })
         .unwrap()
     else {
         panic!("real retained declarations must publish");
@@ -804,9 +855,14 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     )
     .unwrap()
     .with_validation_include(effects.include_paths().to_vec());
-    recovered_library
-        .attach_owned_recovery_graph_v3(&manifest, recovery_owner.clone())
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        recovered_library.attach_owned_recovery_graph_v3(
+            &manifest,
+            recovery_owner.clone(),
+            settlement,
+        )
+    })
+    .unwrap();
     let mut consumer = PersistentSession::new(Some(recovered_library), 1024 * 1024);
     let report = consumer.lib().declaration_recovery_report().unwrap();
     assert_eq!(report.successor_session, 4403);
@@ -1047,8 +1103,14 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
             .unwrap();
         // All three scopes select the same exact immutable declaration root.
         // Reuse its compiled pure probe; mutable resident execution stays fresh.
-        let ResidentOutcome::Completed { result, .. } = resident
-            .run_with_sites("recovered_original_dependency", compiled.code())
+        let ResidentOutcome::Completed { result, .. } =
+            tidepool_testing::with_settlement(|settlement| {
+                resident.run_with_sites(
+                    "recovered_original_dependency",
+                    compiled.code(),
+                    settlement,
+                )
+            })
             .unwrap()
         else {
             panic!("real recovered original dependency must execute in each selected scope");
@@ -1102,8 +1164,14 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
             reserved_declaration_modules: Vec::new(),
         });
         let include = view.include_paths(effects.include_paths());
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include)
-            .unwrap();
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &include,
+                settlement,
+            )
+        })
+        .unwrap();
         let admission = resident
             .admit_planned_cell_for_execution(
                 execution,
@@ -1146,14 +1214,16 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
                 ..SessionRunContext::ROOT
             })
             .unwrap();
-        let outcome = resident
-            .run_bind_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            resident.run_bind_with_sites(
                 &binder.name,
                 compiled.code(),
                 binder,
                 reservation.generation(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert!(
             matches!(
                 outcome,
@@ -1222,16 +1292,19 @@ fn owned_manifest_read_refuses_foreign_run_symlink_and_changed_public_selectors(
         ModuleEnv::standalone_default(),
     )
     .unwrap();
-    assert!(unowned.attach_recovery_graph_v2(&manifest).is_err());
+    assert!(tidepool_testing::with_settlement(
+        |settlement| unowned.attach_recovery_graph_v2(&manifest, settlement)
+    )
+    .is_err());
     assert_eq!(unowned.log.generation(), Generation(0));
-    assert!(unowned
-        .attach_owned_recovery_graph_v3(&manifest, run_owner(foreign.path()))
-        .is_err());
+    assert!(tidepool_testing::with_settlement(|settlement| unowned
+        .attach_owned_recovery_graph_v3(&manifest, run_owner(foreign.path()), settlement))
+    .is_err());
     let alias = foreign.path().join("escaped.json");
     std::os::unix::fs::symlink(&manifest, &alias).unwrap();
-    assert!(unowned
-        .attach_owned_recovery_graph_v3(&alias, run_owner(foreign.path()))
-        .is_err());
+    assert!(tidepool_testing::with_settlement(|settlement| unowned
+        .attach_owned_recovery_graph_v3(&alias, run_owner(foreign.path()), settlement))
+    .is_err());
     let mut session =
         PersistentSession::new(Some(library(4412, source.path(), &manifest, &[])), 1024);
     let mut altered = recovery::read_v2(&manifest, durable.path())
@@ -1264,8 +1337,10 @@ fn successor_transfer_fences_old_admissions_after_durable_and_uncertain_rename()
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024);
         let target = session.mint_scope(ScopeId::ROOT).unwrap();
         let old = session.begin_private_execution(target).unwrap();
@@ -1325,8 +1400,10 @@ fn successor_transfer_retains_only_the_sealed_live_bootstrap_dependencies() {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let target = session.mint_isolated_scope();
         let (_, keys) = prepared::tests::install_source_publication_fixture(&mut session, target);
@@ -1432,8 +1509,10 @@ fn successor_initialization_refuses_changed_or_released_native_dependencies() {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let target = session.mint_isolated_scope();
         let (_, keys) = prepared::tests::install_source_publication_fixture(&mut session, target);
@@ -1485,8 +1564,10 @@ fn initial_public_owner_survives_restart_before_first_cell() {
         ModuleEnv::standalone_default(),
     )
     .unwrap();
-    lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+    })
+    .unwrap();
     let mut session = PersistentSession::new(Some(lib), 1024);
     let target = session.mint_isolated_scope();
     assert_eq!(

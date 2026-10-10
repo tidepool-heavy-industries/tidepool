@@ -1423,10 +1423,13 @@ where
         &format!("{label}.parse"),
         None,
         |_| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                Arc::new(specification.clone()),
-                &admitted_include,
-            )
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(specification.clone()),
+                    &admitted_include,
+                    settlement,
+                )
+            })
         },
     )
     .map_err(crate::session::SessionError::Compile)?;
@@ -1889,21 +1892,29 @@ where
                     Some(index),
                     |resident| {
                         if bound.is_empty() {
-                            resident.run_with_sites(label, compiled.code())
+                            tidepool_testing::with_settlement(|settlement| {
+                                resident.run_with_sites(label, compiled.code(), settlement)
+                            })
                         } else if bound.len() == 1 {
-                            resident.run_bind_with_sites(
-                                &bound[0].name,
-                                compiled.code(),
-                                &bound[0],
-                                reservation.generation(),
-                            )
+                            tidepool_testing::with_settlement(|settlement| {
+                                resident.run_bind_with_sites(
+                                    &bound[0].name,
+                                    compiled.code(),
+                                    &bound[0],
+                                    reservation.generation(),
+                                    settlement,
+                                )
+                            })
                         } else {
-                            resident.run_projected_bind_with_sites(
-                                label,
-                                compiled.code(),
-                                &bound,
-                                reservation.generation(),
-                            )
+                            tidepool_testing::with_settlement(|settlement| {
+                                resident.run_projected_bind_with_sites(
+                                    label,
+                                    compiled.code(),
+                                    &bound,
+                                    reservation.generation(),
+                                    settlement,
+                                )
+                            })
                         }
                     },
                 )?;
@@ -1915,12 +1926,15 @@ where
                     &format!("{label}.native_observe"),
                     Some(index),
                     |resident| {
-                        resident.run_observation_with_sites(
-                            compiled.code(),
-                            &bound[0],
-                            reservation.generation(),
-                            false,
-                        )
+                        tidepool_testing::with_settlement(|settlement| {
+                            resident.run_observation_with_sites(
+                                compiled.code(),
+                                &bound[0],
+                                reservation.generation(),
+                                false,
+                                settlement,
+                            )
+                        })
                     },
                 );
                 assert_eq!(
@@ -2022,7 +2036,8 @@ where
                         reserved_generation = reserved.0,
                     );
                     let _entered = span.enter();
-                    base.certify().unwrap()
+                    tidepool_testing::with_settlement(|settlement| base.certify(settlement))
+                        .unwrap()
                 },
             );
             let CertifiedDeclarationPublication::Accepted(accepted) = certified else {
@@ -2200,8 +2215,10 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
         .with_validation_include(effects.include_paths().to_vec());
     let publication = if durable {
         let manifest = root_path.join("declarations.json");
-        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path), settlement)
+        })
+        .unwrap();
         ScalePublication::Durable {
             owner: RecoveryPublicOwner::new(
                 &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
@@ -2513,8 +2530,10 @@ fn resident_capture_cells(count: usize, durable: bool) {
         .with_validation_include(effects.include_paths().to_vec());
     let publication = if durable {
         let manifest = root_path.join("declarations.json");
-        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path), settlement)
+        })
+        .unwrap();
         ScalePublication::Durable {
             owner: RecoveryPublicOwner::new(
                 &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
@@ -3528,8 +3547,10 @@ fn durable_mixed_originals_recover_independent_native_entry() {
     )
     .unwrap()
     .with_validation_include(effects.include_paths().to_vec());
-    lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path), settlement)
+    })
+    .unwrap();
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = if child_root.is_some() {

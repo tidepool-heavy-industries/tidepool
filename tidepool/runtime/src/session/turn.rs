@@ -6062,10 +6062,13 @@ mod tests {
                 roots.insert(0, first.to_owned());
             }
             let include_paths = view.include_paths(&roots);
-            let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-                Arc::new(specification.clone()),
-                &include_paths,
-            )?;
+            let plan = tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(specification.clone()),
+                    &include_paths,
+                    settlement,
+                )
+            })?;
             let admission = resident
                 .admit_planned_cell_for_execution(
                     execution.clone(),
@@ -6147,7 +6150,7 @@ mod tests {
                         if kind
                             == tidepool_toolchain::checked_cell::CheckedItemKind::Expression =>
                     {
-                        resident.run_observation_with_sites(
+                        tidepool_testing::with_settlement(|settlement| resident.run_observation_with_sites(
                             compiled.code(),
                             binder,
                             reservation.generation(),
@@ -6155,20 +6158,20 @@ mod tests {
                                 == Some(
                                     tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
                                 ),
-                        )
+                         settlement))
                     }
-                    [binder] => resident.run_bind_with_sites(
+                    [binder] => tidepool_testing::with_settlement(|settlement| resident.run_bind_with_sites(
                         &binder.name,
                         compiled.code(),
                         binder,
                         reservation.generation(),
-                    ),
-                    binders => resident.run_projected_bind_with_sites(
+                     settlement)),
+                    binders => tidepool_testing::with_settlement(|settlement| resident.run_projected_bind_with_sites(
                         "checkedHome",
                         compiled.code(),
                         binders,
                         reservation.generation(),
-                    ),
+                     settlement)),
                 }
                 .unwrap();
                 assert!(
@@ -6263,7 +6266,8 @@ mod tests {
                 crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
                 crate::session::ExecutionPublication::Declarations(base) => {
                     let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-                        base.certify().unwrap()
+                        tidepool_testing::with_settlement(|settlement| base.certify(settlement))
+                            .unwrap()
                     else {
                         panic!("checked history publication must be accepted");
                     };
@@ -6703,10 +6707,13 @@ mod tests {
         let mut roots = effects.include_paths().to_vec();
         roots.insert(0, root.path().to_owned());
         let include = view.include_paths(&roots);
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(specification.clone()),
-            &include,
-        )
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &include,
+                settlement,
+            )
+        })
         .unwrap();
         let admission = state
             .admit_planned_cell_for_execution(
@@ -6828,15 +6835,21 @@ mod tests {
             ]
             .concat(),
         );
-        let original_plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(specification.clone()),
-            &original_include,
-        )
+        let original_plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &original_include,
+                settlement,
+            )
+        })
         .unwrap();
-        let alternate_plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(specification.clone()),
-            &alternate_include,
-        )
+        let alternate_plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &alternate_include,
+                settlement,
+            )
+        })
         .unwrap();
         let before = state.public_visibility_snapshot_in(execution.private_scope());
         assert!(state
@@ -6997,10 +7010,13 @@ mod tests {
         let mut roots = effects.include_paths().to_vec();
         roots.insert(0, root.path().to_owned());
         let include = view.include_paths(&roots);
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(specification.clone()),
-            &include,
-        )
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &include,
+                settlement,
+            )
+        })
         .unwrap();
         let admission = session
             .admit_planned_cell_for_execution(
@@ -7087,10 +7103,13 @@ mod tests {
             let admission = session
                 .admit_planned_cell_for_execution(
                     execution,
-                    tidepool_toolchain::artifacts::parse_cell_plan(
-                        Arc::new(specification.clone()),
-                        &(admitted_include),
-                    )
+                    tidepool_testing::with_settlement(|settlement| {
+                        tidepool_toolchain::artifacts::parse_cell_plan(
+                            Arc::new(specification.clone()),
+                            &(admitted_include),
+                            settlement,
+                        )
+                    })
                     .unwrap(),
                     Arc::new(specification.clone()),
                     specification.specification_digest(),
@@ -7227,10 +7246,13 @@ mod tests {
             let admission = match &execution {
                 Some(execution) => session.admit_planned_cell_for_execution(
                     execution.clone(),
-                    tidepool_toolchain::artifacts::parse_cell_plan(
-                        Arc::new(specification.clone()),
-                        &(include_paths),
-                    )
+                    tidepool_testing::with_settlement(|settlement| {
+                        tidepool_toolchain::artifacts::parse_cell_plan(
+                            Arc::new(specification.clone()),
+                            &(include_paths),
+                            settlement,
+                        )
+                    })
                     .unwrap(),
                     Arc::new(specification.clone()),
                     specification.specification_digest(),
@@ -7336,17 +7358,20 @@ mod tests {
         let mut lib = SessionLib::open(SessionId(995), root.path(), env)
             .unwrap()
             .with_validation_include(effects.include_paths().to_vec());
-        lib.attach_recovery_graph_v2(&root.path().join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&root.path().join("declarations.json"), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let prior_declarations = include_str!("fixtures/checked-prior-declaration.hs")
             .trim()
             .split("\n\n")
             .collect::<Vec<_>>();
-        let inherited_generation = session
-            .define_scoped_in(public, &prior_declarations)
-            .unwrap();
+        let inherited_generation = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_in(public, &prior_declarations, settlement)
+        })
+        .unwrap();
         let inherited_surface = session.exact_exports_in(public, &["PriorNominal"]).unwrap();
         let inherited_exports = inherited_surface.declarations().unwrap().to_vec();
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
@@ -7382,10 +7407,13 @@ mod tests {
         let admission = session
             .admit_planned_cell_for_execution(
                 execution.clone(),
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(specification.clone()),
-                    &(admitted_include),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(specification.clone()),
+                        &(admitted_include),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
@@ -7534,7 +7562,9 @@ mod tests {
             .unwrap()
             .contains(&inherited_exports[0]));
         let view = resident.compile_view_in(execution.private_scope()).unwrap();
-        let facade = selected.materialize(&view).unwrap();
+        let facade =
+            tidepool_testing::with_settlement(|settlement| selected.materialize(&view, settlement))
+                .unwrap();
         assert!(facade.source_artifact().is_none());
         let projection = facade.projection().unwrap();
         assert!(projection
@@ -7686,23 +7716,27 @@ mod tests {
                     .is_err());
             }
             if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Bind {
-                resident
-                    .run_bind_with_sites(
+                tidepool_testing::with_settlement(|settlement| {
+                    resident.run_bind_with_sites(
                         &bound[0].name,
                         compiled.code(),
                         &bound[0],
                         reservation.generation(),
+                        settlement,
                     )
-                    .unwrap();
+                })
+                .unwrap();
             } else {
-                resident
-                    .run_observation_with_sites(
+                tidepool_testing::with_settlement(|settlement| {
+                    resident.run_observation_with_sites(
                         compiled.code(),
                         &bound[0],
                         reservation.generation(),
                         false,
+                        settlement,
                     )
-                    .unwrap();
+                })
+                .unwrap();
             }
             assert_eq!(
                 protected.snapshot().compiler_prefix().next_item(),
@@ -7730,7 +7764,7 @@ mod tests {
             panic!("original declaration and value winners require paired publication")
         };
         let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-            base.certify().unwrap()
+            tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap()
         else {
             panic!("the original declaration and certified private Value overlay must join")
         };
@@ -7793,8 +7827,10 @@ mod tests {
             SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(effects.include_paths().to_vec());
-        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
@@ -7807,11 +7843,14 @@ mod tests {
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
         let admitted = session.public_visibility_snapshot_in(public).unwrap();
-        let receipt = session
-            .lib()
-            .declaration_receipt(&[include_str!("fixtures/exact-join-original.hs")])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session.lib().declaration_receipt(
+                &[include_str!("fixtures/exact-join-original.hs")],
+                settlement,
+            )
+        })
+        .unwrap()
+        .unwrap();
         let (candidate, values) = session
             .render_declaration_candidate_in(private, &receipt, &SourceImports::new())
             .unwrap();
@@ -7831,11 +7870,17 @@ mod tests {
             .log
             .certified_authored_arc_at(original_generation)
             .unwrap();
-        session.retract_in(private, "HiddenResult").unwrap();
-        let CertifiedDeclarationPublication::Accepted(accepted) = session
-            .snapshot_declaration_publication(owner, &admitted, private, vec![], vec![])
-            .unwrap()
-            .certify()
+        tidepool_testing::with_settlement(|settlement| {
+            session.retract_in(private, "HiddenResult", settlement)
+        })
+        .unwrap();
+        let CertifiedDeclarationPublication::Accepted(accepted) =
+            tidepool_testing::with_settlement(|settlement| {
+                session
+                    .snapshot_declaration_publication(owner, &admitted, private, vec![], vec![])
+                    .unwrap()
+                    .certify(settlement)
+            })
             .unwrap()
         else {
             panic!("first authored declaration must be accepted");
@@ -8033,13 +8078,16 @@ mod tests {
         let admission = session
             .admit_planned_cell_for_execution(
                 binding_execution.clone(),
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(admission_specification.clone()),
-                    &include
-                        .iter()
-                        .map(|path| path.to_path_buf())
-                        .collect::<Vec<_>>(),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(admission_specification.clone()),
+                        &include
+                            .iter()
+                            .map(|path| path.to_path_buf())
+                            .collect::<Vec<_>>(),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(admission_specification.clone()),
                 admission_specification.specification_digest(),
@@ -8141,13 +8189,16 @@ mod tests {
         let expression_admission = session
             .admit_planned_cell_for_execution(
                 expression_execution.clone(),
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(expression_specification.clone()),
-                    &include
-                        .iter()
-                        .map(|path| path.to_path_buf())
-                        .collect::<Vec<_>>(),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(expression_specification.clone()),
+                        &include
+                            .iter()
+                            .map(|path| path.to_path_buf())
+                            .collect::<Vec<_>>(),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(expression_specification.clone()),
                 expression_specification.specification_digest(),
@@ -8204,13 +8255,16 @@ mod tests {
         );
         let hidden_execution = Arc::new(session.begin_private_execution(public).unwrap());
         let hidden_scope = hidden_execution.private_scope();
-        let hidden_plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(hidden_specification.clone()),
-            &include
-                .iter()
-                .map(|path| path.to_path_buf())
-                .collect::<Vec<_>>(),
-        )
+        let hidden_plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(hidden_specification.clone()),
+                &include
+                    .iter()
+                    .map(|path| path.to_path_buf())
+                    .collect::<Vec<_>>(),
+                settlement,
+            )
+        })
         .unwrap();
         let hidden_admission = session
             .admit_planned_cell_for_execution(
@@ -8267,14 +8321,16 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(resident
-            .run_bind_with_sites(
+        assert!(
+            tidepool_testing::with_settlement(|settlement| resident.run_bind_with_sites(
                 "edited",
                 compiled.code(),
                 &edited[0],
-                view.next_value_generation()
-            )
-            .is_err());
+                view.next_value_generation(),
+                settlement
+            ))
+            .is_err()
+        );
         assert!(
             !resident.prepared_machine_ready(),
             "edited binder metadata reached native install"
@@ -8286,14 +8342,16 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let outcome = resident
-            .run_observation_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            resident.run_observation_with_sites(
                 expression_compiled.code(),
                 &expression_bound[0],
                 expression_reservation.generation(),
                 false,
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         match outcome {
             crate::session::ResidentOutcome::Completed { .. }
             | crate::session::ResidentOutcome::BindingsCommitted { .. } => {}
@@ -8313,28 +8371,32 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let outcome = resident
-            .run_bind_with_sites(
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            resident.run_bind_with_sites(
                 "checked",
                 compiled.code(),
                 &bound[0],
                 view.next_value_generation(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         assert!(matches!(
             outcome,
             crate::session::ResidentOutcome::Completed { .. }
                 | crate::session::ResidentOutcome::BindingsCommitted { .. }
         ));
         assert_eq!(binding_prefix.snapshot().compiler_prefix().next_item(), 1);
-        assert!(resident
-            .run_bind_with_sites(
+        assert!(
+            tidepool_testing::with_settlement(|settlement| resident.run_bind_with_sites(
                 "replayed",
                 compiled.code(),
                 &bound[0],
-                view.next_value_generation()
-            )
-            .is_err());
+                view.next_value_generation(),
+                settlement
+            ))
+            .is_err()
+        );
     }
 
     use super::*;
@@ -9882,9 +9944,14 @@ mod compiler_packet_replay {
             injected_modules: Vec::new(),
             reserved_declaration_modules: Vec::new(),
         });
-        let plan =
-            tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &inputs.include)
-                .unwrap();
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &inputs.include,
+                settlement,
+            )
+        })
+        .unwrap();
         assert_eq!(plan.items().len(), 1);
         assert_eq!(plan.items()[0].binders(), ["job1"]);
         let root = tempfile::tempdir().unwrap();

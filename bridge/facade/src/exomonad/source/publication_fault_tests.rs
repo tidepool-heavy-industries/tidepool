@@ -157,9 +157,10 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         )
         .unwrap();
-    let outcome = machine
-        .run_with_sites("source_publication_fault", compiled.code())
-        .unwrap();
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        machine.run_with_sites("source_publication_fault", compiled.code(), settlement)
+    })
+    .unwrap();
     let (mut forest, mut deployments) = ResidentForest::new(
         ActorWorkbenchSource::new(preamble, include).with_spec("AgentSpec.agentSpec"),
         session,

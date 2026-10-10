@@ -498,15 +498,18 @@ mod tests {
     fn selected_artifact_revalidates_nominal_metadata_before_installation() {
         tidepool_testing::eval_harness::require_extract();
         let source = "module NominalAdmissionControl where\nresult = Just (42 :: Int)\n";
-        let mut artifacts = tidepool_toolchain::artifacts::compile_invocation(
-            &tidepool_toolchain::artifacts::CompileInvocation {
-                source,
-                targets: &["result"],
-                include: &[],
-                fallback_module_name: "NominalAdmissionControl",
-            },
-            |_, _, _| {},
-        )
+        let mut artifacts = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::compile_invocation(
+                &tidepool_toolchain::artifacts::CompileInvocation {
+                    source,
+                    targets: &["result"],
+                    include: &[],
+                    fallback_module_name: "NominalAdmissionControl",
+                },
+                |_, _, _| {},
+                settlement,
+            )
+        })
         .unwrap();
         let target = artifacts.targets["result"].prepared.prepared();
         artifacts.table.validate_program(target).unwrap();

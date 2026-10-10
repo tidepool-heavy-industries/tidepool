@@ -630,7 +630,7 @@ fn publication_phase_admits_two_stage_receipts_and_fences_user_work() {
         // controls perform no compiler command, so actual close is NotStarted.
         let ticket = owner.register_publication_work().unwrap();
         assert_eq!(work.state.lock().compilers.len(), generation + 1);
-        let action = ticket.run(|| generation);
+        let action = ticket.run(|_settlement| generation);
         assert_eq!(action, generation);
     }
     let state = work.state.lock();
@@ -673,7 +673,7 @@ async fn publication_cleanup_retains_admitted_ticket_until_late_close_after_canc
     assert!(owner.register_work().is_err());
     assert!(!work.begin_publication());
     // Closing fences new work but never erases the already admitted ticket.
-    let action = ticket.run(|| Err::<(), _>("original publication refusal"));
+    let action = ticket.run(|_settlement| Err::<(), _>("original publication refusal"));
     assert_eq!(action, Err("original publication refusal"));
     assert!(cleanup.uncertainty().is_none());
     fixture.cleanup(&work).await;

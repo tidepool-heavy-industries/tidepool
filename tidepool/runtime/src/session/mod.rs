@@ -3145,7 +3145,10 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        first.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            first.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert!(!manifest.exists());
         assert_eq!(
             first.reserve_join_generation_durable().unwrap(),
@@ -3161,7 +3164,10 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        second.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            second.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert_eq!(second.generation(), Generation(1));
         assert_eq!(
             second.reserve_join_generation_durable().unwrap(),
@@ -3180,7 +3186,10 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert!(lib.reserve_join_generation_durable().is_err());
         assert_eq!(lib.generation(), Generation(0));
         assert!(!manifest.exists());
@@ -3298,10 +3307,11 @@ mod tests {
     }
 
     fn validated_staged_declaration(lib: &SessionLib, source: &str) -> StagedDeclaration {
-        let receipt = lib
-            .declaration_receipt(&[source])
-            .expect("extract declaration receipt")
-            .expect("non-empty declaration receipt");
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(&[source], settlement)
+        })
+        .expect("extract declaration receipt")
+        .expect("non-empty declaration receipt");
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
         tidepool_testing::with_settlement(|settlement| {
@@ -3320,13 +3330,24 @@ mod tests {
         )
         .unwrap();
         let lib = staged_test_lib(&root);
-        let receipt = lib
-            .declaration_receipt(&["import SessionHelpers\nanswer :: Int\nanswer = helper"])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(
+                &["import SessionHelpers\nanswer :: Int\nanswer = helper"],
+                settlement,
+            )
+        })
+        .unwrap()
+        .unwrap();
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
-        assert!(validate_declaration_candidate(candidate.clone(), lib.include_dir()).is_err());
+        assert!(
+            tidepool_testing::with_settlement(|settlement| validate_declaration_candidate(
+                candidate.clone(),
+                lib.include_dir(),
+                settlement
+            ))
+            .is_err()
+        );
         let staged = tidepool_testing::with_settlement(|settlement| {
             validate_declaration_candidate(
                 candidate.with_source_layer(&[helper.path().to_path_buf()]),
@@ -3357,13 +3378,17 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let manifest = root.path().join("declarations.json");
         let mut lib = staged_test_lib(&root);
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         let private = ScopeId(2);
         lib.seed_scope(private, Generation(0));
-        let receipt = lib
-            .declaration_receipt(&["data PrivateFlag = PrivateFlag"])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(&["data PrivateFlag = PrivateFlag"], settlement)
+        })
+        .unwrap()
+        .unwrap();
         let candidate = lib
             .render_admitted_candidate_in(private, &SourceImports::new(), &receipt, &[], &[])
             .unwrap();
@@ -3449,7 +3474,10 @@ mod tests {
         drop(lib);
 
         let mut restarted = staged_test_lib(&root);
-        restarted.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            restarted.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert_eq!(restarted.generation(), Generation(3));
         assert_eq!(
             restarted.reserve_join_generation_durable().unwrap(),
@@ -3463,9 +3491,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let manifest = root.path().join("declarations.json");
         let mut lib = staged_test_lib(&root);
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert_eq!(
-            lib.define_batch(&["data DirectFlag = DirectFlag"]).unwrap(),
+            tidepool_testing::with_settlement(
+                |settlement| lib.define_batch(&["data DirectFlag = DirectFlag"], settlement)
+            )
+            .unwrap(),
             Generation(1)
         );
         let retained = recovery::read_v2(&manifest, root.path()).unwrap().unwrap();
@@ -3478,14 +3512,18 @@ mod tests {
         assert_eq!(retained.graph.nodes().next().unwrap().id, Generation(1));
         assert!(retained.graph.public_surfaces().next().is_none());
         assert!(!retained.graph.artifacts().next().is_none());
-        assert!(lib.retract("DirectFlag").is_err());
+        assert!(tidepool_testing::with_settlement(
+            |settlement| lib.retract("DirectFlag", settlement)
+        )
+        .is_err());
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(1));
         assert_eq!(lib.generation(), Generation(1));
         let projection = lib
             .current_declaration_projection_in(ScopeId::ROOT)
             .unwrap();
         let recovered = Arc::new(
-            tidepool_toolchain::declaration_join::certify_recovered_declaration_tip_in_context(
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::declaration_join::certify_recovered_declaration_tip_in_context(
                 projection.context().clone(),
                 tidepool_toolchain::declaration_join::RecoveryDeclarationSelection {
                     origin:
@@ -3508,7 +3546,8 @@ mod tests {
                     family_closure: projection.receipt().family_closure().to_vec(),
                 },
                 &lib.extra_include,
-            )
+             settlement)
+            })
             .unwrap(),
         );
         let restored = render::RecoveredDeclaration {
@@ -3560,7 +3599,10 @@ mod tests {
             SessionLib::open(SessionId(996), root.path(), ModuleEnv::standalone_default()).unwrap()
         };
         let mut lib = open();
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         let captured = Generation(1 << 40);
         lib.initialize_captured_declaration_high_water(captured)
             .unwrap();
@@ -3582,7 +3624,10 @@ mod tests {
             .is_err());
         drop(lib);
         let mut restarted = open();
-        restarted.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            restarted.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert_eq!(restarted.scope_tip(ScopeId::ROOT), Generation(0));
         assert_eq!(
             restarted.reserve_declaration_generation_durable().unwrap(),
@@ -3599,7 +3644,10 @@ mod tests {
         assert!(lib
             .initialize_captured_declaration_high_water(Generation(7))
             .is_err());
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         std::fs::create_dir(&manifest).unwrap();
         let revision = lib.log.publication_revision();
         assert!(lib
@@ -3635,7 +3683,10 @@ mod tests {
             SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default()).unwrap()
         };
         let mut lib = open();
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert_eq!(
             lib.reserve_declaration_generations_durable(4).unwrap(),
             vec![Generation(1), Generation(2), Generation(3), Generation(4)]
@@ -3660,7 +3711,10 @@ mod tests {
         assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
         drop(lib);
         let mut restarted = open();
-        restarted.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            restarted.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert_eq!(
             restarted
                 .reserve_declaration_generations_durable(2)
@@ -3675,7 +3729,10 @@ mod tests {
         let manifest = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default()).unwrap();
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         std::fs::create_dir(&manifest).unwrap();
         let revision = lib.log.publication_revision();
         assert!(lib.reserve_declaration_generations_durable(3).is_err());
@@ -3714,20 +3771,34 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let manifest = root.path().join("declarations.json");
         let mut lib = staged_test_lib(&root);
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
-        let receipt = lib
-            .declaration_receipt(&["answer :: Int\nanswer = missingHelper"])
-            .unwrap()
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(&["answer :: Int\nanswer = missingHelper"], settlement)
+        })
+        .unwrap()
+        .unwrap();
         let candidate = lib
             .render_admitted_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[])
             .unwrap();
-        assert!(validate_declaration_candidate(candidate, lib.include_dir()).is_err());
+        assert!(
+            tidepool_testing::with_settlement(|settlement| validate_declaration_candidate(
+                candidate,
+                lib.include_dir(),
+                settlement
+            ))
+            .is_err()
+        );
         assert!(lib.log.is_reserved(Generation(1)));
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
         drop(lib);
         let mut restarted = staged_test_lib(&root);
-        restarted.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            restarted.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert_eq!(restarted.generation(), Generation(1));
         assert_eq!(
             restarted.reserve_join_generation_durable().unwrap(),
@@ -3742,7 +3813,10 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        failed.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            failed.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(failed.reserve_declaration_generation_durable().is_err());
         assert_eq!(failed.generation(), Generation(0));
@@ -3786,10 +3860,11 @@ mod tests {
     fn failed_staging_keeps_structured_diagnostics_and_publishes_no_types() {
         let root = tempfile::tempdir().unwrap();
         let lib = staged_test_lib(&root);
-        let receipt = lib
-            .declaration_receipt(&["bad :: Int\nbad = True"])
-            .expect("extract declaration receipt")
-            .expect("non-empty declaration receipt");
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(&["bad :: Int\nbad = True"], settlement)
+        })
+        .expect("extract declaration receipt")
+        .expect("non-empty declaration receipt");
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
         let error = tidepool_testing::with_settlement(|settlement| {
@@ -3866,10 +3941,14 @@ mod tests {
             panic!("the original value must compile as a bind")
         };
         let injected = vec![bound[0].module.clone()];
-        let receipt = lib
-            .declaration_receipt(&["data Version = NewVersion Bool deriving Show"])
-            .expect("extract replacement declaration")
-            .expect("non-empty replacement declaration");
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(
+                &["data Version = NewVersion Bool deriving Show"],
+                settlement,
+            )
+        })
+        .expect("extract replacement declaration")
+        .expect("non-empty replacement declaration");
         let candidate = lib.render_candidate_in(
             ScopeId::ROOT,
             &SourceImports::new(),

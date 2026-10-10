@@ -106,9 +106,10 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
             EffectRunPolicy::SuspendAll,
             LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         );
-        let outcome = machine
-            .run_with_sites("prepared_first_display", compiled.code())
-            .unwrap();
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            machine.run_with_sites("prepared_first_display", compiled.code(), settlement)
+        })
+        .unwrap();
         let descriptor = ActorDescriptor::new(
             "prepared-display",
             ActorPlacement {

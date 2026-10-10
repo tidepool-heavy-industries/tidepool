@@ -327,7 +327,9 @@ mod tests {
             surface.declarations(),
             Err(ExactExportError::UncertifiedExports)
         ));
-        let facade = surface.materialize(&view).expect("materialize facade");
+        let facade =
+            tidepool_testing::with_settlement(|settlement| surface.materialize(&view, settlement))
+                .expect("materialize facade");
         let (path, source) = facade.source_artifact().unwrap();
         assert!(source.contains("Finding(..)"));
         assert!(source.contains("review"));

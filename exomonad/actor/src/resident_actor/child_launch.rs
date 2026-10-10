@@ -962,7 +962,7 @@ mod tests {
             let root_path = root.path().to_path_buf();
             let machines = Arc::new(Machines::new());
             let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()))
-                .with_child_session_factory(Arc::new(move |id, _| {
+                .with_child_session_factory(Arc::new(move |id, _, _settlement| {
                     Ok(Box::new(session(id, &root_path)))
                 }))
                 .with_child_bootstrap_program(bootstrap_program());

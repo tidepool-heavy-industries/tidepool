@@ -343,7 +343,10 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
     let valid = crate::exomonad::workspace::FrozenWorkspace::load(project.path(), valid_run.path())
         .unwrap();
     // Public check/init use this full-workspace validation owner.
-    validate_workspace_program(&valid, valid_run.path()).unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        validate_workspace_program(&valid, valid_run.path(), settlement)
+    })
+    .unwrap();
 
     write_bootstrap_workspace(
         project.path(),
@@ -354,13 +357,16 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
     let invalid =
         crate::exomonad::workspace::FrozenWorkspace::load(project.path(), invalid_run.path())
             .unwrap();
-    let bootstrap = compile_driver(
-        Path::new("unused-live-actors"),
-        Some(&invalid),
-        invalid_run.path(),
-        None,
-        DriverCompilePurpose::Bootstrap,
-    )
+    let bootstrap = tidepool_testing::with_settlement(|settlement| {
+        compile_driver(
+            Path::new("unused-live-actors"),
+            Some(&invalid),
+            invalid_run.path(),
+            None,
+            DriverCompilePurpose::Bootstrap,
+            settlement,
+        )
+    })
     .expect("the fixed driver has no dependency on the invalid workspace spec");
     let certification = bootstrap.compiled.certification().unwrap();
     assert!(certification.recovery_products.iter().all(|product| {
@@ -383,7 +389,10 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
     )
     .unwrap();
     assert_eq!(bootstrap.include, sources.include);
-    let failure = validate_workspace_program(&invalid, invalid_run.path()).unwrap_err();
+    let failure = tidepool_testing::with_settlement(|settlement| {
+        validate_workspace_program(&invalid, invalid_run.path(), settlement)
+    })
+    .unwrap_err();
     assert!(
         failure.to_string().contains("missingConfiguredStartupSpec"),
         "{failure}"
@@ -2571,8 +2580,10 @@ async fn composition_root_child_session_factory_runs_a_cell() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let child_session_id = tidepool_runtime::session::fresh_session_id();
-                let mut child_machine = (campaign.child_session_factory)(child_session_id, &[])
-                    .expect("the composition root's factory builds a fresh session");
+                let mut child_machine = tidepool_testing::with_settlement(|settlement| {
+                    (campaign.child_session_factory)(child_session_id, &[], settlement)
+                })
+                .expect("the composition root's factory builds a fresh session");
 
                 child_machine.set_effect_execution(
                     EffectRunPolicy::HandleOrSuspend,
@@ -2590,9 +2601,16 @@ async fn composition_root_child_session_factory_runs_a_cell() {
                         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
                     )
                     .expect("a freshly bootstrapped machine accepts actor execution context");
-                let outcome = child_machine
-        .run_with_sites("exomonad_root_driver", campaign.program.code())
-        .expect("the driver cell the root itself bootstraps with also runs on a child machine");
+                let outcome = tidepool_testing::with_settlement(|settlement| {
+                    child_machine.run_with_sites(
+                        "exomonad_root_driver",
+                        campaign.program.code(),
+                        settlement,
+                    )
+                })
+                .expect(
+                    "the driver cell the root itself bootstraps with also runs on a child machine",
+                );
                 assert!(
         matches!(
             outcome,

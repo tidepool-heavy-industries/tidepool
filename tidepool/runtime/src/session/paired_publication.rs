@@ -1467,7 +1467,7 @@ mod tests {
     };
 
     fn accepted(base: DeclarationPublicationBase) -> AcceptedDeclarationPublication {
-        match base.certify().unwrap() {
+        match tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap() {
             CertifiedDeclarationPublication::Accepted(accepted) => accepted,
             CertifiedDeclarationPublication::Rejected(rejected) => {
                 panic!("unexpected rejection: {:?}", rejected.receipt.outcome())
@@ -1480,11 +1480,11 @@ mod tests {
         scope: ScopeId,
         source: &str,
     ) -> Generation {
-        let receipt = session
-            .lib()
-            .declaration_receipt(&[source])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session.lib().declaration_receipt(&[source], settlement)
+        })
+        .unwrap()
+        .unwrap();
         let (candidate, values) = session
             .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
             .unwrap();
@@ -1520,8 +1520,10 @@ mod tests {
                 1,
             )
             .unwrap();
-            lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
-                .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+            })
+            .unwrap();
             let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
             let public = session.mint_scope(ScopeId::ROOT).unwrap();
             if durable {
@@ -1715,8 +1717,10 @@ mod tests {
             .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()])
         };
         let mut lib = open(9833);
-        lib.attach_owned_recovery_graph_v3(&path, authority.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&path, authority.clone(), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
         let owner = RecoveryPublicOwner::new(
@@ -1781,8 +1785,10 @@ mod tests {
             .unwrap());
         drop(session);
         let mut lib = open(9834);
-        lib.attach_owned_recovery_graph_v3(&path, authority)
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&path, authority, settlement)
+        })
+        .unwrap();
         let mut reopened = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = reopened.recover_public_scope(&owner).unwrap();
         assert_eq!(
@@ -1850,7 +1856,10 @@ mod tests {
         )
         .unwrap()
         .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -1876,7 +1885,10 @@ mod tests {
             .unwrap();
         let selection = base.selected_facts().unwrap();
         let CertifiedDeclarationPublication::Accepted(oracle) =
-            base.certify_new_join(selection).unwrap()
+            tidepool_testing::with_settlement(|settlement| {
+                base.certify_new_join(selection, settlement)
+            })
+            .unwrap()
         else {
             panic!("independent GHC join refused")
         };
@@ -1957,7 +1969,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let mut lib = SessionLib::open(SessionId(9832), root.path(), ModuleEnv::standalone_default()).unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-            lib.attach_recovery_graph_v2(root.path().join("declarations.json")).unwrap();
+            tidepool_testing::with_settlement(|settlement| lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)).unwrap();
             let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
             let public = session.mint_scope(ScopeId::ROOT).unwrap();
             let execution = session.begin_private_execution(public).unwrap();
@@ -1979,7 +1991,7 @@ mod tests {
             }
             let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(intent.clone()).unwrap() else { panic!("authored publication") };
             let selection = base.selected_facts().unwrap();
-            let CertifiedDeclarationPublication::Accepted(oracle) = base.certify_new_join(selection).unwrap() else { panic!("GHC oracle refused") };
+            let CertifiedDeclarationPublication::Accepted(oracle) = tidepool_testing::with_settlement(|settlement| base.certify_new_join(selection, settlement)).unwrap() else { panic!("GHC oracle refused") };
             let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(intent.clone()).unwrap() else { panic!("authored publication") };
             let reused = accepted(base);
             proptest::prop_assert_eq!(matches!(&reused.receipt, PublicationEvidence::ReusedProjection { .. }), !contended, "full changed public snapshot must force a new join");
@@ -2092,7 +2104,10 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
         let admission = session.begin_ephemeral_private_execution(public).unwrap();
@@ -2229,7 +2244,10 @@ mod tests {
         let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut first = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = first.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2253,7 +2271,10 @@ mod tests {
         let ticket = base.stage().unwrap();
         let mut second_lib =
             SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
-        second_lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            second_lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut second = PersistentSession::new(Some(second_lib), 1024 * 1024);
         let second_public = second.mint_scope(ScopeId::ROOT).unwrap();
         second
@@ -2295,7 +2316,10 @@ mod tests {
             SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2316,9 +2340,10 @@ mod tests {
         let value =
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "%%", 601);
         let value_id = value.id;
-        session
-            .bind_replacing_decl_in(a.private_scope(), value)
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            session.bind_replacing_decl_in(a.private_scope(), value, settlement)
+        })
+        .unwrap();
         let private_tip = tip(session.lib(), session.lib().scope_tip(a.private_scope()))
             .unwrap()
             .unwrap();
@@ -2332,9 +2357,10 @@ mod tests {
             .iter()
             .any(|export| export.head.occurrence == "%%"
                 && export.head.namespace == ExportNamespace::Value));
-        session
-            .retract_many_in(withdrawal.private_scope(), &["%%".into()])
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            session.retract_many_in(withdrawal.private_scope(), &["%%".into()], settlement)
+        })
+        .unwrap();
         let withdrawn = session
             .freeze_execution_intent(&withdrawal, vec![], vec![])
             .unwrap();
@@ -2393,7 +2419,10 @@ mod tests {
             SessionLib::open(SessionId(984), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2497,7 +2526,10 @@ mod tests {
             SessionLib::open(SessionId(985), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2578,11 +2610,11 @@ mod tests {
             PublicManifestCommit::Durable
         );
         assert!(matches!(
-            session
+            tidepool_testing::with_settlement(|settlement| session
                 .restage_declaration_publication(owner, intent)
                 .unwrap()
-                .certify()
-                .unwrap(),
+                .certify(settlement))
+            .unwrap(),
             CertifiedDeclarationPublication::Rejected(_)
         ));
     }
@@ -2596,7 +2628,10 @@ mod tests {
             SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private_a = session.mint_detached_scope(public).unwrap();
@@ -2612,11 +2647,11 @@ mod tests {
             (private_a, include_str!("fixtures/paired-rebase-A.hs")),
             (private_b, include_str!("fixtures/paired-rebase-B.hs")),
         ] {
-            let receipt = session
-                .lib()
-                .declaration_receipt(&[source])
-                .unwrap()
-                .unwrap();
+            let receipt = tidepool_testing::with_settlement(|settlement| {
+                session.lib().declaration_receipt(&[source], settlement)
+            })
+            .unwrap()
+            .unwrap();
             let (candidate, values) = session
                 .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
                 .unwrap();
@@ -2865,7 +2900,10 @@ mod tests {
             SessionLib::open(SessionId(993), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
@@ -2876,11 +2914,14 @@ mod tests {
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
         let admitted = session.public_visibility_snapshot_in(public).unwrap();
-        let receipt = session
-            .lib()
-            .declaration_receipt(&["data PrivateFlag = PrivateFlag\nanswer :: Int\nanswer = 42"])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session.lib().declaration_receipt(
+                &["data PrivateFlag = PrivateFlag\nanswer :: Int\nanswer = 42"],
+                settlement,
+            )
+        })
+        .unwrap()
+        .unwrap();
         let (candidate, values) = session
             .render_declaration_candidate_in(private, &receipt, &SourceImports::new())
             .unwrap();
@@ -2941,7 +2982,7 @@ mod tests {
             }],
         )
         .unwrap();
-        let scratch = tempfile::tempdir().unwrap();
+        let scratch = Arc::new(tempfile::tempdir().unwrap());
         let artifacts = context.materialize(scratch.path()).unwrap().artifacts;
         let original = artifacts
             .iter()
@@ -2962,12 +3003,16 @@ mod tests {
             .occurrence
             .push_str("Missing");
         let CertifiedDeclarationJoin::Rejected(receipt) =
-            tidepool_toolchain::declaration_join::certify_declaration_join(
-                input,
-                &context,
-                &first.base.includes,
-                &first.base.session_root,
-            )
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::declaration_join::certify_declaration_join(
+                    input,
+                    &context,
+                    &first.base.includes,
+                    &first.base.session_root,
+                    scratch.clone(),
+                    settlement,
+                )
+            })
             .unwrap()
         else {
             panic!("expected protected inventory rejection");
@@ -3164,7 +3209,10 @@ mod tests {
         ));
     }
     fn commit_source(session: &mut PersistentSession, scope: ScopeId, source: &str) -> Generation {
-        session.define_scoped_in(scope, &[source]).unwrap()
+        tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_in(scope, &[source], settlement)
+        })
+        .unwrap()
     }
 
     #[test]
@@ -3173,7 +3221,10 @@ mod tests {
         let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(996), root.path(), ModuleEnv::standalone_default()).unwrap();
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -3222,12 +3273,14 @@ mod tests {
             a.private_scope(),
             include_str!("fixtures/paired-rich-A2.hs"),
         );
-        session
-            .retract_many_in(
+        tidepool_testing::with_settlement(|settlement| {
+            session.retract_many_in(
                 a.private_scope(),
                 &["retractValue".into(), "baseValue".into()],
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let value = crate::session::prepared::tests::rooted_publication_fixture(
             &mut session,
             "retractValue",
