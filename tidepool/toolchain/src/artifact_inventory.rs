@@ -2131,7 +2131,6 @@ impl ArtifactInventory {
         let mut required_groups = BTreeMap::<LogicalNodeKey, BTreeSet<InventoryNodeKey>>::new();
         let mut required_artifact_targets =
             BTreeMap::<ArtifactId, BTreeSet<InventoryNodeKey>>::new();
-        let mut required_native_carriers = BTreeSet::new();
         for NativeOriginalRequirement {
             original,
             selection,
@@ -2148,15 +2147,6 @@ impl ArtifactInventory {
                     ArtifactInventoryFailure::NativeRootOutsideView { artifact: original },
                 ));
             }
-            // An issued native closure can select dependency originals
-            // without offering them to the compiler as reusable modules.
-            // Their retained payloads still own the certified native rows.
-            required_native_carriers.extend(graph.bindings.iter().filter_map(|binding| {
-                parent_entries
-                    .get(&binding.artifact)
-                    .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
-                    .map(|_| binding.artifact)
-            }));
             for group in &graph.native_groups {
                 let node = InventoryNodeKey::Group(*group);
                 required_groups
@@ -2184,9 +2174,20 @@ impl ArtifactInventory {
             }
         }
         if let Some(ids) = &namespace_ids {
+            let interfaces = ids
+                .iter()
+                .filter_map(|id| {
+                    let entry = &selected[id];
+                    (!entry.is_native()).then_some((entry.descriptor.owner.clone(), *id))
+                })
+                .collect::<BTreeMap<_, _>>();
             selected.retain(|id, entry| {
                 ids.contains(id)
-                    || required_native_carriers.contains(id)
+                    || (required_artifact_targets.contains_key(id)
+                        && (entry.is_native()
+                            || interfaces
+                                .get(&entry.descriptor.owner)
+                                .is_none_or(|chosen| chosen == id)))
                     || match &entry.payload {
                         ArtifactPayload::Original(product) => {
                             !parent_ids.contains(id)
@@ -2215,8 +2216,13 @@ impl ArtifactInventory {
         let owners = SelectedOwners::new(&state, &selected, &parent_ids)?;
         let mut selected_groups = native_groups(parent_nodes);
         selected_groups.extend(groups.iter().copied());
-        if namespace_ids.is_some() {
-            selected_groups.retain(|group| selected.contains_key(&group.artifact));
+        if let Some(ids) = &namespace_ids {
+            selected_groups.retain(|group| {
+                selected.contains_key(&group.artifact)
+                    && (ids.contains(&group.artifact)
+                        || groups.contains(group)
+                        || required_groups.contains_key(&LogicalNodeKey::Group(*group)))
+            });
         }
         let (planned, closed_groups) = owners.planned_edges(&state, &selected, &selected_groups)?;
         if exact && closed_groups != selected_groups {
@@ -5844,6 +5850,136 @@ mod tests {
         assert!(matches!(inventory.admit_certified_with_demand(
             &joined, vec![Arc::new(root.clone())], NativeArtifactDemand::ScopeInterfaces, &ambiguous,
         ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })));
+    }
+
+    #[test]
+    fn private_native_closure_keeps_hidden_interfaces_without_sibling_group_demand() {
+        let mut observations = Vec::new();
+        for hidden_interfaces in [true, false] {
+            let inventory = ArtifactInventory::default();
+            let extra =
+                issued_native_groups("NativeExtra", vec![(7, vec![])], &[], &BTreeMap::new());
+            let child = issued_native_groups(
+                "NativeChild",
+                vec![(7, vec![]), (9, vec![issued_source(&extra, 7)])],
+                &[&extra],
+                &BTreeMap::new(),
+            );
+            let root = issued_native_groups(
+                "NativeRoot",
+                vec![(12, vec![issued_source(&child, 7)])],
+                &[],
+                &BTreeMap::new(),
+            );
+            let carriers = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    vec![
+                        Arc::new(root.clone()),
+                        Arc::new(child.clone()),
+                        Arc::new(extra.clone()),
+                    ],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let issuer = inventory
+                .admit_shared_with_demand(
+                    &carriers,
+                    vec![Arc::new(root.clone())],
+                    NativeArtifactDemand::AllGroups,
+                )
+                .unwrap();
+            let sibling = inventory
+                .admit_shared_with_demand(
+                    &carriers,
+                    vec![Arc::new(child.clone())],
+                    NativeArtifactDemand::AllGroups,
+                )
+                .unwrap();
+            let expected = issuer.capture_graph_selection().native_groups;
+            assert_eq!(
+                expected
+                    .iter()
+                    .map(|group| group.original_ordinal)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([7, 12])
+            );
+            let projection = if hidden_interfaces {
+                CompilerInputProjection::from_issued_entries(&[Arc::new(root.clone())]).unwrap()
+            } else {
+                CompilerInputProjection::from_issued_entries(&[
+                    Arc::new(root.clone()),
+                    Arc::new(child.clone()),
+                    Arc::new(extra.clone()),
+                ])
+                .unwrap()
+                .for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()]))
+            };
+            let facts =
+                NativeOriginalRequirement::for_projection(&projection, &issuer, &[]).unwrap();
+            let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut receipt =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &issuer.metadata_snapshot(),
+                    &validation.inventory,
+                )
+                .unwrap();
+            receipt
+                .with_native_original_requirements(&issuer.metadata_snapshot(), &facts)
+                .unwrap();
+            for (joined, projected) in [
+                issuer.merge(&sibling).unwrap(),
+                sibling.merge(&issuer).unwrap(),
+            ]
+            .into_iter()
+            .flat_map(|view| [(view.clone(), false), (view, true)])
+            {
+                let admitted = if projected {
+                    inventory.admit_projected_with_native_requirements(
+                        &joined,
+                        vec![Arc::new(root.clone())],
+                        &projection,
+                        &facts,
+                    )
+                } else {
+                    inventory.admit_certified_with_demand(
+                        &joined,
+                        vec![Arc::new(root.clone())],
+                        NativeArtifactDemand::ScopeInterfaces,
+                        &receipt,
+                    )
+                };
+                let result =
+                    admitted.and_then(|view| view.select_admission_roots(vec![root.descriptor.id]));
+                match result {
+                    Ok(selected) => {
+                        assert_eq!(selected.capture_graph_selection().native_groups, expected);
+                        assert!(!selected.artifact_ids().contains(&extra.descriptor.id));
+                        assert_eq!(selected.namespace().len(), projection.roles().len() + 1);
+                        let cold = ArtifactInventory::default();
+                        let reopened = cold
+                            .recover_selection(
+                                &cold.empty_view(),
+                                selected.entries(),
+                                &selected.capture_graph_selection(),
+                                &selected.binding_dependencies(),
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            reopened.capture_graph_selection(),
+                            selected.capture_graph_selection()
+                        );
+                        observations.push(true);
+                    }
+                    Err(error) => {
+                        eprintln!("native_closure hidden_interfaces={hidden_interfaces} projected={projected}: {error:?}");
+                        observations.push(false);
+                    }
+                }
+            }
+        }
+        assert_eq!(observations, vec![true; 8]);
     }
 
     #[test]
