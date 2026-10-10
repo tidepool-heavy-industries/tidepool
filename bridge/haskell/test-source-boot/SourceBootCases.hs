@@ -4582,11 +4582,14 @@ freshExecutionRecipeTest = withScratch $ \work -> do
     fail "shared original source accepted a missing retained witness context"
   unless (fmap (map dependencyResolutionCandidates)
         (executionNodeOriginalResolutions (firstContext:contexts) sharedSupport)
-        == Right (map dependencyResolutionCandidates retainedResolutions)
-      && case executionNodeOriginalResolutions [firstContext,secondContext {
-          executionGraphBody=executionGraphBody firstContext}] sharedSupport of
-        Left (ExecutionSourceConflicting _) -> True; _ -> False) $
-    fail "original witness inventory did not deduplicate identical graphs or refuse conflicting graph bytes"
+        == Right (map dependencyResolutionCandidates retainedResolutions)) $
+    fail "original witness inventory did not deduplicate identical graphs"
+  -- The owned byte primitive cannot pair one body with another body's digest.
+  -- Refuse that mismatch at acquisition using two genuine distinct contexts.
+  unless (executionGraphSha256 firstContext /= executionGraphSha256 secondContext
+      && case decodeExecutionSourceGraph (executionGraphSha256 firstContext)
+          (executionGraphBytes secondContext) of Left _ -> True; Right _ -> False) $
+    fail "original witness acquisition accepted another context's sealed bytes"
   let changedSource = secondContext {executionGraphEvidence=(executionGraphEvidence secondContext) {
         dependencySources=[if dependencySourcePath row == supportPath
           then row {dependencySourceSha256=replicate 64 'f'} else row

@@ -174,7 +174,7 @@ import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (<
 import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getCurrentDirectory, getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.Posix.Temp (mkdtemp)
 import System.IO (hPutStrLn, stderr, readFile', hClose)
-import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, captureArtifactBytes)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, artifactLength, captureArtifactBytes)
 import Tidepool.RequestInputs (capturedRequestInputToken)
 import Tidepool.BoundedRead (readFileAtMost)
 import Control.Monad.IO.Class (liftIO)
@@ -4029,7 +4029,10 @@ data CandidateLoading = CandidateInterfaceOnly | CandidateLoadForExecution
 
 candidateInputBody :: ModuleCandidate -> FilePath -> String -> Int -> IO ArtifactBytes
 candidateInputBody candidate path sha bound = case candidateInputCustody candidate of
-  Just custody -> capturedRequestInputToken custody path sha
+  Just custody -> do
+    body <- capturedRequestInputToken custody path sha
+    when (artifactLength body > bound) (fail "captured candidate input exceeds its consumer bound")
+    pure body
   Nothing -> do
     bytes <- readFileAtMost path (bound + 1)
     when (BS.length bytes > bound) (fail "fresh candidate input exceeds its artifact bound")
