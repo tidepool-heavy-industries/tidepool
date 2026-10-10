@@ -72,3 +72,14 @@ cleanupPartialSpawn :: Member Core.AgentControl effects => Spawn.SpawnError -> E
 cleanupPartialSpawn (Spawn.SpawnPartialFailure (Spawn.SpawnRetainedActor agent) _ _) =
   Just <$> Agent.stopAgent agent
 cleanupPartialSpawn _ = pure Nothing
+
+-- Response completion and unavailable timestamps are separate observations.
+reflectResponseIdentity :: Authored.ConversationTurn -> Maybe Text
+reflectResponseIdentity turn = case Authored.turnState turn of
+  Authored.TurnCompleted responseId -> responseId
+  Authored.TurnInProgress -> Nothing
+  Authored.TurnInterrupted -> Nothing
+  Authored.TurnUnknown -> Nothing
+
+reflectRuntimeIdentity :: Authored.ConversationTurn -> Text
+reflectRuntimeIdentity = Authored.turnIdentity

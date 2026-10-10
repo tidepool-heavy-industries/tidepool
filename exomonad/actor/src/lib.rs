@@ -86,7 +86,9 @@ pub use agent_spec::preparation::{
     ToolsetProgramSelection,
 };
 pub use descriptor::{ActorDescriptor, ActorPersistencePolicy};
-pub use exomonad_model::{ConversationTurn, Role as ConversationRole, TurnItem};
+pub use exomonad_model::{
+    ConversationTurn, ConversationTurnState, Role as ConversationRole, TurnItem,
+};
 pub use exomonad_worktree::WorkspaceAccess;
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,

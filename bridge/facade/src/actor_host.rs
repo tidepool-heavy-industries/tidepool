@@ -54,6 +54,8 @@ mod embedded_recovery;
 #[cfg(test)]
 mod embedded_recovery_tests;
 mod embedded_reflect;
+#[cfg(test)]
+mod embedded_reflect_tests;
 mod embedded_service;
 mod form_output;
 #[cfg(test)]

@@ -11,8 +11,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use exomonad_model::{ConversationTurn, Role, TurnItem};
-use tidepool_bridge_effects::{RfConversationTurn, RfError, RfRole, RfTurnItem};
+use exomonad_model::{ConversationTurn, ConversationTurnState, Role, TurnItem};
+use tidepool_bridge_effects::{RfConversationTurn, RfError, RfRole, RfTurnItem, RfTurnState};
 
 /// Why an actor's own conversation could not be returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +47,14 @@ pub fn reflection(
 fn turn(turn: ConversationTurn) -> RfConversationTurn {
     RfConversationTurn {
         identity: turn.turn,
+        state: match turn.state {
+            ConversationTurnState::InProgress => RfTurnState::TurnInProgress,
+            ConversationTurnState::Completed {
+                provider_response_id,
+            } => RfTurnState::TurnCompleted(provider_response_id),
+            ConversationTurnState::Interrupted => RfTurnState::TurnInterrupted,
+            ConversationTurnState::Unknown => RfTurnState::TurnUnknown,
+        },
         started_at: turn.started_at,
         completed_at: turn.completed_at,
         items: turn.items.into_iter().map(item).collect(),
@@ -109,6 +117,9 @@ mod tests {
     fn a_turn_crosses_with_its_items_in_order() {
         let crossed = reflection(Ok(vec![ConversationTurn {
             turn: "t1".into(),
+            state: ConversationTurnState::Completed {
+                provider_response_id: Some("provider-response".into()),
+            },
             started_at: Some("2026-09-17T00:00:00Z".into()),
             completed_at: None,
             items: vec![
@@ -132,6 +143,7 @@ mod tests {
             crossed,
             vec![RfConversationTurn {
                 identity: "t1".into(),
+                state: RfTurnState::TurnCompleted(Some("provider-response".into())),
                 started_at: Some("2026-09-17T00:00:00Z".into()),
                 completed_at: None,
                 items: vec![
