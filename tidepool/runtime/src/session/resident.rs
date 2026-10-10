@@ -9359,7 +9359,7 @@ mod authored_publication_tests {
 
         tidepool_testing::eval_harness::require_extract();
         let durable = tempfile::tempdir().unwrap();
-        let producer_source = durable.path().join("producer-source");
+        let producer_source = durable.path().join("compiler");
         let recovery =
             crate::session::recovery_test_fixture::RecoveryFixture::create(durable.path());
         let run = recovery.owner.clone();
@@ -9425,7 +9425,7 @@ mod authored_publication_tests {
         drop(producer);
 
         {
-            let source = durable.path().join("successor-source");
+            let source = durable.path().join("compiler");
             let mut session = TestSession::unbootstrapped(
                 frunk::HNil,
                 EmptyOutput,

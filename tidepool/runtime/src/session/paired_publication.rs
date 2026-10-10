@@ -1621,7 +1621,7 @@ mod tests {
         let open = |id| {
             SessionLib::open(
                 SessionId(id),
-                root.path().join(format!("session{id}")),
+                root.path().join("compiler"),
                 ModuleEnv::standalone_default(),
             )
             .unwrap()

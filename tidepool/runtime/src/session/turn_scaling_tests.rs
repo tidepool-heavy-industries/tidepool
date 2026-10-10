@@ -3522,13 +3522,7 @@ fn durable_mixed_originals_recover_independent_native_entry() {
     .unwrap();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let images = Arc::new(ImageRegistry::new());
-    let source_root = if child_root.is_some() {
-        let source = root_path.join("fresh-process-source");
-        std::fs::create_dir(&source).unwrap();
-        source
-    } else {
-        root_path.clone()
-    };
+    let source_root = root_path.join("compiler");
     let mut lib = SessionLib::open(
         SessionId(if child_root.is_some() { 1003 } else { 1002 }),
         &source_root,
