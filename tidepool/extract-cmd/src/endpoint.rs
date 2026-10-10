@@ -2188,7 +2188,7 @@ mod tests {
         if mode == "replay" {
             let directory = tempfile::tempdir().unwrap();
             let seed_path = directory.path().join("regressions.txt");
-            let seed_path = seed_path.to_str().unwrap();
+            let seed_path = Box::leak(seed_path.to_str().unwrap().to_owned().into_boxed_str());
             let mut persisted = config;
             persisted.failure_persistence =
                 Some(Box::new(FileFailurePersistence::Direct(seed_path)));
