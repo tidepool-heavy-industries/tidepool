@@ -48,7 +48,8 @@ import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.SourceText (il_value)
 import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.Fixity (Fixity(..))
-import GHC.Driver.Session (parseDynamicFilePragma, gopt_set, PackageDBFlag(..), PkgDbRef(..))
+import GHC.LanguageExtensions (Extension(ImportQualifiedPost))
+import GHC.Driver.Session (xopt_set, xopt_unset, parseDynamicFilePragma, gopt_set, PackageDBFlag(..), PkgDbRef(..))
 import GHC.Driver.Backend (interpreterBackend)
 import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
@@ -65,7 +66,7 @@ import GHC.Types.SrcLoc (mkRealSrcLoc)
 import GHC.Types.SourceError (SourceError)
 import Tidepool.Binders
 import Tidepool.TurnSource
-  ( spliceTemplate, generatedScaffoldModuleName, renameScaffoldModuleHeader
+  ( extractModuleName, spliceTemplate, generatedScaffoldModuleName, renameScaffoldModuleHeader
   , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker, preambleDefaultMarker )
 import Test.QuickCheck qualified as QC
 import Tidepool.SessionArtifacts (mkBoundBinders)
@@ -115,6 +116,8 @@ requestValidationChecks = do
 
 generatedScaffoldIdentityChecks :: IO ()
 generatedScaffoldIdentityChecks = do
+  libdir <- getLibdir
+  flags <- runGhc (Just libdir) getSessionDynFlags
   let fields = ["scope-semantic", "protected template", "rendered source", "retained:main:M:value:1", "item:digest"]
       owner = generatedScaffoldModuleName fields
       template = "{-# LANGUAGE OverloadedStrings #-}\nmodule Expr where\n__result = {{TURN}}\n"
@@ -126,12 +129,124 @@ generatedScaffoldIdentityChecks = do
     (fail "generated owner ignored an admission digest change")
   unless (owner /= generatedScaffoldModuleName (fields ++ ["different rendered source"]))
     (fail "generated owner ignored a rendered source change")
-  renamed <- either fail pure (renameScaffoldModuleHeader owner template)
+  renamed <- either fail pure (renameScaffoldModuleHeader flags owner template)
   assertEqual "generated owner rename changes only the protected header"
     ("{-# LANGUAGE OverloadedStrings #-}\nmodule " ++ owner ++ " where\n__result = {{TURN}}\n") renamed
-  case renameScaffoldModuleHeader owner (template ++ "-- module Expr where\n") of
+  case renameScaffoldModuleHeader flags owner (template ++ "-- module Expr where\n") of
     Left _ -> pure ()
     Right _ -> fail "generated owner rename accepted an ambiguous protected header"
+  let commentMarkerOnly = "{-\nmodule Actual where\n-}\nmodule\n Actual\n where\nanswer = 42\n"
+  case renameScaffoldModuleHeader flags owner commentMarkerOnly of
+    Left _ -> pure ()
+    Right _ -> fail "generated owner rename changed a comment instead of the parsed header"
+  let remappedMarker = "{-\nmodule Actual where\n-}\n{-# LINE 1 \"<generated-module>\" #-}\nmodule\n       Actual\n where\nanswer = 42\n"
+  case renameScaffoldModuleHeader flags owner remappedMarker of
+    Left _ -> pure ()
+    Right _ -> fail "generated owner rename authenticated a remapped logical location"
+  let unicodePrefix = "{- λ雪🐟 module Decoy where -}\n"
+  renamedUnicode <- either fail pure (renameScaffoldModuleHeader flags owner (unicodePrefix ++ template))
+  assertEqual "scaffold physical position counts decoded characters"
+    (unicodePrefix ++ "{-# LANGUAGE OverloadedStrings #-}\nmodule " ++ owner ++ " where\n__result = {{TURN}}\n") renamedUnicode
+  let commentDecoy = "{-\nmodule Decoy where\n-}\n" ++ template
+  renamedDecoy <- either fail pure (renameScaffoldModuleHeader flags owner commentDecoy)
+  assertEqual "scaffold rename retains a comment decoy verbatim"
+    ("{-\nmodule Decoy where\n-}\n{-# LANGUAGE OverloadedStrings #-}\nmodule " ++ owner ++ " where\n__result = {{TURN}}\n") renamedDecoy
+
+-- The chosen owner is the oracle; generated trivia and header layouts must
+-- never create another owner. This does not compare two calls to GHC's parser.
+data HeaderScenario = HeaderScenario [Int] Int Int deriving Show
+
+instance QC.Arbitrary HeaderScenario where
+  arbitrary = HeaderScenario <$> QC.listOf (QC.chooseInt (0, 4))
+    <*> QC.chooseInt (0, 4) <*> QC.chooseInt (0, 3)
+  shrink (HeaderScenario trivia shape owner) =
+    [HeaderScenario simpler shape owner | simpler <- QC.shrinkList (const []) trivia]
+    ++ [HeaderScenario trivia smaller owner | smaller <- QC.shrink shape, smaller >= 0]
+    ++ [HeaderScenario trivia shape smaller | smaller <- QC.shrink owner, smaller >= 0]
+
+headerScenarioSource :: HeaderScenario -> (String, String)
+headerScenarioSource (HeaderScenario trivia shape owner) = (name, prefix ++ header ++ body)
+  where
+    name = ["Actual", "Actual.Deep", "Actual_17", "Actual'"] !! owner
+    prefix = concatMap (["\n", "-- module LineDecoy where\n", "{-\nmodule BlockDecoy where\n-}\n",
+      "{- outer {- module NestedDecoy where -} trailing -}\n",
+      "{-| module DocDecoy where -}\n"] !!) trivia
+    header = ["module " ++ name ++ " where\n",
+      "module\t" ++ name ++ "\twhere\n",
+      "module\n  " ++ name ++ "\n  where\n",
+      "module " ++ name ++ " (answer) where\n",
+      "module {- module InlineDecoy where -} " ++ name ++ " where\n"] !! shape
+    body = "answer :: String\nanswer = \"module BodyDecoy where\"\n"
+
+moduleHeaderProperties :: IO ()
+moduleHeaderProperties = do
+  libdir <- getLibdir
+  flags <- runGhc (Just libdir) getSessionDynFlags
+  let witness = "{-\nmodule Decoy where\n-}\nmodule Actual where\nanswer = 42\n"
+  assertEqual "comment decoy cannot select the module owner"
+    (Right (Just "Actual")) (extractModuleName flags witness)
+  assertEqual "headerless source has no explicit declaration"
+    (Right Nothing) (extractModuleName flags "answer = 42\n")
+  let postQualifiedImport = "module Actual where\nimport Prelude qualified\nanswer = 42\n"
+  assertEqual "header parsing consumes effective extension flags"
+    (Right (Just "Actual")) (extractModuleName (xopt_set flags ImportQualifiedPost) postQualifiedImport)
+  case extractModuleName (xopt_unset flags ImportQualifiedPost) postQualifiedImport of
+    Left _ -> pure ()
+    Right _ -> fail "header parser ignored disabled ImportQualifiedPost"
+  forM_ ["module where\n", "module Actual ( where\n", "{- unterminated"] $ \source ->
+    case extractModuleName flags source of
+      Left _ -> pure ()
+      Right accepted -> fail ("malformed header was accepted: " ++ show (source,accepted))
+  result <- QC.quickCheckWithResult QC.stdArgs {QC.maxSuccess=500} $ \scenario@(HeaderScenario trivia shape owner) ->
+    let (name,source) = headerScenarioSource scenario
+    in QC.checkCoverage
+      $ QC.cover 10 (2 `elem` trivia) "block decoy"
+      $ QC.cover 10 (3 `elem` trivia) "nested comment"
+      $ QC.cover 10 (shape == 1) "tabbed header"
+      $ QC.cover 10 (shape == 2) "multiline header"
+      $ QC.cover 10 (shape == 3) "export list"
+      $ QC.cover 10 (owner == 1) "hierarchical owner"
+      $ QC.counterexample source (extractModuleName flags source QC.=== Right (Just name))
+  unless (QC.isSuccess result) (fail "generated header identity property failed")
+
+-- Exercise both ordinary and resident consumers. The same source path can
+-- acquire a different owner after preprocessing or a successful replacement.
+moduleHeaderCompilation :: IO ()
+moduleHeaderCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
+  let path = root </> "DifferentBasename.hs"
+      examples =
+        [ ("Actual", "{-\nmodule Decoy where\n-}\nmodule Actual where\nresult = 41 :: Int\n")
+        , ("Actual.Deep", "module\n Actual.Deep (result)\n where\nresult = 42 :: Int\n")
+        , ("Main", "main :: IO ()\nmain = pure ()\nresult = 43 :: Int\n")
+        , ("CppActual", "{-# LANGUAGE CPP #-}\n#if 0\nmodule CppDecoy where\n#else\nmodule CppActual where\n#endif\nresult = 44 :: Int\n")
+        ]
+      assertOwner expected prepared = assertEqual "compiled owner is the GHC source owner" expected
+        (moduleNameString (moduleName (tcg_mod (prTargetTcGblEnv (pprPipelineResult prepared)))))
+  writeFile path (snd (head examples))
+  runPipelineSelected PreparedStg path [root] >>= assertOwner "Actual"
+  withResidentPipelineSelectedRequests [root] $ \runRequest -> do
+    forM_ examples $ \(expected,source) -> do
+      writeFile path source
+      runRequest (pure ()) $ \compiler ->
+        compiler PreparedStg mempty GeneralCompile Nothing path [root] Nothing >>= assertOwner expected
+    writeFile path "module where\nresult = 45 :: Int\n"
+    rejected <- try (runRequest (pure ()) $ \compiler ->
+      compiler CheckedEnvironment mempty GeneralCompile Nothing path [root] Nothing)
+      :: IO (Either SomeException CheckedEnvironmentResult)
+    case rejected of
+      Left _ -> pure ()
+      Right _ -> fail "malformed source header reached a successful compiler result"
+    writeFile path (snd (head examples))
+    runRequest (pure ()) $ \compiler ->
+      compiler PreparedStg mempty GeneralCompile Nothing path [root] Nothing >>= assertOwner "Actual"
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path, handle) <- openTempFile parent "tidepool-module-header"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 dependencyQualifierChecks :: IO ()
 dependencyQualifierChecks = do

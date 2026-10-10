@@ -129,8 +129,7 @@ data ExportItem
 -- of its top-level declarations as structured 'ExportItem's, selecting the
 -- module summary by an EXACT match on @expectedModuleName@. Used by
 -- @--turn@'s decl path: the caller controls the name of the scratch module it
--- just spliced and wrote (via 'Main.extractModuleName' on the spliced
--- source), so it can demand exactly that summary. A missing match is a
+-- just spliced and wrote (using GHC's parsed header identity), so it can demand exactly that summary. A missing match is a
 -- caller wiring bug — the module just written is not the module GHC parsed —
 -- and fails loudly rather than silently returning a different module's
 -- binders. Parse-only: never typechecks, so a declaration that references

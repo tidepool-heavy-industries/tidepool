@@ -25,16 +25,19 @@ import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Driver.Session (DynFlags, xopt_set)
 import GHC.LanguageExtensions (Extension(PackageImports))
 import GHC.Parser (parseHeader)
-import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.Parser.Annotation (getLocA)
+import GHC.Data.Strict qualified as Strict
+import GHC.Parser.Lexer (ParseResult(..), initParserState, unP, getPsErrorMessages)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString)
-import GHC.Types.SrcLoc (mkRealSrcLoc)
+import GHC.Types.SrcLoc (SrcSpan, RealSrcLoc, mkRealSrcLoc, getBufSpan, bufSpanStart, bufPos)
+import GHC.Types.Error (isEmptyMessages)
 import GHC.Types.Name (nameModule, nameOccName)
 import GHC.Unit.Types (moduleUnit, moduleName, unitString)
 import GHC.Types.Name.Occurrence (isSymOcc, mkVarOcc, occNameString)
-import Data.Char (isAlphaNum, isSpace)
+import Data.Char (isSpace)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix)
-import Data.Maybe (listToMaybe, maybeToList)
+import Data.Maybe (maybeToList)
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -162,11 +165,24 @@ generatedScaffoldModuleName fields = "TidepoolScaffold_" ++ shaHex framed
 -- | Rename only a generated template's module declaration, before authored
 -- turn text is inserted. The protected scaffold must have one conventional
 -- module header; malformed or ambiguous templates fail closed.
-renameScaffoldModuleHeader :: String -> String -> Either String String
-renameScaffoldModuleHeader replacement template = do
-  old <- maybe (Left "generated scaffold has no module header") Right (extractModuleName template)
-  replaceTemplateMarker ("module " ++ old ++ " where")
-    ("module " ++ replacement ++ " where") template
+renameScaffoldModuleHeader :: DynFlags -> String -> String -> Either String String
+renameScaffoldModuleHeader flags replacement template = do
+  let blank marker = T.replace (T.pack marker) (T.replicate (length marker) (T.singleton ' '))
+      parserSource = T.unpack (blank "{{CELL_PRAGMAS}}" (blank "{{CELL_IMPORTS}}" (T.pack template)))
+  declared <- parsedModuleHeaderName flags parserSource
+  (oldName, nameSpan) <- maybe (Left "generated scaffold has no module header") Right declared
+  nameOffset <- case getBufSpan nameSpan of
+    Strict.Just span' -> Right (bufPos (bufSpanStart span'))
+    Strict.Nothing -> Left "generated scaffold module name lacks a physical source location"
+  let old = moduleNameString oldName
+      prefix = "module "
+      marker = prefix ++ old ++ " where"
+      start = nameOffset - length prefix
+  -- LINE pragmas remap logical locations. GHC BufPos counts physical decoded
+  -- characters, so match it against String rather than UTF-8 byte offsets.
+  if start < 0 || not (marker `isPrefixOf` drop start template)
+    then Left "generated scaffold requires a conventional parsed module header"
+    else replaceTemplateMarker marker ("module " ++ replacement ++ " where") template
 
 -- | Replace one protected marker before authored text is inserted. Duplicate
 -- or missing markers cannot silently alter the selected compiler recipe.
@@ -225,16 +241,26 @@ explicitBraceLetBody rest = firstLine ++ go following
        in '\n' : placed ++ go followingLines
     go other = other
 
--- | Read the module name from a conventional module header.
-extractModuleName :: String -> Maybe String
-extractModuleName source = listToMaybe
-  [ name
-  | line <- lines source
-  , Just rest <- [stripPrefix "module " (dropWhile (== ' ') line)]
-  , let name = takeWhile (\char -> isAlphaNum char || char == '.' || char == '_')
-          (dropWhile (== ' ') rest)
-  , not (null name)
-  ]
+-- | Parse an unpreprocessed generated source header with the request's parser
+-- flags. Absence of an explicit header is distinct from malformed syntax.
+-- General source compilation consumes ModSummary instead, including CPP.
+extractModuleName :: DynFlags -> String -> Either String (Maybe String)
+extractModuleName flags source =
+  fmap (moduleNameString . fst) <$> parsedModuleHeaderName flags source
+
+parsedModuleHeaderName :: DynFlags -> String -> Either String (Maybe (ModuleName, SrcSpan))
+parsedModuleHeaderName flags source =
+  case unP parseHeader (initParserState (initParserOpts flags)
+      (stringToStringBuffer source) generatedHeaderStart) of
+    PFailed _ -> failure
+    POk state parsed
+      | not (isEmptyMessages (getPsErrorMessages state)) -> failure
+      | otherwise -> Right (fmap (\name -> (unLoc name, getLocA name)) (hsmodName (unLoc parsed)))
+  where
+    failure = Left "GHC could not parse the generated module header"
+
+generatedHeaderStart :: RealSrcLoc
+generatedHeaderStart = mkRealSrcLoc (mkFastString "<generated-module>") 1 1
 
 renderImportBinder :: String -> String
 renderImportBinder name

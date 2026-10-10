@@ -126,6 +126,12 @@ unique issuer character, retaining only its current cache epoch. Identity of a r
 Neither a retained cache nor an EPS lazy closure may retain a temporary path;
 executable GHC make views are separate disposable materializations.
 
+Source target identity comes from the requested source's GHC `ModSummary`,
+including CPP and implicit `Main`. Carry that issued module through transforms,
+candidate selection and retained-context cleanup. Before a generated source has
+such a summary, parse its header with GHC under the effective request/template
+flags; a malformed header is a refusal, not a basename fallback.
+
 All source downsweeps use `depanalSourceModules`. Exact interface summaries have
 no source path and belong to admitted instance/linker graphs; the source boundary
 preserves their home interfaces. CPP summaries require fresh preprocessing so

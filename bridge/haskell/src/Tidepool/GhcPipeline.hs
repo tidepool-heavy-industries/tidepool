@@ -96,7 +96,7 @@ import GHC.Fingerprint.Type (Fingerprint)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), NodeKey, mkNodeKey, nodeDependencies)
 import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
 import GHC.Unit.Env (UnitEnv(..))
-import GHC.Unit.Types (unitString, unitIdString, stringToUnit)
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId)
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Driver.Session
   ( updOptLevel, gopt_set, gopt_unset, xopt
@@ -176,10 +176,10 @@ import Data.Containers.ListUtils (nubOrd)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef, writeIORef)
 import Numeric (showHex)
 import System.Environment (lookupEnv)
-import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (</>))
+import System.FilePath (takeFileName, normalise, pathSeparator, (</>))
 import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getCurrentDirectory, getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.Posix.Temp (mkdtemp)
-import System.IO (hPutStrLn, stderr, readFile', hClose)
+import System.IO (hPutStrLn, stderr, hClose)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, artifactLength, captureArtifactBytes)
 import Tidepool.RequestInputs (capturedRequestInputToken)
 import Tidepool.BoundedRead (readFileAtMost)
@@ -208,7 +208,7 @@ import Tidepool.CheckedPrefixImports
   , transformCompletedValueImports, refineParsedDeclarationImports, selectedImportNames )
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
-import Tidepool.ExtractUtil (getLibdir, capitalize)
+import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeLookupWildcards)
 import Tidepool.Session
@@ -244,7 +244,6 @@ import Tidepool.RetainedUnfoldings
   ( RetainedContext, retainedContext
   , installRetainedUnfoldingsPlugin, retainedDefinedBy
   , scopeRetainedModuleGraph, scopeRetainedSummaryHscEnv )
-import Tidepool.TurnSource (extractModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..)
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
@@ -1018,20 +1017,20 @@ rejectedCellInstances recipe authority failure = nub
       , nameUnique (fi_fam instance') == repTyConKey, ty <- fi_tys instance']
     rejectedTypes _ = []
 
--- | Resolve the target module's 'ModuleName' for one input file. Prefers the
--- declared name from a conventional @module ... where@ header (via
--- 'Tidepool.TurnSource.extractModuleName'), so a hierarchical module such as
--- @Tidepool.Session.Val.G1@ (declared in a file whose bare basename is only
--- @G1@) is recognised by its own dotted name rather than reduced to that
--- basename. Falls back to the historical @capitalize (takeBaseName path)@
--- derivation when the file has no recognisable header, or can't be read.
--- Every existing caller compiles a flat module whose declared name already
--- equals its basename, so this changes nothing for them.
-targetModuleNameFor :: FilePath -> IO ModuleName
-targetModuleNameFor path = do
-  contents <- try (readFile' path) :: IO (Either IOException String)
-  let declared = either (const Nothing) extractModuleName contents
-  pure (mkModuleName (fromMaybe (capitalize (takeBaseName path)) declared))
+-- | Select the target identity issued by the source downsweep. Source paths
+-- distinguish the requested module from its dependencies; header spelling,
+-- CPP and the implicit Main owner remain GHC's decisions.
+targetModuleFor :: ModuleGraph -> FilePath -> IO Module
+targetModuleFor graph path = do
+  requested <- canonicalizePath path
+  matches <- filterM (\summary -> case ml_hs_file (ms_location summary) of
+    Nothing -> pure False
+    Just source -> (== requested) <$> canonicalizePath source)
+    [summary | ModuleNode _ summary <- mgModSummaries' graph
+      , ms_hsc_src summary == HsSrcFile]
+  case matches of
+    [summary] -> pure (ms_mod summary)
+    _ -> fail "source downsweep target summary is missing or duplicated"
 
 runPipelineSelected :: PipelineSelection result -> FilePath -> [FilePath] -> IO result
 runPipelineSelected selection path includes =
@@ -1049,7 +1048,7 @@ runPipelineSelectedRetaining
   :: PipelineSelection result -> Set.Set SymbolIdentity -> FilePath -> [FilePath] -> IO result
 runPipelineSelectedRetaining selection retained path includes = do
   producer <- captureCompilerProducerIdentity
-  variant <- normalVariant GeneralCompile path
+  variant <- normalVariant GeneralCompile
   runCompile selection retained variant {pvCompilerProducer = producer} path includes Nothing
 
 -- The process owner supplies this configuration before any authored compiler
@@ -1105,11 +1104,11 @@ data PipelineVariant = PipelineVariant
   , pvDownsweepExcludes :: [ModuleName]
     -- ^ Modules @depanal@ must NOT try to summarise (the session path's
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
-  , pvPlan :: FilePath -> Bool -> ModuleGraph -> Maybe ExactScope -> Ghc CompilePlan
-    -- ^ @pvPlan compilerViewDirectory timingEnabled downsweepGraph selectedExactScope@.
+  , pvPlan :: FilePath -> Bool -> ModuleName -> ModuleGraph -> Maybe ExactScope -> Ghc CompilePlan
+    -- ^ @pvPlan compilerViewDirectory timingEnabled targetName downsweepGraph selectedExactScope@.
   , pvGeneratedInstanceCheck :: Maybe GeneratedInstanceRecipe
   , pvSourceImportIntents :: [ImportIntent]
-  , pvTransformParsed :: HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
+  , pvTransformParsed :: ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
   }
 
 candidateManifestFor :: PipelineSelection result -> Maybe FilePath
@@ -1639,8 +1638,8 @@ runPipelineSessionSelectedWithProducer
   -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
 runPipelineSessionSelectedWithProducer producer selection retained purpose mscope path includes buildProductsDir = do
   variant <- case mscope of
-    Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
-    _ -> normalVariant purpose path
+    Just scope | isSessionScopeActive scope -> sessionVariant purpose scope
+    _ -> normalVariant purpose
   runCompile selection retained variant {pvCompilerProducer = producer} path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
@@ -2224,8 +2223,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           _ -> False) (mgModSummaries' modGraphDownsweep)) $
         liftIO $ ioError $ userError "fresh source collides with an admitted exact owner"
     modGraphRaw <- elideUnusedQuasiQuoteCodegen timing modGraphDownsweep
-    targetName <- liftIO (targetModuleNameFor path)
-    let targetOwner = mkModule (homeUnitAsUnit (hsc_home_unit previous)) targetName
+    targetOwner <- liftIO (targetModuleFor modGraphRaw path)
+    let targetName = moduleName targetOwner
         prepareTypedTarget summary env tcg = case typedPlanFor selection of
           Just typedPlan | ms_mod_name summary == targetName -> do
             prepare <- maybe (throwIO MissingSegmentPreparation) pure (typedPreparationFor selection)
@@ -2593,7 +2592,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       Nothing -> pure Map.empty
       Just manifest -> certifyModuleCandidates requestIdentity (forkExactContextWithPackageFacts packageFinder)
         compilerViewDirectory (compilerProducerFor variant) selectedExact
-        sourceFreeOwners capturedCandidates manifest modGraphRaw path
+        sourceFreeOwners capturedCandidates manifest modGraphRaw targetName
     let acceptedCandidates = if sourceReuseDisabled then Map.empty else normalCandidates
     -- One dependency-order decision combines current admitted originals with
     -- source memo validation. An offered name or a previous HPT entry cannot
@@ -2777,7 +2776,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     setupT1 <- monotonicTime
     endResourceTiming setupResources "compile" "ghc_setup"
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
-    observedPlan <- pvPlan variant compilerViewDirectory timing modGraphRaw selectedExact
+    observedPlan <- pvPlan variant compilerViewDirectory timing targetName modGraphRaw selectedExact
     -- Returned environments outlive this request's observer, just as the
     -- resident session does. Keep all plan-owned hooks, restoring only ours.
     let originalPlan = observedPlan
@@ -2878,7 +2877,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     (mkModuleGraph [node | node <- mgModSummaries' plannedLoadGraph
                       , mkNodeKey node /= targetKey], LoadAllTargets)
                 | otherwise -> (plannedLoadGraph, LoadDependenciesOf
-                    (mkModule (homeUnitId (hsc_home_unit previous)) targetName))
+                    (mkModule (toUnitId (moduleUnit targetOwner)) targetName))
               [] -> (plannedLoadGraph, LoadAllTargets)
           _ -> (plannedLoadGraph, LoadAllTargets)
     targetLoadFailure <- liftIO (newIORef Nothing)
@@ -2992,7 +2991,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 current <- getSession
                 parsed <- parseModule summaryC
                 let quotes = classifyQuasiQuoteUse parsed
-                transformed <- liftIO (pvTransformParsed variant current summaryC parsed)
+                transformed <- liftIO (pvTransformParsed variant targetName current summaryC parsed)
                 ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summaryC parsed
                   (typecheckNativeModuleWithDiagnostics current transformed)
                 liftIO (validateCompilationFamilies current tcg)
@@ -3248,8 +3247,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           moduleMsRef <- liftIO (newIORef (Map.empty :: Map.Map String Integer))
           interfaceMsRef <- liftIO (newIORef (0 :: Integer))
           moduleInterfaceMsRef <- liftIO (newIORef (Map.empty :: Map.Map String Integer))
-          targetModName' <- liftIO (targetModuleNameFor path)
-          let targetModName = moduleNameString targetModName'
+          let targetModName' = targetName
+              targetModName = moduleNameString targetModName'
               recordInterface modSum = \case
                 Nothing -> pure ()
                 Just ms -> do
@@ -3267,7 +3266,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   timeDetailPhase timing "typecheck" (moduleNameString (ms_mod_name modSum)) $ do
                     parsed <- parseModule modSum
                     let quotes = classifyQuasiQuoteUse parsed
-                    transformed <- liftIO (pvTransformParsed variant typecheckEnv modSum parsed)
+                    transformed <- liftIO (pvTransformParsed variant targetName typecheckEnv modSum parsed)
                     ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName typecheckEnv modSum parsed
                       (typecheckNativeModuleWithDiagnostics typecheckEnv transformed)
                     let flags = ms_hspp_opts modSum
@@ -3917,7 +3916,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     (moduleNameString (ms_mod_name summary)) $ do
                       parsed <- parseModule summary
                       let quotes = classifyQuasiQuoteUse parsed
-                      transformed <- liftIO (pvTransformParsed variant current summary parsed)
+                      transformed <- liftIO (pvTransformParsed variant targetName current summary parsed)
                       ((checkedEnvironment, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summary parsed
                         (typecheckNativeModuleWithDiagnostics current transformed)
                       let flags = ms_hspp_opts summary
@@ -4133,9 +4132,9 @@ data CandidateExecutionProofFailure
   deriving (Eq, Show)
 
 certifyModuleCandidates
-  :: Word64 -> (HscEnv -> IO HscEnv) -> FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> FilePath
+  :: Word64 -> (HscEnv -> IO HscEnv) -> FilePath -> Maybe String -> Maybe ExactScope -> Set.Set ModuleName -> Maybe (Either String CapturedCandidateManifest) -> FilePath -> ModuleGraph -> ModuleName
   -> Ghc (Map.Map ModuleName AdmittedSourceCandidate)
-certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expectedProducer exactScope sourceFreeOwners captured manifest graph targetPath = do
+certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expectedProducer exactScope sourceFreeOwners captured manifest graph targetName = do
   timing <- liftIO readTimingEnabled
   observations <- liftIO (newIORef Map.empty)
   let boundedDetail detail = case splitAt 192 detail of
@@ -4155,7 +4154,6 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
       pure Map.empty
     Right candidates -> do
       env <- getSession
-      targetName <- liftIO (targetModuleNameFor targetPath)
       current <- liftIO (dependencyEvidenceFor env ([], True) graph [])
       let summaries = Map.fromList
             [ (ms_mod_name summary, summary)
@@ -4949,8 +4947,8 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
   sessionT0 <- monotonicTime
   resources <- beginResourceTiming timing
   selected <- liftIO $ case mscope of
-    Just scope | isSessionScopeActive scope -> sessionVariant purpose scope path
-    _ -> normalVariant purpose path
+    Just scope | isSessionScopeActive scope -> sessionVariant purpose scope
+    _ -> normalVariant purpose
   let variant = selected {pvCompilerProducer=producer}
       policy = retainedContext retained
       admitted = sourceReuseAdmitted variant mscope
@@ -4965,11 +4963,9 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
   borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe)
     (universeEnvironment universe))
   initialEpoch <- liftIO (compilerInterpreterEpoch <$> readIORef (universeInterpreter universe))
-  targetName <- liftIO (targetModuleNameFor path)
-  let targetOwner = mkModule (homeUnitAsUnit (hsc_home_unit borrowed)) targetName
-      -- Only currently admitted original nodes become initially visible. Fresh
-      -- source nodes are installed after this graph's dependency validation.
-      originalNodes = Map.fromList [(owner,node)
+  -- Only currently admitted original nodes become initially visible. Fresh
+  -- source nodes are installed after this graph's dependency validation.
+  let originalNodes = Map.fromList [(owner,node)
         | scope <- maybe [] pure (pvExactScope variant)
         , (artifact,_,_) <- scopeInterfaces scope
         , let owner = mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
@@ -5005,6 +5001,7 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
       activateRecovery (universeInterpreter universe) (universePackageFinder universe) interpreterAttempt)
     policy incarnation timing requestIdentity sessionT0 resources variant path
   final <- getSession
+  targetOwner <- liftIO (targetModuleFor (hsc_mod_graph final) path)
   recovery <- liftIO (readIORef recoveryRef)
   let context = ActiveCompilerAttempt final recovery
       recoveryContext = RecoveryContext recoveryIdentity recovery
@@ -5326,13 +5323,12 @@ installPreparedInterface name hmi = do
 
 -- | Ordinary compilation has no value injection and selects prepared STG
 -- from the pre-optimization Core reference closure.
-normalVariant :: CompilePurpose -> FilePath -> IO PipelineVariant
-normalVariant purpose path = do
+normalVariant :: CompilePurpose -> IO PipelineVariant
+normalVariant purpose = do
   let effectivePurpose = originalPurpose purpose
   case effectivePurpose of
     HostActivationPreviewCompile {} -> fail "activation preview requires its sealed session admission"
     _ -> pure ()
-  targetModName' <- targetModuleNameFor path
   pure PipelineVariant
    { pvLabel = "runPipeline"
    , pvPurpose = purpose
@@ -5342,8 +5338,8 @@ normalVariant purpose path = do
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvSourceImportIntents = sourceImportIntents purpose
    , pvDownsweepExcludes = []
-   , pvTransformParsed = transformFor purpose targetModName'
-   , pvPlan = \_compilerViewDirectory _timing modGraphRaw _selectedExact -> pure CompilePlan
+   , pvTransformParsed = transformFor purpose
+   , pvPlan = \_compilerViewDirectory _timing _targetName modGraphRaw _selectedExact -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
       , cpAfterLoad = pure ()
         -- Consume load captures and finalize any deferred source in dependency
@@ -5831,9 +5827,8 @@ planExactExecutionLoad directory admitted interfaces checkedInterfaces targetNam
       liftIO (throwIO (ExecutionSourceUnsupported (ownerKey (ms_mod summary))))
   pure (ExactExecutionPlan ordinaryLoad modules freshProviders (mkModuleGraph moduleNodes))
 
-sessionVariant :: CompilePurpose -> SessionScope -> FilePath -> IO PipelineVariant
-sessionVariant purpose scope path = do
-  targetModName' <- targetModuleNameFor path
+sessionVariant :: CompilePurpose -> SessionScope -> IO PipelineVariant
+sessionVariant purpose scope = do
   completedValuesRef <- newIORef Nothing
   let effectivePurpose = originalPurpose purpose
       completedValues = case effectivePurpose of
@@ -5873,14 +5868,14 @@ sessionVariant purpose scope path = do
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
    , pvSourceImportIntents = sourceImportIntents purpose
    , pvDownsweepExcludes = excludedOwners
-   , pvTransformParsed = \env summary parsed -> do
+   , pvTransformParsed = \targetModName' env summary parsed -> do
        captured <- readIORef completedValuesRef
        transformed <- transformWithCompletedValues captured purpose targetModName' env summary parsed
        case scopeRequestTypes =<< exact of
          Just (recipe, signatures) | ms_mod_name summary == targetModName' ->
            thenNativeModule transformed (rewriteRequestTypes env recipe signatures)
          _ -> pure transformed
-   , pvPlan = \compilerViewDirectory timing modGraphRaw selectedExact -> do
+   , pvPlan = \compilerViewDirectory timing targetModName' modGraphRaw selectedExact -> do
       let directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
           importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
           -- Everything that (directly or transitively) imports an injected

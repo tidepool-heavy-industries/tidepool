@@ -35,6 +35,8 @@ tests = testGroup "cell-splitter"
   , testCase "quasiQuoteSourceReuseCompilation" quasiQuoteSourceReuseCompilation
   , testCase "pinnedQuasiQuoteSourceCompilation" pinnedQuasiQuoteSourceCompilation
   , testCase "untrackedCompileTimeCompilation" untrackedCompileTimeCompilation
+  , testCase "moduleHeaderProperties" moduleHeaderProperties
+  , testCase "moduleHeaderCompilation" moduleHeaderCompilation
   , testCase "generatedScaffoldIdentityChecks" generatedScaffoldIdentityChecks
   , testCase "checkedAdmissionChecks" checkedAdmissionChecks
   , testCase "cellProgramStateChecks" cellProgramStateChecks

@@ -402,6 +402,7 @@ runActivationPreviewMode parserFlags compiler caches request args path = do
     unless (shaHex originalBytes == previewTemplateSha256 admission)
       (fail "activation preview template differs from its protected offer")
     original <- either (fail . show) (pure . T.unpack) (TE.decodeUtf8' originalBytes)
+    selectedFlags <- templateParserFlags parserFlags original >>= either throwCellSplitError pure
     let outDir = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
         opaque = "(TidepoolScaffoldText.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)"
         basePurpose = HostActivationPreviewCompile (previewInputSignature admission)
@@ -409,9 +410,9 @@ runActivationPreviewMode parserFlags compiler caches request args path = do
           source <- replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body original
           let owner = generatedScaffoldModuleName
                 ["activation-renderer-scaffold-v1", previewOriginalContextDigest admission, source]
-          protected <- either fail pure (renameScaffoldModuleHeader owner original)
+          protected <- either fail pure (renameScaffoldModuleHeader selectedFlags owner original)
           named <- replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body protected
-          (_, moduleName', modulePath) <- writeSplicedModule outDir lastAttempt named
+          (_, moduleName', modulePath) <- writeSplicedModule selectedFlags outDir lastAttempt named
           recipe <- generatedActivationPreviewRecipe parserFlags (previewOriginalInterfaces admission)
             (previewOriginalTarget admission) protected named modulePath moduleName' >>= either fail pure
           pure (named, modulePath, GeneratedScaffoldCompile recipe basePurpose)
@@ -882,7 +883,7 @@ runTurnMode compilerScope caches request args path = do
         declarationSource <- declarationSourceWithTemplateFlags parserFlags tmplSrc turnSrc
           >>= either throwCellSplitError pure
         spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
-        (_spliced, modName, modulePath) <- writeSplicedModule outDir lastAttempt spliced
+        (_spliced, modName, modulePath) <- writeSplicedModule parserFlags outDir lastAttempt spliced
         items <- timePhase timing "declaration_binders" $ scopedRunGhc compilerScope (extractBindersNamedGhc modulePath (requestIncludes args) modName)
         let binders = if null (sbBinders sb)
                         then map (T.pack . exportItemName) items
@@ -914,16 +915,18 @@ runTurnMode compilerScope caches request args path = do
 -- @decl@ verdict, directly) and 'compileClassifiedTurn' (every other
 -- verdict, via its own @spliceInto@).
 writeSplicedModule
-  :: FilePath -> IORef (Maybe (FilePath, String)) -> String
+  :: DynFlags -> FilePath -> IORef (Maybe (FilePath, String)) -> String
   -> IO (String, String, FilePath)
-writeSplicedModule outDir lastAttempt spliced = do
-  let modName = fromMaybe "Input" (extractModuleName spliced)
+writeSplicedModule flags outDir lastAttempt spliced = do
   createDirectoryIfMissing True outDir
-  let modulePath = outDir </> modName ++ ".hs"
-  writeFile modulePath spliced
-  -- Retain the exact attempted source, but write the diagnostic copy
-  -- only on failure. Successful TurnOut already contains this source.
+  -- A refused header still retains the exact generated source for diagnostics.
+  -- Successful TurnOut already contains this source.
   writeIORef lastAttempt (Just (outDir </> "turn-attempt.hs", spliced))
+  effective <- templateParserFlags flags spliced >>= either throwCellSplitError pure
+  declared <- either fail pure (extractModuleName effective spliced)
+  let modName = fromMaybe "Main" declared
+      modulePath = outDir </> modName ++ ".hs"
+  writeFile modulePath spliced
   return (spliced, modName, modulePath)
 
 -- | Compile one non-declaration turn from authored syntax or an admitted
@@ -976,9 +979,8 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
         -- module under the name in its compiler-owned header. Non-declaration
         -- turns derive a stable owner from their semantic compile inputs;
         -- authored declaration templates retain their declared module name.
-        -- The scratch basename must match the header because
-        -- 'runPipelineSessionSelected' resolves the compiled module by
-        -- @capitalize (takeBaseName path)@ (GhcPipeline.hs).
+        -- The scratch path uses the generated header's identity; compilation
+        -- selects the target's GHC summary by that source path.
         spliceInto :: FilePath -> IO (String, String, RenderedProtectedTemplateImports, String, FilePath)
         spliceInto tmplFile = do
           originalTemplate <- readFile tmplFile
@@ -1049,7 +1051,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
                           (["turn-scaffold-owner-v1", "scope"] ++ semanticScopeFields
                             ++ ["template", originalTemplate, "rendered", baseSource
                               ] ++ includeFields ++ authorityFields ++ retainedFields)
-                    renamed <- either fail pure (renameScaffoldModuleHeader owner originalTemplate)
+                    renamed <- either fail pure (renameScaffoldModuleHeader selectedFlags owner originalTemplate)
                     protectedOccurrences <- either fail pure
                       (captureProtectedTemplateImports selectedFlags renamed)
                     renamedTemplate <- prepareTemplate renamed
@@ -1058,7 +1060,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
                       (renderProtectedTemplateImports linePrefix protectedOccurrences)
                     pure (renamed, finalSource, renderedOccurrences)
           (finalProtected, finalSource, finalOccurrences) <- renderNamedRecipe
-          finalOutput <- writeSplicedModule outDir lastAttempt finalSource
+          finalOutput <- writeSplicedModule selectedFlags outDir lastAttempt finalSource
           let (_,moduleName',modulePath) = finalOutput
           pure (finalProtected, finalSource, finalOccurrences, moduleName',modulePath)
     -- Four-shape selection (protocol note, "the verdict space has four
@@ -1139,7 +1141,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
           return (TBind [T.pack observation] variant bound asksSites wrapped)
         Nothing -> return (TExpr variant asksSites wrapped)
       SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
-    owner <- maybe (fail "compiled turn has no module owner") pure (extractModuleName spliced)
+    let owner = moduleNameString (moduleName (tcg_mod (prTargetTcGblEnv result)))
     pure (CompiledTurnOutput turn prepared originalProducts owner)
 
 -- | Block classify mode (@--classify@):
@@ -1225,10 +1227,12 @@ runLegacyCellMode parserFlags compiler caches request args cellPath = do
       (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags checkingTemplate)
     initialPlan <- analyzeCellWithFlags parserFlags template cellSource >>= either throwCellSplitError pure
     initialSource <- either fail pure (renderCellCheckSource checkingTemplate initialPlan)
+    effectiveFlags <- templateParserFlags parserFlags initialSource >>= either throwCellSplitError pure
+    declaredModule <- either fail pure (extractModuleName effectiveFlags initialSource)
     let outDir = fromMaybe
           (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
           (requestOutDir args)
-        moduleName' = fromMaybe "CellCheck" (extractModuleName initialSource)
+        moduleName' = fromMaybe "Main" declaredModule
         modulePath = outDir </> moduleName' ++ ".hs"
         scope = if hasSessionScope args
           then Just (scopeFromWorkerRequest args)
@@ -1415,7 +1419,9 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
                 let owner = generatedScaffoldModuleName ["typed-segment-owner-v1",
                       scopeRequestSha256 scope, checkedAdmissionDigest admission,
                       preparedTypedSegmentSource base]
-                named <- either fail pure (renameScaffoldModuleHeader owner checkingTemplate)
+                effectiveFlags <- templateParserFlags parserFlags (preparedTypedSegmentSource base)
+                  >>= either throwCellSplitError pure
+                named <- either fail pure (renameScaffoldModuleHeader effectiveFlags owner checkingTemplate)
                 authored <- either fail pure (prepareTypedSegmentSource named plan
                   (plannedReservationDigest planned) slots)
                 unless (preparedTypedSegmentPlan base == preparedTypedSegmentPlan authored)
