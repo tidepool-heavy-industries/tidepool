@@ -40,6 +40,14 @@ pub struct ExactDeclarationContext {
     original_instance_environment: OriginalInstanceEnvironment,
 }
 
+/// Value and lexical roots issue compiler selection; additional native carriers
+/// remain independently owned byte custody for future execution.
+pub(crate) struct RetainedValueSourceSurface {
+    pub(crate) artifacts: ArtifactView,
+    pub(crate) compiler_artifacts: ArtifactView,
+    pub(crate) lexical: Vec<ExactLexicalNode>,
+}
+
 /// Only the original compiler output proof can establish complete instance
 /// visibility. Type projections and generic declaration contexts have none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1682,7 +1690,7 @@ impl ProgramSourceSupport {
         compiler_projection: CompilerInputProjection,
         imports: impl IntoIterator<Item = (ExactModuleIdentity, Vec<ExactModuleIdentity>)>,
     ) -> Result<Self, CompileError> {
-        let compiler_projection = compiler_projection.for_program_support(&artifacts);
+        let compiler_projection = compiler_projection.for_selected_support(&artifacts);
         let compiler_projection = match previous {
             Some(previous) => previous.compiler_projection.merge(&compiler_projection)?,
             None => compiler_projection,
@@ -4943,7 +4951,7 @@ impl ExactDeclarationContext {
         for value in values {
             let interface = value.certified_interface();
             self.admit_producer(interface.interface().toolchain_identity_sha256())?;
-            self.inventory = self.inventory.merge(value.artifact_view())?;
+            self.inventory = self.inventory.merge(value.compiler_artifact_view())?;
             self.compiler_projection = self
                 .compiler_projection
                 .merge(value.compiler_input_projection())?;
@@ -4966,7 +4974,7 @@ impl ExactDeclarationContext {
         &self,
         value: &ArtifactView,
         support: &[ExactLexicalNode],
-    ) -> Result<(ArtifactView, Vec<ExactLexicalNode>), CompileError> {
+    ) -> Result<RetainedValueSourceSurface, CompileError> {
         let retained = value
             .descriptors()
             .into_iter()
@@ -5008,24 +5016,29 @@ impl ExactDeclarationContext {
                 "retained source surface lacks its exact artifact owner",
             ));
         }
-        let view = self.artifact_view().select_roots(
-            value
-                .root_entries()
-                .iter()
-                .map(|entry| entry.descriptor.id)
-                .chain(entries.values().map(|entry| entry.descriptor.id))
-                // Original executable availability is retained independently
-                // of the lexical surface above. Type-only projection remains
-                // an explicit operation that removes native authority.
+        let compiler_roots = value
+            .root_entries()
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .chain(entries.values().map(|entry| entry.descriptor.id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let compiler_artifacts = self.artifact_view().select_roots(compiler_roots.clone())?;
+        let artifacts = self.artifact_view().select_roots(
+            compiler_roots
+                .into_iter()
                 .chain(self.artifact_view().entries().iter().filter_map(|entry| {
                     matches!(entry.payload, ArtifactPayload::Original(_))
                         .then_some(entry.descriptor.id)
                 }))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
                 .collect(),
         )?;
-        Ok((view, lexical))
+        Ok(RetainedValueSourceSurface {
+            artifacts,
+            compiler_artifacts,
+            lexical,
+        })
     }
 
     pub(crate) fn extend_program_value_interface(
@@ -8669,6 +8682,76 @@ mod tests {
         ));
     }
 
+    fn check_retained_value_compiler_selection(old_epoch: u8, new_epoch: u8, demands_epoch: bool) {
+        let (initial, _) = metadata_fixture();
+        let epoch = |version: u8| {
+            crate::certified_products::fixture_finalized_product(
+                support_product_with_interface("fixture", "Epoch", vec![version; 16]),
+                initial.producer,
+            )
+        };
+        let old = initial
+            .as_ref()
+            .clone()
+            .extend_checked_original_products(initial.producer, &[epoch(old_epoch)])
+            .unwrap();
+        let child = initial
+            .as_ref()
+            .clone()
+            .extend_checked_original_products(initial.producer, &[epoch(new_epoch)])
+            .unwrap();
+        let selected = old
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity(
+                "fixture",
+                if demands_epoch { "Epoch" } else { "Value" },
+            )))
+            .unwrap();
+        let root = selected.values().next().unwrap().descriptor.id;
+        let value = old.artifact_view().select_roots(vec![root]).unwrap();
+        let surface = old.retain_value_source_surface(&value, &[]).unwrap();
+        assert!(surface
+            .artifacts
+            .descriptors()
+            .iter()
+            .any(|row| row.owner == identity("fixture", "Epoch")
+                && row.kind == ArtifactKind::OriginalModule));
+        assert_eq!(
+            surface
+                .compiler_artifacts
+                .descriptors()
+                .iter()
+                .any(|row| row.owner == identity("fixture", "Epoch")),
+            demands_epoch
+        );
+        let attached = child.artifact_view().merge(&surface.compiler_artifacts);
+        assert_eq!(attached.is_ok(), !demands_epoch || old_epoch == new_epoch);
+        if old_epoch != new_epoch {
+            assert!(child.artifact_view().merge(&surface.artifacts).is_err());
+        }
+        // Retiring the issuing source cannot revoke byte custody owned by the value.
+        let old_ids = surface.artifacts.artifact_ids();
+        drop(old);
+        assert_eq!(surface.artifacts.artifact_ids(), old_ids);
+    }
+
+    #[test]
+    fn retained_value_compiler_selection_separates_unused_native_epochs() {
+        check_retained_value_compiler_selection(1, 2, false);
+        check_retained_value_compiler_selection(1, 2, true);
+        check_retained_value_compiler_selection(1, 1, true);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn retained_value_compiler_selection_epoch_history(
+            old in 0u8..8, new in 0u8..8, demands_epoch in proptest::bool::ANY
+        ) {
+            check_retained_value_compiler_selection(old, new, demands_epoch);
+        }
+    }
+
     #[test]
     fn retained_value_keeps_nonlexical_originals_and_projected_file_custody() {
         let (initial, producer) = metadata_fixture();
@@ -8711,7 +8794,11 @@ mod tests {
                 value_entry[&identity("fixture", "Value")].descriptor.id,
             ])
             .unwrap();
-        let (retained, lexical) = context.retain_value_source_surface(&value, &[]).unwrap();
+        let RetainedValueSourceSurface {
+            artifacts: retained,
+            lexical,
+            ..
+        } = context.retain_value_source_surface(&value, &[]).unwrap();
         assert!(lexical
             .iter()
             .all(|node| node.owner.module != "HiddenNative"));
@@ -9498,7 +9585,7 @@ mod tests {
                 },
             ]
         );
-        let (_, lexical) = effective
+        let RetainedValueSourceSurface { lexical, .. } = effective
             .retain_value_source_surface(
                 &request.program_support.as_ref().unwrap().artifacts,
                 request.program_source_lexical(),
@@ -10592,7 +10679,11 @@ mod tests {
         let receipt = import_receipt(directory.path(), &request, "Hidden");
         assert!(request.validate_receipt(&receipt, None, &context).is_err());
         assert!(context.lexical_graph().is_empty());
-        let (retained, lexical) = context
+        let RetainedValueSourceSurface {
+            artifacts: retained,
+            lexical,
+            ..
+        } = context
             .retain_value_source_surface(&request.program_support.as_ref().unwrap().artifacts, &[])
             .unwrap();
         assert!(support
@@ -10638,7 +10729,11 @@ mod tests {
             .artifact_view()
             .select_roots(vec![entries[&owner].descriptor.id])
             .unwrap();
-        let (view, lexical) = context
+        let RetainedValueSourceSurface {
+            artifacts: view,
+            lexical,
+            ..
+        } = context
             .retain_value_source_surface(&value, request.program_source_lexical())
             .unwrap();
         assert!(lexical
@@ -10687,7 +10782,11 @@ mod tests {
             owner: identity("fixture", "LaterSupport"),
             imports: vec![],
         });
-        let (earlier_view, earlier_lexical) = later
+        let RetainedValueSourceSurface {
+            artifacts: earlier_view,
+            lexical: earlier_lexical,
+            ..
+        } = later
             .retain_value_source_surface(&value, &later_support)
             .unwrap();
         assert!(earlier_view
@@ -10739,7 +10838,7 @@ mod tests {
             following
                 .retain_value_source_surface(&value, &[])
                 .unwrap()
-                .1,
+                .lexical,
             lexical
         );
         let conflict = [ExactLexicalNode {
@@ -11039,7 +11138,7 @@ mod tests {
             context
                 .retain_value_source_surface(native, request.program_source_lexical())
                 .unwrap()
-                .1,
+                .lexical,
             request.program_source_lexical()
         );
         let current = request

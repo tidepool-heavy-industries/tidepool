@@ -1197,7 +1197,8 @@ impl CapturedValueInterface {
     }
 }
 
-/// An original checked output always owns its certification and selected closure.
+/// An original checked output owns its certification, selected compiler closure
+/// and independent native byte custody.
 /// The directory lease preserves its immutable compiler input path after the cell drops.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CheckedValueArtifact {
@@ -1205,6 +1206,8 @@ pub struct CheckedValueArtifact {
     authority: ([u8; 32], [u8; 32]),
     certified_interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
     artifact_view: crate::artifact_inventory::ArtifactView,
+    // Exact type/source selection; full native custody above grants no compiler role.
+    compiler_artifact_view: crate::artifact_inventory::ArtifactView,
     compiler_projection: crate::artifact_inventory::CompilerInputProjection,
     source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
     template_imports: Option<Arc<crate::declaration_context::RetainedTemplateImports>>,
@@ -1636,6 +1639,7 @@ impl HostBindingInterfaceOffer {
                 .compiler_input_projection()
                 .interface_only()
                 .within_view(&artifact_view),
+            compiler_artifact_view: artifact_view.clone(),
             artifact_view,
             source_lexical: Vec::new(),
             template_imports: None,
@@ -1977,8 +1981,11 @@ impl CheckedValueInputs {
         let value_view = context
             .artifact_view()
             .select_roots(vec![certificate.artifact_id()])?;
-        let (artifact_view, source_lexical) =
-            context.retain_value_source_surface(&value_view, source_lexical)?;
+        let crate::declaration_context::RetainedValueSourceSurface {
+            artifacts: artifact_view,
+            compiler_artifacts: compiler_artifact_view,
+            lexical: source_lexical,
+        } = context.retain_value_source_surface(&value_view, source_lexical)?;
         let templates = cell.specification.template_sources();
         let template_imports = crate::declaration_context::RetainedTemplateImports::capture(
             original_execution,
@@ -1988,6 +1995,10 @@ impl CheckedValueInputs {
             Some(retained) => retained.retain_in(&artifact_view)?,
             None => artifact_view,
         };
+        let compiler_artifact_view = match &template_imports {
+            Some(retained) => retained.retain_in(&compiler_artifact_view)?,
+            None => compiler_artifact_view,
+        };
         let compiler_projection = context
             .compiler_input_projection()
             .for_source_owners(
@@ -1996,13 +2007,13 @@ impl CheckedValueInputs {
                     .map(|node| node.owner.clone())
                     .collect(),
             )
-            .within_view(&artifact_view)
+            .for_selected_support(&compiler_artifact_view)
             .merge(
                 &crate::artifact_inventory::CompilerInputProjection::from_interface_view(
-                    &artifact_view,
+                    &compiler_artifact_view,
                 )?,
             )?;
-        compiler_projection.validate(&artifact_view)?;
+        compiler_projection.validate(&compiler_artifact_view)?;
         self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
         self.output_bytes_hashed
             .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -2017,6 +2028,7 @@ impl CheckedValueInputs {
             authority: (cell.producer, cell.receipt_digest),
             certified_interface: certificate,
             artifact_view,
+            compiler_artifact_view,
             compiler_projection,
             source_lexical,
             template_imports,
@@ -2043,6 +2055,9 @@ impl CheckedValueArtifact {
     }
     pub(crate) fn artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
         &self.artifact_view
+    }
+    pub(crate) fn compiler_artifact_view(&self) -> &crate::artifact_inventory::ArtifactView {
+        &self.compiler_artifact_view
     }
     pub(crate) fn source_lexical(&self) -> &[crate::declaration_join::ExactLexicalNode] {
         &self.source_lexical
@@ -4869,6 +4884,103 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn captured_value_reattachment_preserves_custody_without_selecting_unused_epoch() {
+        use super::*;
+        let producer = [2; 32];
+        let epoch = |version| {
+            crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture_with_interface(
+                    "Epoch",
+                    vec![(7, vec![])],
+                    version,
+                    &BTreeMap::new(),
+                    vec![version; 16],
+                ),
+                producer,
+            )
+        };
+        let context = |version| {
+            Arc::new(
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_checked_original_products(producer, &[epoch(version)])
+                    .unwrap(),
+            )
+        };
+        let original = context(1);
+        let child = context(2);
+        let inputs = CheckedValueInputs::capture_raw(vec![]).unwrap();
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(1));
+        let path = inputs.root().join(owner.relative_hi_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = b"opaque checked package-only value interface";
+        std::fs::write(&path, bytes).unwrap();
+        let packages = array([
+            text("TPPKGROOTS"),
+            text("2"),
+            array([text("main"), text(owner.module_name()), text(hash(bytes))]),
+            array([]),
+            array([]),
+        ]);
+        let mut encoded = vec![];
+        ciborium::ser::into_writer(&packages, &mut encoded).unwrap();
+        std::fs::write(path.with_extension("hi.packages"), encoded).unwrap();
+        let mut encoded = vec![];
+        ciborium::ser::into_writer(&array([]), &mut encoded).unwrap();
+        std::fs::write(path.with_extension("hi.requirements"), encoded).unwrap();
+        let cell = ExactCheckedCell {
+            specification: CheckedCellSpecification {
+                admission_digest: [3; 32],
+                cell_source: String::new(),
+                template_source: String::new(),
+                turn_templates: vec![],
+                injected_modules: vec![],
+                reserved_declaration_modules: vec![],
+            },
+            producer,
+            context: original.semantic_sha256(),
+            declaration_context: original.clone(),
+            retained_projections: vec![],
+            receipt_digest: [4; 32],
+            checked_source: String::new(),
+            evidence: vec![],
+            observations: vec![],
+            items: vec![],
+            include: vec![],
+            planned_declaration: None,
+            planned_declarations: BTreeMap::new(),
+            typed_segments: vec![],
+            value_inputs: inputs.clone(),
+        };
+        let captured = inputs
+            .capture_output(1, &cell, &original, &[], &original)
+            .unwrap();
+        let epoch_ids = original.artifact_view().artifact_ids();
+        assert!(epoch_ids
+            .iter()
+            .all(|id| captured.artifact_view().artifact_ids().contains(id)));
+        let attached = child
+            .as_ref()
+            .clone()
+            .extend_retained_value_artifacts(std::slice::from_ref(&captured))
+            .unwrap();
+        assert!(attached
+            .artifact_view()
+            .descriptors()
+            .iter()
+            .any(|row| row.owner.module == owner.module_name()));
+        assert!(captured
+            .compiler_input_projection()
+            .roles()
+            .iter()
+            .all(|role| !epoch_ids.contains(&role.interface())));
+        let custody = captured.artifact_view().artifact_ids();
+        drop(cell);
+        drop(original);
+        assert_eq!(captured.artifact_view().artifact_ids(), custody);
+    }
 
     fn signature_codec_fixture() -> ciborium::Value {
         use super::*;

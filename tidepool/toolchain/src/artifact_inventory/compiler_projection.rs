@@ -134,10 +134,10 @@ impl CompilerInputProjection {
         }
     }
 
-    /// A transient source-support view owns only its exact retained carriers.
+    /// A transient source or value support view owns only its selected carriers.
     /// Persistent published policy stays in the parent declaration namespace;
     /// a canonical dependency here does not offer its absent implementation.
-    pub(crate) fn for_program_support(&self, view: &ArtifactView) -> Self {
+    pub(crate) fn for_selected_support(&self, view: &ArtifactView) -> Self {
         let ids = view.artifact_ids().into_iter().collect::<BTreeSet<_>>();
         Self {
             roles: self
