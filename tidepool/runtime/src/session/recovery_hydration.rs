@@ -822,11 +822,11 @@ mod lazy_tests {
         root: &Path,
         generation: u64,
     ) -> serde_json::Value {
-        let imports = format!("import {}", lexical_root.module);
+        let imports = &lexical_root.module;
         let templates = [TurnTemplate {
             kind: TemplateSelector::Expr,
             source: assemble_expression_module(
-                &insert_preamble_imports(effects.preamble(), &imports),
+                &insert_preamble_imports(effects.preamble(), imports),
                 "__result",
                 effects.row(),
                 "{{TURN}}",
