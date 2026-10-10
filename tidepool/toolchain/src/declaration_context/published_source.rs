@@ -656,27 +656,49 @@ mod tests {
                 published.semantic_sha256(),
                 "publication keeps its original selection independently of later demand"
             );
-            let recovery_inventory = RecoveredArtifactInventory {
-                producer,
-                entries: published
-                    .artifact_view()
-                    .entries()
-                    .into_iter()
-                    .map(|entry| (entry.descriptor.id, entry))
-                    .collect(),
-                recorded_inventory: true,
-                bindings: BTreeSet::new(),
-                binding_edges: Vec::new(),
-                interfaces: published.artifact_view().interface_dependencies(),
-            };
+            let recovery_scratch = tempfile::tempdir().unwrap();
+            let (published_products, published_interfaces) = published
+                .materialize_recovery_products_and_interfaces(recovery_scratch.path())
+                .unwrap();
+            let selection: crate::artifact_inventory::ArtifactGraphSelection =
+                serde_json::from_slice(
+                    &serde_json::to_vec(&published.artifact_view().capture_graph_selection())
+                        .unwrap(),
+                )
+                .unwrap();
+            let edges: Vec<_> = serde_json::from_slice(
+                &serde_json::to_vec(&published.artifact_view().binding_dependencies()).unwrap(),
+            )
+            .unwrap();
+            let recovery_inventory = RecoveredArtifactInventory::capture_bound(
+                recovery_scratch.path(),
+                &published_products,
+                &published_interfaces,
+                &[],
+                &[],
+                &published.artifact_view().descriptors(),
+                &selection.bindings,
+                &edges,
+            )
+            .unwrap();
+            assert!(
+                recovery_inventory
+                    .context_with_published_roles(
+                        &published.artifact_view().artifact_ids(),
+                        &published
+                            .artifact_view()
+                            .selected_native_groups()
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                        &published.compiler_input_roles(),
+                        published.lexical.clone(),
+                    )
+                    .is_err(),
+                "flat recovery cannot recreate an issuer's exact bound selection"
+            );
             let recovered = recovery_inventory
-                .context_with_published_roles(
-                    &published.artifact_view().artifact_ids(),
-                    &published
-                        .artifact_view()
-                        .selected_native_groups()
-                        .into_iter()
-                        .collect::<Vec<_>>(),
+                .context_with_graph_selection(
+                    &selection,
                     &published.compiler_input_roles(),
                     published.lexical.clone(),
                 )
@@ -719,22 +741,28 @@ mod tests {
                     &serde_json::to_vec(&snapshot.compiler_input_roles()).unwrap(),
                 )
                 .unwrap();
-                let durable = ExactDeclarationContext::capture_recovery_with_inventory(
+                let snapshot_selection: crate::artifact_inventory::ArtifactGraphSelection =
+                    serde_json::from_slice(
+                        &serde_json::to_vec(&snapshot.artifact_view().capture_graph_selection())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                let snapshot_edges: Vec<_> = serde_json::from_slice(
+                    &serde_json::to_vec(&snapshot.artifact_view().binding_dependencies()).unwrap(),
+                )
+                .unwrap();
+                let durable = RecoveredArtifactInventory::capture_bound(
                     scratch.path(),
                     &products,
                     &interfaces,
                     &[],
                     &[],
                     &snapshot.artifact_view().descriptors(),
-                    &snapshot.artifact_view().interface_dependencies(),
-                    &snapshot
-                        .artifact_view()
-                        .selected_native_groups()
-                        .into_iter()
-                        .collect::<Vec<_>>(),
-                    &roles,
-                    snapshot.lexical.clone(),
+                    &snapshot_selection.bindings,
+                    &snapshot_edges,
                 )
+                .unwrap()
+                .context_with_graph_selection(&snapshot_selection, &roles, snapshot.lexical.clone())
                 .unwrap();
                 assert_eq!(durable.artifact_view(), snapshot.artifact_view());
                 assert_eq!(
@@ -759,14 +787,8 @@ mod tests {
             missing.entries.remove(&old.descriptor.id);
             assert!(
                 missing
-                    .context_with_published_roles(
-                        &published
-                            .artifact_view()
-                            .artifact_ids()
-                            .into_iter()
-                            .filter(|id| *id != old.descriptor.id)
-                            .collect::<Vec<_>>(),
-                        &[early],
+                    .context_with_graph_selection(
+                        &selection,
                         &published.compiler_input_roles(),
                         published.lexical.clone(),
                     )

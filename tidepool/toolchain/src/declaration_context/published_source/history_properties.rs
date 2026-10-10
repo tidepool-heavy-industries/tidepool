@@ -118,27 +118,69 @@ fn restored(
     roles: &[CompilerInputRole],
 ) -> Result<ExactDeclarationContext, CompileError> {
     let view = context.artifact_view();
-    RecoveredArtifactInventory {
-        producer: context.producer,
-        entries: view
-            .entries()
-            .into_iter()
-            .map(|entry| (entry.descriptor.id, entry))
-            .collect(),
-        recorded_inventory: true,
-        bindings: BTreeSet::new(),
-        binding_edges: Vec::new(),
-        interfaces: view.interface_dependencies(),
+    let scratch = tempfile::tempdir().unwrap();
+    let (products, interfaces) = context
+        .materialize_recovery_products_and_interfaces(scratch.path())
+        .unwrap();
+    let selection: crate::artifact_inventory::ArtifactGraphSelection =
+        serde_json::from_slice(&serde_json::to_vec(&view.capture_graph_selection()).unwrap())
+            .unwrap();
+    let edges: Vec<_> =
+        serde_json::from_slice(&serde_json::to_vec(&view.binding_dependencies()).unwrap()).unwrap();
+    let bindings = selection.bindings.iter().copied().collect::<BTreeSet<_>>();
+    let artifacts = bindings
+        .iter()
+        .map(|binding| binding.artifact)
+        .collect::<BTreeSet<_>>();
+    let payloads = view
+        .descriptors()
+        .iter()
+        .map(|row| row.id)
+        .collect::<BTreeSet<_>>();
+    let edge_count = edges.iter().collect::<BTreeSet<_>>().len();
+    let missing = edges
+        .iter()
+        .flat_map(|(from, to, _)| [*from, *to])
+        .filter(|node| {
+            let binding = match node {
+                crate::artifact_inventory::ArtifactBindingNode::Artifact(binding) => *binding,
+                crate::artifact_inventory::ArtifactBindingNode::Group(group) => group.binding,
+            };
+            !bindings.contains(&binding)
+        })
+        .collect::<BTreeSet<_>>();
+    if bindings.len() != selection.bindings.len()
+        || artifacts != payloads
+        || edge_count != edges.len()
+        || !missing.is_empty()
+    {
+        static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "bound recovery fixture endpoint census: {}",
+                serde_json::json!({
+                    "bindings": selection.bindings.len(), "unique_bindings": bindings.len(),
+                    "artifact_ids": artifacts.len(), "authenticated_payload_ids": payloads.len(),
+                    "extra_artifact_ids": artifacts.difference(&payloads).collect::<Vec<_>>(),
+                    "missing_artifact_ids": payloads.difference(&artifacts).collect::<Vec<_>>(),
+                    "edges": edges.len(), "unique_edges": edge_count,
+                    "missing_endpoints": missing, "selection": selection, "binding_edges": edges,
+                })
+            );
+        }
     }
-    .context_with_published_roles(
-        &view.artifact_ids(),
-        &view
-            .selected_native_groups()
-            .into_iter()
-            .collect::<Vec<_>>(),
-        roles,
-        context.lexical.clone(),
+    RecoveredArtifactInventory::capture_bound(
+        scratch.path(),
+        &products,
+        &interfaces,
+        &[],
+        &[],
+        &view.descriptors(),
+        &selection.bindings,
+        &edges,
     )
+    .unwrap()
+    .context_with_graph_selection(&selection, roles, context.lexical.clone())
 }
 
 fn property_config() -> proptest::test_runner::Config {
