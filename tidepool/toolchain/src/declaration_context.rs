@@ -11805,6 +11805,24 @@ mod tests {
         assert!(decoded.retained_generations().is_empty());
         std::fs::write(root.join("worker-request.cbor"), request_bytes).unwrap();
         let compiler_identity = endpoint.identity().clone();
+        let envelope = read_receipt(&request.manifest);
+        let acquisition = envelope.as_array().unwrap()[10].as_array().unwrap();
+        assert_eq!(acquisition[0].as_text(), Some("continue-originals"));
+        let mut changed_aliases = BTreeSet::new();
+        for image in acquisition[2].as_array().unwrap() {
+            for part in image.as_array().unwrap()[4].as_array().unwrap() {
+                let part = part.as_array().unwrap();
+                let path = PathBuf::from(part[1].as_text().unwrap());
+                if changed_aliases.insert(path.clone()) {
+                    if changed_aliases.len() % 2 == 0 {
+                        std::fs::remove_file(path).unwrap();
+                    } else {
+                        std::fs::write(path, b"changed after owned capture").unwrap();
+                    }
+                }
+            }
+        }
+        assert!(changed_aliases.len() >= 6, "actual owned request covers companion payloads");
         let run = endpoint.execute(&command).unwrap();
         std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
         std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();

@@ -65,7 +65,7 @@ import Text.Read (readMaybe)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
-import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
+import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -634,26 +634,6 @@ validateInputClosure producer inputs products = do
       [selected] -> validateNativeSelection selected full native
       _ -> fail "admitted native census lacks its unique scope product"
   where firstOfThree (value,_,_) = value
-
-revalidateScopeInputs :: FileObservations -> AdmittedScopeInputs -> IO ()
-revalidateScopeInputs observations (AdmittedScopeInputs _ inputs _ census _) = do
-  forM_ (Map.elems inputs) $ \(ScopeInterfaceInput (iface,packages,packagesSha) evidence) -> do
-    let interfaceBound = case evidence of
-          ModuleInterfaceEvidence{} -> Just (32 * 1024 * 1024)
-          LocalNativeDeclarationEvidence{} -> Just (32 * 1024 * 1024)
-          _ -> Nothing
-    observeSeal observations (exactPath iface) interfaceBound (exactSha256 iface)
-      "canonical module interface or package imports changed"
-    observeSeal observations packages (Just (4 * 1024 * 1024)) packagesSha
-      "canonical module interface or package imports changed"
-    case evidence of
-      ModuleInterfaceEvidence proof -> observeSeal observations (canonicalCertificatePath proof)
-        (Just (4 * 1024 * 1024)) (canonicalCertificateSha256 proof) "canonical module certificate changed"
-      LocalNativeDeclarationEvidence native ->
-        revalidateLocalFinalizedAdmissionWith observations (localNativeProof native) >>= either fail pure
-      _ -> pure ()
-  forM_ (Map.elems census) $ \(AdmittedOriginalCensus path sha _ _) ->
-    observeSeal observations path (Just (32 * 1024 * 1024)) sha "original native certification changed"
 
 observeSeal :: FileObservations -> FilePath -> Maybe Int -> String -> String -> IO ()
 observeSeal observations path bound expected reason = do
@@ -1730,10 +1710,7 @@ revalidateExactScopesAtWithOutputs reason env scopes outputs = do
           outcome <- try (forM_ scopes $ \scope -> do
             observeSeal observations (scopeManifestPath scope) (Just (4 * 1024 * 1024))
               (scopeRequestSha256 scope) "exact scope request changed"
-            forM_ (scopeCapturedInputs scope) $ \inputs ->
-              revalidateRequestInputsWith observations inputs >>= either fail pure
             validateInputClosure (scopeProducerSha256 scope) (scopeInputs scope) (scopeProducts scope)
-            revalidateScopeInputs observations (scopeInputs scope)
             validatePreviewOriginalTarget scope (scopeInterfaceEvidence scope)
             let AdmittedScopeInputs _ _ roots _ _ = scopeInputs scope
             revalidateAdmittedPackageImports observations env roots >>= either fail pure
@@ -1741,8 +1718,7 @@ revalidateExactScopesAtWithOutputs reason env scopes outputs = do
             -- Preserve the proof marker; observed_file alone counts actual reads.
             emitCount timing ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 scope)
               (fromIntegral (observedByteCount manifest))
-            mapM_ (checkProduct observations) (scopeProducts scope)
-            mapM_ (checkValue observations) (scopeValueInterfaces scope))
+            pure ())
             :: IO (Either IOException ())
           outputOutcome <- try (forM_ outputs $ \(path,sha,bound) ->
             observeSeal observations path bound sha "fresh exact output changed before publication")

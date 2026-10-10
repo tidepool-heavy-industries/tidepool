@@ -8446,6 +8446,46 @@ mod completed_response_tests {
     }
 
     #[test]
+    fn owned_candidate_request_uses_captured_companions_after_alias_drift() {
+        let fixture = CandidateFixture::new();
+        let root = fixture._directory.path();
+        let command = ExtractCmd::new().unwrap();
+        let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(command.bind().unwrap()).unwrap();
+        let output = root.join("captured-candidate-output");
+        std::fs::create_dir(&output).unwrap();
+        let offer = ModuleCandidateOffer::select_admitted(&endpoint, &fixture.include, &output).unwrap();
+        let selected = offer.selected.as_ref().expect("production candidate owner");
+        let envelope: Value = ciborium::de::from_reader(
+            std::fs::read(&selected.manifest_path).unwrap().as_slice()).unwrap();
+        let acquisition = envelope.as_array().unwrap()[7].as_array().unwrap();
+        assert_eq!(acquisition[0].as_text(), Some("continue-originals"));
+        let mut aliases = BTreeSet::new();
+        for image in acquisition[2].as_array().unwrap() {
+            for part in image.as_array().unwrap()[4].as_array().unwrap() {
+                let path = PathBuf::from(part.as_array().unwrap()[1].as_text().unwrap());
+                if aliases.insert(path.clone()) {
+                    if aliases.len() % 2 == 0 { std::fs::remove_file(path).unwrap(); }
+                    else { std::fs::write(path, b"changed after candidate capture").unwrap(); }
+                }
+            }
+        }
+        assert!(aliases.len() >= 5);
+        let input = root.join("ResponseConsumer.hs");
+        std::fs::write(&input, CONSUMER).unwrap();
+        let mut command = ExtractCmd::new().unwrap();
+        command.input(input).target("result").includes(&fixture.include).output_dir(&output);
+        offer.apply_to(&mut command).unwrap();
+        let run = endpoint.execute(&command).unwrap();
+        diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
+            .expect("cold worker consumes captured candidate companions");
+        let receipt = certified_products::decode_receipt_in(
+            &std::fs::read(output.join("certified-products.cbor")).unwrap(),Some(&output)).unwrap();
+        assert!(receipt.modules.iter().any(|module| module.module == "ResponseDependency"
+            && module.origin == certified_products::ProductOrigin::Cached),
+            "alias drift cannot silently fall back to source recompilation");
+    }
+
+    #[test]
     fn offered_candidates_do_not_replay_source_failure() {
         let fixture = CandidateFixture::new();
         let mut completed_requests = 0;
