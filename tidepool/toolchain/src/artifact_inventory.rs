@@ -4105,6 +4105,44 @@ impl ArtifactView {
             .fetch_add(entries.len() as u64, Ordering::Relaxed);
         entries
     }
+    /// Materialize requested selected artifacts without copying the retained
+    /// inventory. The existing read projection preserves issuing overrides.
+    pub(crate) fn entries_for_artifacts(
+        &self,
+        ids: &BTreeSet<ArtifactId>,
+    ) -> Result<Vec<Arc<ArtifactEntry>>, CompileError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        state.view_queries.fetch_add(1, Ordering::Relaxed);
+        let projection = self.read_projection(&state);
+        let positions =
+            ids.iter()
+                .map(|id| {
+                    // Registry bytes supply only the sorted search key. Membership
+                    // and physical custody come from the selected view's entries.
+                    let semantic = state.payloads.get(id).ok_or_else(|| {
+                        failure("materialization artifact is outside retained view")
+                    })?;
+                    projection
+                        .entries
+                        .binary_search_by(|entry| {
+                            (&entry.descriptor.owner, entry.descriptor.id)
+                                .cmp(&(&semantic.descriptor.owner, *id))
+                        })
+                        .map_err(|_| failure("materialization artifact is outside retained view"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        let entries = positions
+            .into_iter()
+            .map(|position| Arc::clone(&projection.entries[position]))
+            .collect::<Vec<_>>();
+        state
+            .entry_handle_copies
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        Ok(entries)
+    }
     /// Explicitly retained roots, excluding their hidden dependency closure.
     pub(crate) fn root_entries(&self) -> Vec<Arc<ArtifactEntry>> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
@@ -7609,6 +7647,88 @@ mod tests {
             .admit(&empty, vec![entry("Original", &[])])
             .unwrap();
         assert_eq!(replacement.descriptors().len(), 1);
+    }
+
+    #[test]
+    fn artifact_subset_materialization_preserves_selected_custody_and_bounded_warm_reads() {
+        let inventory = ArtifactInventory::default();
+        let mut native = issued_native_groups("Root", vec![(7, vec![])], &[], &BTreeMap::new());
+        let ArtifactPayload::Original(product) = &native.payload else {
+            unreachable!()
+        };
+        native.payload = ArtifactPayload::Original(product.clone().with_source_sha256([1; 32]));
+        let id = native.descriptor.id;
+        assert!(native.source_admission_witness().is_some());
+        let unused = entry_in_unit("fixture", "Unused", vec![]);
+        let unused_id = unused.descriptor.id;
+        let mut supplied = (0..128)
+            .map(|ordinal| entry_in_unit("fixture", &format!("Extra{ordinal}"), vec![]))
+            .collect::<Vec<_>>();
+        supplied.extend([native, unused]);
+        let broad = inventory.admit(&inventory.empty_view(), supplied).unwrap();
+        let selected = broad.select_roots(vec![id]).unwrap();
+        assert!(selected.reads.read_projection.get().is_none());
+        let before = inventory.metrics();
+        assert!(selected
+            .entries_for_artifacts(&BTreeSet::new())
+            .unwrap()
+            .is_empty());
+        assert!(selected.reads.read_projection.get().is_none());
+        assert_eq!(inventory.metrics(), before);
+
+        let broad_entries = broad.entries();
+        let selected_entries = selected.entries();
+        let before = inventory.metrics();
+        for (view, expected) in [(&broad, &broad_entries), (&selected, &selected_entries)] {
+            let entries = view.entries_for_artifacts(&BTreeSet::from([id])).unwrap();
+            assert_eq!(entries.len(), 1);
+            let issued = expected
+                .iter()
+                .find(|entry| entry.descriptor.id == id)
+                .unwrap();
+            assert!(Arc::ptr_eq(&entries[0], issued));
+            assert_eq!(
+                entries[0].source_admission_witness(),
+                issued.source_admission_witness()
+            );
+        }
+        let after = inventory.metrics();
+        assert_eq!(after.graph_visits, before.graph_visits);
+        assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 2);
+        assert!(inventory.0.lock().unwrap().payloads[&id]
+            .source_admission_witness()
+            .is_none());
+        assert!(selected
+            .selection_snapshot()
+            .scopes
+            .values()
+            .any(|reference| reference
+                .proof()
+                .nodes
+                .iter()
+                .any(|node| node.artifact() == unused_id)));
+        assert!(inventory
+            .0
+            .lock()
+            .unwrap()
+            .payloads
+            .contains_key(&unused_id));
+        assert!(selected
+            .entries_for_artifacts(&BTreeSet::from([unused_id]))
+            .is_err());
+        assert!(selected
+            .entries_for_artifacts(&BTreeSet::from([ArtifactId([0xee; 32])]))
+            .is_err());
+        drop(broad);
+        assert!(!inventory
+            .0
+            .lock()
+            .unwrap()
+            .payloads
+            .contains_key(&unused_id));
+        assert!(selected
+            .entries_for_artifacts(&BTreeSet::from([unused_id]))
+            .is_err());
     }
 
     #[test]
