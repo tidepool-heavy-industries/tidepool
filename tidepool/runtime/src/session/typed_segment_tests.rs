@@ -1053,6 +1053,151 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
 }
 
 #[test]
+fn compiler_issued_binding_survives_capture_and_releases_interface_and_root() {
+    let mut session = SemanticSession::new();
+    let roots = |resident: &ProbeSession| {
+        resident
+            .residency()
+            .map_or(0, |counts| counts.persistent_roots)
+    };
+    let mut certificate = None;
+    try_execute_cell_with_template_imports_expectation_observed(
+        &mut session.resident,
+        session.public,
+        &session.effects,
+        &session.images,
+        (0, 0),
+        "binding_index_real_producer",
+        "indexedValue <- pure (41 :: Int)",
+        CellDeclarationExpectation::Total(0),
+        &ScalePublication::Ephemeral,
+        AuthorityChecks::Configured,
+        &SourceImports::new(),
+        None,
+        |program| {
+            let [item] = program.items() else {
+                panic!("producer admits one native binding");
+            };
+            certificate = Some(
+                item.native()
+                    .unwrap()
+                    .value_interface_certificate()
+                    .unwrap(),
+            );
+        },
+    )
+    .unwrap();
+    let certificate = certificate.unwrap();
+    let original = session
+        .resident
+        .current_binding_in(session.public, "indexedValue")
+        .unwrap();
+    assert_eq!(original.1, certificate.owner());
+    assert_eq!(
+        session.resident.inject_val_modules(),
+        [original.1.module_name()]
+    );
+    assert_eq!(
+        session.resident.current_val_modules_in(session.public),
+        [original.1.module_name()]
+    );
+    assert!(Arc::ptr_eq(
+        session
+            .resident
+            .retained_checked_value_artifact(original.1)
+            .unwrap(),
+        &certificate,
+    ));
+    let produced_roots = roots(&session.resident);
+    assert!(produced_roots > 0);
+
+    // This retained lexical tip, rather than a new certificate or copied value,
+    // owns the original root while its issuer's scope is retired.
+    let consumer = session
+        .resident
+        .mint_detached_scope(session.public)
+        .unwrap();
+    let retired = session.resident.retire_scope(session.public);
+    assert_eq!(retired.bindings_retired, 0);
+    assert_eq!(retired.roots_released, 0);
+    assert_eq!(roots(&session.resident), produced_roots);
+    assert!(session
+        .resident
+        .current_binding_in(session.public, "indexedValue")
+        .is_none());
+    assert_eq!(
+        session
+            .resident
+            .current_binding_in(consumer, "indexedValue"),
+        Some(original.clone())
+    );
+    assert!(Arc::ptr_eq(
+        session
+            .resident
+            .retained_checked_value_artifact(original.1)
+            .unwrap(),
+        &certificate,
+    ));
+    let certificate_lifetime = Arc::downgrade(&certificate);
+    drop(certificate);
+    session.public = consumer;
+    session
+        .execute(
+            "binding_index_real_consumer",
+            "segmentRecord (indexedValue + 1)",
+            0,
+        )
+        .unwrap();
+    assert_eq!(session.observed(), [42]);
+    // Cell capsules queue lease release outside checkout. Use the lifecycle
+    // owner's checkpoint before testing the remaining captured scope's release.
+    assert_eq!(session.resident.outstanding_custody(), 0);
+    // The consumer's final unit observation is also a checked native binding.
+    let published = session
+        .resident
+        .public_visibility_snapshot_in(consumer)
+        .unwrap();
+    assert_eq!(published.bindings.len(), 2);
+    assert!(published.bindings.iter().any(|(_, id)| *id == original.0));
+    // Native installs also own package/CAF roots. Retirement must release the
+    // binding root from this immediate ledger, rather than return to a cold
+    // machine's total before those native artifacts were installed.
+    let before_retirement = roots(&session.resident);
+    assert!(before_retirement >= produced_roots);
+    assert_eq!(
+        session
+            .resident
+            .retained_checked_value_artifact(original.1)
+            .map(Arc::as_ptr),
+        Some(certificate_lifetime.as_ptr()),
+        "the executed consumer retains the original issued certificate until retirement"
+    );
+
+    let retired = session.resident.retire_scope(consumer);
+    assert_eq!(retired.bindings_retired, 2);
+    assert_eq!(retired.roots_released, 2);
+    assert_eq!(roots(&session.resident), before_retirement - 2);
+    assert!(session
+        .resident
+        .retained_checked_value_artifact(original.1)
+        .is_none());
+    assert!(
+        certificate_lifetime.upgrade().is_none(),
+        "last binding releases the issued certificate"
+    );
+    assert!(session.resident.inject_val_modules().is_empty());
+    assert!(session.resident.current_val_modules_in(consumer).is_empty());
+    assert!(session
+        .resident
+        .current_binding_in(consumer, "indexedValue")
+        .is_none());
+    assert_eq!(
+        session.resident.retire_scope(consumer),
+        crate::session::ScopeRetirement::default()
+    );
+}
+
+#[test]
 fn warm_target_selects_previously_unselected_original_native_groups() {
     use std::collections::BTreeSet;
     use tidepool_toolchain::artifact_inventory::{
