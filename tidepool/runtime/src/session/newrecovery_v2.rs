@@ -13,7 +13,7 @@ use crate::session::recovery_store::{RunRecoveryStore, RecoveryDomainId, Recover
 
 #[path = "newrecovery_v2/snapshots.rs"]
 mod snapshots;
-pub(crate) use snapshots::{RecoveryGraph, RecoveryGraphCandidate, RecoveryPublicSurface, StagedRecoveryManifest};
+pub(crate) use snapshots::{RecoveryGraph, RecoveryPublicSurface, StagedRecoveryManifest};
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryPublicOwner {

@@ -42,7 +42,7 @@ pub mod recovery_store;
 pub use recovery_hydration::{RecoveryRunAuthority, RecoverySuccessorAuthority, RecoveredDomainPresence};
 pub use recovery_store::{
     DomainSnapshotRoot, PublicSurfaceRoot, RecoveryDomainId, RecoveryDomainState,
-    RecoveryPublicOwnerState, RecoverySnapshotIdentity, RunRecoveryStore, StoreRevision,
+    RecoveryPublicOwnerState, RecoverySnapshotIdentity, RunRecoveryStore, StoreRevision, StoreDisposition, StoreError, StoreErrorKind, StoreRefusal,
 };
 pub mod registry;
 pub mod render;

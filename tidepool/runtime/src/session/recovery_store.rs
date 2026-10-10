@@ -1,6 +1,7 @@
 //! The run's SQLite owner. Immutable facts live in authenticated IPLD blocks;
 //! SQL owns only their roots, public ownership, and allocation ceilings.
 use std::path::{Path, PathBuf};
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -194,6 +195,7 @@ struct StoreConnection {
 pub struct RunRecoveryStore {
     path: Arc<PathBuf>,
     database_id: [u8; 16],
+    physical_identity:(u64,u64),
     connection: Arc<Mutex<StoreConnection>>,
     transactions: Arc<AtomicU64>,
     block_writes: Arc<AtomicU64>,
@@ -226,6 +228,7 @@ impl RunRecoveryStore {
             .create_new(true)
             .open(path)
             .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
+        let physical_identity=file.metadata().map(|metadata|(metadata.dev(),metadata.ino())).map_err(|error|store_error(path,StoreErrorKind::Storage,error))?;
         drop(file);
         let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
@@ -260,12 +263,13 @@ impl RunRecoveryStore {
                 return Err(store_error(path, StoreErrorKind::RecoveryRequired, error))
             }
         }
-        Ok(Self::from_connection(path, identity, connection))
+        Self::from_connection(path, identity, physical_identity,connection)
     }
 
     /// Validate the contract using a read-only connection before any writer
     /// PRAGMA. Only the run's authenticated attachment owner calls this.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        let physical_identity=physical_identity(path)?;
         let read = read_connection(path)?;
         let identity = read_contract(path, &read)?;
         drop(read);
@@ -279,12 +283,14 @@ impl RunRecoveryStore {
             ));
         }
         writer_configuration(path, &connection)?;
-        Ok(Self::from_connection(path, identity, connection))
+        Self::from_connection(path, identity, physical_identity,connection)
     }
-    fn from_connection(path: &Path, database_id: [u8; 16], connection: Connection) -> Self {
-        Self {
+    fn from_connection(path: &Path, database_id: [u8; 16], physical_identity:(u64,u64),connection: Connection) -> Result<Self,StoreError> {
+        if self::physical_identity(path)?!=physical_identity {return Err(store_error(path,StoreErrorKind::Integrity,"database pathname changed during open"))}
+        Ok(Self {
             path: Arc::new(path.to_path_buf()),
             database_id,
+            physical_identity,
             connection: Arc::new(Mutex::new(StoreConnection {
                 connection,
                 fence: None,
@@ -294,7 +300,7 @@ impl RunRecoveryStore {
             transactions: Arc::new(AtomicU64::new(0)),
             block_writes: Arc::new(AtomicU64::new(0)),
             block_bytes: Arc::new(AtomicU64::new(0)),
-        }
+        })
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -310,12 +316,15 @@ impl RunRecoveryStore {
     }
     pub fn lease_admission(&self) -> Result<RunStoreAdmissionGuard<'_>, StoreError> {
         let connection = self.connection.lock();
-        if let Some(error) = &connection.fence {
-            return Err(error.clone());
-        }
+        if let Some(error) = &connection.fence { return Err(error.clone()); }
+        self.validate_physical_identity()?;
         Ok(RunStoreAdmissionGuard {
             _connection: connection,
         })
+    }
+    fn validate_physical_identity(&self)->Result<(),StoreError> {
+        if physical_identity(self.path())?!=self.physical_identity {return Err(store_error(self.path(),StoreErrorKind::Integrity,"database pathname no longer names this run store"))}
+        Ok(())
     }
     pub fn work(&self) -> RecoveryStoreWork {
         RecoveryStoreWork {
@@ -337,6 +346,7 @@ impl RunRecoveryStore {
         if let Some(error) = &owner.fence {
             return Err(error.clone());
         }
+        self.validate_physical_identity()?;
         read_domain(&owner.connection, domain)
             .map_err(|error| store_error(self.path(), StoreErrorKind::Storage, error))
     }
@@ -349,12 +359,14 @@ impl RunRecoveryStore {
         if let Some(error) = &connection.fence {
             return Err(error.clone());
         }
+        self.validate_physical_identity()?;
         read_public_owner(&connection.connection, domain, owner)
             .map_err(|error| store_error(self.path(), StoreErrorKind::Storage, error))
     }
     pub(crate) fn public_owner_states(&self, domain:RecoveryDomainId)->Result<Vec<RecoveryPublicOwnerState>,StoreError> {
         let connection=self.connection.lock();
         if let Some(error)=&connection.fence {return Err(error.clone())}
+        self.validate_physical_identity()?;
         let mut statement=connection.connection.prepare("SELECT owner,epoch,surface_root FROM public_owners WHERE domain=?1 ORDER BY owner")
             .map_err(|error|store_error(self.path(),StoreErrorKind::Storage,error))?;
         let rows=statement.query_map([domain.bytes().as_slice()],|row| {
@@ -369,6 +381,7 @@ impl RunRecoveryStore {
         if let Some(error) = &connection.fence {
             return Err(error.clone());
         }
+        self.validate_physical_identity()?;
         connection
             .connection
             .query_row(
@@ -387,6 +400,7 @@ impl RunRecoveryStore {
         if let Some(error) = &connection.fence {
             return Err(error.clone());
         }
+        self.validate_physical_identity()?;
         read_snapshot(&connection.connection, self.database_id, domain, owner)
             .map_err(|error| store_error(self.path(), StoreErrorKind::Storage, error))
     }
@@ -559,6 +573,7 @@ impl RunRecoveryStore {
         if let Some(error) = &owner.fence {
             return StoreDisposition::RecoveryRequired(error.clone());
         }
+        if let Err(error)=self.validate_physical_identity() {return StoreDisposition::Refused(StoreRefusal::Storage(error))}
         #[cfg(test)]
         let fault = owner.fault.take();
         self.transactions.fetch_add(1, Ordering::Relaxed);
@@ -594,6 +609,7 @@ impl Blockstore for RunRecoveryStore {
         if let Some(error) = &owner.fence {
             return Err(error.clone().into());
         }
+        self.validate_physical_identity()?;
         let bytes = owner
             .connection
             .query_row(
@@ -823,6 +839,12 @@ fn read_contract(path: &Path, connection: &Connection) -> Result<[u8; 16], Store
         .try_into()
         .map_err(|_| store_error(path, StoreErrorKind::Integrity, "invalid database identity"))
 }
+fn physical_identity(path:&Path)->Result<(u64,u64),StoreError> {
+    let metadata=std::fs::metadata(path).map_err(|error|store_error(path,if error.kind()==std::io::ErrorKind::NotFound{StoreErrorKind::MissingDatabase}else{StoreErrorKind::Storage},error))?;
+    if !metadata.is_file(){return Err(store_error(path,StoreErrorKind::Integrity,"run store pathname is not a regular file"))}
+    Ok((metadata.dev(),metadata.ino()))
+}
+
 fn writer_configuration(path: &Path, connection: &Connection) -> Result<(), StoreError> {
     connection
         .busy_timeout(std::time::Duration::from_secs(5))

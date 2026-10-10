@@ -356,16 +356,6 @@ impl SessionLib {
                 "could not restore burned declaration identities".into(),
             ));
         }
-        let mut contexts = BTreeMap::new();
-        for node in graph.nodes() {
-            let context = Arc::new(inventory.context_with_graph_selection(
-                &node.graph_selection,
-                &node.compiler_roles,
-                node.lexical.clone(),
-            )?);
-            validate_recovery_native_markers(node, &context).map_err(invalid)?;
-            contexts.insert(node.id, context);
-        }
         for surface in graph.public_surfaces() {
             // Required at Generation0 as well: surface roles can only be
             // reissued after the complete immutable inventory was validated.
@@ -409,7 +399,7 @@ impl SessionLib {
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| invalid("unsupported durable family closure identity".into()))?;
             let evidence = Arc::new(certify_recovered_declaration_tip_in_context(
-                Arc::clone(&contexts[&generation]),
+                context,
                 RecoveryDeclarationSelection {
                     origin: match node.kind {
                         recovery::RecoveryNodeKind::Join => RecoveryDeclarationOrigin::Join,
