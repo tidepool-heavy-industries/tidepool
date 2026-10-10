@@ -747,8 +747,8 @@ fn run_history(
     coverage: &mut Coverage,
 ) -> Result<(), TestCaseError> {
     crate::request::test_support::fresh_history();
-    // Each replay owns a fresh authenticated run. Fencing is absorbing for every
-    // capability issued by that owner, including capabilities retained by waiters.
+    // Ready histories share their original owner. Fence histories own a fresh
+    // authenticated run; its fence also revokes capabilities retained by waiters.
     fixture.make_ready();
     if initially_pending {
         let started = std::time::Instant::now();
@@ -1449,6 +1449,12 @@ async fn generated_run_fences_preserve_publication_receipts() {
     // the inexpensive registry family keeps the full 96-case search above.
     if std::env::var_os("PROPTEST_CASES").is_none() {
         cfg.cases = 4;
+    }
+    // Replaying a real owner compiles and admits native input again. The broad
+    // ready-only family keeps full shrinking; this family bounds expensive
+    // counterexample replay while preserving the original failing history.
+    if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+        cfg.max_shrink_iters = 4;
     }
     for initially_pending in [false, true] {
         let coverage = RefCell::new(Coverage::default());
