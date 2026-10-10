@@ -58,6 +58,53 @@ M3_RECURSIVE_TESTS = [
     "actor_host::scripted_recursive_acceptance::production_harness_recursive_captured_helper_and_typed_replies",
     "actor_host::embedded_agent_spec_tests::accepted_reply_resumes_after_parked_notebook_and_provider_completion",
 ]
+RESULT_DELIVERY_CASES = {
+    "actor_host::fresh_child_tests::fresh_context_child_owns_and_retires_its_machine": {
+        "placement": "distinct child and issuer sessions",
+        "input_path": "FreshCtx request with parent-declared nominal input",
+        "force_after_child_gone": [42],
+    },
+    "actor_host::fresh_child_tests::fresh_context_callable_reply_survives_retirement_and_request_forget": {
+        "placement": "distinct child and issuer sessions",
+        "input_path": "FreshCtx typed request with integer input 41",
+        "force_after_child_gone": [42, 42, 51, 42, 39],
+        "repeated_read": "await response followed by pollResponse",
+        "receipt_equality": ["execution", "worktree"],
+        "watch_after_request_and_watch_forget": [42, 141, 42, 31],
+        "stale_request_refused": True,
+    },
+    "actor_host::fresh_child_tests::fresh_context_inherited_response_preserves_value_and_watch_custody": {
+        "placement": "issuer, producer and observer have distinct sessions",
+        "input_path": "pending Request supplied as genuine FreshCtx observer input",
+        "force_after_child_gone": "saved scalar and callable projections after producer retirement",
+        "cleanup_owner_transfer": True,
+        "returned_pending_handle": True,
+        "watch_forget": True,
+        "receipt_equality": ["execution", "worktree"],
+    },
+    "actor_host::custody_tests::inherited_response_late_fill_and_release_preserve_extracted_value": {
+        "placement": "issuer, producer and captured observer share one actual session",
+        "input_path": "captured pending Request; same custody history as dedicated control",
+        "force_after_child_retirement": "saved scalar and callable projections",
+        "cleanup_owner_transfer": True,
+        "returned_pending_handle": True,
+        "watch_forget": True,
+        "receipt_equality": ["execution", "worktree"],
+    },
+    "actor_host::fresh_child_tests::fresh_context_typed_exit_and_replacement_retain_callable_value": {
+        "placement": "issuer, typed predecessor and replacement have distinct sessions",
+        "input_path": "Selected empty effect row typed actor with scalar and callable state",
+        "predecessor_cancelled": True,
+        "force_after_child_gone": [41, 42, 51, 41, 39],
+        "repeated_read": "awaitExit followed by pollExit",
+    },
+    "actor_host::fresh_child_tests::fresh_context_source_reads_actual_progress_and_result_before_typed_exit": {
+        "placement": "captured producer shares issuer session; collector has a distinct session",
+        "input_path": "real progressSource and settlementSource publications",
+        "forced_source_values": [13, 30, -7, -1, 42],
+        "force_after_child_gone": "collector typed exit state",
+    },
+}
 HARNESS_PERFORMANCE_REPORTER = "scripts/harness-usecase-perf-report.py"
 PREPARED_CHILD_TESTS = [
     "actor_host::prepared_runtime_acceptance::production_prepared_toolset_twenty_children_execute_original_native_probe",
@@ -128,6 +175,11 @@ def cohorts() -> dict:
                                     "compiler_mode": "owned-resident"},
             "m1": {"tests": M1_TESTS, "expected_count": 1, "ignored": True, "timeout": 900,
                    "compiler_mode": "owned-resident"},
+            "result-delivery": {
+                "tests": list(RESULT_DELIVERY_CASES), "expected_count": len(RESULT_DELIVERY_CASES),
+                "ignored": False, "timeout": 1200, "compiler_mode": "owned-resident",
+                "max_jobs": 2, "retain_artifacts": True, "require_confirmed_cleanup": True,
+                "mode": "model_free_resident_cluster", "case_premises": RESULT_DELIVERY_CASES},
             "prepared-child": {"tests": PREPARED_CHILD_TESTS, "expected_count": len(PREPARED_CHILD_TESTS),
                                "ignored": True, "timeout": 1800,
                                "compiler_mode": "owned-resident", "max_jobs": 1},
@@ -1733,9 +1785,23 @@ def run_cohort(args) -> int:
     record_paths = sorted((output / "tests").glob("*.json"))
     records = [json.loads(path.read_text()) for path in record_paths]
     exact = {record["test"] for record in records} == set(cohort["tests"])
-    confirmed = exact and len(records) == cohort["expected_count"] and all(record["passed"] and record["execution"]["executed_test_count"] == 1
-        and record["execution"]["exit_code"] == 0
-        and record["execution"].get("startup_diagnostic_seconds") is None for record in records)
+    def case_confirmed(record):
+        execution = record["execution"]
+        return (record["passed"] and execution["executed_test_count"] == 1
+                and execution["exit_code"] == 0
+                and execution.get("startup_diagnostic_seconds") is None
+                and (not cohort.get("require_confirmed_cleanup", False)
+                     or all(execution.get(domain + "_cleanup_status") == "confirmed"
+                            for domain in ("process", "hosted", "compiler"))))
+    confirmed = exact and len(records) == cohort["expected_count"] and all(
+        case_confirmed(record) for record in records)
+    case_premises = {}
+    for name, premises in cohort.get("case_premises", {}).items():
+        matching = [record for record in records if record["test"] == name]
+        case_premises[name] = {
+            "premises": premises,
+            "verified": len(matching) == 1 and case_confirmed(matching[0]),
+        }
     compiler_allowance_selection_confirmed = True
     if any(value is not None for value in allowances.values()):
         compiler_allowance_selection_confirmed = exact and len(records) == cohort["expected_count"] and all(
@@ -1768,6 +1834,7 @@ def run_cohort(args) -> int:
               "executed_test_count": sum((record.get("execution") or {}).get("executed_test_count") or 0 for record in records),
               "unknown_execution_count": sum((record.get("execution") or {}).get("executed_test_count") is None for record in records),
               "behavioral_completed": behavioral_completed,
+              "case_premises": case_premises,
               "compiler_allowance_selection_confirmed": compiler_allowance_selection_confirmed,
               "measurement": measurement, "completed": completed, "tests": records}
     case_cleanup = [{

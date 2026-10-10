@@ -560,6 +560,91 @@ class NativeQualificationTests(unittest.TestCase):
                          {'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'})
         self.assertNotIn('measurement_reporter', recursive)
 
+    def test_result_delivery_seals_actual_machine_and_value_premises_separately_from_m2(self):
+        cohorts = qualification.cohorts()
+        result = cohorts['result-delivery']
+        self.assertEqual(result['tests'], list(qualification.RESULT_DELIVERY_CASES))
+        self.assertEqual(result['expected_count'], 6)
+        self.assertFalse(result['ignored'])
+        self.assertEqual(result['compiler_mode'], 'owned-resident')
+        self.assertEqual(result['max_jobs'], 2)
+        self.assertTrue(result['retain_artifacts'])
+        self.assertTrue(result['require_confirmed_cleanup'])
+        self.assertEqual(result['mode'], 'model_free_resident_cluster')
+        self.assertEqual(result['case_premises'], qualification.RESULT_DELIVERY_CASES)
+        self.assertTrue(set(result['tests']).isdisjoint(cohorts['m2']['tests']))
+        self.assertEqual(len(cohorts['m2']['tests']), 9)
+        for premises in result['case_premises'].values():
+            self.assertIn('placement', premises)
+            self.assertIn('input_path', premises)
+
+    def test_result_delivery_preserves_failed_missing_and_unconfirmed_runner_receipts(self):
+        """Synthetic receipts test qualification refusal, not runtime success."""
+        selected = list(qualification.RESULT_DELIVERY_CASES)
+        for mutation in ('control', 'missing', 'duplicate', 'zero', 'unknown',
+                         'failed', 'nonzero_exit', 'missing_hosted_cleanup',
+                         'failed_compiler_cleanup'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / 'descriptor.json'
+                path.write_text('sealed descriptor')
+                descriptor = {
+                    'external_inputs': {'runtime_tools': {'path': '/frozen/tools'}},
+                    'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
+                    'cohorts': qualification.cohorts(), 'environment': {},
+                    'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                    'profile': 'fast-dev', 'stdlib_mode': 'catalog-backed',
+                }
+                output = root / 'evidence'
+
+                def execute(command, **kwargs):
+                    self.assertEqual([command[i + 1] for i, word in enumerate(command)
+                                      if word == '--exact'], selected)
+                    self.assertEqual(command[command.index('--expected-count') + 1], '6')
+                    self.assertIn('--retain-artifacts', command)
+                    self.assertNotIn('--ignored', command)
+                    names = selected[:-1] if mutation == 'missing' else list(selected)
+                    if mutation == 'duplicate':
+                        names[-1] = names[0]
+                    for index, name in enumerate(names):
+                        execution = {
+                            'executed_test_count': 1, 'exit_code': 0,
+                            'process_cleanup_status': 'confirmed',
+                            'hosted_cleanup_status': 'confirmed',
+                            'compiler_cleanup_status': 'confirmed',
+                        }
+                        if index == len(names) - 1:
+                            if mutation in ('zero', 'unknown'):
+                                execution['executed_test_count'] = 0 if mutation == 'zero' else None
+                            elif mutation == 'nonzero_exit':
+                                execution['exit_code'] = 101
+                            elif mutation == 'missing_hosted_cleanup':
+                                del execution['hosted_cleanup_status']
+                            elif mutation == 'failed_compiler_cleanup':
+                                execution['compiler_cleanup_status'] = 'unconfirmed'
+                        qualification.write_json(output / f'tests/{index}.json', {
+                            'test': name, 'execution': execution,
+                            'passed': not (mutation == 'failed' and index == len(names) - 1),
+                        })
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch.dict(os.environ, {}, clear=True), \
+                     patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run', side_effect=execute):
+                    code = qualification.main([
+                        'run', str(path), '--cohort', 'result-delivery',
+                        '--output', str(output), '--jobs', '2'])
+                report = json.loads((output / 'report.json').read_text())
+                self.assertEqual(code, int(mutation != 'control'))
+                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['expected_count'], 6)
+                self.assertEqual(report['runner_exit_code'], 0)
+                self.assertEqual(set(report['case_premises']), set(selected))
+                self.assertEqual(all(case['verified'] for case in report['case_premises'].values()),
+                                 mutation == 'control')
+                for name, case in report['case_premises'].items():
+                    self.assertEqual(case['premises'], qualification.RESULT_DELIVERY_CASES[name])
+
     def test_recursive_m3_requires_both_exact_executed_receipts(self):
         recursive, asynchronous = qualification.M3_RECURSIVE_TESTS
         for mutation in ('control', 'missing_asynchronous', 'duplicate_recursive',

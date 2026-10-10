@@ -300,6 +300,30 @@ The M2 roster also checks host shutdown and coordinator failure after child
 failure. The `unified-regressions` cohort runs the published lookup/form examples
 and all three operation-settlement controls through the same frozen libtest.
 
+Every new release also requires `result-delivery` from the same descriptor.
+Its six model-free resident cluster cases assert actual session placement and
+force real Haskell values: a dedicated nominal scalar reply, a dedicated callable
+reply after the child machine is gone, shared and dedicated pending-request
+custody histories, a dedicated callable typed exit and replacement, and a
+dedicated collector of real progress and settlement publications. Callable
+reads check repeated observation, receipt execution/worktree equality, stale
+request refusal and saved watch values after forgetting the request and watch.
+The shared custody control retires the producer actor while retaining its shared
+machine; the dedicated control requires the producer machine to be gone before
+late forcing. These cases use genuine compiler-issued sites and typed inputs.
+They establish resident result delivery; M1 and M3 retain their browser and
+scripted-provider acceptance contracts.
+
+The descriptor seals each case's placement, input path and forced-value premises.
+The existing cohort report marks those premises verified only for one passing,
+executed receipt with confirmed process, campaign and compiler cleanup. Missing,
+duplicate, zero-count, unknown, failed or unconfirmed receipts keep the cohort
+unqualified and remain in its reports. The cohort retains diagnostic artifacts,
+uses a 1200-second watchdog per case, and permits at most two bounded processes.
+Historical M2 acceptance keeps its original roster and meaning. The separate
+ignored shared/dedicated native-renderer controls remain focused diagnostics;
+they cannot share a selection with the nonignored result-delivery roster.
+
 ```sh
 DESCRIPTOR="$FINAL_BUNDLE/share/exomonad/qualification.json"
 python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
@@ -307,6 +331,9 @@ python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort m1 --output "$M1_EVIDENCE"
+python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+  --cohort result-delivery --output "$RESULT_DELIVERY_EVIDENCE" --jobs 2 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
 
 For the parallel command, `ADMITTED_USER_SLICE` names an existing user slice
