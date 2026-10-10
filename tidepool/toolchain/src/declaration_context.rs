@@ -173,6 +173,34 @@ fn carry_native_original_requirements(
     requirements
 }
 
+/// Capture native choices for an offer before its private custody is merged.
+/// The offer can be only part of the eventual compiler namespace; validate that
+/// namespace after all inputs arrive rather than inferring choices from it.
+fn capture_native_original_requirements(
+    projection: &CompilerInputProjection,
+    artifacts: &ArtifactView,
+    preferred: &[crate::artifact_inventory::NativeOriginalRequirement],
+) -> Result<Vec<crate::artifact_inventory::NativeOriginalRequirement>, CompileError> {
+    let mut requirements = carry_native_original_requirements(projection, preferred);
+    let bound = projection.within_view(artifacts);
+    for role in bound.roles() {
+        let Some(original) = role.original() else {
+            continue;
+        };
+        if requirements.iter().any(|fact| fact.original == original) {
+            continue;
+        }
+        if let Some(requirement) =
+            crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
+                original, artifacts,
+            )?
+        {
+            requirements.push(requirement);
+        }
+    }
+    Ok(requirements)
+}
+
 impl OriginalCompilerInputs {
     /// Privately reuse a complete selected authored original matching the
     /// issuing compiler interface and, when present, its exact native role.
@@ -472,10 +500,19 @@ impl ProtectedScaffoldRequirements {
         let mut projection = context.compiler_projection.merge(&self.projection)?;
         let mut native_original_requirements =
             crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-                &projection,
+                &context.compiler_projection,
                 context.artifact_view(),
                 &[],
             )?;
+        // A protected recipe can offer a scaffold supplied only by the later
+        // private input. Capture baseline choices only where it already owns
+        // the carrier, independently of that private availability.
+        let scaffold_requirements = capture_native_original_requirements(
+            &self.projection,
+            context.artifact_view(),
+            &native_original_requirements,
+        )?;
+        native_original_requirements.extend(scaffold_requirements);
         let (artifacts, metadata) = match private {
             Some(private) => {
                 projection = projection.merge(&private.projection)?;
@@ -13974,13 +14011,66 @@ mod tests {
             .unwrap();
         assert!(without_certificate.protected_scaffold.native.is_empty());
         let inputs = request.compiler_inputs();
-        let selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &inputs.projection,
-                &inputs.metadata,
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            inputs,
+            &inputs.metadata,
+            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
+        let private =
+            OriginalCompilerInputs::from_selection(&selection, context.artifact_view()).unwrap();
+        assert!(!private.native_original_requirements.is_empty());
+        assert_eq!(
+            private.native_original_requirements,
+            inputs.native_original_requirements
+        );
+        // The recipe keeps its certificate while the declaration baseline is
+        // narrowed to types. Its original arrives through the private issuer,
+        // after baseline native choices have been captured independently.
+        let mut type_baseline = (*context).clone();
+        type_baseline.inventory = context
+            .artifact_view()
+            .interface_projection(&[identity("main", &owner.module_name())])
+            .unwrap();
+        type_baseline.compiler_projection = context
+            .compiler_projection
+            .within_view(type_baseline.artifact_view());
+        type_baseline.normalize().unwrap();
+        assert!(!type_baseline
+            .artifact_view()
+            .artifact_ids()
+            .contains(&original_id));
+        let private_request = ExactCompileContext::new(context.clone())
+            .with_generated_planned_imports(Some(&certificate), [source.as_str()])
+            .unwrap()
+            .with_declarations(Arc::new(type_baseline))
+            .prepare_compilation_with_private_input(
+                &directory.path().join("private-planned"),
+                producer,
+                None,
+                Some(private.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            private_request
+                .compiler_inputs()
+                .native_original_requirements,
+            private.native_original_requirements
+        );
+        let private_receipt =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                private_request.compiler_inputs(),
+                &private_request.compiler_inputs().metadata,
                 &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
             )
             .unwrap();
+        assert_eq!(
+            private_receipt
+                .native_original_requirements()
+                .cloned()
+                .collect::<Vec<_>>(),
+            private.native_original_requirements
+        );
         let published = request
             .admit_program_support_with_selection(
                 context.clone(),
