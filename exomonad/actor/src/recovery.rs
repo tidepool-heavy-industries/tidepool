@@ -1764,7 +1764,7 @@ mod tests {
         Arc<LockedRun>,
     ) {
         use tidepool_runtime::session::{
-            ModuleEnv, PersistentSession, RecoveryDomainId, RunRecoveryStore, SessionLib,
+            ModuleEnv, PersistentSession, RecoveryDomainId, SessionLib,
         };
         let root = path.parent().unwrap().canonicalize().unwrap();
         let fixture = RecoveryFixture::create(&root);
@@ -1991,7 +1991,7 @@ mod tests {
                 revision,
                 tidepool_repr::Generation(8),
             ),
-            tidepool_runtime::session::StoreDisposition::Committed(_)
+            tidepool_runtime::session::recovery_store::StoreDisposition::Committed(_)
         ));
         assert!(!proof
             .validate_successor(

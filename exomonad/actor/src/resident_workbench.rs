@@ -12168,7 +12168,6 @@ mod tool_dispatch_tests {
 #[cfg(test)]
 pub(crate) mod request_tests {
     use super::*;
-    use std::path::Path;
 
     #[tokio::test]
     async fn empty_checkpoint_retirement_preserves_nonempty_machine_admission() {
@@ -13555,10 +13554,10 @@ pub(crate) mod request_tests {
         else {
             panic!("successful cell must publish");
         };
-        assert_eq!(
+        assert!(matches!(
             commit,
             tidepool_runtime::session::PublicManifestCommit::Ephemeral
-        );
+        ));
         assert_eq!(native_bindings.len(), 2, "{native_bindings:?}");
         assert!(native_bindings.contains(&accepted));
         assert!(native_bindings.contains(&"completedNative".to_owned()));
@@ -14625,7 +14624,11 @@ pub(crate) mod request_tests {
                 PrivateExecutionPublication::Manifest {
                     commit,
                     ..
-                } if commit == expected
+                } if matches!((commit, expected),
+                    (tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                     tidepool_runtime::session::PublicManifestCommit::Ephemeral)
+                    | (tidepool_runtime::session::PublicManifestCommit::Durable,
+                       tidepool_runtime::session::PublicManifestCommit::Durable))
             ));
             let public_scope = execution.public_scope;
             self.access
@@ -21590,7 +21593,7 @@ pub(crate) mod request_tests {
             panic!("receiver setup publishes only native bindings");
         };
         let ticket = publication.stage().unwrap();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     ticket,
@@ -21598,7 +21601,7 @@ pub(crate) mod request_tests {
                 )
                 .unwrap(),
             tidepool_runtime::session::PublicManifestCommit::Ephemeral
-        );
+        ));
         session.set_run_context(previous_context).unwrap();
         drop(receiver);
         drop(reservation);
@@ -21704,7 +21707,7 @@ pub(crate) mod request_tests {
         context: crate::ActorSessionContext,
         receipt: Option<tidepool_runtime::session::CheckoutReceipt>,
         _machines: Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
-        run_root: tempfile::TempDir,
+        _run_root: tempfile::TempDir,
         recovery: crate::recovery::recovery_test_fixture::RecoveryFixture,
     }
 
@@ -21866,7 +21869,7 @@ pub(crate) mod request_tests {
             context,
             receipt: Some(receipt),
             _machines: machines,
-            run_root,
+            _run_root: run_root,
             recovery,
         }
     }

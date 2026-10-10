@@ -113,7 +113,9 @@ async fn interrupt_during_preview(
     let original_public = resident
         .public_visibility_snapshot_in(context.placement.lexical_scope)
         .unwrap();
-    let original_manifest = durable.then(|| std::fs::read(&manifest).unwrap());
+    let original_manifest = durable_owner
+        .as_ref()
+        .map(|owner| recovery.as_ref().unwrap().public_owner(owner));
     let readiness = durable_owner.as_ref().map(|owner| {
         resident
             .durable_public_readiness(owner, context.placement.lexical_scope)
@@ -390,8 +392,14 @@ async fn interrupt_during_preview(
             .unwrap(),
         original_public
     );
-    if let Some(bytes) = original_manifest {
-        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+    if let Some(original) = original_manifest {
+        assert_eq!(
+            recovery
+                .as_ref()
+                .unwrap()
+                .public_owner(durable_owner.as_ref().unwrap()),
+            original
+        );
     }
     if let Some(owner) = &durable_owner {
         resident
@@ -678,9 +686,18 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         response: crate::ResponseExpectation::new("()"),
         siblings: Vec::new(),
     };
+    #[derive(Debug)]
+    enum ObservedCommit {
+        Ephemeral,
+        Durable,
+        Refused,
+        RecoveryRequired,
+        Cancelled,
+        Stale,
+    }
     enum NativeEvent {
         Claimed,
-        Settled(PublicManifestCommit),
+        Settled(ObservedCommit),
     }
     let (native_tx, mut native_rx) = tokio::sync::mpsc::unbounded_channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -708,9 +725,17 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                 if !matches!(failure, NativeFailure::None) {
                     recovery_observer.as_ref().unwrap().clear_commit_failure();
                 }
-                native_tx
-                    .send(NativeEvent::Settled(commit.clone()))
-                    .unwrap();
+                let observed = match commit {
+                    PublicManifestCommit::Ephemeral => ObservedCommit::Ephemeral,
+                    PublicManifestCommit::Durable => ObservedCommit::Durable,
+                    PublicManifestCommit::Refused { .. } => ObservedCommit::Refused,
+                    PublicManifestCommit::RecoveryRequired { .. } => {
+                        ObservedCommit::RecoveryRequired
+                    }
+                    PublicManifestCommit::Cancelled => ObservedCommit::Cancelled,
+                    PublicManifestCommit::Stale => ObservedCommit::Stale,
+                };
+                native_tx.send(NativeEvent::Settled(observed)).unwrap();
                 // Native disposition is already settled, and the JoinHandle
                 // cannot deliver while this owned blocking operation waits.
                 release_rx
@@ -770,13 +795,13 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     match failure {
         NativeFailure::None => assert!(matches!(
             (&commit, durable),
-            (PublicManifestCommit::Durable, true) | (PublicManifestCommit::Ephemeral, false)
+            (ObservedCommit::Durable, true) | (ObservedCommit::Ephemeral, false)
         )),
         NativeFailure::StatementRefusal => {
-            assert!(matches!(commit, PublicManifestCommit::Refused { .. }))
+            assert!(matches!(commit, ObservedCommit::Refused))
         }
         NativeFailure::CommitError => {
-            let PublicManifestCommit::RecoveryRequired { .. } = &commit else {
+            let ObservedCommit::RecoveryRequired = &commit else {
                 panic!("expected held run fence: {commit:?}");
             };
             assert!(!owner.is_ready());
