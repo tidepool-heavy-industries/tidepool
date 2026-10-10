@@ -76,7 +76,8 @@ pub enum HostExit {
 
 /// One window onto a captured stream. `start`/`end` are byte offsets into the
 /// original stream and may be narrower than the window that was asked for when
-/// a boundary fell inside a character.
+/// a boundary fell inside a character or its start was lost from the retained
+/// tail. Malformed bytes are represented as lossy text, including final EOF.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostPage {
     pub text: String,
@@ -143,10 +144,49 @@ impl StreamBuffer {
         self.dropped = self.dropped.saturating_add(excess as u64);
     }
 
+    /// Check the retained neighbors of a boundary, rather than interpreting
+    /// arbitrary continuation bytes as a valid character's suffix.
+    fn character_crossing(&self, boundary: u64) -> Option<(u64, u64)> {
+        let available = self.dropped + self.bytes.len() as u64;
+        for back in 1..=3 {
+            let Some(start) = boundary.checked_sub(back) else {
+                break;
+            };
+            if start < self.dropped {
+                break;
+            }
+            let index = (start - self.dropped) as usize;
+            let width = match self.bytes.get(index)? {
+                0xC2..=0xDF => 2,
+                0xE0..=0xEF => 3,
+                0xF0..=0xF4 => 4,
+                _ => continue,
+            };
+            if start + width as u64 <= boundary {
+                continue;
+            }
+            let count = width.min((available - start) as usize);
+            let mut bytes = [0; 4];
+            for (offset, byte) in bytes[..count].iter_mut().enumerate() {
+                *byte = self.bytes[index + offset];
+            }
+            match std::str::from_utf8(&bytes[..count]) {
+                Ok(_) => return Some((start, start + width as u64)),
+                Err(error) if !self.finished && error.error_len().is_none() => {
+                    return Some((start, start + width as u64));
+                }
+                Err(_) => {}
+            }
+        }
+        None
+    }
+
     /// Render `[start, end)` of the captured bytes. Boundaries that fall
     /// inside a UTF-8 character are reported as fragments and trimmed out of
     /// the text rather than replaced, so a caller stitching pages together by
     /// `end` never sees a replacement character invented by paging itself.
+    /// A valid incomplete prefix at live EOF is deferred until it completes or
+    /// the stream finishes; at final EOF it is malformed and decoded lossily.
     fn page(&self, start: u64, end: u64) -> HostPage {
         let available = self.dropped + self.bytes.len() as u64;
         let start = start.clamp(self.dropped, available);
@@ -158,33 +198,34 @@ impl StreamBuffer {
             .collect();
         let slice = slice.as_slice();
 
-        let leading = slice
-            .iter()
-            .take_while(|byte| **byte & 0b1100_0000 == 0b1000_0000)
-            .count()
-            .min(slice.len());
-        let body = &slice[leading..];
-        let mut trailing = 0;
-        for back in 1..=body.len().min(3) {
-            let byte = body[body.len() - back];
-            if byte & 0b1100_0000 == 0b1000_0000 {
-                continue;
-            }
-            let width = if byte >= 0b1111_0000 {
-                4
-            } else if byte >= 0b1110_0000 {
-                3
-            } else if byte >= 0b1100_0000 {
-                2
+        // The omitted prefix can contain a character's start, but a UTF-8
+        // character can have at most three continuation bytes. This uncertainty
+        // applies to subwindows within that same retained prefix as well.
+        let unknown_prefix_end = self.dropped
+            + if self.dropped > 0 {
+                self.bytes
+                    .iter()
+                    .take(3)
+                    .take_while(|byte| **byte & 0xC0 == 0x80)
+                    .count() as u64
             } else {
-                1
+                0
             };
-            if width > back {
-                trailing = back;
-            }
-            break;
-        }
-        let body = &body[..body.len() - trailing];
+        let leading = if start < unknown_prefix_end {
+            (unknown_prefix_end.min(end) - start) as usize
+        } else {
+            self.character_crossing(start)
+                .map_or(0, |(_, character_end)| {
+                    (character_end.min(end) - start) as usize
+                })
+        };
+        let body_start = start + leading as u64;
+        let trailing = self
+            .character_crossing(end)
+            .map_or(0, |(character_start, _)| {
+                (end - character_start.max(body_start)) as usize
+            });
+        let body = &slice[leading..slice.len() - trailing];
         let text = String::from_utf8_lossy(body);
         let lossy = matches!(text, std::borrow::Cow::Owned(_));
         HostPage {
@@ -435,6 +476,210 @@ mod tests {
         assert!(page.lossy);
         assert!(!page.leading_fragment && !page.trailing_fragment);
         assert_eq!((page.start, page.end), (0, 3));
+    }
+
+    #[test]
+    fn malformed_bytes_at_stream_origin_remain_visible() {
+        for bytes in [
+            vec![0x80],
+            vec![0x80, 0xBF, b'a'],
+            vec![0xFF],
+            vec![0xC0, 0x80],
+        ] {
+            let page = buffer(&bytes, true).page(0, bytes.len() as u64);
+            assert_eq!(page.text, String::from_utf8_lossy(&bytes));
+            assert_eq!((page.start, page.end), (0, bytes.len() as u64));
+            assert!(page.lossy);
+            assert!(!page.leading_fragment && !page.trailing_fragment);
+        }
+    }
+
+    #[test]
+    fn malformed_boundary_bytes_are_not_valid_character_fragments() {
+        for bytes in [
+            vec![0x80],
+            vec![0xFF],
+            vec![0xC0, 0x80],
+            vec![0xE0, 0x80, 0x80],
+            vec![0xED, 0xA0, 0x80],
+            vec![0xF4, 0x90, 0x80, 0x80],
+            vec![0xE2, 0x82],
+        ] {
+            let framed = [b"a".as_slice(), &bytes, b"z".as_slice()].concat();
+            let page = buffer(&framed, true).page(1, 1 + bytes.len() as u64);
+            assert_eq!(page.text, String::from_utf8_lossy(&bytes));
+            assert_eq!((page.start, page.end), (1, 1 + bytes.len() as u64));
+            assert!(page.lossy);
+            assert!(!page.leading_fragment && !page.trailing_fragment);
+            let eof = buffer(&bytes, true).page(0, u64::MAX);
+            assert_eq!(eof.text, String::from_utf8_lossy(&bytes));
+            assert!(eof.lossy && !eof.trailing_fragment);
+        }
+    }
+
+    #[test]
+    fn an_unfinished_valid_prefix_becomes_a_character_or_lossy_at_eof() {
+        let mut capture = buffer(&[0xE2, 0x82], false);
+        let pending = capture.page(0, 2);
+        assert_eq!((pending.start, pending.end), (0, 0));
+        assert!(pending.text.is_empty() && pending.trailing_fragment && !pending.lossy);
+        capture.finished = true;
+        let eof = capture.page(0, 2);
+        assert_eq!(eof.text, "\u{FFFD}");
+        assert_eq!((eof.start, eof.end), (0, 2));
+        assert!(eof.lossy && !eof.trailing_fragment);
+        capture.finished = false;
+        capture.push(&[0xAC]);
+        let complete = capture.page(0, 3);
+        assert_eq!(complete.text, "€");
+        assert!(!complete.lossy && !complete.trailing_fragment);
+    }
+
+    #[test]
+    fn a_rotated_unknown_prefix_can_hide_at_most_three_continuation_bytes() {
+        let mut capture = buffer(&[0x80, 0x80, 0x80, 0x80, b'z'], true);
+        capture.dropped = 10;
+        let page = capture.page(0, u64::MAX);
+        assert_eq!(page.text, "\u{FFFD}z");
+        assert_eq!((page.start, page.end, page.retained_start), (13, 15, 10));
+        assert!(page.leading_fragment && page.lossy);
+        let suffix = capture.page(11, 15);
+        assert_eq!(suffix.text, page.text);
+        assert_eq!((suffix.start, suffix.end), (13, 15));
+        assert!(suffix.leading_fragment && suffix.lossy);
+        for offset in [0, 10, 11, 15, 99] {
+            let empty = capture.page(offset, offset);
+            assert!(empty.text.is_empty());
+            assert_eq!(empty.start, empty.end);
+            assert!(!empty.leading_fragment && !empty.trailing_fragment && !empty.lossy);
+        }
+    }
+
+    // Scan the complete input with the standard decoder to locate only valid
+    // scalar spans; this oracle does not use the production boundary decoder.
+    fn valid_character_spans(bytes: &[u8]) -> Vec<(u64, u64)> {
+        let mut spans = Vec::new();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let (valid, invalid) = match std::str::from_utf8(&bytes[offset..]) {
+                Ok(_) => (bytes.len() - offset, None),
+                Err(error) => (error.valid_up_to(), error.error_len()),
+            };
+            let text = std::str::from_utf8(&bytes[offset..offset + valid]).unwrap();
+            for (start, character) in text.char_indices() {
+                let start = offset + start;
+                spans.push((start as u64, (start + character.len_utf8()) as u64));
+            }
+            offset += valid;
+            let Some(invalid) = invalid else { break };
+            offset += invalid;
+        }
+        spans
+    }
+
+    #[test]
+    fn byte_windows_match_complete_stream_utf8_spans_and_valid_pages_compose() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{
+            contextualize_config, Config, FileFailurePersistence, TestRunner,
+        };
+        let mut config = Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::byte_windows_match_complete_stream_utf8_spans_and_valid_pages_compose"
+        ));
+        let mut runner = TestRunner::new(contextualize_config(config));
+        let near_valid = proptest::collection::vec(
+            prop_oneof![
+                Just(vec![0x80]),
+                Just(vec![0xC0, 0xAF]),
+                Just(vec![0xE0, 0x80, 0x80]),
+                Just(vec![0xED, 0xA0, 0x80]),
+                Just(vec![0xF4, 0x90, 0x80, 0x80]),
+                Just(vec![0xE2, 0x82]),
+                Just("aµ€🦀".as_bytes().to_vec()),
+            ],
+            0..12,
+        )
+        .prop_map(|chunks| chunks.concat());
+        let strategy = (
+            prop_oneof![proptest::collection::vec(any::<u8>(), 0..64), near_valid],
+            proptest::collection::vec(any::<char>(), 0..32),
+            1_usize..9,
+        );
+        let callbacks = std::cell::Cell::new(0_usize);
+        let windows = std::cell::Cell::new(0_usize);
+        let malformed = std::cell::Cell::new(0_usize);
+        runner
+            .run(&strategy, |(bytes, characters, width)| {
+                callbacks.set(callbacks.get() + 1);
+                malformed.set(malformed.get() + usize::from(std::str::from_utf8(&bytes).is_err()));
+                let capture = buffer(&bytes, true);
+                let spans = valid_character_spans(&bytes);
+                let available = bytes.len() as u64;
+                for boundary in 0..=available + 1 {
+                    for (start, end) in [
+                        (0, boundary),
+                        (boundary, available),
+                        (boundary, boundary),
+                        (boundary, boundary + 1),
+                    ] {
+                        let start = start.min(available);
+                        let end = end.clamp(start, available);
+                        let mut expected_start = start;
+                        let mut expected_end = end;
+                        for &(a, b) in &spans {
+                            if a < start && start < b {
+                                expected_start = b.min(end);
+                            }
+                            if a < end && end < b {
+                                expected_end = a.max(expected_start);
+                            }
+                        }
+                        let page = capture.page(start, end);
+                        prop_assert_eq!((page.start, page.end), (expected_start, expected_end));
+                        prop_assert_eq!(page.leading_fragment, expected_start > start);
+                        prop_assert_eq!(page.trailing_fragment, expected_end < end);
+                        let text = String::from_utf8_lossy(
+                            &bytes[expected_start as usize..expected_end as usize],
+                        );
+                        prop_assert_eq!(page.lossy, matches!(text, std::borrow::Cow::Owned(_)));
+                        prop_assert_eq!(page.text, text);
+                        windows.set(windows.get() + 1);
+                    }
+                }
+                let text: String = characters.into_iter().collect();
+                let capture = buffer(text.as_bytes(), true);
+                let mut stitched = String::new();
+                let mut offset = 0;
+                while offset < text.len() as u64 {
+                    let mut end = offset + width as u64;
+                    let page = loop {
+                        let page = capture.page(offset, end);
+                        if page.end > offset {
+                            break page;
+                        }
+                        end += 1;
+                        prop_assert!(end <= offset + 4);
+                    };
+                    prop_assert!(!page.lossy && !page.leading_fragment);
+                    stitched.push_str(&page.text);
+                    offset = page.end;
+                }
+                prop_assert_eq!(stitched, text);
+                Ok(())
+            })
+            .unwrap();
+        eprintln!(
+            "byte_windows callbacks={} windows={} malformed={}",
+            callbacks.get(),
+            windows.get(),
+            malformed.get()
+        );
     }
 
     #[test]
