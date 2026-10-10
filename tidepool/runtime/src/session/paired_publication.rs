@@ -1212,6 +1212,11 @@ impl AcceptedDeclarationPublication {
                         .and_then(|surface| surface.context_root.as_ref()),
                 )
                 .map_err(|e| recovery::graph_error(&error_path, e))?;
+            for artifact in artifacts {
+                candidate
+                    .insert_artifact(artifact)
+                    .map_err(|error| recovery::graph_error(&error_path, error))?;
+            }
             candidate
                 .insert_node(recovery::RecoveryNode {
                     id: base.reserved,
@@ -1237,12 +1242,7 @@ impl AcceptedDeclarationPublication {
                     },
                     live_dependencies,
                 })
-                .map_err(|error| invalid_at(&error_path, error.to_string()))?;
-            for artifact in artifacts {
-                candidate
-                    .insert_artifact(artifact)
-                    .map_err(|error| invalid_at(&error_path, error.to_string()))?;
-            }
+                .map_err(|error| recovery::graph_error(&error_path, error))?;
             let mut surface = previous
                 .map(|surface| (*surface).clone())
                 .unwrap_or_else(|| recovery::RecoveryPublicSurface::empty(owner.clone()));

@@ -127,6 +127,9 @@ pub(crate) struct RecoveryGraph {
     pending: OrdMap<Cid, Arc<[u8]>>,
     public_changes: Vec<PreparedPublicOwnerChange>,
     work: crate::session::RecoveryPublicationWork,
+    /// Coupled receipts created by this graph's materializer. Cancelled
+    /// candidates cannot contribute receipts without their owned block packet.
+    materialized_contexts: OrdMap<ContextRoot, Arc<MaterializedContext>>,
     acquired: Arc<Mutex<Acquired>>,
 }
 impl std::fmt::Debug for RecoveryGraph {
@@ -174,6 +177,7 @@ impl RecoveryGraph {
             pending: OrdMap::new(),
             public_changes: Vec::new(),
             work: Default::default(),
+            materialized_contexts: OrdMap::new(),
             acquired: Arc::new(Mutex::new(Acquired::default())),
         }
     }
@@ -210,6 +214,7 @@ impl RecoveryGraph {
             pending: OrdMap::new(),
             public_changes: Vec::new(),
             work: Default::default(),
+            materialized_contexts: OrdMap::new(),
             acquired: Arc::new(Mutex::new(Acquired::default())),
         };
         graph.load_public_surfaces()?;
@@ -332,6 +337,9 @@ impl RecoveryGraph {
         root: &ContextRoot,
     ) -> Result<Arc<MaterializedContext>, RecoveryError> {
         self.store.ensure_ready()?;
+        if let Some(context) = self.materialized_contexts.get(root) {
+            return Ok(context.clone());
+        }
         if let Some(context) = self.acquired.lock().contexts.get(root).cloned() {
             return Ok(context);
         }
@@ -533,6 +541,16 @@ impl RecoveryGraphCandidate {
                 "declaration insertion violates immutable causal identity",
             ));
         }
+        self.graph.context(&node.context_root)?;
+        if node
+            .artifact_refs
+            .iter()
+            .any(|id| !self.graph.artifacts.contains_key(id))
+        {
+            return Err(error(
+                "declaration producer artifact is absent from the candidate",
+            ));
+        }
         let cid = self.encode(&node)?;
         self.graph.nodes.insert(node.id.0, cid);
         self.graph
@@ -586,13 +604,26 @@ impl RecoveryGraphCandidate {
         let packet = materializer.finish()?;
         self.graph.stage_packet(packet);
         let root = context.root().clone();
-        self.graph.remember_context(context)?;
+        self.graph
+            .materialized_contexts
+            .insert(root.clone(), context);
         Ok(root)
     }
     pub(crate) fn replace_surface(
         &mut self,
         mut surface: RecoveryPublicSurface,
     ) -> Result<(), RecoveryError> {
+        if surface
+            .declaration_root
+            .is_some_and(|id| !self.graph.nodes.contains_key(&id.0))
+        {
+            return Err(error(
+                "public declaration root is absent from the candidate",
+            ));
+        }
+        if let Some(root) = &surface.context_root {
+            self.graph.context(root)?;
+        }
         let previous = self.graph.owner_roots.get(&surface.owner).cloned();
         let mut materializer = Materializer::new(&self.graph);
         let bindings =
@@ -793,6 +824,49 @@ mod tests {
                 .unwrap()
                 .workbench_imports,
             ["first"]
+        );
+    }
+
+    #[test]
+    fn cancelled_context_cannot_supply_a_required_reference_to_another_candidate() {
+        let (_directory, base) = fixture();
+        let before = base.store().work();
+        let mut cancelled = base.candidate();
+        let root = context(&mut cancelled);
+        drop(cancelled);
+        let mut candidate = base.candidate();
+        let error = candidate
+            .insert_node(node(1, None, root.clone(), "missing"))
+            .unwrap_err();
+        assert!(
+            matches!(error.kind, RecoveryErrorKind::Snapshot(SnapshotError::MissingBlock(cid)) if cid == *root.cid())
+        );
+        let mut surface = RecoveryPublicSurface::empty(owner(1));
+        surface.context_root = Some(root);
+        assert!(matches!(
+            candidate.replace_surface(surface).unwrap_err().kind,
+            RecoveryErrorKind::Snapshot(SnapshotError::MissingBlock(_))
+        ));
+        assert_eq!(base.store().work(), before);
+        assert!(base.node(Generation(1)).unwrap().is_none());
+        assert!(base.public_owners().next().is_none());
+        // A fresh issuing materializer stages its complete packet and retries.
+        let root = context(&mut candidate);
+        let mut missing_artifact = node(1, None, root.clone(), "missing-artifact");
+        missing_artifact.artifact_refs.push(ArtifactId([17; 32]));
+        assert!(candidate.insert_node(missing_artifact).is_err());
+        assert_eq!(base.store().work(), before);
+        candidate
+            .insert_node(node(1, None, root, "complete"))
+            .unwrap();
+        let committed = publish(candidate, &base);
+        assert_eq!(
+            reopened(&committed)
+                .node(Generation(1))
+                .unwrap()
+                .unwrap()
+                .workbench_imports,
+            ["complete"]
         );
     }
 

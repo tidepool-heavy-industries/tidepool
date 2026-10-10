@@ -2541,6 +2541,11 @@ impl SessionLib {
         let context_root = graph
             .insert_context(context, previous.as_ref())
             .map_err(|e| recovery::graph_error(&state.path, e))?;
+        for artifact in artifacts {
+            graph
+                .insert_artifact(artifact)
+                .map_err(|error| recovery::graph_error(&state.path, error))?;
+        }
         graph
             .insert_node(recovery::RecoveryNode {
                 id: staged.generation,
@@ -2576,12 +2581,7 @@ impl SessionLib {
                 },
                 live_dependencies,
             })
-            .map_err(|error| invalid(&error.to_string()))?;
-        for artifact in artifacts {
-            graph
-                .insert_artifact(artifact)
-                .map_err(|error| invalid(&error.to_string()))?;
-        }
+            .map_err(|error| recovery::graph_error(&state.path, error))?;
         graph
             .prepare(state.store_revision, state.allocation_ceiling)
             .map_err(|e| recovery::graph_error(&state.path, e))

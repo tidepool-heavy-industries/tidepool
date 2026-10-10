@@ -385,8 +385,7 @@ impl RunRecoveryStore {
             return Err(error.clone());
         }
         self.validate_physical_identity()?;
-        read_domain(&owner.connection, domain)
-            .map_err(|error| store_error(self.path(), StoreErrorKind::Storage, error))
+        read_domain(&owner.connection, domain).map_err(|error| sql_store_error(self.path(), error))
     }
     pub fn read_public_owner(
         &self,
@@ -399,7 +398,7 @@ impl RunRecoveryStore {
         }
         self.validate_physical_identity()?;
         read_public_owner(&connection.connection, domain, owner)
-            .map_err(|error| store_error(self.path(), StoreErrorKind::Storage, error))
+            .map_err(|error| sql_store_error(self.path(), error))
     }
     pub(crate) fn public_owner_states(
         &self,
@@ -434,7 +433,7 @@ impl RunRecoveryStore {
             })
             .map_err(|error| store_error(self.path(), StoreErrorKind::Storage, error))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| store_error(self.path(), StoreErrorKind::Storage, error))
+            .map_err(|error| sql_store_error(self.path(), error))
     }
     pub fn has_public_owners(&self, domain: RecoveryDomainId) -> Result<bool, StoreError> {
         let connection = self.connection.lock();
@@ -462,7 +461,7 @@ impl RunRecoveryStore {
         }
         self.validate_physical_identity()?;
         read_snapshot(&connection.connection, self.database_id, domain, owner)
-            .map_err(|error| store_error(self.path(), StoreErrorKind::Storage, error))
+            .map_err(|error| sql_store_error(self.path(), error))
     }
     pub fn read_snapshot_at(
         path: &Path,
@@ -476,7 +475,7 @@ impl RunRecoveryStore {
             .transaction()
             .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
         let snapshot = read_snapshot(&transaction, identity, domain, owner)
-            .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
+            .map_err(|error| sql_store_error(path, error))?;
         transaction
             .rollback()
             .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
@@ -533,6 +532,17 @@ impl RunRecoveryStore {
         prepared: PreparedRecoveryWrite,
         install: impl FnOnce(RecoveryDomainState) -> T,
     ) -> StoreDisposition<T> {
+        let owner_keys = prepared
+            .public_changes
+            .iter()
+            .map(|change| {
+                owner_bytes(match change {
+                    PreparedPublicOwnerChange::Insert(next)
+                    | PreparedPublicOwnerChange::Replace { next, .. } => &next.owner,
+                    PreparedPublicOwnerChange::Remove { owner, .. } => owner,
+                })
+            })
+            .collect::<Vec<_>>();
         self.transact_and_install(|transaction| {
             let current = read_domain(transaction, prepared.domain_id).map_err(sql_refusal)?.ok_or(StoreRefusal::DomainMissing)?;
             if current.revision != prepared.expected_revision { return Err(StoreRefusal::StaleRevision); }
@@ -540,7 +550,7 @@ impl RunRecoveryStore {
             let content_revision = increment(current.content_revision)?;
             if prepared.allocation_ceiling < current.allocation_ceiling { return Err(StoreRefusal::CeilingDecrease); }
             insert_blocks(transaction, &prepared.blocks, &self.block_writes, &self.block_bytes).map_err(sql_refusal)?;
-            for change in &prepared.public_changes { apply_owner_change(transaction, prepared.domain_id, change)?; }
+            for (change, key) in prepared.public_changes.iter().zip(&owner_keys) { apply_owner_change(transaction, prepared.domain_id, change, key)?; }
             let updated = transaction.execute("UPDATE recovery_domains SET revision=?1,content_revision=?2,ceiling=?3,snapshot_root=?4 WHERE domain=?5 AND revision=?6 AND ceiling<=?3", params![
                 revision.0.to_be_bytes().as_slice(), content_revision.0.to_be_bytes().as_slice(), prepared.allocation_ceiling.0.to_be_bytes().as_slice(), prepared.snapshot_root.cid().to_bytes(), prepared.domain_id.bytes().as_slice(), prepared.expected_revision.0.to_be_bytes().as_slice()]).map_err(sql_refusal)?;
             if updated != 1 { return Err(StoreRefusal::StaleRevision); }
@@ -577,6 +587,8 @@ impl RunRecoveryStore {
         successor_epoch: u64,
         install: impl FnOnce(RecoveryDomainState) -> T,
     ) -> StoreDisposition<T> {
+        let previous_key = owner_bytes(&previous.owner);
+        let successor_key = owner_bytes(&successor);
         self.transact_and_install(
             |transaction| {
                 let current = read_domain(transaction, domain)
@@ -585,9 +597,10 @@ impl RunRecoveryStore {
                 if current.revision != expected {
                     return Err(StoreRefusal::StaleRevision);
                 }
-                let retained = read_public_owner(transaction, domain, &previous.owner)
-                    .map_err(sql_refusal)?
-                    .ok_or(StoreRefusal::OwnerMissing)?;
+                let retained =
+                    read_public_owner_key(transaction, domain, &previous.owner, &previous_key)
+                        .map_err(sql_refusal)?
+                        .ok_or(StoreRefusal::OwnerMissing)?;
                 if &retained != previous {
                     return Err(StoreRefusal::StaleEpoch);
                 }
@@ -598,6 +611,7 @@ impl RunRecoveryStore {
                         owner: previous.owner.clone(),
                         expected_epoch: previous.epoch,
                     },
+                    &previous_key,
                 )?;
                 apply_owner_change(
                     transaction,
@@ -607,6 +621,7 @@ impl RunRecoveryStore {
                         epoch: successor_epoch,
                         surface_root: retained.surface_root,
                     }),
+                    &successor_key,
                 )?;
                 let revision = increment(expected)?;
                 let updated = transaction
@@ -672,7 +687,14 @@ impl RunRecoveryStore {
         );
         match result {
             TransactionResult::Committed(value) => StoreDisposition::Committed(install(value)),
-            TransactionResult::Refused(refusal) => StoreDisposition::Refused(refusal),
+            TransactionResult::Refused(mut refusal) => {
+                if let StoreRefusal::Storage(error) = &mut refusal {
+                    if error.path.as_os_str().is_empty() {
+                        error.path = self.path().to_path_buf();
+                    }
+                }
+                StoreDisposition::Refused(refusal)
+            }
             TransactionResult::RecoveryRequired(detail) => {
                 let error = store_error(self.path(), StoreErrorKind::RecoveryRequired, detail);
                 owner.fence = Some(error.clone());
@@ -776,7 +798,26 @@ fn increment(revision: StoreRevision) -> Result<StoreRevision, StoreRefusal> {
         .ok_or(StoreRefusal::RevisionExhausted)
 }
 fn sql_refusal(error: rusqlite::Error) -> StoreRefusal {
-    StoreRefusal::Storage(store_error(Path::new(""), StoreErrorKind::Storage, error))
+    StoreRefusal::Storage(sql_store_error(Path::new(""), error))
+}
+fn sql_store_error(path: &Path, error: rusqlite::Error) -> StoreError {
+    let kind = match &error {
+        rusqlite::Error::FromSqlConversionFailure(..)
+        | rusqlite::Error::InvalidColumnType(..)
+        | rusqlite::Error::InvalidQuery
+        | rusqlite::Error::IntegralValueOutOfRange(..)
+        | rusqlite::Error::QueryReturnedNoRows => StoreErrorKind::Integrity,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(
+                failure.code,
+                rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+            ) =>
+        {
+            StoreErrorKind::Integrity
+        }
+        _ => StoreErrorKind::Storage,
+    };
+    store_error(path, kind, error)
 }
 fn insert_blocks(
     transaction: &Transaction<'_>,
@@ -809,12 +850,13 @@ fn apply_owner_change(
     transaction: &Transaction<'_>,
     domain: RecoveryDomainId,
     change: &PreparedPublicOwnerChange,
+    key: &[u8],
 ) -> Result<(), StoreRefusal> {
     let domain = domain.bytes();
     let changed = match change {
-        PreparedPublicOwnerChange::Insert(next) => transaction.execute("INSERT INTO public_owners(domain,owner,epoch,surface_root) VALUES(?1,?2,?3,?4) ON CONFLICT(domain,owner) DO NOTHING", params![domain.as_slice(), owner_bytes(&next.owner), next.epoch.to_be_bytes().as_slice(), next.surface_root.cid().to_bytes()]).map_err(sql_refusal)?,
-        PreparedPublicOwnerChange::Replace { expected_epoch, next } => transaction.execute("UPDATE public_owners SET epoch=?1,surface_root=?2 WHERE domain=?3 AND owner=?4 AND epoch=?5", params![next.epoch.to_be_bytes().as_slice(), next.surface_root.cid().to_bytes(), domain.as_slice(), owner_bytes(&next.owner), expected_epoch.to_be_bytes().as_slice()]).map_err(sql_refusal)?,
-        PreparedPublicOwnerChange::Remove { owner, expected_epoch } => transaction.execute("DELETE FROM public_owners WHERE domain=?1 AND owner=?2 AND epoch=?3", params![domain.as_slice(), owner_bytes(owner), expected_epoch.to_be_bytes().as_slice()]).map_err(sql_refusal)?,
+        PreparedPublicOwnerChange::Insert(next) => transaction.execute("INSERT INTO public_owners(domain,owner,epoch,surface_root) VALUES(?1,?2,?3,?4) ON CONFLICT(domain,owner) DO NOTHING", params![domain.as_slice(), key, next.epoch.to_be_bytes().as_slice(), next.surface_root.cid().to_bytes()]).map_err(sql_refusal)?,
+        PreparedPublicOwnerChange::Replace { expected_epoch, next } => transaction.execute("UPDATE public_owners SET epoch=?1,surface_root=?2 WHERE domain=?3 AND owner=?4 AND epoch=?5", params![next.epoch.to_be_bytes().as_slice(), next.surface_root.cid().to_bytes(), domain.as_slice(), key, expected_epoch.to_be_bytes().as_slice()]).map_err(sql_refusal)?,
+        PreparedPublicOwnerChange::Remove { expected_epoch, .. } => transaction.execute("DELETE FROM public_owners WHERE domain=?1 AND owner=?2 AND epoch=?3", params![domain.as_slice(), key, expected_epoch.to_be_bytes().as_slice()]).map_err(sql_refusal)?,
     };
     if changed != 1 {
         return Err(match change {
@@ -837,10 +879,18 @@ fn read_public_owner(
     domain: RecoveryDomainId,
     owner: &RecoveryPublicOwner,
 ) -> rusqlite::Result<Option<RecoveryPublicOwnerState>> {
+    read_public_owner_key(connection, domain, owner, &owner_bytes(owner))
+}
+fn read_public_owner_key(
+    connection: &Connection,
+    domain: RecoveryDomainId,
+    owner: &RecoveryPublicOwner,
+    key: &[u8],
+) -> rusqlite::Result<Option<RecoveryPublicOwnerState>> {
     connection
         .query_row(
             "SELECT epoch,surface_root FROM public_owners WHERE domain=?1 AND owner=?2",
-            params![domain.bytes().as_slice(), owner_bytes(owner)],
+            params![domain.bytes().as_slice(), key],
             |row| {
                 Ok(RecoveryPublicOwnerState {
                     owner: owner.clone(),
@@ -1314,6 +1364,44 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();
         assert_eq!(mode, "delete");
+    }
+
+    #[test]
+    fn malformed_sql_metadata_is_integrity_failure_and_never_absence() {
+        let (_directory, store) = store();
+        domain(&store, RecoveryDomainId::Root, 64);
+        let external = Connection::open(store.path()).unwrap();
+        external
+            .execute(
+                "UPDATE recovery_domains SET snapshot_root=x'01' WHERE domain=?1",
+                [RecoveryDomainId::Root.bytes().as_slice()],
+            )
+            .unwrap();
+        let error = store.read_domain(RecoveryDomainId::Root).unwrap_err();
+        assert_eq!(error.kind, StoreErrorKind::Integrity);
+        assert_eq!(error.path, store.path());
+        assert!(matches!(
+            store.read_snapshot_identity(RecoveryDomainId::Root, None),
+            Err(StoreError {
+                kind: StoreErrorKind::Integrity,
+                ..
+            })
+        ));
+        assert!(matches!(
+            RunRecoveryStore::read_snapshot_at(store.path(), RecoveryDomainId::Root, None),
+            Err(StoreError {
+                kind: StoreErrorKind::Integrity,
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.reserve_ceiling(RecoveryDomainId::Root, StoreRevision(0), Generation(128)),
+            StoreDisposition::Refused(StoreRefusal::Storage(StoreError {
+                kind: StoreErrorKind::Integrity,
+                ..
+            }))
+        ));
+        assert!(!store.is_recovery_required());
     }
 
     #[test]
