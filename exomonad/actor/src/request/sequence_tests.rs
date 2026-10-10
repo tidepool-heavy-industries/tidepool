@@ -415,7 +415,7 @@ fn run_history_with_mutation(
         .collect();
     let ids: Vec<_> = targets
         .iter()
-        .map(|target| registry.reserve(owner, *target))
+        .map(|target| registry.reserve_native(owner, *target))
         .collect();
     let mut requests = vec![RequestModel::default(); targets.len()];
     let mut reply_claims: Vec<Option<RequestReplyClaim>> =

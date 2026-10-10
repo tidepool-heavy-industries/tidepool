@@ -183,7 +183,6 @@ mod tests {
             true,
             Some(invocation.clone()),
         );
-        crate::request::test_support::admit_destination(registry, owner, request);
         request
     }
 
@@ -450,6 +449,7 @@ mod tests {
         let scope = invocation(1);
         let ready = reserve(&registry, owner, target, &scope);
         let detached = reserve(&registry, owner, target, &scope);
+        crate::request::test_support::admit_destination(&registry, owner, ready);
         registry.mark_queued(owner, target, ready).unwrap();
         registry.mark_queued(owner, target, detached).unwrap();
         registry

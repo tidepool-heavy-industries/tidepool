@@ -731,7 +731,7 @@ fn run_history(
         std::array::from_fn(|_| crate::RetainedActorExit::new());
     let mut shutdown = [false; 4];
     let ids = targets.map(|target| {
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         request

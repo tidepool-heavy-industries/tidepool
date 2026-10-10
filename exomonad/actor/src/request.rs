@@ -1570,6 +1570,11 @@ impl RequestRegistry {
         self.reserve_labeled(owner, target, "request".into())
     }
 
+    #[cfg(test)]
+    pub(crate) fn reserve_native(&self, owner: ActorRef, target: ActorRef) -> RequestId {
+        self.reserve_native_labeled(owner, target, "request".into())
+    }
+
     pub(crate) fn received_counts(&self, actor: ActorRef) -> (u64, u64) {
         let state = self.state.lock();
         (
@@ -1590,6 +1595,27 @@ impl RequestRegistry {
 
     #[cfg(test)]
     pub(crate) fn reserve_labeled_with_reporting(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+        label: String,
+        notify_owner: bool,
+    ) -> RequestId {
+        self.reserve_for_operation(owner, target, label, notify_owner, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reserve_native_labeled(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+        label: String,
+    ) -> RequestId {
+        self.reserve_native_labeled_with_reporting(owner, target, label, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reserve_native_labeled_with_reporting(
         &self,
         owner: ActorRef,
         target: ActorRef,
@@ -3484,7 +3510,7 @@ mod tests {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         assert_eq!(registry.open_without_reply(target), None);
         registry.mark_queued(owner, target, request).unwrap();
         assert_eq!(registry.open_without_reply(target), None);
@@ -3492,7 +3518,7 @@ mod tests {
         assert_eq!(registry.open_without_reply(target), Some(request));
         assert_eq!(registry.open_without_reply(owner), None);
 
-        let grandchild = registry.reserve(target, actor(3));
+        let grandchild = registry.reserve_native(target, actor(3));
         assert_eq!(registry.open_without_reply(target), None);
         registry.mark_target_unavailable(target, grandchild);
         assert_eq!(registry.open_without_reply(target), Some(request));
@@ -3515,8 +3541,12 @@ mod tests {
         let silent_target = actor(3);
         let failed_target = actor(4);
 
-        let ready =
-            registry.reserve_labeled_with_reporting(owner, ready_target, "ready".into(), true);
+        let ready = registry.reserve_native_labeled_with_reporting(
+            owner,
+            ready_target,
+            "ready".into(),
+            true,
+        );
         registry.mark_queued(owner, ready_target, ready).unwrap();
         registry.present(ready_target, ready).unwrap();
         let mut reply_claim_ready = Some(registry.begin_reply(ready_target, ready).unwrap());
@@ -3526,8 +3556,12 @@ mod tests {
             None,
         );
 
-        let silent =
-            registry.reserve_labeled_with_reporting(owner, silent_target, "silent".into(), false);
+        let silent = registry.reserve_native_labeled_with_reporting(
+            owner,
+            silent_target,
+            "silent".into(),
+            false,
+        );
         registry.mark_queued(owner, silent_target, silent).unwrap();
         registry.present(silent_target, silent).unwrap();
         let mut reply_claim_silent = Some(registry.begin_reply(silent_target, silent).unwrap());
@@ -3537,8 +3571,12 @@ mod tests {
             None,
         );
 
-        let failed =
-            registry.reserve_labeled_with_reporting(owner, failed_target, "failed".into(), true);
+        let failed = registry.reserve_native_labeled_with_reporting(
+            owner,
+            failed_target,
+            "failed".into(),
+            true,
+        );
         registry.mark_target_unavailable(owner, failed);
 
         let notices = registry.take_settlement_notifications();
@@ -3814,9 +3852,9 @@ mod tests {
         use readiness::{Node, Plan};
         let registry = RequestRegistry::default();
         let owner = actor(1);
-        let left = registry.reserve(owner, actor(2));
-        let right = registry.reserve(owner, actor(3));
-        let tail = registry.reserve(owner, actor(4));
+        let left = registry.reserve_native(owner, actor(2));
+        let right = registry.reserve_native(owner, actor(3));
+        let tail = registry.reserve_native(owner, actor(4));
         for (request, target) in [(left, actor(2)), (right, actor(3)), (tail, actor(4))] {
             registry.mark_queued(owner, target, request).unwrap();
             registry.present(target, request).unwrap();
@@ -4170,7 +4208,7 @@ mod tests {
             let registry = std::sync::Arc::new(RequestRegistry::default());
             let owner = actor(1);
             let target = actor(2);
-            let request = registry.reserve(owner, target);
+            let request = registry.reserve_native(owner, target);
             registry.mark_queued(owner, target, request).unwrap();
             registry.present(target, request).unwrap();
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -4264,7 +4302,7 @@ mod tests {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, initial) = registry
@@ -4335,7 +4373,7 @@ mod tests {
         let second_target = actor(3);
         let unrelated_target = actor(4);
         let prepare = |target| {
-            let request = registry.reserve(owner, target);
+            let request = registry.reserve_native(owner, target);
             registry.mark_queued(owner, target, request).unwrap();
             registry.present(target, request).unwrap();
             request
@@ -4398,7 +4436,7 @@ mod tests {
         let owner = actor(1);
         let target = actor(2);
         let inspected = [(target, registry.cleanup_revision(target))];
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
@@ -4422,7 +4460,7 @@ mod tests {
         let registry = std::sync::Arc::new(RequestRegistry::default());
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let inspected = [(target, registry.cleanup_revision(target))];
@@ -4437,11 +4475,11 @@ mod tests {
             None,
         );
         // Unrelated root work and inspection do not invalidate this decision.
-        let outside = registry.reserve(owner, actor(3));
+        let outside = registry.reserve_native(owner, actor(3));
         registry.mark_queued(owner, actor(3), outside).unwrap();
         registry.observe_response(owner, request).unwrap();
         let guard = registry.begin_cleanup(owner, &inspected).ok().unwrap();
-        let next = registry.reserve(owner, target);
+        let next = registry.reserve_native(owner, target);
         assert_eq!(
             registry.mark_queued(owner, target, next),
             Err(ReplyError::CancellationRequested)
@@ -4450,7 +4488,7 @@ mod tests {
             registry.register_watch(owner, vec![request]),
             Err(ReplyError::CancellationRequested)
         ));
-        let outbound = registry.reserve(target, actor(3));
+        let outbound = registry.reserve_native(target, actor(3));
         assert_eq!(
             registry.mark_queued(target, actor(3), outbound),
             Err(ReplyError::CancellationRequested)
@@ -4465,7 +4503,7 @@ mod tests {
         let owner = actor(1);
         let member = actor(2);
         let outside = actor(3);
-        let request = registry.reserve(member, outside);
+        let request = registry.reserve_native(member, outside);
         registry.mark_queued(member, outside, request).unwrap();
         registry.present(outside, request).unwrap();
         let inspected = [(member, registry.cleanup_revision(member))];
@@ -4499,8 +4537,8 @@ mod tests {
         let owner = actor(1);
         let left_target = actor(2);
         let right_target = actor(3);
-        let left = registry.reserve(owner, left_target);
-        let right = registry.reserve(owner, right_target);
+        let left = registry.reserve_native(owner, left_target);
+        let right = registry.reserve_native(owner, right_target);
         registry.mark_queued(owner, left_target, left).unwrap();
         registry.mark_queued(owner, right_target, right).unwrap();
         registry.present(left_target, left).unwrap();
@@ -4841,7 +4879,7 @@ mod tests {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
@@ -4863,7 +4901,7 @@ mod tests {
         let registry = std::sync::Arc::new(RequestRegistry::default());
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
@@ -4927,7 +4965,7 @@ mod tests {
         let registry = std::sync::Arc::new(RequestRegistry::default());
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
@@ -4959,7 +4997,7 @@ mod tests {
         let registry = std::sync::Arc::new(RequestRegistry::default());
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
@@ -4983,7 +5021,7 @@ mod tests {
         let registry = std::sync::Arc::new(RequestRegistry::default());
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
@@ -5005,7 +5043,7 @@ mod tests {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, initial) = registry.register_watch(owner, vec![request]).unwrap();
@@ -5091,8 +5129,8 @@ mod tests {
         let owner = actor(1);
         let failed_target = actor(2);
         let ready_target = actor(3);
-        let failed = registry.reserve(owner, failed_target);
-        let ready = registry.reserve(owner, ready_target);
+        let failed = registry.reserve_native(owner, failed_target);
+        let ready = registry.reserve_native(owner, ready_target);
         registry.mark_queued(owner, failed_target, failed).unwrap();
         registry.mark_queued(owner, ready_target, ready).unwrap();
         registry.present(ready_target, ready).unwrap();
@@ -5343,7 +5381,7 @@ mod tests {
             let registry = RequestRegistry::default();
             let owner = actor(1);
             let target = actor(2);
-            let request = registry.reserve(owner, target);
+            let request = registry.reserve_native(owner, target);
             registry.mark_queued(owner, target, request).unwrap();
             registry.present(target, request).unwrap();
             let (_, initial) = registry.register_watch(owner, vec![request]).unwrap();
@@ -5413,7 +5451,7 @@ mod tests {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
 
@@ -5473,7 +5511,7 @@ mod tests {
         let owner = actor(1);
         let target = actor(2);
         let intruder = actor(3);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
 
         assert!(matches!(
@@ -5513,7 +5551,7 @@ mod tests {
             id: owner.id,
             incarnation: Incarnation(2),
         };
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
@@ -5551,7 +5589,7 @@ mod tests {
         assert!(registry.watch_observed_since(owner, watch, transition_time));
 
         let unavailable_registry = RequestRegistry::default();
-        let unavailable_request = unavailable_registry.reserve(owner, target);
+        let unavailable_request = unavailable_registry.reserve_native(owner, target);
         unavailable_registry
             .mark_queued(owner, target, unavailable_request)
             .unwrap();
@@ -5593,7 +5631,8 @@ mod tests {
         let owner = actor(1);
         let target = actor(2);
         let child = actor(3);
-        let request = registry.reserve_labeled_with_reporting(owner, target, "shared".into(), true);
+        let request =
+            registry.reserve_native_labeled_with_reporting(owner, target, "shared".into(), true);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (owner_watch, _) = registry.register_watch(owner, vec![request]).unwrap();
@@ -5649,7 +5688,8 @@ mod tests {
         let owner = actor(1);
         let target = actor(2);
         let child = actor(3);
-        let request = registry.reserve_labeled_with_reporting(owner, target, "shared".into(), true);
+        let request =
+            registry.reserve_native_labeled_with_reporting(owner, target, "shared".into(), true);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(child, vec![request]).unwrap();
@@ -5673,8 +5713,8 @@ mod tests {
         let owner = actor(1);
         let target = actor(2);
         let child = actor(3);
-        let completed = registry.reserve(owner, target);
-        let active = registry.reserve(owner, target);
+        let completed = registry.reserve_native(owner, target);
+        let active = registry.reserve_native(owner, target);
         for request in [completed, active] {
             registry.mark_queued(owner, target, request).unwrap();
             registry.present(target, request).unwrap();
@@ -5727,7 +5767,7 @@ mod tests {
         let target = actor(2);
         let child = actor(3);
         let other = actor(4);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry
@@ -5779,7 +5819,7 @@ mod tests {
         let owner = actor(1);
         let target = actor(2);
         let observer = actor(3);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(observer, vec![request]).unwrap();
@@ -5806,7 +5846,7 @@ mod tests {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
@@ -5857,7 +5897,7 @@ mod tests {
         let pending_target = actor(3);
         let outside_target = actor(4);
 
-        let ready = registry.reserve_labeled(owner, ready_target, "ready".into());
+        let ready = registry.reserve_native_labeled(owner, ready_target, "ready".into());
         registry.mark_queued(owner, ready_target, ready).unwrap();
         registry.present(ready_target, ready).unwrap();
         let (ready_watch, _) = registry.register_watch(owner, vec![ready]).unwrap();
@@ -5868,11 +5908,11 @@ mod tests {
             None,
         );
 
-        let pending = registry.reserve_labeled(owner, pending_target, "pending".into());
+        let pending = registry.reserve_native_labeled(owner, pending_target, "pending".into());
         registry
             .mark_queued(owner, pending_target, pending)
             .unwrap();
-        let outside = registry.reserve_labeled(owner, outside_target, "outside".into());
+        let outside = registry.reserve_native_labeled(owner, outside_target, "outside".into());
         registry
             .mark_queued(owner, outside_target, outside)
             .unwrap();
@@ -5906,7 +5946,7 @@ mod tests {
         let owner = actor(1);
         let target = actor(2);
 
-        let request = registry.reserve_labeled(owner, target, "work".into());
+        let request = registry.reserve_native_labeled(owner, target, "work".into());
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();

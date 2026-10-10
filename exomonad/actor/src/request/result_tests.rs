@@ -8,7 +8,7 @@ fn actor(id: u64) -> ActorRef {
 }
 
 fn presented(registry: &RequestRegistry, owner: ActorRef, target: ActorRef) -> RequestId {
-    let request = registry.reserve(owner, target);
+    let request = registry.reserve_native(owner, target);
     registry.mark_queued(owner, target, request).unwrap();
     registry.present(target, request).unwrap();
     request
