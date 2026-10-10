@@ -1340,13 +1340,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d726571756573742d6c61796f75742e6873",
-    src = "src/session/fixtures/activation-input-request-layout.hs",
-    out = "activation-input-request-layout.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d7477656e74792d72656e6465726572732e6873",
     src = "src/session/fixtures/activation-input-twenty-renderers.hs",
     out = "activation-input-twenty-renderers.hs",
