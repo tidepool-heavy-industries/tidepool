@@ -9,14 +9,15 @@ use std::{
 
 use tidepool_bridge::{FromHaskell, HaskellValue};
 use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
-use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+use tidepool_effect::{EffectError, EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{Generation, SessionId};
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates,
     turn::{run_turn, BoundBinder, CompiledTurn, TurnRequest, TurnResult},
-    ModuleEnv, OutputSink, PersistentSession, ResidentHole, ResidentOutcome, ResidentSession,
-    RuntimeResultPublication, SessionLib,
+    ModuleEnv, OutputSink, PersistentSession, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentSession, RuntimeResultPublication, SessionLib,
 };
+use tidepool_runtime::RuntimeError;
 use tidepool_testing::effect_surface::TestEffectSurface;
 
 use super::{RequestId, RequestRegistry, RequestReplyClaim, WatchNotification};
@@ -221,9 +222,7 @@ impl Fixture {
             .resident
             .request_result_type_witness(site, &hole)
             .unwrap();
-        self.resident
-            .abort(hole.cont_id(), "fixture destination admitted".into())
-            .unwrap();
+        self.abort_submission(&hole, "fixture destination admitted");
         RequestResultDestination::new(
             owner,
             FIXTURE_SESSION,
@@ -239,9 +238,7 @@ impl Fixture {
             .live_payload_handle_owned_by(submission.cont_id(), RealmId::ROOT)
             .unwrap()
             .expect("submission owns original RunRequest");
-        self.resident
-            .abort(submission.cont_id(), "fixture payload transferred".into())
-            .unwrap();
+        self.abort_submission(&submission, "fixture payload transferred");
         let receiver = self
             .resident
             .retain_binding_custody("resultRegistryReceiver")
@@ -273,6 +270,17 @@ impl Fixture {
             ResidentOutcome::Completed { .. }
         ));
         captured
+    }
+
+    fn abort_submission(&mut self, hole: &ResidentHole, reason: &str) {
+        let parked = self.resident.parked_count();
+        assert!(matches!(
+            self.resident.abort(hole.cont_id(), reason.to_owned()),
+            Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(detail))))
+                if detail == format!("ask aborted by caller: {reason}")
+        ));
+        assert_eq!(self.resident.parked_count(), parked - 1);
+        assert!(!self.resident.parked_holes().contains(&hole.cont_id()));
     }
 
     fn force(&mut self, snapshot: &OwnedResultSnapshot) -> i64 {
