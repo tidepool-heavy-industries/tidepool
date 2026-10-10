@@ -59,6 +59,18 @@ impl CompilerInputProjection {
     pub(crate) fn snapshot_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {
         &self.roles
     }
+    pub(crate) fn bind_snapshot_roles(
+        &mut self,
+        roles: &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
+    ) -> Result<(), CompileError> {
+        if &self.roles != roles {
+            return Err(failure(
+                "restored compiler roles differ from exact snapshot",
+            ));
+        }
+        self.roles = roles.clone();
+        Ok(())
+    }
     pub fn roles(&self) -> Vec<CompilerInputRole> {
         self.roles.values().cloned().collect()
     }

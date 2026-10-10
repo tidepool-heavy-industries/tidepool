@@ -27,7 +27,7 @@ fn captured_materialization_context(
     let mut selected = source.as_ref().clone();
     selected.inventory = source.inventory.select_roots(roots).unwrap();
     selected.compiler_projection = source.compiler_projection.within_view(&selected.inventory);
-    selected.lexical.clear();
+    selected.lexical = crate::exact_context::ExactLexicalSnapshot::default();
     selected.normalize().unwrap();
     Arc::new(selected)
 }

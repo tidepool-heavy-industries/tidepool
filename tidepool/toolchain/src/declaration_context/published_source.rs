@@ -134,7 +134,7 @@ impl ExactDeclarationContext {
             }
         }
         let bytes = serde_json::to_vec(&(
-            "published-source-original1",
+            "published-source-original2",
             self.producer,
             root,
             interface,
@@ -143,6 +143,7 @@ impl ExactDeclarationContext {
             original_input_identity,
             metadata.artifacts.keys().copied().collect::<Vec<_>>(),
             closure.selected_native_groups(),
+            selection.observation_digest()?,
             self.published_lexical_closure(root)?,
         ))
         .map_err(failure)?;
@@ -275,7 +276,9 @@ impl ExactDeclarationContext {
             producer: self.producer,
             compiler_projection: CompilerInputProjection::restore(&inventory, &roles)?,
             inventory,
-            lexical: self.published_lexical_closure(root)?,
+            lexical: self
+                .lexical
+                .replace(self.published_lexical_closure(root)?)?,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
             // Checked values retain their own template custody in the caller's
             // context. A source publication carries its selected source graph.
@@ -354,7 +357,7 @@ impl ExactDeclarationContext {
             .compiler_projection
             .merge(&incoming.compiler_projection)?;
         self.inventory = self.inventory.merge(&incoming.inventory)?;
-        self.lexical = lexical;
+        self.lexical = self.lexical.replace(lexical)?;
         self.finish()
     }
 
@@ -645,7 +648,7 @@ mod tests {
                 producer,
                 &admitted,
                 published.compiler_projection.clone(),
-                published.lexical.clone(),
+                published.lexical.to_vec(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],
             )
@@ -691,7 +694,7 @@ mod tests {
                             .into_iter()
                             .collect::<Vec<_>>(),
                         &published.compiler_input_roles(),
-                        published.lexical.clone(),
+                        published.lexical.to_vec(),
                     )
                     .is_err(),
                 "flat recovery cannot recreate an issuer's exact bound selection"
@@ -700,7 +703,7 @@ mod tests {
                 .context_with_graph_selection(
                     &selection,
                     &published.compiler_input_roles(),
-                    published.lexical.clone(),
+                    published.lexical.to_vec(),
                 )
                 .unwrap();
             assert_eq!(recovered.semantic_sha256(), published.semantic_sha256());
@@ -762,7 +765,11 @@ mod tests {
                     &snapshot_edges,
                 )
                 .unwrap()
-                .context_with_graph_selection(&snapshot_selection, &roles, snapshot.lexical.clone())
+                .context_with_graph_selection(
+                    &snapshot_selection,
+                    &roles,
+                    snapshot.lexical.to_vec(),
+                )
                 .unwrap();
                 assert_eq!(durable.artifact_view(), snapshot.artifact_view());
                 assert_eq!(
@@ -790,7 +797,7 @@ mod tests {
                     .context_with_graph_selection(
                         &selection,
                         &published.compiler_input_roles(),
-                        published.lexical.clone(),
+                        published.lexical.to_vec(),
                     )
                     .is_err(),
                 "recovery cannot replace missing exact child custody with its canonical interface"

@@ -108,7 +108,7 @@ fn continued_context(
         context.producer,
         view,
         context.compiler_projection.clone(),
-        context.lexical.clone(),
+        context.lexical.to_vec(),
         root.descriptor.owner.clone(),
         &[root.descriptor.owner.clone()],
     )
@@ -139,7 +139,7 @@ fn restored(
         &edges,
     )
     .unwrap()
-    .context_with_graph_selection(&selection, roles, context.lexical.clone())
+    .context_with_graph_selection(&selection, roles, context.lexical.to_vec())
 }
 
 fn property_config() -> proptest::test_runner::Config {
@@ -379,11 +379,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
     );
     result.unwrap();
     assert!(normalizations.get() >= configured_cases as usize);
-    assert!(
-        refusals
-            .iter()
-            .all(|count| count.get() >= configured_cases as usize)
-    );
+    assert!(refusals
+        .iter()
+        .all(|count| count.get() >= configured_cases as usize));
 }
 
 #[test]

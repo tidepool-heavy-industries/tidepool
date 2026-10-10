@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use cid::Cid;
 use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
-use fvm_ipld_encoding::{CborStore, DAG_CBOR};
+use fvm_ipld_encoding::DAG_CBOR;
 use fvm_ipld_hamt::{BytesKey, Config, Hamt};
 use imbl::{ordmap::DiffItem, OrdMap};
 use multihash_codetable::{Code, MultihashDigest};
@@ -94,7 +94,7 @@ fn hamt_error(error: fvm_ipld_hamt::Error) -> SnapshotError {
     match error {
         fvm_ipld_hamt::Error::Dynamic(source) => match source.downcast::<SnapshotError>() {
             Ok(error) => error,
-            Err(source) => SnapshotError::Storage(source),
+            Err(source) => malformed(source),
         },
         other => malformed(other),
     }
@@ -178,6 +178,7 @@ pub struct Materializer<'a, BS: Blockstore> {
     base: &'a BS,
     pending: MemoryBlockstore,
     changed_entries: u64,
+    selection_base: Option<MaterializedSelection>,
 }
 
 impl<'a, BS: Blockstore> Materializer<'a, BS> {
@@ -186,12 +187,15 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
             base,
             pending: MemoryBlockstore::new(),
             changed_entries: 0,
+            selection_base: None,
         }
     }
 
     pub fn materialize_value<T: Serialize>(&mut self, value: &T) -> Result<Cid, SnapshotError> {
-        self.put_cbor(value, Code::Blake2b256)
-            .map_err(storage_error)
+        let bytes = fvm_ipld_encoding::to_vec(value).map_err(malformed)?;
+        let cid = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(&bytes));
+        self.put_keyed(&cid, &bytes).map_err(storage_error)?;
+        Ok(cid)
     }
 
     /// The base receipt couples its root, actual facts and fixed codec family.
@@ -204,7 +208,7 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
         K: SnapshotKey,
         V: Clone + Eq + Serialize + DeserializeOwned,
     {
-        self.materialize_map_with(base, next, &InlineValues)
+        self.materialize_map_with::<K, V, InlineValues>(base, next)
     }
 
     /// The codec is chosen by the fact owner, rather than a per-call closure.
@@ -212,7 +216,6 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
         &mut self,
         base: Option<&MaterializedMap<K, V, C>>,
         next: &OrdMap<K, V>,
-        codec: &C,
     ) -> Result<MaterializedMap<K, V, C>, SnapshotError>
     where
         K: SnapshotKey,
@@ -235,10 +238,7 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
                 | DiffItem::Update {
                     new: (key, value), ..
                 } => {
-                    edits.push((
-                        BytesKey(key.encode_key()?),
-                        Some(codec.encode(self, value)?),
-                    ));
+                    edits.push((BytesKey(key.encode_key()?), Some(C::encode(self, value)?)));
                 }
                 DiffItem::Remove(key, _) => edits.push((BytesKey(key.encode_key()?), None)),
             }
@@ -342,24 +342,19 @@ impl<K: Ord, V, C> MaterializedMap<K, V, C> {
 pub trait SnapshotValueCodec<V> {
     type Wire: Clone + Eq + Serialize + DeserializeOwned;
     fn encode<BS: Blockstore>(
-        &self,
         store: &mut Materializer<'_, BS>,
         value: &V,
     ) -> Result<Self::Wire, SnapshotError>;
-    fn decode<BS: Blockstore>(&self, store: &BS, value: Self::Wire) -> Result<V, SnapshotError>;
+    fn decode<BS: Blockstore>(store: &BS, value: Self::Wire) -> Result<V, SnapshotError>;
 }
 #[derive(Clone, Copy, Debug)]
 pub struct InlineValues;
 impl<V: Clone + Eq + Serialize + DeserializeOwned> SnapshotValueCodec<V> for InlineValues {
     type Wire = V;
-    fn encode<BS: Blockstore>(
-        &self,
-        _: &mut Materializer<'_, BS>,
-        value: &V,
-    ) -> Result<V, SnapshotError> {
+    fn encode<BS: Blockstore>(_: &mut Materializer<'_, BS>, value: &V) -> Result<V, SnapshotError> {
         Ok(value.clone())
     }
-    fn decode<BS: Blockstore>(&self, _: &BS, value: V) -> Result<V, SnapshotError> {
+    fn decode<BS: Blockstore>(_: &BS, value: V) -> Result<V, SnapshotError> {
         Ok(value)
     }
 }
@@ -373,13 +368,12 @@ where
     V: Clone + Eq + Serialize + DeserializeOwned,
     BS: Blockstore,
 {
-    hydrate_map_with(store, root, &InlineValues)
+    hydrate_map_with::<K, V, InlineValues, BS>(store, root)
 }
 
 pub fn hydrate_map_with<K, V, C, BS>(
     store: &BS,
     root: &SnapshotMapRoot,
-    codec: &C,
 ) -> Result<MaterializedMap<K, V, C>, SnapshotError>
 where
     K: SnapshotKey,
@@ -392,9 +386,13 @@ where
         Hamt::load_with_config(root.cid(), &checked, HAMT_CONFIG).map_err(hamt_error)?;
     let mut facts = OrdMap::new();
     hamt.for_each_cacheless(|key, value| {
-        let key = K::decode_key(&key.0)?;
+        let decoded = K::decode_key(&key.0)?;
+        if decoded.encode_key()? != key.0 {
+            return Err(malformed("noncanonical typed snapshot key").into());
+        }
+        let key = decoded;
         if facts
-            .insert(key, codec.decode(store, value.clone())?)
+            .insert(key, C::decode(store, value.clone())?)
             .is_some()
         {
             return Err(malformed("duplicate typed snapshot key").into());
@@ -606,7 +604,6 @@ pub struct ScopeProofCodec;
 impl SnapshotValueCodec<ImmutableScopeProofRef> for ScopeProofCodec {
     type Wire = Cid;
     fn encode<BS: Blockstore>(
-        &self,
         store: &mut Materializer<'_, BS>,
         value: &ImmutableScopeProofRef,
     ) -> Result<Cid, SnapshotError> {
@@ -615,14 +612,21 @@ impl SnapshotValueCodec<ImmutableScopeProofRef> for ScopeProofCodec {
         Ok(*cid)
     }
     fn decode<BS: Blockstore>(
-        &self,
         store: &BS,
         cid: Cid,
     ) -> Result<ImmutableScopeProofRef, SnapshotError> {
-        let proof: ScopeProofV3 = read_value(store, &cid)?;
+        let bytes = store
+            .get(&cid)
+            .map_err(storage_error)?
+            .ok_or(SnapshotError::MissingBlock(cid))?;
+        verify_block(&cid, &bytes)?;
+        let proof: ScopeProofV3 = fvm_ipld_encoding::from_slice(&bytes).map_err(malformed)?;
         // The inventory authenticates complete scope identities and ancestry
         // before these decoded facts become live compiler custody.
-        Ok(ImmutableScopeProofRef::from_issued(Arc::new(proof)))
+        Ok(ImmutableScopeProofRef(Arc::new(ScopeFact {
+            proof: Arc::new(proof),
+            encoded: OnceLock::from((cid, bytes.into())),
+        })))
     }
 }
 
@@ -649,8 +653,8 @@ impl<BS: Blockstore> Materializer<'_, BS> {
         base: Option<&MaterializedSelection>,
         next: &ExactSelectionSnapshot,
     ) -> Result<MaterializedSelection, SnapshotError> {
-        let scopes =
-            self.materialize_map_with(base.map(|b| &b.scopes), &next.scopes, &ScopeProofCodec)?;
+        let scopes = self
+            .materialize_map_with::<_, _, ScopeProofCodec>(base.map(|b| &b.scopes), &next.scopes)?;
         let roots = self.materialize_map(base.map(|b| &b.roots), &next.roots)?;
         let namespace = self.materialize_map(base.map(|b| &b.namespace), &next.namespace)?;
         let native_custody =
@@ -691,7 +695,7 @@ pub fn hydrate_selection<BS: Blockstore>(
         return Err(malformed("selection encoding version"));
     }
     let scopes: MaterializedMap<ArtifactSelectionId, ImmutableScopeProofRef, ScopeProofCodec> =
-        hydrate_map_with(store, &descriptor.scopes, &ScopeProofCodec)?;
+        hydrate_map_with::<_, _, ScopeProofCodec, _>(store, &descriptor.scopes)?;
     if scopes
         .facts
         .iter()
@@ -716,6 +720,377 @@ pub fn hydrate_selection<BS: Blockstore>(
         roots,
         namespace,
         native_custody,
+    })
+}
+
+/// Canonical immutable lexical facts share resident nodes and their encoded bytes.
+#[derive(Clone, Debug)]
+pub struct ImmutableLexicalFactRef {
+    cid: Cid,
+    node: Arc<ExactLexicalNode>,
+    bytes: Arc<[u8]>,
+}
+impl PartialEq for ImmutableLexicalFactRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.cid == other.cid
+    }
+}
+impl Eq for ImmutableLexicalFactRef {}
+impl ImmutableLexicalFactRef {
+    fn new(mut node: ExactLexicalNode) -> Result<Self, SnapshotError> {
+        node.imports.sort();
+        if node.imports.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(malformed("duplicate selected lexical import"));
+        }
+        let bytes: Arc<[u8]> = fvm_ipld_encoding::to_vec(&node).map_err(malformed)?.into();
+        let cid = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(&bytes));
+        Ok(Self {
+            cid,
+            node: Arc::new(node),
+            bytes,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExactLexicalSnapshot {
+    facts: OrdMap<ExactModuleIdentity, ImmutableLexicalFactRef>,
+    rows: Arc<OnceLock<Vec<ExactLexicalNode>>>,
+}
+impl PartialEq for ExactLexicalSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.facts == other.facts
+    }
+}
+impl Eq for ExactLexicalSnapshot {}
+impl ExactLexicalSnapshot {
+    pub(crate) fn replace(
+        &self,
+        nodes: Vec<ExactLexicalNode>,
+    ) -> Result<Self, crate::CompileError> {
+        let mut facts = self.facts.clone();
+        let mut selected = std::collections::BTreeSet::new();
+        for mut node in nodes {
+            if !selected.insert(node.owner.clone()) {
+                return Err(crate::CompileError::ExtractFailed(format!(
+                    "duplicate selected lexical owner {}:{}",
+                    node.owner.unit, node.owner.module
+                )));
+            }
+            node.imports.sort();
+            if facts
+                .get(&node.owner)
+                .is_some_and(|previous| previous.node.as_ref() == &node)
+            {
+                continue;
+            }
+            let owner = node.owner.clone();
+            let fact = ImmutableLexicalFactRef::new(node)
+                .map_err(|error| crate::CompileError::ExtractFailed(error.to_string()))?;
+            facts.insert(owner, fact);
+        }
+        for owner in self.facts.keys().filter(|owner| !selected.contains(*owner)) {
+            facts.remove(owner);
+        }
+        Ok(Self {
+            facts,
+            rows: Arc::new(OnceLock::new()),
+        })
+    }
+}
+impl std::ops::Deref for ExactLexicalSnapshot {
+    type Target = [ExactLexicalNode];
+    fn deref(&self) -> &Self::Target {
+        self.rows.get_or_init(|| {
+            self.facts
+                .values()
+                .map(|fact| fact.node.as_ref().clone())
+                .collect()
+        })
+    }
+}
+impl<'a> IntoIterator for &'a ExactLexicalSnapshot {
+    type Item = &'a ExactLexicalNode;
+    type IntoIter = std::slice::Iter<'a, ExactLexicalNode>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LexicalFactCodec;
+impl SnapshotValueCodec<ImmutableLexicalFactRef> for LexicalFactCodec {
+    type Wire = Cid;
+    fn encode<BS: Blockstore>(
+        store: &mut Materializer<'_, BS>,
+        fact: &ImmutableLexicalFactRef,
+    ) -> Result<Cid, SnapshotError> {
+        store
+            .put_keyed(&fact.cid, &fact.bytes)
+            .map_err(storage_error)?;
+        Ok(fact.cid)
+    }
+    fn decode<BS: Blockstore>(
+        store: &BS,
+        cid: Cid,
+    ) -> Result<ImmutableLexicalFactRef, SnapshotError> {
+        let bytes = store
+            .get(&cid)
+            .map_err(storage_error)?
+            .ok_or(SnapshotError::MissingBlock(cid))?;
+        verify_block(&cid, &bytes)?;
+        let node: ExactLexicalNode = fvm_ipld_encoding::from_slice(&bytes).map_err(malformed)?;
+        if node.imports.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(malformed("noncanonical lexical adjacency"));
+        }
+        Ok(ImmutableLexicalFactRef {
+            cid,
+            node: Arc::new(node),
+            bytes: bytes.into(),
+        })
+    }
+}
+
+/// Exact compiler facts. Source-instance authority remains with the live
+/// declaration/transaction owner and is deliberately absent from this snapshot.
+#[derive(Clone, Debug, Default)]
+pub struct ExactContextSnapshot {
+    pub(crate) producer: [u8; 32],
+    pub(crate) selection: Arc<ExactSelectionSnapshot>,
+    pub(crate) roles: OrdMap<ExactModuleIdentity, CompilerInputRole>,
+    pub(crate) lexical: ExactLexicalSnapshot,
+}
+impl ExactContextSnapshot {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+    pub fn producer_sha256(&self) -> [u8; 32] {
+        self.producer
+    }
+    pub fn selection(&self) -> &Arc<ExactSelectionSnapshot> {
+        &self.selection
+    }
+    pub fn graph_selection(&self) -> Result<ArtifactGraphSelection, SnapshotError> {
+        self.selection.graph_selection()
+    }
+    pub fn binding_dependencies(
+        &self,
+    ) -> Result<
+        Vec<(
+            ArtifactBindingNode,
+            ArtifactBindingNode,
+            crate::artifact_inventory::ArtifactDependency,
+        )>,
+        SnapshotError,
+    > {
+        self.selection.binding_dependencies()
+    }
+    pub fn compiler_roles(&self) -> Vec<CompilerInputRole> {
+        self.roles.values().cloned().collect()
+    }
+    pub fn lexical(&self) -> Vec<ExactLexicalNode> {
+        self.lexical.to_vec()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompilerRoleFact {
+    InterfaceOnly {
+        interface: ArtifactId,
+    },
+    ReusableOriginal {
+        interface: ArtifactId,
+        original: ArtifactId,
+    },
+    PublishedSourceOriginal {
+        interface: ArtifactId,
+        original: ArtifactId,
+        source_revision: String,
+        original_input_identity: String,
+        selection: SelectionRoot,
+        selection_sha256: [u8; 32],
+    },
+}
+#[derive(Clone, Copy, Debug)]
+pub struct CompilerRoleCodec;
+impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
+    type Wire = Cid;
+    fn encode<BS: Blockstore>(
+        store: &mut Materializer<'_, BS>,
+        role: &CompilerInputRole,
+    ) -> Result<Cid, SnapshotError> {
+        let fact = match role {
+            CompilerInputRole::InterfaceOnly { interface } => CompilerRoleFact::InterfaceOnly {
+                interface: *interface,
+            },
+            CompilerInputRole::ReusableOriginal {
+                interface,
+                original,
+            } => CompilerRoleFact::ReusableOriginal {
+                interface: *interface,
+                original: *original,
+            },
+            CompilerInputRole::PublishedSourceOriginal {
+                interface,
+                original,
+                source_revision,
+                original_input_identity,
+                selection,
+                selection_sha256,
+            } => {
+                let base = store.selection_base.clone();
+                let selection = store.materialize_selection(base.as_ref(), selection.snapshot())?;
+                CompilerRoleFact::PublishedSourceOriginal {
+                    interface: *interface,
+                    original: *original,
+                    source_revision: source_revision.clone(),
+                    original_input_identity: original_input_identity.clone(),
+                    selection: selection.root,
+                    selection_sha256: *selection_sha256,
+                }
+            }
+        };
+        store.materialize_value(&fact)
+    }
+    fn decode<BS: Blockstore>(store: &BS, cid: Cid) -> Result<CompilerInputRole, SnapshotError> {
+        Ok(match read_value::<CompilerRoleFact, _>(store, &cid)? {
+            CompilerRoleFact::InterfaceOnly { interface } => {
+                CompilerInputRole::InterfaceOnly { interface }
+            }
+            CompilerRoleFact::ReusableOriginal {
+                interface,
+                original,
+            } => CompilerInputRole::ReusableOriginal {
+                interface,
+                original,
+            },
+            CompilerRoleFact::PublishedSourceOriginal {
+                interface,
+                original,
+                source_revision,
+                original_input_identity,
+                selection,
+                selection_sha256,
+            } => {
+                let selection = hydrate_selection(store, &selection)?;
+                CompilerInputRole::PublishedSourceOriginal {
+                    interface,
+                    original,
+                    source_revision,
+                    original_input_identity,
+                    selection: crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                        selection.snapshot,
+                    ),
+                    selection_sha256,
+                }
+            }
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextDescriptor {
+    version: u32,
+    producer: [u8; 32],
+    selection: SelectionRoot,
+    roles: SnapshotMapRoot,
+    lexical: SnapshotMapRoot,
+}
+#[derive(Clone, Debug)]
+pub struct MaterializedContext {
+    root: ContextRoot,
+    snapshot: ExactContextSnapshot,
+    selection: MaterializedSelection,
+    roles: MaterializedMap<ExactModuleIdentity, CompilerInputRole, CompilerRoleCodec>,
+    lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec>,
+}
+impl MaterializedContext {
+    pub fn root(&self) -> &ContextRoot {
+        &self.root
+    }
+    pub fn snapshot(&self) -> &ExactContextSnapshot {
+        &self.snapshot
+    }
+}
+impl<BS: Blockstore> Materializer<'_, BS> {
+    pub fn materialize_context(
+        &mut self,
+        base: Option<&MaterializedContext>,
+        next: &ExactContextSnapshot,
+    ) -> Result<MaterializedContext, SnapshotError> {
+        self.selection_base = base.map(|base| base.selection.clone());
+        let selection =
+            self.materialize_selection(base.map(|base| &base.selection), &next.selection)?;
+        let roles = self.materialize_map_with::<_, _, CompilerRoleCodec>(
+            base.map(|base| &base.roles),
+            &next.roles,
+        )?;
+        let lexical = self.materialize_map_with::<_, _, LexicalFactCodec>(
+            base.map(|base| &base.lexical),
+            &next.lexical.facts,
+        )?;
+        let descriptor = ContextDescriptor {
+            version: 1,
+            producer: next.producer,
+            selection: selection.root.clone(),
+            roles: roles.root.clone(),
+            lexical: lexical.root.clone(),
+        };
+        let root = if base.is_some_and(|base| {
+            base.snapshot.producer == next.producer
+                && base.selection.root == selection.root
+                && base.roles.root == roles.root
+                && base.lexical.root == lexical.root
+        }) {
+            base.expect("equal context implies base").root.clone()
+        } else {
+            ContextRoot(self.materialize_value(&descriptor)?)
+        };
+        Ok(MaterializedContext {
+            root,
+            snapshot: next.clone(),
+            selection,
+            roles,
+            lexical,
+        })
+    }
+}
+pub fn hydrate_context<BS: Blockstore>(
+    store: &BS,
+    root: &ContextRoot,
+) -> Result<MaterializedContext, SnapshotError> {
+    let descriptor: ContextDescriptor = read_value(store, root.cid())?;
+    if descriptor.version != 1 {
+        return Err(malformed("context encoding version"));
+    }
+    let selection = hydrate_selection(store, &descriptor.selection)?;
+    let roles = hydrate_map_with::<_, _, CompilerRoleCodec, _>(store, &descriptor.roles)?;
+    let lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec> =
+        hydrate_map_with::<_, _, LexicalFactCodec, _>(store, &descriptor.lexical)?;
+    if lexical
+        .facts
+        .iter()
+        .any(|(owner, fact)| owner != &fact.node.owner)
+    {
+        return Err(malformed("lexical key differs from fact owner"));
+    }
+    let snapshot = ExactContextSnapshot {
+        producer: descriptor.producer,
+        selection: selection.snapshot.clone(),
+        roles: roles.facts.clone(),
+        lexical: ExactLexicalSnapshot {
+            facts: lexical.facts.clone(),
+            rows: Arc::new(OnceLock::new()),
+        },
+    };
+    Ok(MaterializedContext {
+        root: root.clone(),
+        snapshot,
+        selection,
+        roles,
+        lexical,
     })
 }
 

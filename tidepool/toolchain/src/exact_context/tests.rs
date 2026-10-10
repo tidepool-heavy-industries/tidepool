@@ -115,11 +115,20 @@ fn existing_key_corruption_and_storage_errors_keep_their_types() {
     let mut materializer = Materializer::new(&store);
     let cid = materializer.materialize_value(&42u64).unwrap();
     install(&store, materializer.finish().unwrap());
+    assert!(matches!(
+        hydrate_map::<u64, u64, _>(&store, &SnapshotMapRoot(cid)),
+        Err(SnapshotError::Malformed(_))
+    ));
     store.put_keyed(&cid, &[0]).unwrap();
     let mut materializer = Materializer::new(&store);
     assert!(
         matches!(materializer.materialize_value(&42u64), Err(SnapshotError::Integrity(found)) if found == cid)
     );
+    struct Refused;
+    impl Serialize for Refused {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok,S::Error> { Err(serde::ser::Error::custom("refused leaf encoding")) }
+    }
+    assert!(matches!(materializer.materialize_value(&Refused), Err(SnapshotError::Malformed(_))));
     struct BrokenStore;
     impl Blockstore for BrokenStore {
         fn get(&self, _: &Cid) -> anyhow::Result<Option<Vec<u8>>> {

@@ -257,6 +257,7 @@ impl ExactArtifactSelection {
 impl PartialEq for ExactArtifactSelection {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+            || Arc::ptr_eq(&self.0.snapshot, &other.0.snapshot)
             || self
                 .observation_digest()
                 .expect("closed exact selection encoding")

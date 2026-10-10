@@ -38,7 +38,7 @@ fn type_context(products: &[CertifiedRecoveryProduct]) -> Arc<ExactDeclarationCo
         producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
         inventory: view,
         compiler_projection: projection,
-        lexical: vec![],
+        lexical: crate::exact_context::ExactLexicalSnapshot::default(),
         template_imports: None,
         original_instance_environment: OriginalInstanceEnvironment::Unknown,
     })
@@ -141,7 +141,7 @@ fn partial_context(
         producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
         inventory: view,
         compiler_projection: projection,
-        lexical: vec![],
+        lexical: crate::exact_context::ExactLexicalSnapshot::default(),
         template_imports: None,
         original_instance_environment: OriginalInstanceEnvironment::Unknown,
     })
