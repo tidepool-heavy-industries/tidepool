@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import sys
@@ -12,6 +13,7 @@ import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "buck2-reindeer.sh"
 PROVENANCE = SCRIPT.parent / "embedded_web_provenance.py"
+TOOLCHAIN_INPUTS = SCRIPT.parent / "toolchain-inputs.sh"
 
 
 class ReindeerStaging(unittest.TestCase):
@@ -23,6 +25,7 @@ class ReindeerStaging(unittest.TestCase):
         (self.root / "third-party/rust/fixups").mkdir(parents=True)
         (self.root / "bin").mkdir()
         shutil.copyfile(SCRIPT, self.root / "scripts/buck2-reindeer.sh")
+        shutil.copyfile(TOOLCHAIN_INPUTS, self.root / "scripts/toolchain-inputs.sh")
         (self.root / "scripts/buck2-reindeer.sh").chmod(0o755)
         (self.root / "scripts/buck2-dependencies.py").write_text(
             """import os, pathlib, sys
@@ -89,9 +92,15 @@ import os, sys
 args = sys.argv[1:]
 if args[:3] == ['diff', '--quiet', 'HEAD']:
     raise SystemExit(1 if os.environ.get('DIRTY_NIX') else 0)
-if args[:2] == ['ls-tree', 'HEAD']:
-    print('100644 blob deadbeef\\tflake.nix')
-elif args[:1] == ['mktree']:
+if args[:1] == ['ls-files']:
+    pass
+elif args[:2] == ['read-tree', '--empty']:
+    pass
+elif args[:3] == ['ls-tree', '-rz', 'HEAD']:
+    sys.stdout.write('100644 blob deadbeef\\tflake.nix\\0')
+elif args[:1] == ['update-index']:
+    sys.stdin.read()
+elif args[:1] == ['write-tree']:
     print('b' * 40)
 elif args[:1] == ['commit-tree']:
     print('a' * 40)
@@ -157,6 +166,80 @@ else:
             f"[nix]\nmatched_harness_source = {self.expected_source}\n"
         )
         return self.run_script("--local-harness-source", MATCHED_HARNESS="1", **env)
+
+    def prepare_real_toolchain_fixture(self):
+        git = shutil.which("git")
+        self.assertIsNotNone(git, "the native test target supplies Git")
+        (self.root / "bin/git").write_text(
+            "#!/usr/bin/env bash\nexec " + shlex.quote(git) + ' "$@"\n'
+        )
+        for name in ("flake.nix", "rust-toolchain.toml", "nix/pin.nix",
+                     "bridge/haskell/resume/Resume.hs", "bridge/haskell/Unselected.hs"):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("committed fixture input\n")
+        (self.root / ".buckconfig.local").write_text(
+            f"[nix]\nmatched_harness_source = {self.expected_source}\n"
+        )
+        subprocess.run([git, "init", "--quiet", str(self.root)], check=True)
+        subprocess.run([git, "-C", str(self.root), "add", "."], check=True)
+        subprocess.run([git, "-C", str(self.root), "-c", "user.name=fixture",
+                        "-c", "user.email=fixture@invalid", "commit", "--quiet",
+                        "-m", "committed inputs"], check=True)
+        tree = subprocess.run(
+            ["bash", "-e", "-c", "source scripts/toolchain-inputs.sh; toolchain_input_tree"],
+            cwd=self.root, env=self.env, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        commit_env = self.env | {
+            "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_DATE": "@0 +0000",
+            "GIT_AUTHOR_NAME": "dev-shell", "GIT_AUTHOR_EMAIL": "dev-shell@invalid",
+            "GIT_COMMITTER_NAME": "dev-shell", "GIT_COMMITTER_EMAIL": "dev-shell@invalid",
+        }
+        revision = subprocess.run(
+            [git, "-C", str(self.root), "commit-tree", tree, "-m", "dev-shell toolchain-input pin"],
+            env=commit_env, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        subprocess.run([git, "-C", str(self.root), "update-ref",
+                        "refs/tidepool/dev-shell/" + revision, revision], check=True)
+        return git, revision
+
+    def test_implicit_source_uses_owned_nested_input_tree_without_changing_index(self):
+        _, revision = self.prepare_real_toolchain_fixture()
+        index = self.root / ".git/index"
+        before = index.read_bytes()
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(index.read_bytes(), before)
+        self.assertIn(f"git+file://{self.root}?rev={revision}",
+                      (self.root / "received-nix-args").read_text())
+        result = self.run_script("--check", "--local-harness-source", MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(index.read_bytes(), before)
+
+    def test_implicit_source_refuses_changed_or_untracked_owned_nested_input(self):
+        self.prepare_real_toolchain_fixture()
+        before = self.contents()
+        path = self.root / "bridge/haskell/resume/Resume.hs"
+        for operation in ("changed", "untracked"):
+            with self.subTest(operation=operation):
+                selected = path if operation == "changed" else path.with_name("Added.hs")
+                selected.write_text("uncommitted toolchain input\n")
+                result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Commit changed toolchain inputs", result.stderr)
+                self.assertEqual(self.contents(), before)
+                if operation == "changed":
+                    selected.write_text("committed fixture input\n")
+                else:
+                    selected.unlink()
+
+    def test_implicit_source_excludes_unrelated_nested_siblings(self):
+        _, revision = self.prepare_real_toolchain_fixture()
+        (self.root / "bridge/haskell/Unselected.hs").write_text("unrelated change\n")
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"git+file://{self.root}?rev={revision}",
+                      (self.root / "received-nix-args").read_text())
 
     def test_check_compares_staged_result_without_changing_outputs(self):
         result = self.run_script("--check")
@@ -303,7 +386,7 @@ else:
         before = self.contents()
         result = self.run_script('--local-harness-source', MATCHED_HARNESS='1', DIRTY_NIX='1')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('commit Nix inputs before Reindeer generation', result.stderr)
+        self.assertIn('Commit changed toolchain inputs', result.stderr)
         self.assertEqual(self.contents(), before)
 
     def test_verified_override_missing_path_or_wrong_source_layout_refuses(self):

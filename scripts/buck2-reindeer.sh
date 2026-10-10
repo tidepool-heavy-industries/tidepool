@@ -74,17 +74,16 @@ dependency_args = sys.argv[4:]
 HARNESS_REPO = 'https://github.com/tidepool-heavy-industries/exomonad-harness.git'
 
 def current_harness_source_output():
-    # Mirror scripts/dev-shell.sh's reduced committed source so this check is
-    # independent of an inherited TIDEPOOL_DEV_SHELL and never captures the
-    # Codex submodule or mounted build outputs.
-    nix_inputs = ['flake.nix', 'flake.lock', 'rust-toolchain.toml', 'nix']
-    if subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--', *nix_inputs], cwd=root).returncode:
-        raise SystemExit('Cannot verify matched harness source: commit Nix inputs before Reindeer generation')
-    listing = subprocess.run(
-        ['git', 'ls-tree', 'HEAD', '--', *nix_inputs], cwd=root,
-        check=True, capture_output=True,
-    ).stdout
-    tree = subprocess.run(['git', 'mktree'], cwd=root, input=listing, check=True, capture_output=True).stdout.decode().strip()
+    # The dev-shell owner selects committed inputs and preserves nested paths.
+    # Recompute its tree instead of trusting an inherited shell selection.
+    try:
+        tree = subprocess.run(
+            ['bash', '-e', '-c', 'source "$1"; toolchain_input_tree',
+             'reindeer-toolchain-inputs', str(root / 'scripts/toolchain-inputs.sh')],
+            cwd=root, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f'Cannot verify matched harness source: {error.stderr.strip()}')
     commit_env = os.environ | {
         'GIT_AUTHOR_DATE': '@0 +0000',
         'GIT_COMMITTER_DATE': '@0 +0000',
