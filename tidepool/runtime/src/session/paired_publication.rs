@@ -1514,8 +1514,10 @@ mod tests {
                 1,
             )
             .unwrap();
-            lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
-                .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+            })
+            .unwrap();
             let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
             let public = session.mint_scope(ScopeId::ROOT).unwrap();
             if durable {
@@ -1709,8 +1711,10 @@ mod tests {
             .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()])
         };
         let mut lib = open(9833);
-        lib.attach_owned_recovery_graph_v3(&path, authority.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&path, authority.clone(), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
         let owner = RecoveryPublicOwner::new(
@@ -1775,8 +1779,10 @@ mod tests {
             .unwrap());
         drop(session);
         let mut lib = open(9834);
-        lib.attach_owned_recovery_graph_v3(&path, authority)
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&path, authority, settlement)
+        })
+        .unwrap();
         let mut reopened = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = reopened.recover_public_scope(&owner).unwrap();
         assert_eq!(
@@ -1844,7 +1850,10 @@ mod tests {
         )
         .unwrap()
         .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -1951,7 +1960,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let mut lib = SessionLib::open(SessionId(9832), root.path(), ModuleEnv::standalone_default()).unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-            lib.attach_recovery_graph_v2(root.path().join("declarations.json")).unwrap();
+            tidepool_testing::with_settlement(|settlement| lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)).unwrap();
             let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
             let public = session.mint_scope(ScopeId::ROOT).unwrap();
             let execution = session.begin_private_execution(public).unwrap();
@@ -2086,7 +2095,10 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
         let admission = session.begin_ephemeral_private_execution(public).unwrap();
@@ -2223,7 +2235,10 @@ mod tests {
         let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut first = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = first.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2247,7 +2262,10 @@ mod tests {
         let ticket = base.stage().unwrap();
         let mut second_lib =
             SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
-        second_lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            second_lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut second = PersistentSession::new(Some(second_lib), 1024 * 1024);
         let second_public = second.mint_scope(ScopeId::ROOT).unwrap();
         second
@@ -2289,7 +2307,10 @@ mod tests {
             SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2389,7 +2410,10 @@ mod tests {
             SessionLib::open(SessionId(984), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2493,7 +2517,10 @@ mod tests {
             SessionLib::open(SessionId(985), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2592,7 +2619,10 @@ mod tests {
             SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private_a = session.mint_detached_scope(public).unwrap();
@@ -2861,7 +2891,10 @@ mod tests {
             SessionLib::open(SessionId(993), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
@@ -3175,7 +3208,10 @@ mod tests {
         let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(996), root.path(), ModuleEnv::standalone_default()).unwrap();
-        lib.attach_recovery_graph_v2(&path).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&path, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(

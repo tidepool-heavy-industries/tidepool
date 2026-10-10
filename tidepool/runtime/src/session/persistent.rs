@@ -4280,8 +4280,10 @@ mod checkpoint_scope_tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_recovery_graph_v2(root.join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.join("declarations.json"), settlement)
+        })
+        .unwrap();
         PersistentSession::new(Some(lib), 1024)
     }
 
@@ -4301,10 +4303,13 @@ mod checkpoint_scope_tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(
-            root.join("declarations.json"),
-            Arc::new(RunOwner(root.canonicalize().unwrap())),
-        )
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(
+                root.join("declarations.json"),
+                Arc::new(RunOwner(root.canonicalize().unwrap())),
+                settlement,
+            )
+        })
         .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
@@ -5730,7 +5735,10 @@ mod checkpoint_scope_tests {
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024);
         let first = session.mint_scope(ScopeId::ROOT).unwrap();
         let second = session.mint_scope(ScopeId::ROOT).unwrap();

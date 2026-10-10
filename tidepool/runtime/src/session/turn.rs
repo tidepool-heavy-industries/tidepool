@@ -7207,8 +7207,10 @@ mod tests {
         let mut lib = SessionLib::open(SessionId(995), root.path(), env)
             .unwrap()
             .with_validation_include(effects.include_paths().to_vec());
-        lib.attach_recovery_graph_v2(&root.path().join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(&root.path().join("declarations.json"), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let prior_declarations = include_str!("fixtures/checked-prior-declaration.hs")
@@ -7406,7 +7408,9 @@ mod tests {
             .unwrap()
             .contains(&inherited_exports[0]));
         let view = resident.compile_view_in(execution.private_scope()).unwrap();
-        let facade = selected.materialize(&view).unwrap();
+        let facade =
+            tidepool_testing::with_settlement(|settlement| selected.materialize(&view, settlement))
+                .unwrap();
         assert!(facade.source_artifact().is_none());
         let projection = facade.projection().unwrap();
         assert!(projection
@@ -7665,8 +7669,10 @@ mod tests {
             SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(effects.include_paths().to_vec());
-        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();

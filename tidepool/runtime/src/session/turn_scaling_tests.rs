@@ -2203,8 +2203,10 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
         .with_validation_include(effects.include_paths().to_vec());
     let publication = if durable {
         let manifest = root_path.join("declarations.json");
-        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path), settlement)
+        })
+        .unwrap();
         ScalePublication::Durable {
             owner: RecoveryPublicOwner::new(
                 &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
@@ -2516,8 +2518,10 @@ fn resident_capture_cells(count: usize, durable: bool) {
         .with_validation_include(effects.include_paths().to_vec());
     let publication = if durable {
         let manifest = root_path.join("declarations.json");
-        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path), settlement)
+        })
+        .unwrap();
         ScalePublication::Durable {
             owner: RecoveryPublicOwner::new(
                 &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
@@ -3531,8 +3535,10 @@ fn durable_mixed_originals_recover_independent_native_entry() {
     )
     .unwrap()
     .with_validation_include(effects.include_paths().to_vec());
-    lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path))
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path), settlement)
+    })
+    .unwrap();
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = if child_root.is_some() {

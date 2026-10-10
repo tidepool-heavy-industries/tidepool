@@ -3702,8 +3702,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut lib =
             SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default()).unwrap();
-        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(

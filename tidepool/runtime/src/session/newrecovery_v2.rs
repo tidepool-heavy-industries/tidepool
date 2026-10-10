@@ -2759,7 +2759,10 @@ mod tests {
             crate::session::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        session.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            session.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert!(
             session.current_declarations().is_empty(),
             "private custody stays private"
@@ -3769,7 +3772,10 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        reopened.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            reopened.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         assert_eq!(reopened.generation(), Generation(2));
         assert_eq!(reopened.scope_tip(ScopeId::ROOT), Generation(0));
         assert!(reopened.current_module().is_none());
@@ -3834,9 +3840,11 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        assert!(matches!(reopened.attach_recovery_graph_v2(&manifest),
+        assert!(
+            matches!(tidepool_testing::with_settlement(|settlement| reopened.attach_recovery_graph_v2(&manifest, settlement)),
             Err(crate::session::SessionError::RecoveryManifest { detail, .. })
-                if detail.contains("live dependencies differ from verified original native requirements")));
+                if detail.contains("live dependencies differ from verified original native requirements"))
+        );
         assert_eq!(fs::read(&manifest).unwrap(), bytes);
         graph.nodes[0].live_dependencies = vec![RecoveryLiveDependency::Instance {
             dfun: identity("dfun"),
@@ -3891,8 +3899,10 @@ mod tests {
         )
         .unwrap()
         .with_validation_include(effects.include_paths().to_vec());
-        lib.attach_owned_recovery_graph_v3(&producer_manifest, run_owner.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&producer_manifest, run_owner.clone(), settlement)
+        })
+        .unwrap();
         let images = Arc::new(ImageRegistry::new());
         let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
         persistent.set_image_registry(images.clone());
@@ -4057,9 +4067,14 @@ mod tests {
         )
         .unwrap()
         .with_validation_include(effects.include_paths().to_vec());
-        recovered_lib
-            .attach_owned_recovery_graph_v3(&join_manifest, run_owner.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            recovered_lib.attach_owned_recovery_graph_v3(
+                &join_manifest,
+                run_owner.clone(),
+                settlement,
+            )
+        })
+        .unwrap();
         let mut recovered = PersistentSession::new(Some(recovered_lib), 1024 * 1024);
         assert!(recovered.prepared().is_none());
         let recovered_scope = recovered.recover_public_scope(&owner("root")).unwrap();
@@ -4100,9 +4115,10 @@ mod tests {
         )
         .unwrap()
         .with_validation_include(effects.include_paths().to_vec());
-        empty_lib
-            .attach_owned_recovery_graph_v3(&empty_manifest, run_owner.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            empty_lib.attach_owned_recovery_graph_v3(&empty_manifest, run_owner.clone(), settlement)
+        })
+        .unwrap();
         assert!(empty_lib.log.joined_context_at(original_join.id).is_some());
         assert!(empty_lib
             .recovered_public_compiler_context(&owner("root"))
@@ -4193,7 +4209,7 @@ mod tests {
             .unwrap()
             .with_validation_include(effects.include_paths().to_vec());
             assert!(
-                matches!(lib.attach_owned_recovery_graph_v3(&path, run_owner.clone()),
+                matches!(tidepool_testing::with_settlement(|settlement| lib.attach_owned_recovery_graph_v3(&path, run_owner.clone(), settlement)),
                 Err(crate::session::SessionError::RecoveryManifest { detail, .. })
                     if detail.contains("live dependencies differ from verified original native requirements"))
             );
@@ -4237,9 +4253,10 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        accepted
-            .attach_owned_recovery_graph_v3(&manifest, run_owner.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            accepted.attach_owned_recovery_graph_v3(&manifest, run_owner.clone(), settlement)
+        })
+        .unwrap();
         assert!(!accepted
             .validate_recovered_public_owner(&owner("root"))
             .unwrap());
@@ -4287,7 +4304,7 @@ mod tests {
             )
             .unwrap();
             assert!(
-                matches!(session.attach_recovery_graph_v2(&path), Err(crate::session::SessionError::RecoveryManifest { detail, .. }) if detail.contains("live dependencies differ from verified original native requirements"))
+                matches!(tidepool_testing::with_settlement(|settlement| session.attach_recovery_graph_v2(&path, settlement)), Err(crate::session::SessionError::RecoveryManifest { detail, .. }) if detail.contains("live dependencies differ from verified original native requirements"))
             );
             assert_eq!(session.generation(), Generation(0));
             assert_eq!(fs::read(&path).unwrap(), bytes);
@@ -4359,9 +4376,11 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        assert!(matches!(reopened.attach_recovery_graph_v2(&manifest),
+        assert!(
+            matches!(tidepool_testing::with_settlement(|settlement| reopened.attach_recovery_graph_v2(&manifest, settlement)),
             Err(crate::session::SessionError::RecoveryManifest { detail, .. })
-                if detail.contains("retained public recovery requires its configured run owner")));
+                if detail.contains("retained public recovery requires its configured run owner"))
+        );
         assert_eq!(reopened.generation(), Generation(0));
         assert!(reopened.current_module().is_none());
     }
@@ -4388,7 +4407,10 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        control.attach_recovery_graph_v2(&manifest).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            control.attach_recovery_graph_v2(&manifest, settlement)
+        })
+        .unwrap();
         let RecoveryArtifactClosure::Home(reference) = home_artifact(&graph) else {
             panic!("fixture has a home artifact")
         };
@@ -4399,9 +4421,11 @@ mod tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        assert!(matches!(reopened.attach_recovery_graph_v2(&manifest),
+        assert!(
+            matches!(tidepool_testing::with_settlement(|settlement| reopened.attach_recovery_graph_v2(&manifest, settlement)),
             Err(crate::session::SessionError::RecoveryManifest { detail, .. })
-                if detail.contains("unavailable or corrupt artifacts")));
+                if detail.contains("unavailable or corrupt artifacts"))
+        );
         assert_eq!(reopened.generation(), Generation(0));
     }
 

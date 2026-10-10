@@ -8844,8 +8844,10 @@ mod authored_publication_tests {
             let mut lib = SessionLib::open(id, source, ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-            lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-                .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+            })
+            .unwrap();
             lib
         };
         let mut producer = PersistentSession::new(
@@ -9508,8 +9510,10 @@ mod authored_publication_tests {
         )
         .unwrap()
         .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+        })
+        .unwrap();
         let mut session =
             TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(lib));
         let public = session.state.mint_scope(ScopeId::ROOT).unwrap();
@@ -9822,8 +9826,10 @@ mod authored_publication_tests {
             SessionLib::open(SessionId(993), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(effects.include_paths().to_vec());
-        lib.attach_recovery_graph_v2(root.path().join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+        })
+        .unwrap();
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
         tidepool_testing::with_settlement(|settlement| {
             session.define_scoped_with_imports_in(
@@ -10006,8 +10012,10 @@ mod authored_publication_tests {
         let mut lib = SessionLib::open(SessionId(991), root, ModuleEnv::standalone_default())
             .unwrap()
             .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_recovery_graph_v2(root.join("declarations.json"))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_recovery_graph_v2(root.join("declarations.json"), settlement)
+        })
+        .unwrap();
         lib
     }
 
@@ -10420,13 +10428,16 @@ mod authored_publication_tests {
             SessionLib::open(SessionId(997), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        lib.attach_owned_recovery_graph_v3(
-            root.path().join("declarations.json"),
-            Arc::new(RunOwner {
-                root: root.path().canonicalize().unwrap(),
-                _lock: lock,
-            }),
-        )
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(
+                root.path().join("declarations.json"),
+                Arc::new(RunOwner {
+                    root: root.path().canonicalize().unwrap(),
+                    _lock: lock,
+                }),
+                settlement,
+            )
+        })
         .unwrap();
         let mut session =
             ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));

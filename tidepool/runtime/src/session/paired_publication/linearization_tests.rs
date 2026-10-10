@@ -57,8 +57,10 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
     )
     .unwrap();
     if matches!(persistence, Persistence::Durable) {
-        lib.attach_owned_recovery_graph_v3(&manifest, run_owner(root.path()))
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, run_owner(root.path()), settlement)
+        })
+        .unwrap();
     }
     let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
     let public = session.mint_isolated_scope();
@@ -265,10 +267,13 @@ fn fixed_sibling_intents_restage_after_observation_and_manifest_changes_without_
         ModuleEnv::standalone_default(),
     )
     .unwrap();
-    lib.attach_owned_recovery_graph_v3(
-        &root.path().join("declarations.json"),
-        run_owner(root.path()),
-    )
+    tidepool_testing::with_settlement(|settlement| {
+        lib.attach_owned_recovery_graph_v3(
+            &root.path().join("declarations.json"),
+            run_owner(root.path()),
+            settlement,
+        )
+    })
     .unwrap();
     let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
     let public_a = session.mint_isolated_scope();

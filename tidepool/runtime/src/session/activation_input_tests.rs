@@ -3352,17 +3352,17 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     // Receiver setup reserves a Join identity even for a binding-only
     // publication. Attach recovery before that allocator can advance.
     assert_eq!(library.generation(), Generation(0));
-    library
-        .attach_owned_recovery_graph_v3(
+    tidepool_testing::with_settlement(|settlement| {
+        library.attach_owned_recovery_graph_v3(
             durable_root.path().join("declarations.json"),
             Arc::new(RunOwner {
                 root: durable_root.path().canonicalize().unwrap(),
                 _lock: lock,
             }),
+            settlement,
         )
-        .unwrap_or_else(|error| {
-            panic!("fresh declaration library must attach recovery: {error:?}")
-        });
+    })
+    .unwrap_or_else(|error| panic!("fresh declaration library must attach recovery: {error:?}"));
     let mut resident = InputFixture::fresh_with_library(library, &recipe);
     assert_eq!(resident.state.lib().scope_tip(ScopeId::ROOT), Generation(0));
     assert_eq!(

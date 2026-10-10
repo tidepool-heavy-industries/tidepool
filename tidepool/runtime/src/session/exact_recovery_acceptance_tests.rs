@@ -71,8 +71,14 @@ fn library(id: u64, source: &Path, manifest: &Path, include: &[PathBuf]) -> Sess
     let mut lib = SessionLib::open(SessionId(id), source, ModuleEnv::standalone_default())
         .unwrap()
         .with_validation_include(include.to_vec());
-    lib.attach_owned_recovery_graph_v3(manifest, run_owner(manifest.parent().unwrap()))
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        lib.attach_owned_recovery_graph_v3(
+            manifest,
+            run_owner(manifest.parent().unwrap()),
+            settlement,
+        )
+    })
+    .unwrap();
     lib
 }
 
@@ -208,8 +214,10 @@ fn recovered_owner_validation_retains_and_revalidates_the_actual_run_authority()
         ModuleEnv::standalone_default(),
     )
     .unwrap();
-    lib.attach_owned_recovery_graph_v3(&manifest, retained.clone())
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        lib.attach_owned_recovery_graph_v3(&manifest, retained.clone(), settlement)
+    })
+    .unwrap();
     let mut session = PersistentSession::new(Some(lib), 1024);
     let public = session.mint_isolated_scope();
     session
@@ -839,9 +847,14 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     )
     .unwrap()
     .with_validation_include(effects.include_paths().to_vec());
-    recovered_library
-        .attach_owned_recovery_graph_v3(&manifest, recovery_owner.clone())
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        recovered_library.attach_owned_recovery_graph_v3(
+            &manifest,
+            recovery_owner.clone(),
+            settlement,
+        )
+    })
+    .unwrap();
     let mut consumer = PersistentSession::new(Some(recovered_library), 1024 * 1024);
     let report = consumer.lib().declaration_recovery_report().unwrap();
     assert_eq!(report.successor_session, 4403);
@@ -1257,16 +1270,19 @@ fn owned_manifest_read_refuses_foreign_run_symlink_and_changed_public_selectors(
         ModuleEnv::standalone_default(),
     )
     .unwrap();
-    assert!(unowned.attach_recovery_graph_v2(&manifest).is_err());
+    assert!(tidepool_testing::with_settlement(
+        |settlement| unowned.attach_recovery_graph_v2(&manifest, settlement)
+    )
+    .is_err());
     assert_eq!(unowned.log.generation(), Generation(0));
-    assert!(unowned
-        .attach_owned_recovery_graph_v3(&manifest, run_owner(foreign.path()))
-        .is_err());
+    assert!(tidepool_testing::with_settlement(|settlement| unowned
+        .attach_owned_recovery_graph_v3(&manifest, run_owner(foreign.path()), settlement))
+    .is_err());
     let alias = foreign.path().join("escaped.json");
     std::os::unix::fs::symlink(&manifest, &alias).unwrap();
-    assert!(unowned
-        .attach_owned_recovery_graph_v3(&alias, run_owner(foreign.path()))
-        .is_err());
+    assert!(tidepool_testing::with_settlement(|settlement| unowned
+        .attach_owned_recovery_graph_v3(&alias, run_owner(foreign.path()), settlement))
+    .is_err());
     let mut session =
         PersistentSession::new(Some(library(4412, source.path(), &manifest, &[])), 1024);
     let mut altered = recovery::read_v2(&manifest, durable.path())
@@ -1299,8 +1315,10 @@ fn successor_transfer_fences_old_admissions_after_durable_and_uncertain_rename()
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024);
         let target = session.mint_scope(ScopeId::ROOT).unwrap();
         let old = session.begin_private_execution(target).unwrap();
@@ -1360,8 +1378,10 @@ fn successor_transfer_retains_only_the_sealed_live_bootstrap_dependencies() {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let target = session.mint_isolated_scope();
         let (_, keys) = prepared::tests::install_source_publication_fixture(&mut session, target);
@@ -1467,8 +1487,10 @@ fn successor_initialization_refuses_changed_or_released_native_dependencies() {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let target = session.mint_isolated_scope();
         let (_, keys) = prepared::tests::install_source_publication_fixture(&mut session, target);
@@ -1520,8 +1542,10 @@ fn initial_public_owner_survives_restart_before_first_cell() {
         ModuleEnv::standalone_default(),
     )
     .unwrap();
-    lib.attach_owned_recovery_graph_v3(&manifest, run.clone())
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+    })
+    .unwrap();
     let mut session = PersistentSession::new(Some(lib), 1024);
     let target = session.mint_isolated_scope();
     assert_eq!(

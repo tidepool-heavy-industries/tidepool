@@ -280,15 +280,17 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
     lock.try_lock().unwrap();
     let mut library =
         SessionLib::open(session, root.path(), ModuleEnv::standalone_default()).unwrap();
-    library
-        .attach_owned_recovery_graph_v3(
+    tidepool_testing::with_settlement(|settlement| {
+        library.attach_owned_recovery_graph_v3(
             &manifest,
             Arc::new(RunOwner {
                 root: root.path().canonicalize().unwrap(),
                 _lock: lock,
             }),
+            settlement,
         )
-        .unwrap();
+    })
+    .unwrap();
     let machine = ResidentSession::unbootstrapped(
         frunk::HNil,
         tidepool_mcp::CapturedOutput::new(),

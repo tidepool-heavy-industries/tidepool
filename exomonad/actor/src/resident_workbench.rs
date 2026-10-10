@@ -16247,8 +16247,10 @@ pub(crate) mod request_tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(&manifest, authority.clone())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, authority.clone(), settlement)
+        })
+        .unwrap();
         let mut session = PersistentSession::new(Some(lib), 0);
         let scope = session.mint_isolated_scope();
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
@@ -16274,8 +16276,10 @@ pub(crate) mod request_tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        lib.attach_owned_recovery_graph_v3(&manifest, authority)
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
+        })
+        .unwrap();
         let mut recovered = PersistentSession::new(Some(lib), 0);
         let scope = recovered.recover_public_scope(&owner).unwrap();
         let view = recovered.compile_view_in(scope).unwrap();
@@ -16367,8 +16371,10 @@ pub(crate) mod request_tests {
         let manifest = durable.path().join("declarations.json");
         let authority = Arc::new(RunOwner(durable.path().canonicalize().unwrap()));
         let (session, context, source, session_root) = host_mount_fixture_with_lib(|lib| {
-            lib.attach_owned_recovery_graph_v3(&manifest, authority.clone())
-                .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                lib.attach_owned_recovery_graph_v3(&manifest, authority.clone(), settlement)
+            })
+            .unwrap();
         });
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
@@ -16481,8 +16487,10 @@ pub(crate) mod request_tests {
             )
             .unwrap()
             .with_validation_include(roots.clone());
-            lib.attach_owned_recovery_graph_v3(&manifest, authority.clone())
-                .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                lib.attach_owned_recovery_graph_v3(&manifest, authority.clone(), settlement)
+            })
+            .unwrap();
             let mut recovered = tidepool_runtime::session::PersistentSession::new(Some(lib), 0);
             let scope = recovered.recover_public_scope(&owner).unwrap();
             recovered.compile_view_in(scope).unwrap()
@@ -17523,8 +17531,10 @@ pub(crate) mod request_tests {
             _lock: lock,
         });
         let (mut session, context, source, _root) = host_mount_fixture_with_lib(|lib| {
-            lib.attach_owned_recovery_graph_v3(&manifest, authority)
-                .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
+            })
+            .unwrap();
         });
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/installer-child").unwrap(),
@@ -21180,10 +21190,13 @@ pub(crate) mod request_tests {
         });
         let (mut session, mut context, source, mut inputs, source_root) =
             activation_input_fixture(|lib| {
-                lib.attach_owned_recovery_graph_v3(
-                    run_root.path().join("declarations.json"),
-                    authority,
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    lib.attach_owned_recovery_graph_v3(
+                        run_root.path().join("declarations.json"),
+                        authority,
+                        settlement,
+                    )
+                })
                 .unwrap();
             });
         context.placement.lexical_scope = session.mint_scope(ScopeId::ROOT).unwrap();
@@ -21344,8 +21357,10 @@ pub(crate) mod request_tests {
             _lock: lock,
         });
         let (mut session, mut context, source, inputs, _root) = activation_input_fixture(|lib| {
-            lib.attach_owned_recovery_graph_v3(&manifest, authority)
-                .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
+            })
+            .unwrap();
         });
         let path = tidepool_repr::ActorPath::parse("root/activation-child").unwrap();
         let durable_owner =

@@ -79,8 +79,10 @@ async fn interrupt_during_preview(
     let (mut resident, mut context, source, mut parked, _root) =
         crate::resident_workbench::request_tests::activation_session_fixture(|lib| {
             if durable {
-                lib.attach_owned_recovery_graph_v3(&manifest, authority)
-                    .unwrap();
+                tidepool_testing::with_settlement(|settlement| {
+                    lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
+                })
+                .unwrap();
             }
         });
     let (hole, input) = parked.remove(0);
@@ -635,8 +637,10 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     let (mut resident, mut context, source, mut parked, _source_root) =
         crate::resident_workbench::request_tests::activation_session_fixture(|lib| {
             if durable {
-                lib.attach_owned_recovery_graph_v3(&manifest, authority)
-                    .unwrap();
+                tidepool_testing::with_settlement(|settlement| {
+                    lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
+                })
+                .unwrap();
             }
         });
     let (hole, input) = parked.remove(0);

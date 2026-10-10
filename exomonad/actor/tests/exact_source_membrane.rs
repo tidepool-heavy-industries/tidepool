@@ -35,9 +35,10 @@ fn actor_context_carries_an_exact_facade_into_an_isolated_compile_view() {
     let source_view = session
         .compile_view_in(ScopeId::ROOT)
         .expect("source compile view");
-    let facade = surface
-        .materialize(&source_view)
-        .expect("materialize facade");
+    let facade = tidepool_testing::with_settlement(|settlement| {
+        surface.materialize(&source_view, settlement)
+    })
+    .expect("materialize facade");
 
     let actor_scope = session.mint_isolated_scope();
     let isolated_view = session
