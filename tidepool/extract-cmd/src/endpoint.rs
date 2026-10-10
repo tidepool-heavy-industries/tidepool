@@ -2139,12 +2139,13 @@ mod tests {
         };
         let config = property_config(128, NAME);
         let expected_cases = if mode == "defaults" { 128 } else { 1 };
-        assert_eq!(config.cases, expected_cases);
         assert_eq!(config.rng_seed, RngSeed::Fixed(123));
         assert_eq!(config.source_file, Some(file!()));
         assert_eq!(config.test_name, Some(NAME));
         if mode == "disabled" {
             assert!(config.failure_persistence.is_none());
+        } else {
+            assert!(config.failure_persistence.is_some());
         }
         let mut fresh_config = config.clone();
         fresh_config.failure_persistence = None;
@@ -2159,6 +2160,13 @@ mod tests {
             values.into_inner()
         };
         let fresh = sample();
+        println!(
+            "campaign mode={mode} fresh={} configured_cases={} seed={}",
+            fresh.len(),
+            config.cases,
+            config.rng_seed
+        );
+        assert_eq!(config.cases, expected_cases);
         assert_eq!(fresh.len(), expected_cases as usize);
         assert_eq!(
             fresh,
@@ -2179,9 +2187,7 @@ mod tests {
             assert!(shrinking.len() > 1 && shrinking.len() <= 5);
         }
         println!(
-            "campaign mode={mode} fresh={} seed={} failure_callbacks={} shrink_limit={}",
-            fresh.len(),
-            config.rng_seed,
+            "shrinking mode={mode} failure_callbacks={} shrink_limit={}",
             shrinking.len(),
             config.max_shrink_iters
         );

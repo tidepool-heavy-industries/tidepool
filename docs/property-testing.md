@@ -181,11 +181,15 @@ path resolves into the source tree.
 The `proptest!` macro applies `contextualize_config` to its configured value.
 For a manually constructed `TestRunner`, call
 `proptest::test_runner::contextualize_config(config)` **after** applying suite
-defaults and native seed-path overrides. Otherwise environment controls such as
-`PROPTEST_CASES`, `PROPTEST_RNG_SEED`, or
-`PROPTEST_DISABLE_FAILURE_PERSISTENCE` can be overwritten by those defaults.
-Set `source_file` and `test_name` on the resulting config before constructing
-the runner so persisted failures retain the native test identity.
+defaults and native seed-path overrides. `Config::default()` already reads
+campaign controls, but later field assignments can overwrite them: a suite's
+`cases` replaces `PROPTEST_CASES`, and native persistence replaces
+`PROPTEST_DISABLE_FAILURE_PERSISTENCE`. Seed and shrink controls remain effective
+unless those fields are also replaced. Contextualization gives explicit controls
+the final choice. Set `source_file` and `test_name` on the resulting config before
+constructing the runner so persisted failures retain the native test identity.
+Test environment settings in isolated subprocesses: proptest caches its default
+configuration, and process-wide environment changes can race other tests.
 
 For custom runners, keep generated production replay inside the configured
 runner so failures receive shrinking and persistence. Separate deterministic
