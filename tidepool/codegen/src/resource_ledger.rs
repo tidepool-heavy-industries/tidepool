@@ -6,7 +6,7 @@
 //! managed-root value moves the original cell with its exact representation.
 //! Scope closure removes entries before their cell owners settle registration.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -70,6 +70,45 @@ impl PreparedReplyEvidence {
     }
 }
 
+/// Exact declaring row retained from an admitted parked frame. Numeric values
+/// never issue this dependency; parcel import can only remap an existing token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct SiteDependency {
+    owner: ProgramId,
+    row: usize,
+}
+
+impl SiteDependency {
+    pub(crate) fn from_reply(reply: PreparedReplyEvidence) -> Option<Self> {
+        match reply {
+            PreparedReplyEvidence::AtSite { owner, row } => Some(Self { owner, row }),
+            PreparedReplyEvidence::StaticWithSite {
+                site_owner,
+                site_row,
+                ..
+            } => Some(Self {
+                owner: site_owner,
+                row: site_row,
+            }),
+            PreparedReplyEvidence::Static { .. } => None,
+        }
+    }
+    pub(crate) fn owner(self) -> ProgramId {
+        self.owner
+    }
+    pub(crate) fn row(self) -> usize {
+        self.row
+    }
+    pub(crate) fn remap(self, owner: ProgramId) -> Self {
+        Self {
+            owner,
+            row: self.row,
+        }
+    }
+}
+
+pub(crate) type SiteDependencies = BTreeSet<SiteDependency>;
+
 pub(crate) type FrameEvidence = PreparedFrameEvidence;
 
 /// Atomic frame ownership of a persistent cell and its exact representation.
@@ -77,6 +116,7 @@ pub(crate) type FrameEvidence = PreparedFrameEvidence;
 pub(crate) struct OwnedManagedRoot {
     cell: OwnedRootCell,
     rep: RuntimeRep,
+    pub(crate) sites: SiteDependencies,
 }
 
 impl OwnedManagedRoot {
@@ -84,8 +124,8 @@ impl OwnedManagedRoot {
         self.cell.addr()
     }
 
-    pub(crate) fn into_parts(self) -> (OwnedRootCell, RuntimeRep) {
-        (self.cell, self.rep)
+    pub(crate) fn into_parts(self) -> (OwnedRootCell, RuntimeRep, SiteDependencies) {
+        (self.cell, self.rep, self.sites)
     }
 }
 
@@ -95,6 +135,7 @@ pub(crate) struct ContinuationFrame {
     pub(crate) realm: RealmId,
     pub(crate) live_payload_root: Option<OwnedManagedRoot>,
     pub(crate) evidence: FrameEvidence,
+    pub(crate) sites: SiteDependencies,
 }
 
 /// One live handle's rooted slot, cleanup owner, and the representation of
@@ -107,6 +148,7 @@ pub(crate) struct HandleEntry {
     pub(crate) realm: RealmId,
     pub(crate) rep: RuntimeRep,
     pub(crate) class: HandleClass,
+    pub(crate) sites: SiteDependencies,
 }
 
 /// What a rooted handle is accounted as. Both classes share one handle
@@ -165,6 +207,7 @@ impl RootHandleLedger {
         realm: RealmId,
         rep: RuntimeRep,
         class: HandleClass,
+        sites: SiteDependencies,
     ) -> ValueHandle {
         let handle = ValueHandle::fresh();
         let replaced = self.handles.insert(
@@ -174,6 +217,7 @@ impl RootHandleLedger {
                 realm,
                 rep,
                 class,
+                sites,
             },
         );
         debug_assert!(replaced.is_none(), "fresh value handle must not collide");
@@ -397,7 +441,33 @@ impl ResourceLedger {
         realm: RealmId,
         rep: RuntimeRep,
     ) -> ValueHandle {
-        self.handles.insert(slot, realm, rep, HandleClass::Value)
+        self.insert_handle_with_sites(slot, realm, rep, SiteDependencies::new())
+    }
+
+    pub(crate) fn insert_handle_with_sites(
+        &mut self,
+        slot: OwnedRootCell,
+        realm: RealmId,
+        rep: RuntimeRep,
+        sites: SiteDependencies,
+    ) -> ValueHandle {
+        self.handles
+            .insert(slot, realm, rep, HandleClass::Value, sites)
+    }
+
+    pub(crate) fn site_dependencies(&self) -> impl Iterator<Item = SiteDependency> + '_ {
+        self.handles
+            .handles
+            .values()
+            .flat_map(|entry| entry.sites.iter().copied())
+            .chain(self.continuations.values().flat_map(|frame| {
+                frame.sites.iter().copied().chain(
+                    frame
+                        .live_payload_root
+                        .iter()
+                        .flat_map(|root| root.sites.iter().copied()),
+                )
+            }))
     }
 
     /// [`Self::insert_handle`] for a machine-lifetime export root: same
@@ -407,12 +477,36 @@ impl ResourceLedger {
         slot: OwnedRootCell,
         rep: RuntimeRep,
     ) -> ValueHandle {
+        self.handles.insert(
+            slot,
+            RealmId::ROOT,
+            rep,
+            HandleClass::CodeExport,
+            SiteDependencies::new(),
+        )
+    }
+
+    pub(crate) fn insert_export_handle_with_sites(
+        &mut self,
+        slot: OwnedRootCell,
+        rep: RuntimeRep,
+        sites: SiteDependencies,
+    ) -> ValueHandle {
         self.handles
-            .insert(slot, RealmId::ROOT, rep, HandleClass::CodeExport)
+            .insert(slot, RealmId::ROOT, rep, HandleClass::CodeExport, sites)
     }
 
     pub(crate) fn handle(&self, handle: ValueHandle) -> Option<&HandleEntry> {
         self.handles.get(handle)
+    }
+
+    pub(crate) fn extend_handle_sites(&mut self, handle: ValueHandle, sites: SiteDependencies) {
+        self.handles
+            .handles
+            .get_mut(&handle.0)
+            .expect("owned import handle")
+            .sites
+            .extend(sites);
     }
 
     pub(crate) fn take_handle(&mut self, handle: ValueHandle) -> Option<HandleEntry> {
@@ -429,6 +523,7 @@ impl ResourceLedger {
         Some(OwnedManagedRoot {
             cell: entry.slot,
             rep: entry.rep,
+            sites: entry.sites,
         })
     }
 

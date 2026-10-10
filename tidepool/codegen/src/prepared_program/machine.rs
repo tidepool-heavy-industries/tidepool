@@ -64,7 +64,8 @@ use crate::native_stack::{NativeEntryAdmission, NativeStackScope};
 use crate::old_space::OldSpace;
 use crate::prepared_control::CallStatus;
 use crate::resource_ledger::{
-    ContinuationFrame, HandleClass, PreparedFrameEvidence, ResourceLedger,
+    ContinuationFrame, HandleClass, PreparedFrameEvidence, ResourceLedger, SiteDependencies,
+    SiteDependency,
 };
 use crate::suspension::{ContinuationId, RealmId, ValueHandle};
 use std::cell::RefCell;
@@ -161,6 +162,9 @@ struct InstalledProgram<'code> {
     environment: Box<InstallationEnvironment>,
     statics: Arc<StaticRegion>,
     owned_headers: Vec<usize>,
+    /// Authenticated dependencies of the exact installed import slots. Entry
+    /// results conservatively retain these and their admitted argument tokens.
+    sites: BTreeMap<usize, SiteDependencies>,
 }
 
 /// Proof that the machine is at a quiescent point: no generated frame is
@@ -354,6 +358,7 @@ pub enum ManagedField {
 pub struct ManagedBuilder<'machine, 'code> {
     machine: &'machine mut PreparedMachine<'code>,
     core: super::construction::ConstructionCore,
+    sites: HashMap<super::construction::ConstructionNode, SiteDependencies>,
 }
 
 impl Drop for ManagedBuilder<'_, '_> {
@@ -381,7 +386,11 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
             .checked_add(1)
             .ok_or_else(|| runtime_error(&machine.machine, RuntimeError::HeapOverflow))?;
         let core = super::construction::ConstructionCore::new(owner);
-        Ok(Self { machine, core })
+        Ok(Self {
+            machine,
+            core,
+            sites: HashMap::new(),
+        })
     }
 
     pub fn bytes(&mut self, bytes: &[u8]) -> Result<ManagedNode, ExecutionError> {
@@ -475,6 +484,22 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                 consumed.push(node.node);
             }
         }
+        let mut sites = SiteDependencies::new();
+        for field in fields {
+            match field {
+                ManagedField::Node(node) | ManagedField::Consume(node) => {
+                    if let Some(retained) = self.sites.get(&node.node) {
+                        sites.extend(retained);
+                    }
+                }
+                ManagedField::Handle(handle) => {
+                    if let Some(entry) = handles.handle(handle.raw) {
+                        sites.extend(&entry.sites);
+                    }
+                }
+                ManagedField::Scalar(_) => {}
+            }
+        }
         let node = self
             .core
             .constructor(
@@ -538,6 +563,10 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                     super::answer::AnswerBuildError::Storage(error).into()
                 }
             })?;
+        for consumed in consumed {
+            self.sites.remove(&consumed);
+        }
+        self.sites.insert(node, sites);
         Ok(ManagedNode { node })
     }
 
@@ -576,6 +605,7 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
         realm: RealmId,
         root: ManagedNode,
     ) -> Result<PreparedHandle, ExecutionError> {
+        let sites = self.sites.get(&root.node).cloned().unwrap_or_default();
         let source = self.core.slot(root.node).map_err(|error| match error {
             super::construction::NodeAccessError::Foreign => {
                 super::answer::AnswerBuildError::ForeignNode.into()
@@ -607,10 +637,12 @@ impl<'machine, 'code> ManagedBuilder<'machine, 'code> {
                 crate::host_fns::bad_pointer(),
             ));
         };
-        let raw = self
-            .machine
-            .handles
-            .insert_handle(root, realm, RuntimeRep::LiftedRef);
+        let raw = self.machine.handles.insert_handle_with_sites(
+            root,
+            realm,
+            RuntimeRep::LiftedRef,
+            sites,
+        );
         Ok(PreparedHandle {
             raw,
             rep: RuntimeRep::LiftedRef,
@@ -997,7 +1029,11 @@ impl<'code> PreparedMachine<'code> {
         (
             Arc<CompiledProgram>,
             Arc<InstanceImage>,
-            Vec<(SymbolIdentity, super::evacuation::ParcelRoot)>,
+            Vec<(
+                SymbolIdentity,
+                super::evacuation::ParcelRoot,
+                SiteDependencies,
+            )>,
         ),
         ExecutionError,
     > {
@@ -1020,9 +1056,40 @@ impl<'code> PreparedMachine<'code> {
                 .read(slot.slot)
                 .map_err(|cause| runtime_error(&self.machine, cause))?;
             let root = super::evacuation::ParcelRoot::new(word as usize, slot.rep)?;
-            imports.push((slot.identity.clone(), root));
+            imports.push((
+                slot.identity.clone(),
+                root,
+                installed.sites.get(&slot.slot).cloned().unwrap_or_default(),
+            ));
         }
         Ok((image, Arc::clone(&installed.instance), imports))
+    }
+
+    pub(super) fn retain_parcel_import_sites(
+        &mut self,
+        program: ProgramId,
+        imports: &super::evacuation::ParcelImports,
+        mapped_sites: &[SiteDependencies],
+    ) -> Result<(), ExecutionError> {
+        let installed = self
+            .programs
+            .get_mut(&program)
+            .ok_or(ExecutionError::UnknownProgram(program))?;
+        for (identity, root) in imports {
+            let slot = installed
+                .program
+                .get()
+                .import_slots
+                .iter()
+                .find(|slot| slot.literal.is_none() && &slot.identity == identity)
+                .ok_or(ExecutionError::Invariant(
+                    "import_parcel: import identity is absent",
+                ))?;
+            installed
+                .sites
+                .insert(slot.slot, mapped_sites[*root].clone());
+        }
+        Ok(())
     }
 
     fn install(
@@ -1080,6 +1147,18 @@ impl<'code> PreparedMachine<'code> {
             self.static_catalog = Some(catalog);
         }
         let compiled = program.get();
+        let sites = compiled
+            .import_slots
+            .iter()
+            .filter_map(|slot| {
+                if slot.literal.is_some() {
+                    return None;
+                }
+                let handle = imports.get(&slot.identity)?;
+                let entry = self.handles.handle(handle.raw)?;
+                (!entry.sites.is_empty()).then(|| (slot.slot, entry.sites.clone()))
+            })
+            .collect();
         let image_instance = compiled.image_instance_id();
         // Shared descriptors (interned constructors, external wrappers) have
         // no owner; retiring this program leaves them.
@@ -1122,6 +1201,7 @@ impl<'code> PreparedMachine<'code> {
                 environment,
                 statics,
                 owned_headers,
+                sites,
             },
         );
         tracing::info!(target: "tidepool_codegen::image_install", image_instance, process_id = std::process::id(), machine_owner = self as *const Self as usize, program = id.0, outcome = "machine_published", "native image install");
@@ -1758,6 +1838,9 @@ impl<'code> PreparedMachine<'code> {
         for id in &self.pins {
             mark_program(*id, &mut live, &mut program_work);
         }
+        for site in self.handles.site_dependencies() {
+            mark_program(site.owner(), &mut live, &mut program_work);
+        }
         let mut work: Vec<usize> = self
             .handles
             .handle_slots()
@@ -1787,6 +1870,9 @@ impl<'code> PreparedMachine<'code> {
         loop {
             if let Some(id) = program_work.pop() {
                 if let Some(installed) = self.programs.get(&id) {
+                    for site in installed.sites.values().flatten() {
+                        mark_program(site.owner(), &mut live, &mut program_work);
+                    }
                     let block = installed.roots.snapshot();
                     work.extend(installed.reference_slots().map(|slot| block[slot] as usize));
                 }
@@ -2155,6 +2241,8 @@ impl<'code> PreparedMachine<'code> {
             self.release(continuation);
             return Err(ExecutionError::UnknownPreparedHandle);
         };
+        let mut sites = entry.sites;
+        sites.extend(SiteDependency::from_reply(evidence.reply));
         let mut slot = entry.slot;
         slot.stow()
             .map_err(|cause| runtime_error(&self.machine, cause))?;
@@ -2163,6 +2251,7 @@ impl<'code> PreparedMachine<'code> {
             realm,
             live_payload_root,
             evidence,
+            sites,
         });
         self.assert_rooting_receipt();
         Ok(id)
@@ -2306,12 +2395,16 @@ impl<'code> PreparedMachine<'code> {
             .continuation_mut(id)
             .expect("the frame remains owned during capacity admission");
         let realm = owner.unwrap_or(frame.realm);
-        let root = frame
+        let mut root = frame
             .live_payload_root
             .take()
             .expect("the checked payload remains owned until transfer");
-        let (slot, rep) = root.into_parts();
-        let handle = self.handles.insert_handle(slot, realm, rep);
+        root.sites
+            .extend(SiteDependency::from_reply(frame.evidence.reply));
+        let (slot, rep, sites) = root.into_parts();
+        let handle = self
+            .handles
+            .insert_handle_with_sites(slot, realm, rep, sites);
         self.assert_rooting_receipt();
         Ok(Some(handle))
     }
@@ -2358,12 +2451,13 @@ impl<'code> PreparedMachine<'code> {
         realm: RealmId,
     ) -> Result<PreparedOuter, ExecutionError> {
         self.ensure_handle_access()?;
-        let source = self
+        let entry = self
             .handles
             .handle(handle.raw)
             .filter(|entry| entry.realm == realm)
-            .map(|entry| entry.slot.physical())
             .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let sites = entry.sites.clone();
+        let source = Some(entry.slot.physical()).ok_or(ExecutionError::UnknownPreparedHandle)?;
         let word = unsafe { source.current() } as usize;
         if word == 0 {
             return Err(ExecutionError::UnknownPreparedHandle);
@@ -2448,7 +2542,9 @@ impl<'code> PreparedMachine<'code> {
                 return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
             }
             for ((field_index, rep), root) in managed.into_iter().zip(roots) {
-                let raw = self.handles.insert_handle(root, realm, rep);
+                let raw = self
+                    .handles
+                    .insert_handle_with_sites(root, realm, rep, sites.clone());
                 output[field_index] = PreparedResult::Managed(PreparedHandle { raw, rep });
             }
         }
@@ -2645,6 +2741,12 @@ impl<'code> PreparedMachine<'code> {
             .programs
             .get(&id)
             .ok_or(ExecutionError::UnknownProgram(id))?;
+        let sites = installed
+            .sites
+            .values()
+            .flatten()
+            .copied()
+            .collect::<SiteDependencies>();
         let compiled = installed.program.get();
         if compiled.byte_tops.contains_key(&value) {
             return Err(ExecutionError::MissingEntry(value));
@@ -2691,13 +2793,16 @@ impl<'code> PreparedMachine<'code> {
             return Err(runtime_error(&self.machine, crate::host_fns::bad_pointer()));
         };
         let raw = match class {
-            HandleClass::Value => {
+            HandleClass::Value => self.handles.insert_handle_with_sites(
+                root,
+                RealmId::ROOT,
+                RuntimeRep::LiftedRef,
+                sites.clone(),
+            ),
+            HandleClass::CodeExport => {
                 self.handles
-                    .insert_handle(root, RealmId::ROOT, RuntimeRep::LiftedRef)
+                    .insert_export_handle_with_sites(root, RuntimeRep::LiftedRef, sites)
             }
-            HandleClass::CodeExport => self
-                .handles
-                .insert_export_handle(root, RuntimeRep::LiftedRef),
         };
         Ok(PreparedHandle {
             raw,
@@ -2718,6 +2823,7 @@ impl<'code> PreparedMachine<'code> {
             .handle(handle.raw)
             .filter(|entry| entry.rep == handle.rep)
             .ok_or(ExecutionError::UnknownPreparedHandle)?;
+        let sites = entry.sites.clone();
         let pointer = unsafe { entry.slot.current() };
         if pointer.is_null() {
             return Err(ExecutionError::UnknownPreparedHandle);
@@ -2730,7 +2836,9 @@ impl<'code> PreparedMachine<'code> {
         let root = crate::old_space::OwnedRootCell::new(&self.machine, pointer)
             .map_err(|cause| runtime_error(&self.machine, cause))?;
         Ok(PreparedHandle {
-            raw: self.handles.insert_handle(root, owner, handle.rep),
+            raw: self
+                .handles
+                .insert_handle_with_sites(root, owner, handle.rep, sites),
             rep: handle.rep,
         })
     }
@@ -3109,7 +3217,8 @@ fn take_parked_on(
         .expect("the transitioned frame is consumed without another boundary");
     let (evidence, realm) = (frame.evidence, frame.realm);
     drop(frame.live_payload_root.take());
-    let raw = handles.insert_handle(frame.cell, realm, evidence.continuation_rep);
+    let raw =
+        handles.insert_handle_with_sites(frame.cell, realm, evidence.continuation_rep, frame.sites);
     Ok((
         PreparedHandle {
             raw,
@@ -3203,6 +3312,19 @@ impl<'code> InstalledProgram<'code> {
                 expected: reps.len(),
                 actual: arguments.len(),
             });
+        }
+        let mut sites = self
+            .sites
+            .values()
+            .flatten()
+            .copied()
+            .collect::<SiteDependencies>();
+        for argument in arguments {
+            if let PreparedInput::Managed(handle) = argument {
+                if let Some(entry) = handles.handle(handle.raw) {
+                    sites.extend(&entry.sites);
+                }
+            }
         }
         let argument_area = RootWords::new(arguments.len())?;
         let mut managed_arguments = Vec::new();
@@ -3379,7 +3501,7 @@ impl<'code> InstalledProgram<'code> {
                     matches!(rep, RuntimeRep::LiftedRef | RuntimeRep::UnliftedRef)
                 });
             for ((logical, rep), root) in managed.zip(roots) {
-                let raw = handles.insert_handle(root, realm, rep);
+                let raw = handles.insert_handle_with_sites(root, realm, rep, sites.clone());
                 output[logical] = PreparedResult::Managed(PreparedHandle { raw, rep });
             }
         }
@@ -4690,11 +4812,14 @@ mod tests {
             .handles
             .take_managed_root(bytes.raw(), bytes.rep())
             .unwrap();
-        let (root, _) = root.into_parts();
+        let (root, _, sites) = root.into_parts();
         let bytes = PreparedHandle {
-            raw: machine
-                .handles
-                .insert_handle(root, RealmId::ROOT, RuntimeRep::UnliftedRef),
+            raw: machine.handles.insert_handle_with_sites(
+                root,
+                RealmId::ROOT,
+                RuntimeRep::UnliftedRef,
+                sites,
+            ),
             rep: RuntimeRep::UnliftedRef,
         };
         let duplicate = machine.retain_handle_value(bytes, RealmId::ROOT).unwrap();

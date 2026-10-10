@@ -88,6 +88,7 @@ struct Candidate {
     environment: Box<InstallationEnvironment>,
     imports: Vec<BatchImport>,
     heap_extent: usize,
+    sites: BTreeMap<usize, SiteDependencies>,
 }
 
 impl PreparedMachine<'_> {
@@ -267,6 +268,7 @@ impl PreparedMachine<'_> {
                 environment,
                 imports: item.imports,
                 heap_extent,
+                sites: BTreeMap::new(),
             });
         }
 
@@ -439,6 +441,46 @@ impl PreparedMachine<'_> {
             }
         }
 
+        // Follow only this batch's admitted import graph. Source-group tops
+        // conservatively inherit their group's exact imported site tokens.
+        for &(index, slot, handle) in &external {
+            let entry = self
+                .handles
+                .handle(handle.raw)
+                .ok_or(ExecutionError::UnknownPreparedHandle)?;
+            candidates[index].sites.insert(slot, entry.sites.clone());
+        }
+        loop {
+            let previous = candidates
+                .iter()
+                .map(|candidate| {
+                    candidate
+                        .sites
+                        .values()
+                        .flatten()
+                        .copied()
+                        .collect::<SiteDependencies>()
+                })
+                .collect::<Vec<_>>();
+            let mut changed = false;
+            for candidate in &mut candidates {
+                for (slot, origin) in candidate.image.import_slots.iter().zip(&candidate.imports) {
+                    if slot.literal.is_some() {
+                        continue;
+                    }
+                    if let BatchImport::Source { group, .. } = origin {
+                        let sites = candidate.sites.entry(slot.slot).or_default();
+                        let before = sites.len();
+                        sites.extend(&previous[*group]);
+                        changed |= before != sites.len();
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
         let mut staged_interner = self.interner.clone();
         for candidate in &candidates {
             staged_interner
@@ -568,6 +610,7 @@ impl PreparedMachine<'_> {
                     roots: candidate.roots,
                     environment: candidate.environment,
                     owned_headers,
+                    sites: candidate.sites,
                 },
             );
             tracing::info!(target: "tidepool_codegen::image_install", image_instance, process_id = std::process::id(), machine_owner = self as *const Self as usize, program = id.0, outcome = "machine_published", "native image install");
@@ -624,7 +667,10 @@ impl PreparedMachine<'_> {
             // before commit or rollback, and rollback releases this root.
             let root = crate::old_space::OwnedRootCell::new(&self.machine, word as *mut u8)
                 .map_err(|cause| runtime_error(&self.machine, cause))?;
-            let raw = self.handles.insert_handle(root, RealmId::ROOT, export.rep);
+            let sites = candidate.sites.values().flatten().copied().collect();
+            let raw = self
+                .handles
+                .insert_handle_with_sites(root, RealmId::ROOT, export.rep, sites);
             provisional.push(PreparedHandle {
                 raw,
                 rep: export.rep,

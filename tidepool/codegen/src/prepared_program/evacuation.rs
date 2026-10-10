@@ -21,6 +21,7 @@ use super::instance::InstanceImage;
 use super::machine::{PreparedHandle, PreparedMachine, ProgramId};
 use super::run::runtime_error;
 use super::{CompiledProgram, ExecutionError, ImportBindings};
+use crate::resource_ledger::{SiteDependencies, SiteDependency};
 use crate::suspension::RealmId;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -146,6 +147,13 @@ pub struct ParcelConstructor {
     pub fields: Vec<RuntimeRep>,
 }
 
+/// A previously issued declaring-row dependency bound to the parcel's exact
+/// instance manifest. Its old machine-local owner is never used on import.
+struct ParcelSiteDependency {
+    image: usize,
+    site: SiteDependency,
+}
+
 /// A detached copy of one value together with everything a machine that
 /// never saw its sender needs to hold and run it. Root 0 is the value; the
 /// remaining roots are the import-slot values of the images in `images`.
@@ -155,6 +163,7 @@ pub struct Parcel {
     root_reps: Vec<ParcelRootRep>,
     images: Vec<ParcelImage>,
     constructors: Vec<ParcelConstructor>,
+    sites: Vec<Vec<ParcelSiteDependency>>,
 }
 
 /// Successful import of a value and its exact native instance owners. The
@@ -201,7 +210,7 @@ impl PreparedMachine<'_> {
     pub fn export_parcel(&mut self, handle: PreparedHandle) -> Result<Parcel, ExecutionError> {
         self.ensure_handle_access()?;
         let _quiescent = self.quiesce()?;
-        let value = {
+        let (value, retained_sites) = {
             let entry = self
                 .handles
                 .handle(handle.raw())
@@ -209,93 +218,111 @@ impl PreparedMachine<'_> {
                 .ok_or(ExecutionError::UnknownPreparedHandle)?;
             // SAFETY: the ledger keeps the slot registered while the handle
             // is live, and the machine is quiescent.
-            ParcelRoot::new(unsafe { entry.slot.current() } as usize, entry.rep)?
+            (
+                ParcelRoot::new(unsafe { entry.slot.current() } as usize, entry.rep)?,
+                entry.sites.clone(),
+            )
         };
         let mut roots = vec![value];
+        let mut sites = vec![retained_sites];
         let mut root_indices = HashMap::from([(value, 0)]);
         let mut images = Vec::new();
         let mut constructors = Vec::new();
-        let mut image_ids = HashSet::new();
+        let mut image_ids = HashMap::new();
+        let mut image_work = sites[0].iter().map(|site| site.owner()).collect::<Vec<_>>();
         let mut constructor_headers = HashSet::new();
         let mut capacity = 0usize;
         {
             let heap = self.observation_heap()?;
             let mut work = vec![value.word];
             let mut visited = HashSet::new();
-            while let Some(word) = work.pop() {
-                if word == 0 {
-                    continue;
-                }
-                if !visited.insert(tidepool_heap::managed_reference::untag(word)) {
-                    continue;
-                }
-                let step = heap.trace_parcel_step(word)?;
-                let owner = match step {
-                    super::observe::ParcelTraceStep::Updated { target } => {
-                        work.push(target);
+            while !work.is_empty() || !image_work.is_empty() {
+                let id = if let Some(id) = image_work.pop() {
+                    id
+                } else {
+                    let word = work.pop().expect("nonempty traversal work");
+                    if word == 0 {
                         continue;
                     }
-                    super::observe::ParcelTraceStep::Static { region_start } => {
-                        Some(self.owner_of_static_region(region_start).ok_or(
-                            ExecutionError::Invariant(
-                                "export_parcel: a static reference names no installed program",
-                            ),
-                        )?)
+                    if !visited.insert(tidepool_heap::managed_reference::untag(word)) {
+                        continue;
                     }
-                    super::observe::ParcelTraceStep::Object {
-                        header,
-                        bytes,
-                        children,
-                    } => {
-                        capacity =
-                            capacity
-                                .checked_add(bytes)
-                                .ok_or(ExecutionError::Evacuation(
-                                    DescriptorTraceError::InvalidRange,
-                                ))?;
-                        work.extend(children);
-                        if let Some(id) = self.owner_of_header(header) {
-                            Some(id)
-                        } else {
-                            let entry = self.descriptor_registry.get(&header).ok_or(
-                                ExecutionError::Evacuation(
-                                    DescriptorTraceError::UnknownDescriptor { address: header },
+                    let step = heap.trace_parcel_step(word)?;
+                    let owner = match step {
+                        super::observe::ParcelTraceStep::Updated { target } => {
+                            work.push(target);
+                            continue;
+                        }
+                        super::observe::ParcelTraceStep::Static { region_start } => {
+                            Some(self.owner_of_static_region(region_start).ok_or(
+                                ExecutionError::Invariant(
+                                    "export_parcel: a static reference names no installed program",
                                 ),
-                            )?;
-                            match &entry.meaning {
-                                super::DescriptorMeaning::External => {}
-                                super::DescriptorMeaning::Constructor(observation) => {
-                                    if constructor_headers.insert(header) {
-                                        constructors.push(ParcelConstructor {
-                                            descriptor: Arc::clone(&entry.descriptor),
-                                            identity: observation.identity,
-                                            fields: observation.fields.clone(),
-                                        });
+                            )?)
+                        }
+                        super::observe::ParcelTraceStep::Object {
+                            header,
+                            bytes,
+                            children,
+                        } => {
+                            capacity =
+                                capacity
+                                    .checked_add(bytes)
+                                    .ok_or(ExecutionError::Evacuation(
+                                        DescriptorTraceError::InvalidRange,
+                                    ))?;
+                            work.extend(children);
+                            if let Some(id) = self.owner_of_header(header) {
+                                Some(id)
+                            } else {
+                                let entry = self.descriptor_registry.get(&header).ok_or(
+                                    ExecutionError::Evacuation(
+                                        DescriptorTraceError::UnknownDescriptor { address: header },
+                                    ),
+                                )?;
+                                match &entry.meaning {
+                                    super::DescriptorMeaning::External => {}
+                                    super::DescriptorMeaning::Constructor(observation) => {
+                                        if constructor_headers.insert(header) {
+                                            constructors.push(ParcelConstructor {
+                                                descriptor: Arc::clone(&entry.descriptor),
+                                                identity: observation.identity,
+                                                fields: observation.fields.clone(),
+                                            });
+                                        }
                                     }
-                                }
-                                super::DescriptorMeaning::Callable { .. }
-                                | super::DescriptorMeaning::Pap => {
-                                    return Err(ExecutionError::Invariant(
+                                    super::DescriptorMeaning::Callable { .. }
+                                    | super::DescriptorMeaning::Pap => {
+                                        return Err(ExecutionError::Invariant(
                                         "export_parcel: a callable's header belongs to no installed image",
                                     ));
+                                    }
                                 }
+                                None
                             }
-                            None
                         }
-                    }
+                    };
+                    let Some(id) = owner else {
+                        continue;
+                    };
+                    id
                 };
-                let Some(id) = owner.filter(|id| image_ids.insert(*id)) else {
+                if image_ids.contains_key(&id) {
                     continue;
-                };
+                }
+                image_ids.insert(id, images.len());
                 let (image, instance, slots) = self.image_with_imports(id)?;
                 let mut imports = Vec::with_capacity(slots.len());
-                for (identity, root) in slots {
+                for (identity, root, retained_sites) in slots {
                     let index = *root_indices.entry(root).or_insert_with(|| {
                         let index = roots.len();
                         roots.push(root);
+                        sites.push(SiteDependencies::new());
                         work.push(root.word);
                         index
                     });
+                    image_work.extend(retained_sites.iter().map(|site| site.owner()));
+                    sites[index].extend(retained_sites);
                     imports.push((identity, index));
                 }
                 images.push(ParcelImage {
@@ -305,6 +332,34 @@ impl PreparedMachine<'_> {
                 });
             }
         }
+        let sites = sites
+            .into_iter()
+            .map(|sites| {
+                sites
+                    .into_iter()
+                    .map(|site| {
+                        let image =
+                            *image_ids
+                                .get(&site.owner())
+                                .ok_or(ExecutionError::Invariant(
+                                    "export_parcel: declaring site has no carried image",
+                                ))?;
+                        if images[image]
+                            .image
+                            .definition_facts()
+                            .sites
+                            .get(site.row())
+                            .is_none()
+                        {
+                            return Err(ExecutionError::Invariant(
+                                "export_parcel: declaring site row is absent",
+                            ));
+                        }
+                        Ok(ParcelSiteDependency { image, site })
+                    })
+                    .collect::<Result<Vec<_>, ExecutionError>>()
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
         let words: Vec<_> = roots.iter().map(|root| root.word).collect();
         let heap = self.export_roots(&words, capacity)?;
         Ok(Parcel {
@@ -312,6 +367,7 @@ impl PreparedMachine<'_> {
             root_reps: roots.into_iter().map(|root| root.rep).collect(),
             images,
             constructors,
+            sites,
         })
     }
 
@@ -419,11 +475,37 @@ impl PreparedMachine<'_> {
             root_reps,
             images,
             constructors,
+            sites,
         } = parcel;
         if parcel.root() == 0 {
             return Err(ExecutionError::Evacuation(
                 DescriptorTraceError::TaggedNull { value: 0 },
             ));
+        }
+        // Validate the sealed dependency manifest before admitting descriptors,
+        // allocating roots or installing native images.
+        if sites.len() != parcel.roots().len() || root_reps.len() != sites.len() {
+            return Err(ExecutionError::Invariant(
+                "import_parcel: root dependency count differs",
+            ));
+        }
+        for dependency in sites.iter().flatten() {
+            let image = images
+                .get(dependency.image)
+                .ok_or(ExecutionError::Invariant(
+                    "import_parcel: declaring site image is absent",
+                ))?;
+            if image
+                .image
+                .definition_facts()
+                .sites
+                .get(dependency.site.row())
+                .is_none()
+            {
+                return Err(ExecutionError::Invariant(
+                    "import_parcel: declaring site row is absent",
+                ));
+            }
         }
         let missing = self.missing_parcel_images(&images);
         let new_constructors: Vec<&ParcelConstructor> = constructors
@@ -690,6 +772,34 @@ impl PreparedMachine<'_> {
                     }
                 }
                 installed_ids.push(self.install_instance(image, instance, bindings)?);
+            }
+            // Only the successful exact instance map can remap issued owners.
+            // Existing instances retain their current local import custody.
+            let image_programs = images
+                .iter()
+                .map(|image| {
+                    self.program_for_instance(&image.instance)
+                        .expect("installed parcel instance")
+                })
+                .collect::<Vec<_>>();
+            let mapped_sites = sites
+                .iter()
+                .map(|sites| {
+                    sites
+                        .iter()
+                        .map(|dependency| dependency.site.remap(image_programs[dependency.image]))
+                        .collect::<SiteDependencies>()
+                })
+                .collect::<Vec<_>>();
+            for (handle, sites) in handles.iter().zip(&mapped_sites) {
+                self.handles
+                    .extend_handle_sites(handle.raw(), sites.clone());
+            }
+            for (image, program) in images.iter().zip(&image_programs) {
+                if !installed_ids.contains(program) {
+                    continue;
+                }
+                self.retain_parcel_import_sites(*program, &image.imports, &mapped_sites)?;
             }
             for (index, handle) in handles.iter().copied().enumerate().skip(1) {
                 if !kept_indices.contains(&index) {

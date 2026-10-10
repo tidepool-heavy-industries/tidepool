@@ -18,7 +18,7 @@ use tidepool_heap::{
 };
 use tidepool_repr::execution_schema::RuntimeRep;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(super) struct ConstructionNode {
     index: usize,
     generation: u64,
