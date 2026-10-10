@@ -487,18 +487,22 @@ impl ExactSelectionSnapshot {
     fn selected_nodes(
         &self,
     ) -> Result<std::collections::BTreeSet<ArtifactBindingNode>, SnapshotError> {
-        let mut selected = std::collections::BTreeSet::new();
-        let mut pending: Vec<_> = self
-            .roots
-            .keys()
-            .copied()
-            .chain(
+        self.nodes_from_seeds(
+            self.roots.keys().copied().chain(
                 self.native_custody
                     .keys()
                     .copied()
                     .map(ArtifactBindingNode::Artifact),
-            )
-            .collect();
+            ),
+        )
+    }
+
+    fn nodes_from_seeds(
+        &self,
+        seeds: impl IntoIterator<Item = ArtifactBindingNode>,
+    ) -> Result<std::collections::BTreeSet<ArtifactBindingNode>, SnapshotError> {
+        let mut selected = std::collections::BTreeSet::new();
+        let mut pending: Vec<_> = seeds.into_iter().collect();
         while let Some(node) = pending.pop() {
             if !selected.insert(node) {
                 continue;
@@ -522,6 +526,45 @@ impl ExactSelectionSnapshot {
             );
         }
         Ok(selected)
+    }
+
+    /// Candidate raw artifacts reached by newly selected roots or byte custody.
+    /// The run owner removes IDs whose durable references it already retains.
+    /// An unchanged snapshot does not traverse its inherited closure.
+    pub fn artifact_ids_introduced(
+        &self,
+        previous: Option<&Self>,
+    ) -> Result<std::collections::BTreeSet<ArtifactId>, SnapshotError> {
+        let Some(previous) = previous else {
+            return Ok(self
+                .selected_nodes()?
+                .into_iter()
+                .map(ArtifactBindingNode::artifact)
+                .collect());
+        };
+        let roots = previous
+            .roots
+            .diff(&self.roots)
+            .filter_map(|change| match change {
+                DiffItem::Add(root, _) => Some(*root),
+                DiffItem::Update { new: (root, _), .. } => Some(*root),
+                DiffItem::Remove(_, _) => None,
+            });
+        let custody = previous
+            .native_custody
+            .diff(&self.native_custody)
+            .filter_map(|change| match change {
+                DiffItem::Add(binding, _) => Some(ArtifactBindingNode::Artifact(*binding)),
+                DiffItem::Update {
+                    new: (binding, _), ..
+                } => Some(ArtifactBindingNode::Artifact(*binding)),
+                DiffItem::Remove(_, _) => None,
+            });
+        Ok(self
+            .nodes_from_seeds(roots.chain(custody))?
+            .into_iter()
+            .map(ArtifactBindingNode::artifact)
+            .collect())
     }
 
     /// Derive selected payload/group rows from exact typed roots and custody.

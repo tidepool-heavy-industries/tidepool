@@ -8528,6 +8528,14 @@ mod tests {
                     _ => joined.clone(),
                 };
                 let snapshot = next.snapshot();
+                let previous_snapshot = previous.snapshot();
+                let introduced = snapshot.selection().artifact_ids_introduced(Some(previous_snapshot.selection())).unwrap();
+                let previous_ids = previous.artifact_view().artifact_ids().into_iter().collect::<BTreeSet<_>>();
+                let next_ids = next.artifact_view().artifact_ids().into_iter().collect::<BTreeSet<_>>();
+                proptest::prop_assert!(next_ids.difference(&previous_ids).all(|id| introduced.contains(id)));
+                proptest::prop_assert!(introduced.is_subset(&next_ids));
+                proptest::prop_assert_eq!(snapshot.selection().artifact_ids_introduced(None).unwrap(), next_ids);
+                if operation == 0 || operation == 3 { proptest::prop_assert!(introduced.is_empty()); }
                 let mut materializer = Materializer::new(&store);
                 let result = materializer.materialize_context(Some(base),&snapshot).unwrap();
                 let packet = materializer.finish().unwrap();
