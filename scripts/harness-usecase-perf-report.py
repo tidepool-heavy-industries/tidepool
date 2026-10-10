@@ -9,6 +9,7 @@ import argparse
 from collections import Counter
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -366,6 +367,166 @@ def runtime_cost_coverage(events):
     }
 
 
+
+def interval_union_ns(rows):
+    """Union only already joined intervals from one explicit clock domain."""
+    intervals = sorted((row["start_ns"], row["end_ns"]) for row in rows)
+    total, right = 0, None
+    for left, end in intervals:
+        total += end - left if right is None or left >= right else max(0, end - right)
+        right = end if right is None else max(right, end)
+    return total
+
+
+def owned_artifact_observations(host_rows, daemon_rows):
+    """Retain owner facts; absent summaries never prove zero work or retention."""
+    native_targets = {"tidepool_codegen::image_registry", "tidepool_codegen::prepared_compile",
+                      "tidepool_codegen::image_install", "tidepool_codegen::image_lifetime",
+                      "tidepool_runtime::activation_renderer_install"}
+    native, validations, frontend, problems = [], [], [], []
+    physical_terminals = {}
+    for row in host_rows:
+        if row.get("target") not in native_targets:
+            continue
+        value = dict(fields(row))
+        for name in ("image_registry", "image_entry", "image_compile", "renderer_owner"):
+            if name not in value and attr(row, name) is not None:
+                value[name] = attr(row, name)
+        native.append({"target": row["target"], "fields": value,
+                       "execution": attr(row, "execution"), "span": row.get("span"),
+                       "spans": row.get("spans")})
+    for row in daemon_rows:
+        physical = request_identity(row)
+        if fields(row).get("message") in ("compiler request finished", "compiler request failed",
+                                          "compiler request abandoned by client") and physical is not None:
+            physical_terminals.setdefault(physical, []).append(fields(row))
+        line = fields(row).get("line")
+        if not isinstance(line, str):
+            continue
+        identity = request_identity(row)
+        if line.startswith("tidepool-compile-summary "):
+            frontend.append({"physical_request": list(identity) if identity else None,
+                             "counts": {name: int(value) for name, value in re.findall(
+                                 r"(?:^| )(modules|typecheck_modules|lowering_modules|interface_modules)=([0-9]+)(?= |$)", line)}})
+        if not line.startswith("tidepool-validation "):
+            continue
+        try:
+            value = json.loads(line[len("tidepool-validation "):])
+            required = ("invocation_id", "worker_pid", "start_ns", "end_ns", "wall_ns", "cpu_ns")
+            if (not isinstance(value, dict) or value.get("schema") != 1
+                    or any(type(value.get(name)) is not int or value[name] < 0 for name in required)
+                    or value["end_ns"] < value["start_ns"]
+                    or value.get("outcome") not in ("success", "refused", "exception")
+                    or not isinstance(value.get("clock_domain"), str)
+                    or not isinstance(value.get("counts"), dict)):
+                raise ValueError("invalid validation summary")
+            if identity is None or (attr(row, "worker_pid") is not None
+                                    and integer(attr(row, "worker_pid")) != value["worker_pid"]):
+                raise ValueError("validation lacks matching physical request/worker identity")
+            validations.append({"physical_request": list(identity), **value})
+        except (ValueError, TypeError) as error:
+            problems.append(str(error))
+    seen = set()
+    for event in validations:
+        terminals = physical_terminals.get(tuple(event["physical_request"]), [])
+        event["physical_terminal_status"] = "observed" if len(terminals) == 1 else "missing_or_ambiguous"
+        if len(terminals) != 1:
+            problems.append("validation lacks unique physical service terminal")
+        key = (event["worker_pid"], event["invocation_id"])
+        if key in seen:
+            problems.append("duplicate validation invocation")
+        seen.add(key)
+    compile_events = [event for event in native if event["target"] == "tidepool_codegen::prepared_compile"
+                      and event["fields"].get("message") == "prepared compile"]
+    install_events = [event for event in native if event["target"] == "tidepool_codegen::image_install"
+                      and event["fields"].get("outcome") == "machine_published"]
+    producer_events = [event for event in native if event["target"] == "tidepool_codegen::image_registry"
+                       and event["fields"].get("message") == "native image producer settled"]
+    decisions = [event for event in native if event["fields"].get("message") == "native image registry decision"]
+    images = set()
+    for event in compile_events:
+        key = (event["fields"].get("process_id"), event["fields"].get("image_instance"))
+        if key in images:
+            problems.append("duplicate native compile image identity")
+        images.add(key)
+    for event in compile_events + install_events:
+        if any(nonnegative_integer(event["fields"].get(name)) is None
+               for name in ("process_id", "image_instance")):
+            problems.append("native compile/install lacks process-local image identity")
+    intervals = {}
+    for event in validations:
+        key = (tuple(event["physical_request"]), event["worker_pid"], event["clock_domain"])
+        intervals.setdefault(key, []).append(event)
+    validation_groups = []
+    for (physical, pid, clock), rows in intervals.items():
+        nonoverlapping = sum(row["end_ns"] - row["start_ns"] for row in rows) == interval_union_ns(rows)
+        validation_groups.append({"physical_request": list(physical), "worker_pid": pid,
+            "clock_domain": clock, "invocation_count": len(rows),
+            "wall_interval_union_ns": interval_union_ns(rows), "intervals_nonoverlapping": nonoverlapping,
+            "process_allocated_bytes_sum": (sum(row["allocated_bytes"] for row in rows)
+                if nonoverlapping and all(type(row.get("allocated_bytes")) is int for row in rows) else None)})
+    key_groups = {}
+    released = {(event["fields"].get("process_id"), event["fields"].get("image_instance"))
+                for event in native if event["target"] == "tidepool_codegen::image_lifetime"
+                and event["fields"].get("outcome") == "released"}
+    for event in decisions + producer_events:
+        value = event["fields"]
+        key = tuple(value.get(name) for name in ("process_id", "image_registry", "image_entry"))
+        if any(nonnegative_integer(item) is None for item in key):
+            problems.append("registry event lacks exact retained entry identity")
+            continue
+        group = key_groups.setdefault(key, {"process_id": key[0], "image_registry": key[1],
+                    "image_entry": key[2], "image_instances": set(), "producer_ids": set(),
+                    "dispositions": Counter(), "producer_outcomes": Counter(), "live_hit_wall_ns": [],
+                    "events": []})
+        group["events"].append(value)
+        if nonnegative_integer(value.get("image_instance")) is not None:
+            group["image_instances"].add(value["image_instance"])
+        if value.get("message") == "native image producer settled":
+            if nonnegative_integer(value.get("image_compile")) is not None:
+                group["producer_ids"].add(value["image_compile"])
+            group["producer_outcomes"][value.get("outcome")] += 1
+        else:
+            group["dispositions"][value.get("disposition")] += 1
+            if value.get("disposition") == "live_hit" and nonnegative_integer(value.get("wall_ns")) is not None:
+                group["live_hit_wall_ns"].append(value["wall_ns"])
+    key_output = []
+    for group in key_groups.values():
+        group["released_image_instances_observed"] = sorted(instance for instance in group["image_instances"]
+            if (group["process_id"], instance) in released)
+        group["image_instances"] = sorted(group["image_instances"])
+        group["producer_ids"] = sorted(group["producer_ids"])
+        group["dispositions"] = dict(group["dispositions"])
+        group["producer_outcomes"] = dict(group["producer_outcomes"])
+        key_output.append(group)
+    def observed_count(rows):
+        return len(rows) if rows else None
+    return {
+        "status": "partial_or_unknown" if problems or not compile_events or not install_events or not validations else "observed",
+        "problems": problems,
+        "counts_scope": "observed_owner_records; no missing-event zeros or exhaustive-stream claim",
+        "ghc_frontend_summaries": frontend,
+        "ghc_physical_request_count_observed": len(physical_terminals) or None,
+        "actual_native_image_compiles_observed": (observed_count(compile_events)
+            if not any("native compile" in problem for problem in problems) else None),
+        "machine_installations_observed": observed_count(install_events),
+        "native_producer_outcomes_observed": dict(Counter(event["fields"].get("outcome") for event in producer_events)) or None,
+        "registry_dispositions_observed": dict(Counter(event["fields"].get("disposition") for event in decisions)) or None,
+        "registry_wait_ns_observed": (sum(nonnegative_integer(event["fields"].get("shared_wait_ns")) or 0
+                                         for event in decisions) if decisions else None),
+        "successful_native_functions_defined_observed": (sum(nonnegative_integer(event["fields"].get("functions_defined")) or 0
+            for event in compile_events) if compile_events and all(nonnegative_integer(event["fields"].get("functions_defined")) is not None
+            for event in compile_events) else None),
+        "successful_native_code_bytes_observed": (sum(nonnegative_integer(event["fields"].get("code_bytes")) or 0
+            for event in compile_events) if compile_events and all(nonnegative_integer(event["fields"].get("code_bytes")) is not None
+            for event in compile_events) else None),
+        "registry_key_lifetimes": key_output,
+        "native_events": native, "validation_events": validations, "validation_intervals": validation_groups,
+        "interpretation": "GHC specialization, native production and machine publication are distinct. "
+                          "Weak image expiry permits later production. Cache HIT duration includes lookup/lock cost. "
+                          "Allocation is a process RTS delta, not retained heap; overlapping deltas are not summed.",
+    }
+
 def analyze(record_path):
     record_path = Path(record_path).resolve()
     record = read_json(record_path)
@@ -414,6 +575,7 @@ def analyze(record_path):
     dispatches, calls, submissions, services, queues, unidentified_queue_events = compiler_events(
         host_rows, daemon_rows)
     cost_events = runtime_cost_events(host_rows, phases)
+    owner_observations = owned_artifact_observations(host_rows, iter_jsonl(daemon_path))
 
     cohort_name = environment.get("workload_cohort")
     roster = environment.get("workload_roster")
@@ -750,10 +912,11 @@ def analyze(record_path):
 
     report = {
         "schema": 1,
+        "owned_artifact_observations": owner_observations,
         "trace_profile": {
             "name": trace_profile,
             "fine_joins_and_attribution": "collected; see completeness fields" if trace_profile == "full"
-                else "incomplete_by_design; absent evidence is unknown, not zero",
+                else "bounded summaries and joins collected; per-file detail omitted; see completeness fields",
         },
         "runner": {
             "test": record.get("test"), "passed": record.get("passed"),
@@ -894,63 +1057,11 @@ def analyze(record_path):
             "phase_attributed_event_count": None, "unattributed_event_count": None,
             "ambiguous_event_count": None, "events": None, "coverage": None,
         }
-        report["queue_trace_status"] = "not_collected_by_design"
-        report["queue_evidence"] = {
-            "status": "unknown_by_trace_profile", "expected_admission_count_from_exact_requests": None,
-            "observed_admission_count": None, "missing_admissions": None,
-            "unexpected_admissions": None, "admissions_with_non_single_queue_timing": None,
-            "unidentified_queue_event_count": None,
-        }
-        report["workload_request_service_joins"] = {
-            "status": "unknown_by_trace_profile",
-            "logical_request_count": report["workload_request_service_joins"]["logical_request_count"],
-            "exact_phase_request_join_count": None,
-        }
-        report["whole_physical_stream_reconciliation"] = {
-            "status": "incomplete_by_trace_profile", "raw_host_submission_count": None,
-            "raw_physical_service_count": None, "host_identity_count": None,
-            "duplicate_host_identity_count": None, "duplicate_service_identity_count": None,
-            "unmatched_physical_service_count": None, "host_submissions_missing_identity": None,
-            "physical_service_outcome_status": "unknown_by_trace_profile",
-            "physical_service_failed_or_incomplete_count": None, "raw_jsonl_scan": "not_collected_by_design",
-            "raw_event_capture_status": "not_collected_by_design", "raw_trace_files": None,
-            "runner_raw_scan": None, "detailed_compiler_sample_status": "not_collected_by_design",
-            "detailed_compiler_sample_records_truncated": None,
-            "runner_diagnostic_sample_status": "not_collected_by_design",
-        }
-        report["activation_input_origins"] = None
-        report["startup_scope"] = {
-            "owner_status": "unknown_by_trace_profile", "unowned_host_submission_count": None,
-            "ambiguous_owner_submission_count": None, "unknown_owner_submission_count": None,
-            "explicit_activation_owner_request_count": None,
-            "explicit_startup_span_owner_request_count": None,
-            "recognized_startup_owner_spans": None, "explicit_startup_span_requests": None,
-            "requests": None, "ambiguous_startup_span_requests": None,
-            "ambiguous_requests": None, "unknown_owner_requests": None,
-            "assignment_policy": "not evaluated because fine traces were omitted",
-        }
-        report["compiler_job_grants"] = {
-            "status": "unknown_by_trace_profile", "admissions": None, "observed_jobs": None,
-            "observed_capabilities": None,
-            "interpretation": "Fine queue/admission tracing was omitted by the selected profile.",
-        }
-        report["queue_observations"] = None
-        report["unattributed_compiler_submissions"] = None
-        report["unmatched_daemon_service_records"] = None
+        # Exact request/service joins and bounded owner summaries are required
+        # in minimal too. Only high-volume runtime diagnostics remain omitted.
         for phase in report["phases"]:
-            for name in (
-                "host_submission_event_count", "host_submission_identity_count",
-                "host_submission_events_missing_identity", "host_submission_duplicate_identity_count",
-                "daemon_service_matched_count", "daemon_service_missing_count",
-                "daemon_service_incomplete_count", "daemon_service_ambiguous_count",
-                "globally_unattributed_host_submission_event_count", "dispatch_executions",
-                "call_timing_records", "harness_runtime_cost_events", "harness_runtime_cost_coverage",
-                "host_admission_status", "client_compiler_submissions", "queue_admission_ids",
-                "compiler_request_digest_seen_before",
-            ):
-                phase[name] = None
-            phase["dispatch_attribution"] = "unknown_by_trace_profile"
-            phase["compiler_attribution"] = "unknown_by_trace_profile"
+            phase["harness_runtime_cost_events"] = None
+            phase["harness_runtime_cost_coverage"] = None
             phase["store_projection_status"] = "unknown_by_trace_profile"
     return report
 

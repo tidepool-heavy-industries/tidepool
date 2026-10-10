@@ -955,6 +955,7 @@ class NativeQualificationTests(unittest.TestCase):
                                 'TIDEPOOL_COMPILER_MODULES': '/frozen/catalog/catalog.json',
                                 'TIDEPOOL_COMPILER_DEPLOYMENT': '/frozen/compiler/compiler-deployment.json'},
             }
+            fixture.add_owner_summaries()
             measured = qualification.analyze_harness_performance(
                 descriptor, [record], [runner_path],
                 qualification.cohorts()['harness-performance'],
@@ -979,6 +980,7 @@ class NativeQualificationTests(unittest.TestCase):
             "control": None,
             "short_unknown_roster": "workload_contract_matches_selected_cohort",
             "missing_wall": "phase_measurements_complete",
+            "missing_owner_summary": "bounded_owner_observations_complete",
             "negative_wall": "phase_measurements_complete",
             "malformed_duplicate_queue": "queue_evidence_complete",
             "missing_compiler_grant": "compiler_job_grants_complete",
@@ -1051,6 +1053,8 @@ class NativeQualificationTests(unittest.TestCase):
                     "stdlib_mode": "catalog-backed", "startup_mode": "prepared",
                     "environment": phases[0]["deployment"],
                 }
+                if mutation != "missing_owner_summary":
+                    fixture.add_owner_summaries()
                 measured = qualification.analyze_harness_performance(
                     descriptor, [record], [runner_path], qualification.cohorts()["harness-performance"],
                     True, descriptor_path)

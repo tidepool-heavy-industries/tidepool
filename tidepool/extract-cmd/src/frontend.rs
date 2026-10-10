@@ -157,6 +157,9 @@ fn owned_timing_command(program: impl AsRef<OsStr>, timing: Option<&OsStr>) -> C
             "1"
         },
     );
+    if let Some(summary) = std::env::var_os("TIDEPOOL_TIMING_SUMMARY") {
+        command.env("TIDEPOOL_TIMING_SUMMARY", summary);
+    }
     command
 }
 

@@ -138,7 +138,7 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_TEST_ARTIFACT_ROOT', 'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE',
     'TIDEPOOL_COMPILE_CACHE_DIR',
     'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', 'TIDEPOOL_TIMING', 'TIDEPOOL_MEMO_TRACE',
-    'TIDEPOOL_TEST_TRACE_PROFILE',
+    'TIDEPOOL_TEST_TRACE_PROFILE', 'TIDEPOOL_TIMING_SUMMARY',
     'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS',
     'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
     'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL',
@@ -1130,6 +1130,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         if trace_profile is not None:
             environment['TIDEPOOL_TEST_TRACE_PROFILE'] = trace_profile
             environment['TIDEPOOL_TIMING'] = '0' if trace_profile == 'minimal' else '1'
+            environment['TIDEPOOL_TIMING_SUMMARY'] = '1'
         (artifact_root / 'case.json').write_text(json.dumps({
             'schema': 1, 'test': name, 'scenario': 'running', 'process_cleanup_status': 'not_started',
             'hosted_cleanup_status': 'not_observed', 'compiler_cleanup_status': 'not_observed',

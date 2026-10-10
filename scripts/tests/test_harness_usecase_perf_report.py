@@ -99,6 +99,24 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         })
         return record_path
 
+    def add_owner_summaries(self):
+        host_path = self.root / "artifacts/host.jsonl"
+        compiler_path = self.root / "artifacts/compiler/compiler.jsonl"
+        host = reporter.read_jsonl(host_path)
+        host += [{"target": "tidepool_codegen::prepared_compile", "fields": {
+                    "message": "prepared compile", "process_id": 99, "image_instance": 7}},
+                 {"target": "tidepool_codegen::image_install", "fields": {
+                    "process_id": 99, "image_instance": 7, "outcome": "machine_published"}}]
+        self.write_jsonl(host_path, host)
+        daemon = reporter.read_jsonl(compiler_path)
+        span = next(row["span"] for row in daemon
+                    if row["fields"].get("message") == "compiler request finished")
+        daemon += [{"span": span, "fields": {"line": "tidepool-validation " + json.dumps({
+                    "schema": 1, "invocation_id": 1, "worker_pid": 123, "start_ns": 10,
+                    "end_ns": 20, "wall_ns": 10, "cpu_ns": 9, "clock_domain": "ghc_monotonic_ns",
+                    "outcome": "success", "counts": {"observed_file_count": 8}})}}]
+        self.write_jsonl(compiler_path, daemon)
+
     def make_child_activation_case(self):
         record = self.make_complete_case("three-actor-capture")
         trace = self.root / "artifacts/host.jsonl"
@@ -623,28 +641,52 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                 self.assertEqual(result["queue_observations"][0]["queue_event_count"], 2)
                 self.assertEqual(result["queue_observations"][0]["invalid_timing_record_count"], 1)
 
-    def test_minimal_trace_profile_keeps_phase_measurements_and_marks_fine_evidence_unknown(self):
+    def test_minimal_trace_profile_keeps_bounded_joins_without_runtime_detail(self):
         record = self.make_complete_case(trace_profile="minimal")
         report = reporter.analyze(record)
         self.assertEqual(report["trace_profile"]["name"], "minimal")
         self.assertEqual(report["phase_measurements"]["status"], "complete")
-        self.assertTrue(report["phase_coverage"]["complete"])
-        self.assertEqual(report["workload_request_service_joins"]["status"], "unknown_by_trace_profile")
-        self.assertIsNone(report["workload_request_service_joins"]["exact_phase_request_join_count"])
-        self.assertEqual(report["whole_physical_stream_reconciliation"]["status"], "incomplete_by_trace_profile")
-        self.assertIsNone(report["whole_physical_stream_reconciliation"]["raw_host_submission_count"])
-        self.assertEqual(report["queue_evidence"]["status"], "unknown_by_trace_profile")
-        self.assertIsNone(report["queue_evidence"]["observed_admission_count"])
-        self.assertEqual(report["startup_scope"]["owner_status"], "unknown_by_trace_profile")
-        self.assertIsNone(report["activation_input_origins"])
-        self.assertEqual(report["phases"][0]["compiler_attribution"], "unknown_by_trace_profile")
-        self.assertIsNone(report["phases"][0]["daemon_service_matched_count"])
-        self.assertIsNone(report["phases"][0]["host_submission_event_count"])
-        self.assertEqual(report["whole_physical_stream_reconciliation"]["physical_service_outcome_status"],
-                         "unknown_by_trace_profile")
-        self.assertIsNone(report["runner"]["diagnostic_evidence_complete"])
-        self.assertEqual(report["runner"]["diagnostic_evidence_status"], "not_collected_by_design")
+        self.assertEqual(report["workload_request_service_joins"]["status"], "complete")
         self.assertTrue(report["runner"]["cleanup"]["complete"])
+        self.assertEqual(report["harness_runtime_cost_trace"]["status"], "not_collected_by_design")
+        self.assertIsNone(report["phases"][0]["harness_runtime_cost_events"])
+        self.assertEqual(report["owned_artifact_observations"]["status"], "partial_or_unknown")
+        self.assertIsNone(report["owned_artifact_observations"]["actual_native_image_compiles_observed"])
+
+    def test_owner_summary_separates_native_compile_install_and_buffered_validation(self):
+        identity = {"daemon_epoch": "epoch", "admission_id": 4, "request_ordinal": 1,
+                    "compile_request": "digest", "worker_pid": 123}
+        validation = {"schema": 1, "invocation_id": 1, "worker_pid": 123,
+                      "start_ns": 10, "end_ns": 20, "wall_ns": 10, "cpu_ns": 9,
+                      "clock_domain": "ghc_monotonic_ns", "outcome": "success",
+                      "allocated_bytes": 400, "counts": {"observed_file_count": 8}}
+        host = [{"target": "tidepool_codegen::prepared_compile", "fields": {
+                    "message": "prepared compile", "process_id": 99, "image_instance": 7}},
+                *[{"target": "tidepool_codegen::image_install", "fields": {
+                    "process_id": 99, "image_instance": 7, "outcome": "machine_published"}} for _ in range(20)]]
+        daemon = [{"fields": {"message": "compiler request finished", "elapsed_ms": 2, "exit_code": 0}, "span": identity},
+                  {"fields": {"line": "tidepool-validation " + json.dumps(validation)}, "span": identity}]
+        result = reporter.owned_artifact_observations(host, daemon)
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(result["actual_native_image_compiles_observed"], 1)
+        self.assertEqual(result["machine_installations_observed"], 20)
+        self.assertEqual(result["validation_intervals"][0]["wall_interval_union_ns"], 10)
+        self.assertEqual(result["validation_intervals"][0]["process_allocated_bytes_sum"], 400)
+        self.assertIsNone(result["registry_dispositions_observed"])
+        result = reporter.owned_artifact_observations(host, daemon + [daemon[-1]])
+        self.assertEqual(result["status"], "partial_or_unknown")
+        self.assertIn("duplicate validation invocation", result["problems"])
+        validation["invocation_id"] = 2
+        validation["start_ns"] = 15
+        validation["end_ns"] = 25
+        overlapping = {"fields": {"line": "tidepool-validation " + json.dumps(validation)}, "span": identity}
+        result = reporter.owned_artifact_observations(host, daemon + [overlapping])
+        self.assertEqual(result["validation_intervals"][0]["wall_interval_union_ns"], 15)
+        self.assertIsNone(result["validation_intervals"][0]["process_allocated_bytes_sum"])
+        overlapping["span"] = {**identity, "worker_pid": 124}
+        result = reporter.owned_artifact_observations(host, [overlapping])
+        self.assertEqual(result["status"], "partial_or_unknown")
+        self.assertIn("validation lacks matching physical request/worker identity", result["problems"])
 
     def test_phase_measurements_require_nonnegative_json_integers(self):
         record = self.make_complete_case()

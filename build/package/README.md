@@ -423,6 +423,24 @@ provider replies are scripted. The frozen owner runs its bundled
 `harness-usecase-perf-report.py` after the counted test and writes
 `harness-usecase-perf-report.json` beside `report.json`.
 
+Performance cohorts default to `--trace-profile minimal`: phase outcomes,
+exact compiler request/service joins, per-call timing, validation summaries,
+native-image decisions, successful Cranelift compile summaries and machine
+publication records remain enabled. `TIDEPOOL_TIMING_SUMMARY=1` is forwarded
+through the owned compiler; per-file/module timing and host span lifecycle events
+remain disabled. `--trace-profile full` is an explicit diagnostic control for a
+bounded selected cohort, with detailed attribution enabled. Primary paired
+latency repetitions use minimal; detailed captures do not replace those results.
+
+`owned_artifact_observations` separates GHC frontend summaries, native image
+production and machine publication. Image IDs are process-local, registry entry
+IDs identify exact equal keys while retained, and expired weak images may be
+compiled again. After a key is pruned, a new entry cannot prove equality with an
+older entry. Validation intervals are joined by physical request identity;
+buffered logger arrival order is not an execution boundary. RTS deltas measure
+process allocation, not retained heap; overlapping allocation deltas are not
+summed. Absent summaries remain unknown rather than zero work.
+
 Behavioral and measurement outcomes remain separate. `behavioral_completed`
 requires the one executed passing case and controls the cohort exit status.
 The measurement report separately records phase coverage, exact workload

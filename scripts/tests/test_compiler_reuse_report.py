@@ -140,7 +140,7 @@ class ReuseEvidenceControls(unittest.TestCase):
         self.assertEqual(request['cycle_stages'][1]['stages']['source_frontend']['status'], 'UNKNOWN')
         self.assertIsNone(request['cycle_stages'][1]['stages']['source_frontend']['counts'])
 
-    def test_legacy_diagnostics_before_start_or_after_terminal_are_unqualified(self):
+    def test_buffered_legacy_diagnostics_join_by_physical_identity(self):
         for line in ('tidepool-count name=activation_preview_frontends count=9',
                      'tidepool-count name=exact_execution_original_load_owners count=9',
                      'tidepool-timing phase=retained_finalized_bytecode ms=2'):
@@ -151,13 +151,14 @@ class ReuseEvidenceControls(unittest.TestCase):
                     rows.insert(0 if position == 'before' else len(rows), diagnostic)
                     report = REPORT.analyze(rows)
                     request = report['requests'][0]
-                    self.assertEqual(report['status'], 'incomplete')
-                    self.assertEqual(request['legacy_status'], 'UNKNOWN')
-                    self.assertEqual(request['legacy_counts'], {})
-                    self.assertEqual(request['phases_ms'], {})
-                    self.assertEqual(request['legacy_observations'][0]['boundary_status'], 'UNKNOWN')
-                    self.assertTrue(any('legacy diagnostic outside request boundaries' in problem
-                                        for problem in request['problems']))
+                    self.assertEqual(report['status'], 'observed')
+                    self.assertEqual(request['legacy_status'], 'observed')
+                    self.assertEqual(request['legacy_observations'][0]['boundary_status'], 'observed')
+                    if 'count=' in line:
+                        self.assertIn(9, request['legacy_counts'].values())
+                    else:
+                        self.assertEqual(request['phases_ms'], {'retained_finalized_bytecode': [2]})
+
 
     def test_legacy_totals_need_one_terminal_and_do_not_hide_partial_subtotals(self):
         for terminal in ('missing', 'duplicate', 'after'):
@@ -402,7 +403,7 @@ class ReuseEvidenceControls(unittest.TestCase):
         self.assertEqual(overlap['status'], 'UNKNOWN')
         self.assertTrue(any('overlapping intervals for owner' in problem for problem in overlap['problems']))
 
-    def test_task_timing_detail_must_be_inside_request_boundaries(self):
+    def test_buffered_task_timing_detail_joins_by_physical_identity(self):
         rows = trace([])
         span = rows[0]['span']
         detail_row = {'fields': {'message': 'compiler timing', 'line': timing_detail()}, 'span': span}
@@ -415,9 +416,9 @@ class ReuseEvidenceControls(unittest.TestCase):
                     rows.append(dict(detail_row))
                 report = REPORT.analyze(rows)
                 overlap = report['requests'][0]['task_overlap']
-                self.assertEqual(overlap['status'], 'UNKNOWN')
-                self.assertTrue(any('outside request boundaries' in problem
-                                    for problem in report['requests'][0]['problems']))
+                self.assertEqual(overlap['status'], 'observed')
+                self.assertEqual(len(overlap['qualified_spans']), 1)
+
 
     def test_cell_correlation_joins_all_requests_and_excludes_warmup(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1684,7 +1684,7 @@ def run_cohort(args) -> int:
     performance_cohort = "measurement_reporter" in cohort
     if requested_trace_profile is not None and not performance_cohort:
         raise ValueError("--trace-profile is only supported by retained Harness performance cohorts")
-    trace_profile = (requested_trace_profile or "full") if performance_cohort else None
+    trace_profile = (requested_trace_profile or "minimal") if performance_cohort else None
     required_compiler_mode = cohort.get("compiler_mode")
     if required_compiler_mode not in ("direct", "owned-resident"):
         raise ValueError(f"{args.cohort} requires an explicit sealed compiler mode")
@@ -1894,6 +1894,7 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
         "compiler_job_grants_complete": (report.get("compiler_job_grants") or {}).get("status") == "observed",
         "startup_owner_complete": (report.get("startup_scope") or {}).get("owner_status") == "complete",
         "cleanup_confirmed": ((report.get("runner") or {}).get("cleanup") or {}).get("complete") is True,
+        "bounded_owner_observations_complete": (report.get("owned_artifact_observations") or {}).get("status") == "observed",
     }
     complete = all(prerequisites.values())
     report["status"] = "qualified" if complete else "partial"

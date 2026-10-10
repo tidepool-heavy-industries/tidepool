@@ -21,6 +21,7 @@ native_source_snapshot(
     trees = [
         (":script_test_sources", ""),
         ("//:native_profile_test_sources", ""),
+        ("//:native_report_test_sources", ""),
         ("toolchains//:qualification_inputs", ""),
         ("//:operator_test_sources", ""),
         ("//bridge/haskell:main_acceptance_script_tree", ""),
@@ -65,7 +66,7 @@ sh_test(
 sh_test(
     name = "native_bundle_qualification_tests",
     test = "run-unittests.sh",
-    args = ["scripts.tests.test_native_bundle_qualification", "scripts.tests.test_buck_isolated_libtest", "scripts.tests.test_harness_usecase_perf_report"],
+    args = ["scripts.tests.test_native_bundle_qualification", "scripts.tests.test_buck_isolated_libtest", "scripts.tests.test_harness_usecase_perf_report", "scripts.tests.test_compiler_reuse_report", "scripts.tests.test_resident_performance_report"],
     env = {
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
         "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",

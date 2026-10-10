@@ -657,6 +657,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertTrue(passed)
         self.assertEqual(observed['TIDEPOOL_TEST_TRACE_PROFILE'], 'minimal')
         self.assertEqual(observed['TIDEPOOL_TIMING'], '0')
+        self.assertEqual(observed['TIDEPOOL_TIMING_SUMMARY'], '1')
         case = json.loads((root / 'case.json').read_text())
         self.assertEqual(case['trace_profile'], 'minimal')
 
