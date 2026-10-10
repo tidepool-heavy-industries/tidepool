@@ -2543,11 +2543,6 @@ impl PersistentSession {
             .0
             .checked_add(count_u64)
             .ok_or(SessionError::StaleStagedDeclaration)?;
-        self.lib()
-            .log
-            .publication_revision()
-            .and_then(|revision| revision.checked_add(count_u64))
-            .ok_or(SessionError::StaleStagedDeclaration)?;
         let mut reserved_generations = Vec::new();
         reserved_generations
             .try_reserve_exact(declaration_count)

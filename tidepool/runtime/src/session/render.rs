@@ -381,7 +381,13 @@ impl DeclLog {
     ) -> Option<PreparedDeclarationReservations> {
         let count_u64 = u64::try_from(count).ok()?;
         let high_water = Generation(self.high_water.0.checked_add(count_u64)?);
-        let revision = self.publication_revision()?.checked_add(count_u64)?;
+        // Exhaustion disables revision-based publication tickets, as in
+        // advance_revision; it does not consume the generation namespace.
+        let revision = if self.revision == 0 {
+            0
+        } else {
+            self.revision.checked_add(count_u64).unwrap_or(0)
+        };
         let mut generations = Vec::new();
         generations.try_reserve_exact(count).ok()?;
         let mut slots = BTreeMap::new();
@@ -1350,6 +1356,27 @@ pub fn render_module_with_vals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhausted_local_revision_does_not_shorten_generation_range() {
+        for revision in [u64::MAX - 1, u64::MAX, 0] {
+            let mut log = DeclLog {
+                revision,
+                high_water: Generation(u64::MAX - 2),
+                turns: BTreeMap::new(),
+            };
+            let prepared = log.prepare_reservations(2).unwrap();
+            assert_eq!(log.generation(), Generation(u64::MAX - 2));
+            assert!(log.turns.is_empty());
+            assert_eq!(
+                log.commit_reservations(prepared),
+                vec![Generation(u64::MAX - 1), Generation(u64::MAX)]
+            );
+            assert_eq!(log.publication_revision(), None);
+            assert!(log.is_reserved(Generation(u64::MAX)));
+            assert!(log.prepare_reservations(1).is_none());
+        }
+    }
 
     fn val(name: &str) -> ExportItem {
         ExportItem::Value { name: name.into() }
