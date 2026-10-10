@@ -197,16 +197,21 @@ impl CompilerCloseOwner {
 #[cfg(test)]
 async fn with_test_compiler_owner<T>(operation: impl std::future::Future<Output = T>) -> T {
     let mut owner = crate::CompilerPreparationOwner::new();
-    let outcome = owner.scope(operation).await;
-    let observation = outcome
-        .cleanup
+    let cleanup = owner.cleanup();
+    let result =
+        futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(owner.scope(operation)))
+            .await;
+    let observation = cleanup
         .wait_for_settlement(std::time::Duration::from_secs(5))
         .await;
     assert!(
         observation.is_confirmed(),
         "compiler cleanup: {observation:?}"
     );
-    outcome.action
+    match result {
+        Ok(outcome) => outcome.action,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 pub(crate) fn with_invocation_cancellation<T>(

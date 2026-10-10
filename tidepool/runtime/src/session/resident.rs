@@ -8447,23 +8447,32 @@ mod custody_release_tests {
         );
         let before = destination.value_handle_count();
         for outcome in [
-            destination.resume_framed_custody_classified(
-                hole.clone(),
-                &foreign,
-                DataConId(0),
-                vec![],
-            ),
-            destination.resume_framed_custody_sources_classified(
-                hole.clone(),
-                &foreign,
-                DataConId(0),
-                Vec::<i64>::new(),
-            ),
-            destination.resume_nested_custody_classified(
-                hole.clone(),
-                &foreign,
-                vec![DataConId(0)],
-            ),
+            tidepool_testing::with_settlement(|settlement| {
+                destination.resume_framed_custody_classified(
+                    hole.clone(),
+                    &foreign,
+                    DataConId(0),
+                    vec![],
+                    settlement,
+                )
+            }),
+            tidepool_testing::with_settlement(|settlement| {
+                destination.resume_framed_custody_sources_classified(
+                    hole.clone(),
+                    &foreign,
+                    DataConId(0),
+                    Vec::<i64>::new(),
+                    settlement,
+                )
+            }),
+            tidepool_testing::with_settlement(|settlement| {
+                destination.resume_nested_custody_classified(
+                    hole.clone(),
+                    &foreign,
+                    vec![DataConId(0)],
+                    settlement,
+                )
+            }),
         ] {
             assert!(matches!(
                 outcome,

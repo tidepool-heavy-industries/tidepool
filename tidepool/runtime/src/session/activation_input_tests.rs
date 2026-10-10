@@ -2933,8 +2933,10 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
             "lookup refusal never compiles"
         );
     }
-    let ResidentOutcome::Completed { result, .. } = resident
-        .run_activation_preview(compiled)
+    let ResidentOutcome::Completed { result, .. } =
+        tidepool_testing::with_settlement(|settlement| {
+            resident.run_activation_preview(compiled, settlement)
+        })
         .expect("execute the original custom dictionary against the original mounted heap input")
     else {
         panic!("a pure custom input display must complete without suspension");
