@@ -523,7 +523,7 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             progress.report();
             let binding = host.context.binding(child.actor).expect("production child attachment");
             let conversation = binding.conversation().unwrap();
-            assert_eq!(conversation.identity().actor, *origin.actor());
+            assert_eq!(conversation.identity(), &origin);
             let installed = host.context.observer.installation(child.actor).await;
             progress.observed_installations += 1;
             let (elapsed, compiler_requests, installer_details, installer_compiler_requests, details, launch_executions, first_launch_executions) = {

@@ -319,7 +319,7 @@ async fn production_harness_three_actor_capture_phases() {
             let child_origin = child_round.origin();
             let node = graph.iter().find(|node| host.context.binding(node.actor)
                 .and_then(|binding| binding.conversation())
-                .is_some_and(|conversation| conversation.identity().actor == *child_origin.actor())).unwrap();
+                .is_some_and(|conversation| conversation.identity() == &child_origin)).unwrap();
             assert!(matches!(node.label.as_str(), "three-actor-alpha" | "three-actor-beta"));
             assert_eq!(node.creator, Some(root));
             assert_eq!(node.supervisor_parent, Some(root));

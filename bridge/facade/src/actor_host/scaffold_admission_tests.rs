@@ -101,6 +101,21 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
                 &mut requests, &mut pending, HostedScriptSelection::OtherThan(&root),
             ).await;
             assert_ne!(child_round.origin().actor(), &root, "the typed reply must come from the forked child");
+            let graph = host.context.forest.inspect_host_graph();
+            let expected_children = graph.iter()
+                .filter(|node| node.label == "prepared-default-child")
+                .collect::<Vec<_>>();
+            assert_eq!(expected_children.len(), 1, "one exact prepared context child");
+            let expected_child = expected_children[0];
+            let root_actor = host.context.actor.identity();
+            assert_eq!(expected_child.creator, Some(root_actor));
+            assert_eq!(expected_child.supervisor_parent, Some(root_actor));
+            assert_eq!(expected_child.context_parent, Some(root_actor));
+            let attachment = host.context.binding(expected_child.actor)
+                .expect("the expected child owns its production attachment");
+            let conversation = attachment.conversation().expect("the child owns its provider conversation");
+            assert_eq!(conversation.identity(), &child_round.origin(),
+                "the selected provider request belongs to the expected context child");
             let child = child_round.origin().actor().clone();
             child_round.call("prepared-default-reply", "respond (trialSeed + 1 :: Int)");
             let child_round = next_hosted_script_round(&mut requests, &mut pending, &child).await;
