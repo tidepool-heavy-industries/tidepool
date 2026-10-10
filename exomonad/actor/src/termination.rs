@@ -296,7 +296,8 @@ impl CompilerWorkTicket {
     ) -> T {
         let mut close = outcome.close;
         for observed in self.receipt.attempts.lock().drain(..) {
-            if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) = observed {
+            if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) = observed
+            {
                 if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(previous) = close {
                     evidence.earlier.push(previous);
                 }
@@ -363,7 +364,8 @@ impl CompilerPreparationOwner {
             completed: false,
         };
         let cleanup = self.cleanup();
-        let owner = crate::resident_workbench::CompilerCloseOwner::Initialization(self.retained.clone());
+        let owner =
+            crate::resident_workbench::CompilerCloseOwner::Initialization(self.retained.clone());
         let action = owner.register_work().map(|ticket| ticket.run(action));
         admission.completed = true;
         drop(admission);
@@ -821,6 +823,127 @@ impl RetainedActorExit {
 
 #[cfg(test)]
 mod tests {
+    fn uncertain_close() -> tidepool_runtime::CompilerTransactionClose {
+        tidepool_runtime::CompilerTransactionClose::Unconfirmed(
+            tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                    disconnect: None,
+                },
+            ),
+        )
+    }
+
+    #[test]
+    fn synchronous_preparation_retains_callback_uncertainty_and_primary_action() {
+        let mut owner = super::CompilerPreparationOwner::new();
+        let expected = uncertain_close();
+        let outcome = owner.run(|settlement| {
+            settlement(expected.clone());
+            Err::<(), _>("primary source refusal")
+        });
+        assert_eq!(outcome.action.unwrap(), Err("primary source refusal"));
+        assert!(outcome.cleanup.observation().admission_closed);
+        assert!(!outcome.cleanup.observation().is_confirmed());
+        assert_eq!(
+            outcome.cleanup.observation().work,
+            vec![super::CompilerWorkClose::Settled(expected)]
+        );
+    }
+
+    #[test]
+    fn callback_uncertainty_survives_preparation_unwind() {
+        let mut owner = super::CompilerPreparationOwner::new();
+        let cleanup = owner.cleanup();
+        let expected = uncertain_close();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            owner.run(|settlement| {
+                settlement(expected.clone());
+                panic!("primary action unwind");
+            });
+        }));
+        assert!(unwind.is_err());
+        assert!(cleanup.observation().admission_closed);
+        assert!(!cleanup.observation().is_confirmed());
+        assert_eq!(
+            cleanup.observation().work,
+            vec![super::CompilerWorkClose::Settled(expected)]
+        );
+    }
+
+    #[test]
+    fn public_compiler_owner_refuses_absent_lifecycle_authority() {
+        assert!(matches!(
+            super::ActorCompilerCloseOwner::current(),
+            Err(crate::ResidentActorWorkbenchError::CompilerCleanupOwnerUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn public_compiler_owner_retains_current_receipt_and_independent_action() {
+        let mut owner = super::CompilerPreparationOwner::new();
+        let expected = uncertain_close();
+        let outcome = owner
+            .scope(async {
+                let authority = super::ActorCompilerCloseOwner::current().unwrap();
+                let result = authority
+                    .run(|settlement| {
+                        settlement(expected.clone());
+                        42
+                    })
+                    .unwrap();
+                assert_eq!(result.action, 42);
+                assert_eq!(result.close, expected);
+            })
+            .await;
+        assert_eq!(
+            outcome.cleanup.observation().work,
+            vec![super::CompilerWorkClose::Settled(expected)]
+        );
+        assert!(!outcome.cleanup.observation().is_confirmed());
+    }
+
+    #[test]
+    fn fresh_source_failure_closes_preparation_and_fresh_owner_can_compile() {
+        let mut failed = super::CompilerPreparationOwner::new();
+        let refusal = failed.run(|settlement| {
+            tidepool_runtime::compile_haskell(
+                "module ReceiptFailure where\nvalue =\n",
+                "value",
+                &[],
+                settlement,
+            )
+        });
+        assert!(matches!(
+            refusal.action.unwrap(),
+            Err(tidepool_runtime::CompileError::Diagnostics(_))
+        ));
+        assert!(refusal.cleanup.observation().is_confirmed());
+        assert_eq!(
+            refusal.cleanup.observation().work,
+            vec![super::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::Clean
+            )]
+        );
+        let mut fresh = super::CompilerPreparationOwner::new();
+        let accepted = fresh.run(|settlement| {
+            tidepool_runtime::compile_haskell(
+                "module ReceiptSuccess where\nvalue = (42 :: Int)\n",
+                "value",
+                &[],
+                settlement,
+            )
+        });
+        assert!(accepted.action.unwrap().is_ok());
+        assert!(accepted.cleanup.observation().is_confirmed());
+        assert_eq!(
+            accepted.cleanup.observation().work,
+            vec![super::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::Clean
+            )]
+        );
+    }
+
     #[tokio::test]
     async fn source_preparation_scope_preserves_action_and_confirms_no_native_work() {
         let mut owner = super::CompilerPreparationOwner::new();
