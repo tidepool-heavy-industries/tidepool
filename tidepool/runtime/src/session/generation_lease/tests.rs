@@ -456,6 +456,127 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
 }
 
 #[test]
+fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor() {
+    use crate::session::turn::compile_cell_program_admitted;
+    use crate::session::workbench::resident_cell_check_template;
+    use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+
+    tidepool_testing::eval_harness::require_extract();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let run = TestRun::new();
+    let lib = run
+        .root()
+        .with_validation_include(effects.include_paths().to_vec());
+    let mut session = crate::session::PersistentSession::new(Some(lib), 1024 * 1024);
+    let public = session.mint_scope(ScopeId::ROOT).unwrap();
+    let path = tidepool_repr::ActorPath::parse("root/checked-lease").unwrap();
+    let owner = crate::session::RecoveryPublicOwner::new(&path, 1).unwrap();
+    session
+        .initialize_durable_public_scope(owner.clone(), public)
+        .unwrap();
+    let execution = Arc::new(
+        session
+            .begin_durable_private_execution(&owner, public)
+            .unwrap(),
+    );
+    let private = execution.private_scope();
+    let view = session.compile_view_for_execution(&execution).unwrap();
+    let imports = view.turn_imports(&crate::session::SourceImports::new());
+    let specification = Arc::new(CheckedCellSpecification {
+        admission_digest: [0; 32],
+        cell_source: "preparedLeaseDeclaration :: Int\npreparedLeaseDeclaration = 42".into(),
+        template_source: resident_cell_check_template(effects.preamble(), effects.row(), &imports),
+        turn_templates: Vec::new(),
+        injected_modules: view.injected_module_names(),
+        reserved_declaration_modules: Vec::new(),
+    });
+    let include = view.include_paths(effects.include_paths());
+    let plan = tidepool_testing::with_settlement(|settlement| {
+        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)
+    })
+    .unwrap();
+    let admission = session
+        .admit_planned_cell_for_execution(
+            execution,
+            plan,
+            specification.clone(),
+            specification.specification_digest(),
+            [1; 32],
+            include,
+            None,
+        )
+        .unwrap();
+    let (_, program) = tidepool_testing::with_settlement(|settlement| {
+        compile_cell_program_admitted(admission.clone(), settlement)
+    })
+    .unwrap();
+    let [item] = program.items() else {
+        panic!("one checked declaration required")
+    };
+    let item = item.checked_item().clone();
+    let prefix = session
+        .begin_cell_program(admission, program)
+        .unwrap()
+        .unwrap();
+    let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();
+    let original = prefix.snapshot();
+    let visible = session.public_visibility_snapshot_in(private).unwrap();
+    let stored = store_state(session.lib());
+    let scopes = session.scope_tree().len();
+
+    run.store.inject_fault(StoreFault::BeforeCommit);
+    assert!(matches!(
+        session.adopt_checked_declaration(reservation.clone()),
+        Err(crate::session::SessionError::RecoveryStoreRefused(_))
+    ));
+    assert!(Arc::ptr_eq(&prefix.snapshot(), &original));
+    assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+    assert_eq!(
+        session.public_visibility_snapshot_in(private),
+        Some(visible)
+    );
+    assert_eq!(store_state(session.lib()), stored);
+    assert!(session.lib().log.is_reserved(Generation(1)));
+    assert!(run.store.ensure_ready().is_ok());
+    session.reap_admission_leases();
+    assert_eq!(
+        session.scope_tree().len(),
+        scopes,
+        "refused future capture is retired"
+    );
+
+    let committed = session
+        .adopt_checked_declaration(reservation.clone())
+        .unwrap();
+    assert_eq!(committed.generation, Generation(1));
+    assert!(!Arc::ptr_eq(&prefix.snapshot(), &original));
+    assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
+    assert_eq!(
+        session
+            .public_visibility_snapshot_in(private)
+            .unwrap()
+            .declaration_tip,
+        Generation(1)
+    );
+    assert_eq!(session.lib().scope_tip(public), Generation(0));
+    assert_eq!(
+        store_state(session.lib()).allocation_ceiling,
+        stored.allocation_ceiling
+    );
+    assert!(session
+        .lib()
+        .log
+        .certified_authored_at(Generation(1))
+        .is_some());
+    let projection = prefix.snapshot();
+    assert_eq!(
+        projection.view().library_import_module(),
+        Some(committed.module.module_name())
+    );
+    assert!(session.adopt_checked_declaration(reservation).is_err());
+}
+
+#[test]
 fn failed_compiler_validation_burns_requested_identity_and_restart_burns_tail() {
     tidepool_testing::eval_harness::require_extract();
     let mut run = TestRun::new();
