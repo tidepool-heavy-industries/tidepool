@@ -251,7 +251,7 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
+  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
   , ActivationPreviewAdmission(..), scopeActivationPreview
@@ -5656,8 +5656,10 @@ validateCurrentCanonicalSources admitted interfaces sourceGraph roots = do
       liftIO (throwIO (ExecutionSourceResolutionChanged key))
     packageProof <- case [(artifact,path,sha) | (artifact,path,sha) <- scopeInterfaces admitted
         , (exactUnit artifact,exactModule artifact) == key] of
-      [(artifact,path,sha)] -> liftIO (readPackageImports path sha artifact)
-        >>= either (const (liftIO (throwIO (ExecutionSourcePackageChanged key)))) pure
+      [(artifact,path,sha)] -> do
+        bytes <- liftIO (scopeOriginalBytes admitted path sha)
+        either (const (liftIO (throwIO (ExecutionSourcePackageChanged key)))) pure
+          (decodeCapturedPackageImports artifact bytes)
       _ -> liftIO (throwIO (ExecutionSourceIncomplete key))
     forM_ (ms_textual_imps summary) $ \(qualifier,name) -> do
       resolved <- liftIO (findImportedModule env (unLoc name) qualifier)
