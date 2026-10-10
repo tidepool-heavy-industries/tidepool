@@ -6255,18 +6255,46 @@ where
     }
 
     fn provenance_for(&self, code: &TurnCode<'_>) -> Result<Arc<ProgramProvenance>, ResidentError> {
-        if let Some(plan) = code.provenance.get() {
-            return Ok(plan.instantiate());
+        if code.provenance.get().is_none() {
+            let plan = CompiledProvenancePlan::build(code)?;
+            // Concurrent readers can compute the same immutable plan; only
+            // the retained winner is observed, and failures are not memoized.
+            let _ = code.provenance.set(plan);
         }
-        let plan = CompiledProvenancePlan::build(code)?;
-        // Concurrent readers can compute the same immutable plan; only the
-        // retained winner is observed, and failures are never memoized.
-        let _ = code.provenance.set(plan);
-        Ok(code
+        let mut provenance = code
             .provenance
             .get()
             .expect("plan was initialized")
-            .instantiate())
+            .instantiate();
+        if let Some(certification) = code.certification.as_ref().as_ref() {
+            // Implicit retained-value calls execute the original typed helper.
+            // Resolve the same exact target and selected source-group imports
+            // used by native installation on every execution, including cache
+            // hits. Runtime binding lineage never enters the immutable plan.
+            let resolved = self.state.resolve_certification_in(
+                self.run_context.lexical_scope,
+                code.prepared(),
+                certification,
+            )?;
+            let imports = resolved.target_owners.iter().chain(
+                resolved
+                    .groups
+                    .iter()
+                    .flat_map(|group| group.original().imports()),
+            );
+            let retained = imports
+                .filter_map(|owner| match owner {
+                    ImportOwner::Retained { id, .. } => Some(id.raw()),
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            for id in retained {
+                if let Some(original) = self.binding_provenance.get(&id) {
+                    Arc::make_mut(&mut provenance).merge(original)?;
+                }
+            }
+        }
+        Ok(provenance)
     }
 
     fn next_cont_id(&self) -> String {

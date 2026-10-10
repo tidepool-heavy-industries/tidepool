@@ -2001,6 +2001,90 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         "the real compiler fixture exposes an unselected request site as metadata"
     );
 
+    for (index, (source_text, expected_sites)) in [
+        ("let selectedAlias = selectedAction", &shared_sites),
+        ("let consecutiveAlias = selectedAlias", &shared_sites),
+        ("let unrelatedAlias = unrelatedValue", &expected[0]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let alias = check_fixture_cell(&mut source, &recipe, source_text, execution.clone(), 0);
+        let (bound, compiled, reservation) = alias.compile_binding(&mut source, 0);
+        let [binder] = bound.as_slice() else {
+            panic!("retained import control binds one alias");
+        };
+        assert!(matches!(
+            tidepool_testing::with_settlement(|settlement| source.run_bind_with_sites(
+                "retainedSiteAlias",
+                compiled.code(),
+                binder,
+                reservation.generation(),
+                settlement,
+            ))
+            .unwrap(),
+            ResidentOutcome::Completed { .. }
+        ));
+        let original = source.binding_provenance[&binder.var_id].clone();
+        assert_eq!(
+            original
+                .authenticated_inputs
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            *expected_sites,
+            "implicit retained imports carry exactly their original authority"
+        );
+        assert_eq!(
+            source
+                .provenance_for(&compiled.code())
+                .unwrap()
+                .authenticated_inputs,
+            original.authenticated_inputs,
+            "warm immutable plans still instantiate current retained binding lineage"
+        );
+        if index == 0 {
+            let previous = source.run_context();
+            let sibling = source.begin_private_execution(ScopeId::ROOT).unwrap();
+            source
+                .set_run_context(SessionRunContext {
+                    lexical_scope: sibling.private_scope(),
+                    ..previous
+                })
+                .unwrap();
+            let roots = source.persistent_roots_count();
+            assert!(
+                matches!(
+                    source.provenance_for(&compiled.code()),
+                    Err(ResidentError::Prepared(
+                        PreparedRuntimeError::MissingRetainedCertifiedOwner { .. }
+                    ))
+                ),
+                "a warm plan cannot select a sibling scope's unavailable retained value"
+            );
+            source.retire_scope(sibling.private_scope());
+            assert!(
+                matches!(
+                    source.provenance_for(&compiled.code()),
+                    Err(ResidentError::Prepared(
+                        PreparedRuntimeError::SourceScopeAdmission
+                    ))
+                ),
+                "a warm plan cannot retain runtime authority for a retired scope"
+            );
+            assert_eq!(source.persistent_roots_count(), roots);
+            source.set_run_context(previous).unwrap();
+            assert_eq!(
+                source
+                    .provenance_for(&compiled.code())
+                    .unwrap()
+                    .authenticated_inputs,
+                original.authenticated_inputs,
+                "failed and retired scope observations do not poison the immutable plan"
+            );
+        }
+    }
+
     let mut config = Config::default();
     if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
         config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
