@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module RequestInputsTest (requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse) where
+module RequestInputsTest (artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse) where
 
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, fromException, throwIO, try)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -43,6 +43,7 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), PreparedPipelineResult(..), PipelineResult(..)
   , runPipelineSessionSelected, preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
+import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
 import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope)
@@ -54,6 +55,30 @@ import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
 import CodecFixtureSupport (readCodecTerm)
 import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics)
+
+-- The byte primitive has content identity only. Admission and budgets remain
+-- the responsibility of RequestOriginalInputs, including empty bodies.
+artifactByteOwnership :: IO ()
+artifactByteOwnership = do
+  let check bytes =
+        let body = captureArtifactBytes bytes
+        in artifactBytes body == bytes
+          && artifactLength body == BS.length bytes
+          && artifactSha256 body == digest bytes
+          && BS.length (artifactDigestBytes body) == 32
+          && checkArtifactSeal (digest bytes) body == Right ()
+          && checkArtifactSeal "wrong" body /= Right ()
+          && body == captureArtifactBytes bytes
+  result <- quickCheckWithResult stdArgs {maxSuccess=180, replay=Just (mkQCGen 771208,0)}
+    (\bytes -> check (BS.pack bytes))
+  unless (isSuccess result) (fail "artifact byte identity property failed")
+  unless (check BS.empty) (fail "empty encoded byte body lost content identity")
+  let source = BS.pack [0..255]
+      body = captureArtifactBytes source
+      same = artifactBytes body
+      (sourceOwner,_,_) = BSI.toForeignPtr source
+      (bodyOwner,_,_) = BSI.toForeignPtr same
+  unless (sourceOwner == bodyOwner) (fail "artifact byte capture copied its strict body")
 
 ownedScopeInputReuse :: IO ()
 ownedScopeInputReuse = withTiming $ withScratch $ \work -> do

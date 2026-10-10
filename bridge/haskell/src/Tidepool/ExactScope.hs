@@ -61,7 +61,8 @@ import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
 import GHC.Unit.Module.ModIface (ModIface)
-import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, CapturedRequestInput, capturedInputBytes, capturedInputSha256, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
+import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -818,9 +819,9 @@ captureCoreWith reader admission = do
   unless (digest bytes == sha) (fail ("admitted defining Core changed during capture: " ++ path))
 
 scopeInterfaceBytes :: ExactScope -> ExactIfaceArtifact -> IO BS.ByteString
-scopeInterfaceBytes scope iface = capturedInputBytes <$> scopeInterfaceToken scope iface
+scopeInterfaceBytes scope iface = artifactBytes <$> scopeInterfaceToken scope iface
 
-scopeInterfaceToken :: ExactScope -> ExactIfaceArtifact -> IO CapturedRequestInput
+scopeInterfaceToken :: ExactScope -> ExactIfaceArtifact -> IO ArtifactBytes
 scopeInterfaceToken scope iface = do
   inputs <- maybe (fail "exact scope input custody is not sealed") pure (scopeCapturedInputs scope)
   unless (iface `elem` ([selected | (selected,_,_) <- scopeInterfaces scope] ++ scopeValueInterfaces scope))
@@ -1136,11 +1137,11 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
           selected <- continueRequestInputs available imageReferences
           either fail pure (mergeRequestInputs selected [envelope])
       (scope, originals) <- captureRequestInputTokens (Just base) $ \readToken -> do
-       let readInput artifact bound = capturedInputBytes <$> readToken artifact bound
+       let readInput artifact bound = artifactBytes <$> readToken artifact bound
            readVerified artifact bound sha = do
              token <- readToken artifact bound
-             unless (capturedInputSha256 token == sha) (fail "exact input differs from its selected seal")
-             pure (capturedInputBytes token)
+             unless (artifactSha256 token == sha) (fail "exact input differs from its selected seal")
+             pure (artifactBytes token)
        graphs <- readExecutionSourceGraphsWithFacts (\sha artifact -> do
          payload <- readVerified artifact (64 * 1024 * 1024) sha
          memoOriginalFact timing "original_inputs.graph" graphsState sha

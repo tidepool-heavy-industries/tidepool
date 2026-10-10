@@ -86,6 +86,7 @@ library tidepool-extract-internal
     Tidepool.FinalizedCore
     Tidepool.GhcPipeline
     Tidepool.ExactHydration
+    Tidepool.ArtifactBytes
     Tidepool.RequestInputs
     Tidepool.ExactScope
     Tidepool.ExecutionSource

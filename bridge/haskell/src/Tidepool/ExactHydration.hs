@@ -39,7 +39,7 @@ module Tidepool.ExactHydration
   , installExactLexicalGraph
   ) where
 
-import Tidepool.RequestInputs (CapturedRequestInput, capturedInputBytes, capturedInputSha256)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.TypedSegment.Types (GeneratedSegmentOperations, generatedSegmentQualifier)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence)
@@ -834,16 +834,16 @@ pruneRequestIfaceDecoder selected (RequestIfaceDecoder state) = modifyMVar state
         | (cache,facts) <- universes]
   pure (retained,sum [Map.size facts | (_,facts) <- retained])
 
-readCapturedExactIfaceArtifacts :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
+readCapturedExactIfaceArtifacts :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)])
 readCapturedExactIfaceArtifacts decoder readInput = readExactIfaceArtifactsUsing (readCapturedOne decoder readInput)
 
-readCapturedExactIfaceClosureWithCheckedValues :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
+readCapturedExactIfaceClosureWithCheckedValues :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
 readCapturedExactIfaceClosureWithCheckedValues decoder readInput =
   readVerifiedExactIfaceClosureWithCheckedValuesUsing (readCapturedOne decoder readInput)
 
-readCapturedOne :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
+readCapturedOne :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface))
 readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
   -- HscEnv unpacks NameCache: its selector can rebox the record on every
@@ -859,14 +859,14 @@ readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
         -- Authorization and a relocated alias's seal still belong to the
         -- consuming scope, even though decoding has already completed.
         token <- readInput artifact
-        unless (capturedInputSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
+        unless (artifactSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
         timing <- readTimingEnabled
         emitCount timing ("exact_iface_decode_reuse." ++ exactModule artifact) 1
         pure (universes,Right (artifact,iface))
       Nothing -> do
         token <- readInput artifact
-        unless (capturedInputSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
-        result <- readOneWith (const (pure (capturedInputBytes token))) env artifact
+        unless (artifactSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
+        result <- readOneWith (const (pure (artifactBytes token))) env artifact
         let retained = case result of
               Right (_,iface) -> [(cache,Map.insert key iface known)]
               Left _ -> universes
