@@ -37,7 +37,9 @@ fn complete_source_check_uses_current_transitive_graph_without_native_products()
         include: &includes,
         fallback_module_name: "CheckConsumer",
     };
-    check_source(&request).expect("complete original module checks");
+    let mut closes = Vec::new();
+    let mut settlement = |close| closes.push(close);
+    check_source(&request, &mut settlement).expect("complete original module checks");
 
     // An unchanged consumer must see a newly invalid transitive source.
     std::fs::write(
@@ -45,7 +47,8 @@ fn complete_source_check_uses_current_transitive_graph_without_native_products()
         DEPENDENCY.replace("value = 41", "value = True"),
     )
     .unwrap();
-    let rejection = check_source(&request).expect_err("transitive type error must reject");
+    let rejection =
+        check_source(&request, &mut settlement).expect_err("transitive type error must reject");
     let CompileError::Diagnostics(diagnostics) = rejection else {
         panic!("expected real source diagnostics, got {rejection:?}");
     };
@@ -56,7 +59,12 @@ fn complete_source_check_uses_current_transitive_graph_without_native_products()
 
     // Retrying after repair checks the current graph, without negative caching.
     std::fs::write(&dependency, DEPENDENCY).unwrap();
-    check_source(&request).expect("repaired transitive source checks");
+    check_source(&request, &mut settlement).expect("repaired transitive source checks");
+    drop(settlement);
+    assert_eq!(closes.len(), 3);
+    assert!(closes
+        .iter()
+        .all(tidepool_extract_cmd::CompilerTransactionClose::is_clean));
 
     let products = root.join("checking-products");
     std::fs::create_dir(&products).unwrap();

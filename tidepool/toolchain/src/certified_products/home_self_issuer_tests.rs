@@ -9,7 +9,7 @@ fn ghc_home_self_owner_refuses_substituted_requirements() {
     )
     .unwrap();
     let source = include_str!("../../tests/fixtures/home-self-issuer/HomeSelfCapture.hs");
-    let compiled = crate::artifacts::compile_targets(
+    let compiled = crate::artifacts::test_support::compile_targets(
         source,
         &["result"],
         &[root.path().to_owned()],

@@ -542,7 +542,7 @@ fn source_boot_authored_declaration_packet_producer() {
         std::env::var("TIDEPOOL_COMPILER_PRODUCER").expect("protected matched fixture producer"),
         endpoint.identity().producer_hex()
     );
-    let certificate = crate::declaration_join::certify_authored_declaration(
+    let certificate = crate::artifacts::test_support::certify_authored_declaration(
         module,
         &source_path,
         &source,

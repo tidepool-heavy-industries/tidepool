@@ -2970,8 +2970,10 @@ fn candidate_owned_acquisition(
     let fields = envelope.as_array()?;
     let rows = fields[4].as_array()?;
     let graphs = fields[5].as_array()?[0].as_array()?;
-    let mut builder =
-        crate::owned_input_arena::OwnedInputArenaBuilder::new(tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64).ok()?;
+    let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(
+        tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64,
+    )
+    .ok()?;
     let mut pending = Vec::new();
     let mut pending_graphs = BTreeMap::new();
     let mut graph_receivers = BTreeMap::<[u8; 32], Vec<(String, String)>>::new();
@@ -3473,7 +3475,6 @@ pub(crate) mod tests {
     #[ignore = "requires matched Haskell worker and Rust frontend"]
     #[serial_test::serial]
     fn real_worker_source_boot_products_reuse_and_refuse_changed_boot() {
-        use crate::artifacts::compile_targets;
         use crate::certified_products::ProductOrigin;
 
         struct RestoreEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -3512,7 +3513,7 @@ pub(crate) mod tests {
         }
         let wrapper = fs::read_to_string(fixtures.join("CacheEntry.hs")).unwrap();
         let compile = |salt: u32| {
-            compile_targets(
+            crate::artifacts::test_support::compile_targets(
                 &format!("{wrapper}\n-- distinct consumer {salt}\n"),
                 &["result"],
                 &[work.path().to_path_buf()],
@@ -3541,7 +3542,7 @@ pub(crate) mod tests {
         let boot = work.path().join("CacheEven.hs-boot");
         let original = fs::read(&boot).unwrap();
         fs::write(&boot, b"module CacheEven where\neven' :: Bool -> Bool\n").unwrap();
-        assert!(compile_targets(
+        assert!(crate::artifacts::test_support::compile_targets(
             &format!("{wrapper}\n-- changed boot\n"),
             &["result"],
             &[work.path().to_path_buf()],
@@ -3555,7 +3556,7 @@ pub(crate) mod tests {
             [b"{-# LANGUAGE CPP #-}\n".as_slice(), &original].concat(),
         )
         .unwrap();
-        assert!(compile_targets(
+        assert!(crate::artifacts::test_support::compile_targets(
             &format!("{wrapper}\n-- untracked boot CPP\n"),
             &["result"],
             &[work.path().to_path_buf()],

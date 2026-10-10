@@ -5652,9 +5652,10 @@ impl ExactDeclarationContext {
             .cloned()
             .collect::<Vec<_>>();
         let mut rows = BTreeMap::new();
-        let mut arena_builder =
-            crate::owned_input_arena::OwnedInputArenaBuilder::new(tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64)
-                .map_err(failure)?;
+        let mut arena_builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(
+            tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64,
+        )
+        .map_err(failure)?;
         let mut pending_inputs = BTreeMap::new();
         let mut acquired_inputs = BTreeMap::new();
         for entry in &new_entries {
@@ -11826,7 +11827,14 @@ mod tests {
             changed_aliases.len() >= 6,
             "actual owned request covers companion payloads"
         );
-        let run = endpoint.execute(&command).unwrap();
+        let run = crate::artifacts::test_support::with_settlement(|recipient| {
+            crate::CompileError::compiler_invocation_result(endpoint.execute_with_input_files(
+                &command,
+                offer.input_transport_files(),
+                |close| recipient(close),
+            ))
+        })
+        .unwrap();
         std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
         std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
@@ -11897,7 +11905,7 @@ mod tests {
         assert!(local.validate_receipt(receipt, None, &empty).is_err());
         let conflicting_root = root.join("conflicting-issuer");
         std::fs::create_dir(&conflicting_root).unwrap();
-        let changed = crate::declaration_join::certify_authored_declaration(
+        let changed = crate::artifacts::test_support::certify_authored_declaration(
             module,
             &original_path,
             original,
@@ -12082,7 +12090,7 @@ mod tests {
         )
         .unwrap();
         let certificate = Arc::new(
-            crate::declaration_join::certify_authored_declaration(
+            crate::artifacts::test_support::certify_authored_declaration(
                 owner,
                 &original_path,
                 original_source,
