@@ -11,6 +11,14 @@ library. When changing launch configuration or tool contracts, update the
 scripted-provider fixtures, check exact test selections actually ran, and
 compile changed consumers.
 
+When a positive progress barrier depends on a tool operation, observe that
+exact operation's typed terminal outcome as well as host liveness. Use
+`HostedTestRuntime::while_operation_succeeds` for native progress waits;
+failure or cancellation must end the wait promptly. Successful settlement
+does not replace the requested progress. Browser-provider barriers should
+likewise reject an unexpected delivered result instead of waiting for a
+second result on an already settled call.
+
 Rich views and human forms share `FormHost`, installed before actor admission.
 A form-unavailable campaign that still publishes views needs the production
 display delegate and an explicit typed refusal at form opening.
