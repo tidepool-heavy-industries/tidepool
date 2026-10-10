@@ -325,28 +325,40 @@ fn fenced_run_refuses_value_only_cell_and_private_scope_activation() {
 }
 
 #[test]
-fn fenced_run_refuses_checked_item_from_previously_prepared_reservations() {
+fn fenced_run_refuses_prepared_item_admission_and_native_start() {
     use crate::session::turn::{compile_cell_program_admitted, TemplateSelector};
     use crate::session::workbench::{resident_cell_check_template, resident_workbench_templates};
     use tidepool_toolchain::checked_cell::CheckedCellSpecification;
 
     tidepool_testing::eval_harness::require_extract();
     let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
-    let run = TestRun::new();
-    let mut sibling = run.child();
-    let lib = run
-        .root()
-        .with_validation_include(effects.include_paths().to_vec());
-    let mut session = crate::session::PersistentSession::new(Some(lib), 1024 * 1024);
-    let public = session.mint_scope(ScopeId::ROOT).unwrap();
-    let execution = Arc::new(session.begin_private_execution(public).unwrap());
-    let view = session.compile_view_for_execution(&execution).unwrap();
-    let imports = view.turn_imports(&crate::session::SourceImports::new());
-    let specification = Arc::new(CheckedCellSpecification {
-        admission_digest: [0; 32],
-        cell_source: "leaseChecked :: Int\nleaseChecked = 42".into(),
-        template_source: resident_cell_check_template(effects.preamble(), effects.row(), &imports),
-        turn_templates: resident_workbench_templates(effects.preamble(), effects.row(), &imports)
+    for (source, native_start) in [
+        ("leaseChecked :: Int\nleaseChecked = 42", false),
+        ("leaseValue <- pure (42 :: Int)", true),
+    ] {
+        let run = TestRun::new();
+        let mut sibling = run.child();
+        let lib = run
+            .root()
+            .with_validation_include(effects.include_paths().to_vec());
+        let mut session = crate::session::PersistentSession::new(Some(lib), 1024 * 1024);
+        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let view = session.compile_view_for_execution(&execution).unwrap();
+        let imports = view.turn_imports(&crate::session::SourceImports::new());
+        let specification = Arc::new(CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: source.into(),
+            template_source: resident_cell_check_template(
+                effects.preamble(),
+                effects.row(),
+                &imports,
+            ),
+            turn_templates: resident_workbench_templates(
+                effects.preamble(),
+                effects.row(),
+                &imports,
+            )
             .iter()
             .map(|template| {
                 let kind = match template.kind {
@@ -358,48 +370,77 @@ fn fenced_run_refuses_checked_item_from_previously_prepared_reservations() {
                 (kind.into(), template.source.clone())
             })
             .collect(),
-        injected_modules: view.injected_module_names(),
-        reserved_declaration_modules: Vec::new(),
-    });
-    let include = view.include_paths(effects.include_paths());
-    let plan = tidepool_testing::with_settlement(|settlement| {
-        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)
-    })
-    .unwrap();
-    let admission = session
-        .admit_planned_cell_for_execution(
-            execution,
-            plan,
-            specification.clone(),
-            specification.specification_digest(),
-            [1; 32],
-            include,
-            None,
-        )
+            injected_modules: view.injected_module_names(),
+            reserved_declaration_modules: Vec::new(),
+        });
+        let include = view.include_paths(effects.include_paths());
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &include,
+                settlement,
+            )
+        })
         .unwrap();
-    let (_, program) = tidepool_testing::with_settlement(|settlement| {
-        compile_cell_program_admitted(admission.clone(), settlement)
-    })
-    .unwrap();
-    let [item] = program.items() else {
-        panic!("checked lease fixture must contain one declaration");
-    };
-    let item = item.checked_item().clone();
-    let prefix = session
-        .begin_cell_program(admission, program)
-        .unwrap()
+        let admission = session
+            .admit_planned_cell_for_execution(
+                execution,
+                plan,
+                specification.clone(),
+                specification.specification_digest(),
+                [1; 32],
+                include,
+                None,
+            )
+            .unwrap();
+        let (_, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
         .unwrap();
-    assert!(session.lib().log.is_reserved(Generation(1)));
-    let scopes = session.scope_tree().len();
-    run.store.inject_fault(StoreFault::CommitError);
-    assert!(sibling.reserve_declaration_generation_durable().is_err());
-    assert!(matches!(
-        session.admit_checked_item(prefix.clone(), item),
-        Err(crate::session::SessionError::RecoveryManifest { .. })
-    ));
-    assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
-    assert_eq!(session.scope_tree().len(), scopes);
-    assert_eq!(session.lib().generation(), Generation(1));
+        let [item] = program.items() else {
+            panic!("checked lease fixture must contain one source item");
+        };
+        let native = item.native().cloned();
+        let item = item.checked_item().clone();
+        let prefix = session
+            .begin_cell_program(admission, program)
+            .unwrap()
+            .unwrap();
+        let generation = if native_start {
+            Generation(0)
+        } else {
+            Generation(1)
+        };
+        assert_eq!(session.lib().generation(), generation);
+        if native_start {
+            session
+                .admit_checked_item(prefix.clone(), item.clone())
+                .unwrap();
+        } else {
+            assert!(session.lib().log.is_reserved(generation));
+        }
+        let scopes = session.scope_tree().len();
+        run.store.inject_fault(StoreFault::CommitError);
+        assert!(sibling.reserve_declaration_generation_durable().is_err());
+        if native_start {
+            assert!(matches!(
+                prefix.start(
+                    &session,
+                    prefix.admission().visibility().scope,
+                    native.unwrap()
+                ),
+                Err(crate::session::SessionError::RecoveryManifest { .. })
+            ));
+        } else {
+            assert!(matches!(
+                session.admit_checked_item(prefix.clone(), item),
+                Err(crate::session::SessionError::RecoveryManifest { .. })
+            ));
+        }
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+        assert_eq!(session.scope_tree().len(), scopes);
+        assert_eq!(session.lib().generation(), generation);
+    }
 }
 
 #[test]

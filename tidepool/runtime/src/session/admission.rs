@@ -1027,6 +1027,7 @@ impl RuntimeCheckedPrefix {
         scope: ScopeId,
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
+        let store = session.lib().held_recovery_store()?;
         let mut state = self.state.lock();
         if self.admission.host_carrier().is_some()
             || !self.admission.belongs_to(session)
@@ -1065,12 +1066,21 @@ impl RuntimeCheckedPrefix {
             execution.private_value_overlay_binders(),
         )?;
         state.snapshot.compiler_prefix.append(execution.clone())?;
-        state.in_flight = Some(execution.clone());
-        Ok(Arc::new(CheckedTurnCompletion {
+        let prepared = Arc::new(CheckedTurnCompletion {
             prefix: self.clone(),
-            execution,
+            execution: execution.clone(),
             scope,
-        }))
+        });
+        let _admission = store
+            .as_ref()
+            .map(|store| store.lease_admission())
+            .transpose()
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: error.path.clone(),
+                detail: error.to_string(),
+            })?;
+        state.in_flight = Some(execution);
+        Ok(prepared)
     }
 }
 
@@ -1572,6 +1582,7 @@ impl PersistentSession {
         binding: &str,
         expected: super::resident::HostBindingType,
     ) -> Result<(), SessionError> {
+        let store = self.lib().held_recovery_store()?;
         let prefix = admission.prefix();
         let mut state = prefix.state.lock();
         let scope = prefix.admission.visibility.scope;
@@ -1597,6 +1608,14 @@ impl PersistentSession {
         execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
         execution.validate_required_native_imports(state.snapshot.actual_retained_imports())?;
         execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
+        let _admission = store
+            .as_ref()
+            .map(|store| store.lease_admission())
+            .transpose()
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: error.path.clone(),
+                detail: error.to_string(),
+            })?;
         // Mounting a host payload never executes or completes the placeholder.
         state.reservation = None;
         Ok(())
