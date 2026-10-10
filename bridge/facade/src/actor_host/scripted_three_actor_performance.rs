@@ -9,8 +9,9 @@
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
     commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
-    prepare_performance_traces, record_phase, select_hosted_script_round, HostedScriptRound,
-    HostedScriptSelection, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    prepare_performance_traces, record_phase, select_hosted_script_round,
+    transcript_tool_operation, HostedScriptRound, HostedScriptSelection,
+    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use super::*;
 use harness::model::{AgentPath, CallId, OperationId, RequestId};
@@ -194,9 +195,7 @@ fn assert_capture(
         .iter()
         .any(|item| item.0["call_id"] == "three-actor-setup"));
     assert!(
-        transcript
-            .iter()
-            .all(|item| item.0["call_id"] != PARENT_CALL),
+        transcript_tool_operation(&transcript, PARENT_CALL).is_none(),
         "unfinished parent call is excluded from the BeforeCall capture"
     );
     assert_eq!(

@@ -1,4 +1,5 @@
 use super::hosted_test_context::{HostedActorContext, HostedTestRuntime};
+use super::test_campaign::transcript_tool_operation;
 use super::*;
 use async_trait::async_trait;
 use harness::{
@@ -252,11 +253,8 @@ async fn root_and_child_rounds_with_output(
 }
 
 fn assert_before_call_prefix(request: &ResponsesRequest, raw: &[Item], call_id: &str) {
-    assert!(raw.iter().all(|item| item.0["call_id"] != call_id));
-    assert!(request
-        .input
-        .iter()
-        .all(|item| item.0["call_id"] != call_id));
+    assert!(transcript_tool_operation(raw, call_id).is_none());
+    assert!(transcript_tool_operation(&request.input, call_id).is_none());
     assert!(has_user_text(request, "parent-original"));
     assert!(!has_user_text(request, "must-not-publish"));
 }

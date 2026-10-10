@@ -4,7 +4,7 @@ use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
     commit_workspace, explicit_display_text, hosted_script_provider_with_envelopes,
     hosted_test_settings, next_hosted_script_round, require_ghc_compile_rejection,
-    HostedScriptRound, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    transcript_tool_operation, HostedScriptRound, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use super::*;
 use harness::embedding::HostIdentity;
@@ -162,7 +162,7 @@ fn captured(round: &HostedScriptRound, prefix: &[harness::item::Item], excluded_
         );
     }
     assert!(
-        !text.contains(excluded_call),
+        transcript_tool_operation(&retained, excluded_call).is_none(),
         "BeforeCall excludes the unfinished invocation"
     );
     assert!(text.contains("recursive-setup"));

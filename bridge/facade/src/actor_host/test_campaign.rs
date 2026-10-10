@@ -7,6 +7,25 @@ use exomonad_tool::{
 };
 use serde_json::Value;
 
+/// Find an operation in a scripted transcript whose call IDs are unique across
+/// retained history. Provider item IDs and visible text can mention the same ID.
+pub(super) fn transcript_tool_operation<'a>(
+    items: &'a [harness::item::Item],
+    call_id: &str,
+) -> Option<&'a harness::item::Item> {
+    items.iter().find(|item| {
+        matches!(
+            item.0["type"].as_str(),
+            Some(
+                "function_call"
+                    | "custom_tool_call"
+                    | "function_call_output"
+                    | "custom_tool_call_output"
+            )
+        ) && item.0["call_id"].as_str() == Some(call_id)
+    })
+}
+
 /// Dispatch and completion share one original operation; namespaces identify nested calls.
 pub(super) fn original_tool_call(
     operation: OriginalOperation,
@@ -1653,6 +1672,90 @@ pub(super) fn hosted_test_settings(
 mod tests {
     use super::*;
     use std::future::Future;
+
+    #[test]
+    fn before_call_exclusion_preserves_preceding_provider_item_ids() {
+        let call_id = "recursive-child-await";
+        let call = harness::item::Item(serde_json::json!({
+            "type": "custom_tool_call", "name": "haskell", "call_id": call_id,
+            "input": "display True", "async": true,
+        }));
+        let turn = provider_envelope(
+            "gpt-6-luna",
+            harness::transport::ResponsesTurn {
+                response_id: "before-call-envelope".into(),
+                items: vec![call],
+                usage: Default::default(),
+            },
+        )
+        .unwrap();
+        let boundary = turn
+            .items
+            .iter()
+            .position(|item| {
+                item.tool_call()
+                    .unwrap()
+                    .is_some_and(|call| call.call_id.0 == call_id)
+            })
+            .unwrap();
+        let prefix = &turn.items[..boundary];
+        assert!(prefix
+            .iter()
+            .any(|item| item.0["id"].as_str().is_some_and(|id| id.contains(call_id))));
+        assert!(transcript_tool_operation(prefix, call_id).is_none());
+        assert_eq!(
+            transcript_tool_operation(&turn.items, call_id),
+            Some(&turn.items[boundary])
+        );
+    }
+
+    #[test]
+    fn before_call_exclusion_distinguishes_operation_identity_from_mentions() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+        let mut config = Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::before_call_exclusion_distinguishes_operation_identity_from_mentions"
+        ));
+        TestRunner::new(config).run(
+            &("[a-z0-9-]{1,24}", proptest::collection::vec((0u8..4, ".{0,40}"), 0..24), any::<usize>()),
+            |(call_id, noise, position)| {
+                let mut items = noise.into_iter().map(|(kind, text)| {
+                    let mention = format!("{text} {call_id}");
+                    harness::item::Item(match kind {
+                        0 => serde_json::json!({"type": "message", "role": "assistant", "id": mention,
+                            "content": [{"type": "output_text", "text": call_id}]}),
+                        1 => serde_json::json!({"type": "reasoning", "id": mention,
+                            "summary": [{"type": "summary_text", "text": call_id}]}),
+                        2 => serde_json::json!({"type": "custom_tool_call", "name": "haskell",
+                            "call_id": format!("other-{call_id}"), "input": mention}),
+                        _ => serde_json::json!({"type": "function_call_output",
+                            "call_id": format!("other-{call_id}"), "output": mention}),
+                    })
+                }).collect::<Vec<_>>();
+                prop_assert!(transcript_tool_operation(&items, &call_id).is_none());
+                let position = position % (items.len() + 1);
+                for kind in ["function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"] {
+                    let operation = harness::item::Item(serde_json::json!({
+                        "type": kind, "call_id": call_id, "name": "haskell", "input": "display True",
+                        "arguments": "{}", "output": "retained result",
+                    }));
+                    items.insert(position, operation.clone());
+                    prop_assert_eq!(transcript_tool_operation(&items, &call_id), Some(&operation));
+                    items.remove(position);
+                }
+                Ok(())
+            },
+        ).unwrap();
+    }
 
     #[test]
     fn native_provider_envelope_sse_preserves_source_metadata_and_tool_execution() {
