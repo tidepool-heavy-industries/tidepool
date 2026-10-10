@@ -2440,6 +2440,7 @@ async fn run_owned(
                 actor: root_actor.clone(),
                 forest: Arc::clone(&forest),
                 runtime: Arc::clone(&embedded_service.runtime),
+                recovery_store: Arc::clone(&recovery_store),
                 observer: hooks.observer.clone(),
                 owners: Arc::clone(&application_owners),
             });

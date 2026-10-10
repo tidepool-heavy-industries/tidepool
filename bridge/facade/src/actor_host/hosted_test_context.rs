@@ -693,6 +693,7 @@ pub(super) struct HostedActorContext {
     pub(super) actor: LocalActorRef,
     pub(super) forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub(super) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
+    pub(super) recovery_store: Arc<tidepool_runtime::session::RunRecoveryStore>,
     pub(super) observer: HostTestObserver,
     pub(super) owners: InteractiveOwners,
 }
