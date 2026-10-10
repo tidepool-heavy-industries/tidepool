@@ -83,6 +83,10 @@ impl CertifiedSourceSelection {
 }
 
 impl EntryDependencySelection {
+    pub(crate) fn has_linked_originals(&self) -> bool {
+        !self.linked.is_empty()
+    }
+
     /// Retain only the original identities persisted by the compilation issuer.
     /// Offered inventory membership alone cannot choose an entry's dependencies.
     pub(crate) fn restrict_candidates(

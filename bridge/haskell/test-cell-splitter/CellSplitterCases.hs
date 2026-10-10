@@ -863,9 +863,12 @@ certificationRequestValidation = do
   case workerRequestFromArgv (workerArgv (valid ++ [SessionArtifacts "/scope.cbor"])) of
     Right (Just request) | requestSessionArtifacts request == Just "/scope.cbor" -> pure ()
     other -> fail ("home-product certification rejected explicit exact context: " ++ show other)
+  case workerRequestFromArgv (workerArgv (valid ++ [ModuleCandidates "/candidates.cbor"])) of
+    Right (Just request) | requestCertifyHomeProducts request
+      && requestModuleCandidates request == Just "/candidates.cbor" -> pure ()
+    other -> fail ("home-product certification rejected authenticated candidate input: " ++ show other)
   forM_ [ Cell, Classify, Turn, InspectType "Int", InspectTypeBatch "Batch.hs"
         , DeclarationJoin "join.cbor", BindGen 1, InjectVal "Val1"
-        , ModuleCandidates "candidates.cbor"
         , ActivationPreview, TargetModuleOnly
         , RetainedGeneration (SymbolIdentity "main" "Producer" "value" "value" Nothing) 1
         ] $ \field ->

@@ -659,15 +659,21 @@ pub fn load_selected_production_entry_with_catalog(
             "original purpose, target or configured source selection differs",
         ));
     }
-    CompilerDeploymentConfiguration::Configured(authority.clone())
+    let deployment = CompilerDeploymentConfiguration::Configured(authority.clone())
         .admit(manifest.producer, manifest.worker)
         .map_err(invalid)?;
     sources.revalidate(&manifest.source)?;
     let selection_scratch = tempfile::tempdir()?;
     let selected = if let Some(dependencies) = &manifest.dependencies {
+        if !matches!(sources, ProductionEntrySources::FrozenWorkspace(_)) {
+            return Err(invalid(
+                "native build entry cannot link catalog dependencies",
+            ));
+        }
         let package = catalog
             .acquire()?
             .ok_or_else(|| invalid("linked entry catalog is unavailable"))?;
+        package.validate_deployment(&deployment)?;
         if package.catalog_path() != dependencies.catalog_path
             || package.catalog_identity() != dependencies.catalog_identity
             || package.producer_identity() != &dependencies.producer_identity
@@ -800,8 +806,240 @@ fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>, CompileError> {
 #[cfg(test)]
 mod source_selection_tests {
     use super::*;
+    use crate::certified_products::ProductOrigin;
     use proptest::prelude::*;
     use proptest::test_runner::FileFailurePersistence;
+
+    #[test]
+    #[ignore = "requires the matched native catalog producer"]
+    #[serial_test::serial]
+    fn linked_entry_reopens_exact_selection_in_new_process_without_source_replay() {
+        use crate::toolchain::CatalogSelection;
+        use tidepool_extract_cmd::extract_spawn_count;
+        const CHILD_ENTRY: &str = "TIDEPOOL_LINKED_ENTRY_REOPEN";
+        let CompilerDeploymentConfiguration::Configured(authority) =
+            CompilerDeploymentConfiguration::from_env().unwrap()
+        else {
+            panic!("requires configured matched compiler authority")
+        };
+        if let Some(directory) = std::env::var_os(CHILD_ENTRY) {
+            let directory = PathBuf::from(directory);
+            let manifest: EntryManifest =
+                serde_json::from_slice(&std::fs::read(directory.join(MANIFEST)).unwrap()).unwrap();
+            let counter = directory.parent().unwrap().join("quote-input.executions");
+            let before = std::fs::read(&counter).unwrap();
+            let entry =
+                load_selected_production_entry(&directory, &authority, &manifest.sources).unwrap();
+            assert!(entry.products().original_compile_input.is_some());
+            assert_eq!(
+                extract_spawn_count(),
+                0,
+                "reopening cannot invoke the compiler"
+            );
+            assert_eq!(std::fs::read(counter).unwrap(), before);
+            return;
+        }
+        let package = crate::toolchain::configured_module_package()
+            .unwrap()
+            .expect("requires the matched native catalog");
+        let catalog = CatalogSelection::Acquired(Some(Arc::clone(&package)));
+        let root = tempfile::tempdir().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let input = root.path().join("quote-input");
+        let counter = root.path().join("quote-input.executions");
+        std::fs::write(&input, "37").unwrap();
+        std::fs::write(
+            authored.join("QuotedProvider.hs"),
+            include_str!("../../tests/fixtures/completed-source/QuotedProvider.hs"),
+        )
+        .unwrap();
+        std::fs::write(
+            authored.join("QuotedOriginal.hs"),
+            include_str!("../../tests/fixtures/completed-source/QuotedOriginal.hs")
+                .replace("QUOTE_INPUT_PATH", input.to_str().unwrap()),
+        )
+        .unwrap();
+        let source = authored.join("LinkedPreparedOriginal.hs");
+        std::fs::write(
+            &source,
+            include_str!("../../tests/fixtures/completed-source/LinkedPreparedOriginal.hs"),
+        )
+        .unwrap();
+        let mut roots = vec![authored];
+        roots.extend(package.source_selection().include_roots());
+        let sources = FrozenEntrySources::capture(&roots, &source).unwrap();
+        let selected = ProductionEntrySources::FrozenWorkspace(sources.clone());
+        let output = root.path().join("entry");
+        let started = std::time::Instant::now();
+        let entry =
+            prepare_frozen_production_entry_with_catalog(&sources, root.path(), &output, &catalog)
+                .unwrap();
+        eprintln!("linked entry cold preparation: {:?}", started.elapsed());
+        let executions = std::fs::read(&counter).unwrap();
+        assert_eq!(
+            executions, b"37\n",
+            "fresh entry executes its quotation once"
+        );
+        assert!(entry
+            .products()
+            .certified_groups
+            .iter()
+            .any(|group| group.origin() == ProductOrigin::Cached
+                && group.owner().module == "Tidepool.Prelude"));
+        let original = std::fs::read(output.join(MANIFEST)).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        assert_eq!(manifest["schema"], 3);
+        assert_eq!(
+            manifest["dependencies"]["catalog_path"],
+            package.catalog_path().to_str().unwrap()
+        );
+        assert!(manifest["dependencies"]["selection"]["linked"]
+            .as_array()
+            .is_some_and(|selected| !selected.is_empty()));
+        let linked_modules = manifest["dependencies"]["selection"]["linked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|original| original["module"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            entry
+                .products()
+                .certified_groups
+                .iter()
+                .all(
+                    |group| !linked_modules.contains(group.owner().module.as_str())
+                        || group.origin() == ProductOrigin::Cached
+                ),
+            "compatible selected catalog originals cannot be freshly rebuilt"
+        );
+        let fresh =
+            decode_fresh_products(&std::fs::read(output.join("raw/module-products.cbor")).unwrap())
+                .unwrap();
+        assert!(
+            fresh
+                .iter()
+                .all(|product| !linked_modules.contains(product.module.as_str())),
+            "entry-owned bytes exclude linked catalog original products"
+        );
+        std::fs::write(&input, "91").unwrap();
+        let before = extract_spawn_count();
+        load_selected_production_entry_with_catalog(&output, &authority, &selected, &catalog)
+            .unwrap();
+        assert!(load_selected_production_entry_with_catalog(
+            &output,
+            &authority,
+            &selected,
+            &CatalogSelection::Acquired(None)
+        )
+        .is_err());
+        for field in ["catalog_identity", "catalog_path", "source_identity"] {
+            let saved = manifest["dependencies"][field].clone();
+            manifest["dependencies"][field] = serde_json::json!("mismatched");
+            std::fs::write(
+                output.join(MANIFEST),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            assert!(load_selected_production_entry_with_catalog(
+                &output, &authority, &selected, &catalog
+            )
+            .is_err());
+            manifest["dependencies"][field] = saved;
+        }
+        let saved = manifest["dependencies"]["selection"]["linked"][0]["module_version"].clone();
+        manifest["dependencies"]["selection"]["linked"][0]["module_version"] =
+            serde_json::json!(vec![0; 32]);
+        std::fs::write(
+            output.join(MANIFEST),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(load_selected_production_entry_with_catalog(
+            &output, &authority, &selected, &catalog
+        )
+        .is_err());
+        manifest["dependencies"]["selection"]["linked"][0]["module_version"] = saved;
+        for field in ["artifacts", "native_groups"] {
+            let saved = manifest["dependencies"]["selection"]["native_closure"][field].clone();
+            assert!(!saved.as_array().unwrap().is_empty());
+            manifest["dependencies"]["selection"]["native_closure"][field] = serde_json::json!([]);
+            std::fs::write(
+                output.join(MANIFEST),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            assert!(load_selected_production_entry_with_catalog(
+                &output, &authority, &selected, &catalog
+            )
+            .is_err());
+            manifest["dependencies"]["selection"]["native_closure"][field] = saved;
+        }
+        let linked_count = manifest["dependencies"]["selection"]["linked"]
+            .as_array()
+            .unwrap()
+            .len();
+        let mut config = property_config();
+        config.cases = 16;
+        let mut runner = proptest::test_runner::TestRunner::new(config);
+        runner
+            .run(
+                &(0..linked_count, 0usize..32, 0u8..8, 0usize..3),
+                |(owner, byte, bit, identity)| {
+                    let mut changed = manifest.clone();
+                    let field = ["module_version", "interface_sha256", "product_sha256"][identity];
+                    let original = changed["dependencies"]["selection"]["linked"][owner][field]
+                        [byte]
+                        .as_u64()
+                        .unwrap();
+                    changed["dependencies"]["selection"]["linked"][owner][field][byte] =
+                        serde_json::json!(original ^ (1 << bit));
+                    std::fs::write(output.join(MANIFEST), serde_json::to_vec(&changed).unwrap())
+                        .unwrap();
+                    prop_assert!(
+                        load_selected_production_entry_with_catalog(
+                            &output, &authority, &selected, &catalog
+                        )
+                        .is_err(),
+                        "changed selected original cannot acquire catalog custody"
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap();
+        std::fs::write(output.join(MANIFEST), &original).unwrap();
+        let mut wrong_authority = authority.clone();
+        wrong_authority.producer_identity[0] ^= 1;
+        assert!(load_selected_production_entry_with_catalog(
+            &output,
+            &wrong_authority,
+            &selected,
+            &catalog
+        )
+        .is_err());
+        assert_eq!(extract_spawn_count(), before);
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "artifacts::production_entry::source_selection_tests::linked_entry_reopens_exact_selection_in_new_process_without_source_replay", "--ignored", "--nocapture"])
+            .env(CHILD_ENTRY, &output).output().unwrap();
+        assert!(
+            child.status.success(),
+            "fresh process reopen failed: {} {}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+        std::fs::write(
+            &source,
+            "module LinkedPreparedOriginal where\n__prepared = (91 :: Int)\n",
+        )
+        .unwrap();
+        assert!(load_selected_production_entry_with_catalog(
+            &output, &authority, &selected, &catalog
+        )
+        .is_err());
+        assert_eq!(std::fs::read(counter).unwrap(), executions);
+    }
 
     #[derive(Clone, Debug)]
     enum ReservationOperation {

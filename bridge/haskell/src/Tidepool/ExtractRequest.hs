@@ -328,9 +328,9 @@ workerRequestFromArgv [flag, payload]
         , requestCompilerCapabilities = capabilities }))
 workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
 
--- Certification produces original products for the whole home graph. A
--- higher-priority dispatch mode or ordinary candidate cannot replace that work.
--- Explicit immutable declaration context accompanies the fresh source proof.
+-- Certification produces originals for every fresh home module. Authenticated
+-- candidates may supply unchanged originals through the same compiler pipeline;
+-- another dispatch mode cannot replace certification of the fresh source graph.
 validateCertificationFields :: [RequestField] -> Either String ()
 validateCertificationFields fields
   | CertifyHomeProducts `notElem` fields = Right ()
@@ -349,6 +349,7 @@ validateCertificationFields fields
       SessionArtifacts _ -> True
       HarnessProfile -> True
       BuildProductsDir _ -> True
+      ModuleCandidates _ -> True
       CertifyHomeProducts -> True
       _ -> False
 

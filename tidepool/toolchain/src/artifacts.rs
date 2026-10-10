@@ -4325,6 +4325,9 @@ fn compile_invocation_inner(
                 ..
             } = &policy
             {
+                package
+                    .validate_deployment(&deployment)
+                    .map_err(CompileAttemptError::ModulePackage)?;
                 module_candidates::select_acquired_catalog(
                     package,
                     endpoint.identity().producer_bytes(),
@@ -4953,15 +4956,34 @@ fn compile_invocation_inner(
             } => {
                 let selection = match (&catalog, &candidate_set) {
                     (Some(_), Some(candidates)) => Some(
-                        artifacts.source_selection.as_ref()
-                            .ok_or_else(|| CompileError::ExtractFailed("entry source selection unavailable".into()))?
+                        artifacts
+                            .source_selection
+                            .as_ref()
+                            .ok_or_else(|| {
+                                CompileError::ExtractFailed(
+                                    "entry source selection unavailable".into(),
+                                )
+                            })?
                             .entry_dependency_selection(&artifacts.artifact_view, candidates)
-                            .map_err(compiler_evidence_failure)?
+                            .map_err(compiler_evidence_failure)?,
                     ),
-                    (None, None) => None,
-                    _ => return Err(CompileError::ExtractFailed("entry catalog selection unavailable".into())),
+                    (_, None) => None,
+                    _ => {
+                        return Err(CompileError::ExtractFailed(
+                            "entry catalog selection unavailable".into(),
+                        ))
+                    }
                 };
-                Some(preparation.seal(source_path, sources, &deployment, inv.targets, catalog.as_ref(), selection)?)
+                let selection = selection.filter(|selection| selection.has_linked_originals());
+                let selected_catalog = selection.as_ref().and(catalog.as_ref());
+                Some(preparation.seal(
+                    source_path,
+                    sources,
+                    &deployment,
+                    inv.targets,
+                    selected_catalog,
+                    selection,
+                )?)
             }
             CompilationPolicy::BuildAction {
                 source_path,
@@ -4971,7 +4993,14 @@ fn compile_invocation_inner(
                         ..
                     },
                 ..
-            } => Some(preparation.seal(source_path, sources, &deployment, inv.targets, None, None)?),
+            } => Some(preparation.seal(
+                source_path,
+                sources,
+                &deployment,
+                inv.targets,
+                None,
+                None,
+            )?),
             _ => {
                 return Err(CompileError::ExtractFailed(
                     "original output owner has a different compilation policy".into(),
