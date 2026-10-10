@@ -19,6 +19,9 @@ mod properties;
 
 mod compiler_projection;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
+mod scope_proof;
+pub use scope_proof::ScopeProofV3;
+mod cold_validation;
 
 /// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
 /// Endpoint identities and their raw producer bytes are not this identity.
@@ -51,7 +54,7 @@ impl CanonicalProducerIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct ArtifactId(pub [u8; 32]);
 
-/// Identity of one issued exact dependency binding. Payload identity alone does
+/// Immutable identity of one issued binding scope. Payload identity alone does
 /// not identify the canonical children selected by a compiler transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct ArtifactSelectionId(pub [u8; 32]);
@@ -88,26 +91,16 @@ pub struct ArtifactGraphSelection {
         serialize_with = "serialize_selection_plans",
         deserialize_with = "deserialize_selection_plans"
     )]
-    pub selections: Vec<Arc<ArtifactSelectionPlan>>,
+    pub selections: Vec<Arc<ScopeProofV3>>,
     pub bindings: Vec<ArtifactBinding>,
     pub namespace: Vec<ArtifactBinding>,
-    pub roots: Vec<ArtifactBinding>,
+    pub roots: Vec<ArtifactBindingNode>,
     pub native_groups: Vec<NativeGroupBinding>,
     pub native_custody: Vec<ArtifactBinding>,
 }
 
-/// Complete issued binding plan retained as a digest witness when a view
-/// selects only part of its closure. Payload validation remains independent.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactSelectionPlan {
-    pub selection: ArtifactSelectionId,
-    pub nodes: Vec<ArtifactBindingNode>,
-    pub dependencies: Vec<(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)>,
-}
-
 fn serialize_selection_plans<S: serde::Serializer>(
-    plans: &[Arc<ArtifactSelectionPlan>],
+    plans: &[Arc<ScopeProofV3>],
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     use serde::ser::SerializeSeq;
@@ -120,8 +113,8 @@ fn serialize_selection_plans<S: serde::Serializer>(
 
 fn deserialize_selection_plans<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<Vec<Arc<ArtifactSelectionPlan>>, D::Error> {
-    Vec::<ArtifactSelectionPlan>::deserialize(deserializer)
+) -> Result<Vec<Arc<ScopeProofV3>>, D::Error> {
+    Vec::<ScopeProofV3>::deserialize(deserializer)
         .map(|plans| plans.into_iter().map(Arc::new).collect())
 }
 
@@ -200,11 +193,23 @@ impl ExactArtifactSelection {
         crate::host_work::checkpoint()?;
         let mut sink = DigestWriter(Sha256::new());
         sink.0
-            .update(b"Tidepool reissued exact selection observation v1\0");
+            .update(b"Tidepool selected binding context observation v3\0");
         {
             let mut buffered = std::io::BufWriter::new(&mut sink);
-            serde_json::to_writer(&mut buffered, self)
-                .map_err(|error| failure(&format!("exact selection observation: {error}")))?;
+            let graph = &self.0.graph;
+            // Scope identities commit the immutable rows. Proof-only ancestry
+            // and its transport layout do not change selected semantics.
+            serde_json::to_writer(
+                &mut buffered,
+                &(
+                    &graph.bindings,
+                    &graph.namespace,
+                    &graph.roots,
+                    &graph.native_groups,
+                    &graph.native_custody,
+                ),
+            )
+            .map_err(|error| failure(&format!("exact selection observation: {error}")))?;
             buffered.flush()?;
         }
         Ok(ExactArtifactSelectionDigest(sink.0.finalize().into()))
@@ -277,7 +282,8 @@ enum ArtifactRootIntent<'a> {
 
 /// Graph vertices retain one full artifact allocation separately from its
 /// admitted native groups. A carrier never implies demand for every group.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum LogicalNodeKey {
     Artifact(ArtifactId),
     Group(NativeGroupKey),
@@ -1224,8 +1230,10 @@ struct InventoryState {
     indices: BTreeMap<InventoryNodeKey, NodeIndex>,
     payloads: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     payload_bindings: BTreeMap<ArtifactId, usize>,
-    selection_plans: BTreeMap<ArtifactSelectionId, Arc<ArtifactSelectionPlan>>,
+    selection_plans: BTreeMap<ArtifactSelectionId, Arc<ScopeProofV3>>,
     selection_nodes: BTreeMap<ArtifactSelectionId, usize>,
+    /// Immutable proof retention is independent of selected payload custody.
+    scope_dependents: BTreeMap<ArtifactSelectionId, usize>,
     roots: BTreeMap<InventoryNodeKey, usize>,
     graph_visits: AtomicU64,
     view_queries: AtomicU64,
@@ -1508,56 +1516,6 @@ pub struct ArtifactInventoryMetrics {
     /// Existing reclamation traversal/removal work; excludes parent destruction.
     pub reclamation_elapsed_ns: u64,
     pub admission_owner_lookups: u64,
-}
-
-fn selection_identity(
-    plan: &BTreeMap<InventoryNodeKey, BTreeSet<(InventoryNodeKey, ArtifactDependency)>>,
-    own: ArtifactSelectionId,
-) -> ArtifactSelectionId {
-    let normalize = |key: InventoryNodeKey| {
-        if key.selection() == own {
-            key.logical().bind(ArtifactSelectionId([0; 32]))
-        } else {
-            key
-        }
-    };
-    let canonical = plan
-        .iter()
-        .map(|(key, edges)| {
-            (
-                normalize(*key),
-                edges
-                    .iter()
-                    .map(|(target, edge)| (normalize(*target), edge.clone()))
-                    .collect::<BTreeSet<_>>(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut digest = Sha256::new();
-    digest.update(b"Tidepool exact artifact binding v2\0");
-    for (key, edges) in canonical {
-        let bytes = serde_json::to_vec(&(key, edges)).expect("closed binding schema");
-        digest.update((bytes.len() as u64).to_be_bytes());
-        digest.update(bytes);
-    }
-    ArtifactSelectionId(digest.finalize().into())
-}
-fn capture_selection_plan(
-    plan: &BTreeMap<InventoryNodeKey, BTreeSet<(InventoryNodeKey, ArtifactDependency)>>,
-    selection: ArtifactSelectionId,
-) -> ArtifactSelectionPlan {
-    ArtifactSelectionPlan {
-        selection,
-        nodes: plan.keys().copied().collect(),
-        dependencies: plan
-            .iter()
-            .flat_map(|(source, edges)| {
-                edges
-                    .iter()
-                    .map(|(target, edge)| (*source, *target, edge.clone()))
-            })
-            .collect(),
-    }
 }
 
 fn install_binding_plan(
@@ -2086,12 +2044,13 @@ impl ArtifactInventory {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let selection = selection_identity(&provisional_plan, provisional);
+        let witness = ScopeProofV3::issue(&provisional_plan, provisional).map(Arc::new);
+        let selection = witness.as_ref().map(|proof| proof.selection);
         let resolve = |key: LogicalNodeKey| {
             inherited
                 .get(&key)
                 .copied()
-                .unwrap_or_else(|| key.bind(selection))
+                .unwrap_or_else(|| key.bind(selection.expect("new node has an issued scope")))
         };
         let bound = planned
             .iter()
@@ -2154,22 +2113,11 @@ impl ArtifactInventory {
             })
             .map(|(id, entry)| (*id, Arc::clone(entry)))
             .collect();
-        let witness = bound
-            .keys()
-            .any(|key| key.selection() == selection)
-            .then(|| Arc::new(capture_selection_plan(&bound, selection)));
-        if witness.as_ref().is_some_and(|witness| {
-            state
-                .selection_plans
-                .get(&selection)
-                .is_some_and(|previous| previous != witness)
-        }) {
-            return Err(failure("selection digest has differing exact plans"));
-        }
+        // Validate proof retention before installing graph vertices. No payload
+        // is retained for an unselected source row in an ancestor proof.
+        let prepared_proofs = scope_proof::prepare_install(&state, witness)?;
         install_binding_plan(&mut state, &selected, &bound)?;
-        if let Some(witness) = witness {
-            state.selection_plans.insert(selection, witness);
-        }
+        scope_proof::install(&mut state, prepared_proofs);
         for key in roots.iter().copied().chain(
             native_custody
                 .iter()
@@ -2250,98 +2198,9 @@ impl ArtifactInventory {
                 return Err(failure("duplicate bound recovery edge"));
             }
         }
-        let mut witnesses = BTreeMap::new();
-        for witness in &selection.selections {
-            let mut complete = witness
-                .nodes
-                .iter()
-                .copied()
-                .map(|key| (key, BTreeSet::new()))
-                .collect::<BTreeMap<_, _>>();
-            if complete.len() != witness.nodes.len() {
-                return Err(failure("duplicate selection witness node"));
-            }
-            for (source, target, edge) in &witness.dependencies {
-                if !complete.contains_key(target) {
-                    return Err(failure("selection witness target missing"));
-                }
-                if !complete
-                    .get_mut(source)
-                    .ok_or_else(|| failure("selection witness source missing"))?
-                    .insert((*target, edge.clone()))
-                {
-                    return Err(failure("duplicate selection witness edge"));
-                }
-            }
-            if selection_identity(&complete, witness.selection) != witness.selection
-                || witnesses
-                    .insert(witness.selection, (Arc::clone(witness), complete))
-                    .is_some()
-            {
-                return Err(failure(
-                    "selection witness digest differs from exact binding plan",
-                ));
-            }
-        }
-        if witnesses.keys().copied().collect::<BTreeSet<_>>()
-            != plan
-                .keys()
-                .map(|key| key.selection())
-                .collect::<BTreeSet<_>>()
-        {
-            return Err(failure("unused or missing selection digest witness"));
-        }
-        for (source, edges) in &plan {
-            let (_, witness) = witnesses
-                .get(&source.selection())
-                .ok_or_else(|| failure("issued binding plan missing"))?;
-            if witness.get(source) != Some(edges) {
-                return Err(failure("retained edges differ from issued binding plan"));
-            }
-        }
+        let witnesses = scope_proof::authenticate(&selection.selections, &plan)?;
         let mut state = self.0.lock().expect("inventory lock");
-        // Each binding is validated in its own issued closure, independently of
-        // other historical closures retained by the same recovery record.
-        for source in plan.keys() {
-            let mut pending = vec![*source];
-            let mut reachable = BTreeSet::new();
-            while let Some(key) = pending.pop() {
-                if reachable.insert(key) {
-                    pending.extend(plan[&key].iter().map(|(target, _)| *target));
-                }
-            }
-            let ids = artifact_ids(&reachable);
-            let selected = ids
-                .iter()
-                .map(|id| (*id, Arc::clone(&entries[id])))
-                .collect::<BTreeMap<_, _>>();
-            let owners = SelectedOwners::new(&state, &selected, &BTreeSet::new())?;
-            let expected = match source {
-                InventoryNodeKey::Artifact(binding) => owners
-                    .dependencies(&state, &entries[&binding.artifact], &selected)?
-                    .into_iter()
-                    .map(|(id, edge)| (LogicalNodeKey::Artifact(id), edge))
-                    .collect::<BTreeSet<_>>(),
-                InventoryNodeKey::Group(group) => {
-                    let logical = NativeGroupKey {
-                        artifact: group.binding.artifact,
-                        original_ordinal: group.original_ordinal,
-                    };
-                    let (planned, _) =
-                        owners.planned_edges(&state, &selected, &BTreeSet::from([logical]))?;
-                    planned[&LogicalNodeKey::Group(logical)].clone()
-                }
-            };
-            let actual = plan[source]
-                .iter()
-                .map(|(target, edge)| (target.logical(), edge.clone()))
-                .collect::<BTreeSet<_>>();
-            if expected != actual || actual.len() != plan[source].len() {
-                return Err(failure(
-                    "bound recovery exact edges differ from certified requirements",
-                ));
-            }
-        }
+        cold_validation::validate_selected_rows(&state, &entries, &plan)?;
         let namespace = selection
             .namespace
             .iter()
@@ -2359,13 +2218,10 @@ impl ArtifactInventory {
             .map(|id| (*id, Arc::clone(&entries[id])))
             .collect();
         SelectedOwners::new(&state, &namespace_entries, &BTreeSet::new())?;
-        let roots = selection
-            .roots
-            .iter()
-            .copied()
-            .map(InventoryNodeKey::Artifact)
-            .chain(groups.iter().copied().map(InventoryNodeKey::Group))
-            .collect::<Vec<_>>();
+        let roots = selection.roots.clone();
+        if roots.iter().copied().collect::<BTreeSet<_>>().len() != roots.len() {
+            return Err(failure("duplicate bound recovery roots"));
+        }
         if roots.iter().any(|key| !plan.contains_key(key))
             || selection
                 .native_custody
@@ -2394,19 +2250,10 @@ impl ArtifactInventory {
         if reachable.len() != plan.len() {
             return Err(failure("bound recovery includes unreachable bindings"));
         }
-        for (id, (witness, _)) in &witnesses {
-            if state
-                .selection_plans
-                .get(id)
-                .is_some_and(|previous| previous != witness)
-            {
-                return Err(failure("selection digest has differing exact plans"));
-            }
-        }
+        let prepared_proofs =
+            scope_proof::prepare_install(&state, witnesses.into_values().map(|(proof, _)| proof))?;
         install_binding_plan(&mut state, &entries, &plan)?;
-        for (id, (witness, _)) in witnesses {
-            state.selection_plans.insert(id, witness);
-        }
+        scope_proof::install(&mut state, prepared_proofs);
         for key in roots.iter().copied().chain(
             selection
                 .native_custody
@@ -2588,6 +2435,7 @@ impl Drop for ViewLease {
             })
             .collect::<Vec<_>>();
         let retained = admitted_closure(&state, survivors.into_iter());
+        let mut lost_scopes = BTreeSet::new();
         for id in candidates.difference(&retained) {
             let index = state.indices.remove(id).expect("indexed artifact");
             state.graph.remove_node(index);
@@ -2600,7 +2448,7 @@ impl Drop for ViewLease {
             *count -= 1;
             if *count == 0 {
                 state.selection_nodes.remove(&scope);
-                state.selection_plans.remove(&scope);
+                lost_scopes.insert(scope);
             }
             if let InventoryNodeKey::Artifact(id) = id {
                 let count = state
@@ -2614,6 +2462,7 @@ impl Drop for ViewLease {
                 }
             }
         }
+        scope_proof::retire(&mut state, lost_scopes);
         state.reclamation_elapsed_ns += started.elapsed().as_nanos() as u64;
         // Parent drops after the lock guard, preserving recursive release.
     }
@@ -3020,20 +2869,7 @@ impl ArtifactView {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let nodes = &self.read_projection(&state).nodes;
         ArtifactGraphSelection {
-            selections: nodes
-                .iter()
-                .map(|key| key.selection())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .map(|selection| {
-                    Arc::clone(
-                        state
-                            .selection_plans
-                            .get(&selection)
-                            .expect("issued selection plan"),
-                    )
-                })
-                .collect(),
+            selections: scope_proof::capture(&state, nodes),
             bindings: nodes
                 .iter()
                 .filter_map(|key| match key {
@@ -3047,14 +2883,7 @@ impl ArtifactView {
                 .filter(|binding| nodes.contains(&InventoryNodeKey::Artifact(**binding)))
                 .copied()
                 .collect(),
-            roots: self
-                .roots()
-                .iter()
-                .filter_map(|key| match key {
-                    InventoryNodeKey::Artifact(binding) => Some(*binding),
-                    _ => None,
-                })
-                .collect(),
+            roots: self.roots().to_vec(),
             native_groups: nodes
                 .iter()
                 .filter_map(|key| match key {
@@ -3500,10 +3329,10 @@ impl ArtifactView {
             .collect::<Result<Vec<_>, _>>()?;
         selected.extend(
             graph
-                .native_groups
+                .roots
                 .iter()
-                .copied()
-                .map(InventoryNodeKey::Group),
+                .filter(|root| matches!(root, InventoryNodeKey::Group(_)))
+                .copied(),
         );
         let custody = graph.native_custody.clone();
         let closure = admitted_closure(
@@ -4312,7 +4141,7 @@ mod tests {
             module: name.into(),
         }
     }
-    fn entry(name: &str, requirements: &[&str]) -> ArtifactEntry {
+    pub(super) fn entry(name: &str, requirements: &[&str]) -> ArtifactEntry {
         entry_in_unit(
             "unit",
             name,
@@ -4927,7 +4756,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_binding_plans_keep_complete_inherited_witnesses() {
+    fn incremental_binding_scopes_keep_only_new_source_rows() {
         let inventory = ArtifactInventory::default();
         let mut view = inventory
             .admit(
@@ -4954,7 +4783,9 @@ mod tests {
                 .map(|plan| plan.nodes.len())
                 .collect::<Vec<_>>();
             plan_sizes.sort();
-            assert_eq!(plan_sizes, (12..=12 + generation).collect::<Vec<_>>());
+            let mut expected = vec![1; generation];
+            expected.push(12);
+            assert_eq!(plan_sizes, expected);
             assert_eq!(graph.bindings.len(), 12 + generation);
             let unique_witness_bytes = graph
                 .selections
