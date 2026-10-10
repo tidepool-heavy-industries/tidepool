@@ -1,12 +1,12 @@
 use super::*;
-use crate::actor_host::embedded_harness::{EmbeddedHostActor, EmbeddedRoundControl};
+use crate::actor_host::embedded_harness::{original_operation, EmbeddedRoundControl};
 use exomonad_actor::{
     ActorRef, ActorTerminal, KernelBehavior, KernelBehaviorError, KernelContext,
     KernelInvocationFailure, KernelStep, MailboxValue,
 };
 use futures_util::future::BoxFuture;
 use harness::{
-    embedding::{HostActor, HostIdentity},
+    embedding::{AdmissionGuard, EmbeddedError, HostActor, HostIdentity, ToolSurface},
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     store::Store,
 };
@@ -79,6 +79,133 @@ impl KernelBehavior for AdmissionSentinel {
     }
 }
 
+// A component host for schema refusal and mailbox lifecycle tests. Its real
+// LocalActor lease and installed policy own admission and acknowledgement;
+// it has no resident machine, provider attachment, or native readiness proof.
+struct AdmissionHost {
+    identity: HostIdentity,
+    actor: exomonad_actor::LocalActorRef,
+    installation: Arc<EmbeddedPolicyInstallation>,
+    wakes: tokio::sync::mpsc::UnboundedSender<harness::mailbox::DurableMailboxWake>,
+    round_control: Arc<EmbeddedRoundControl>,
+}
+
+struct SentinelAdmission {
+    _lease: exomonad_actor::ActorAdmissionLease,
+}
+impl AdmissionGuard for SentinelAdmission {}
+
+#[async_trait::async_trait]
+impl HostActor for AdmissionHost {
+    fn identity(&self) -> &HostIdentity {
+        &self.identity
+    }
+    fn active_round(&self) -> Option<harness::embedding::EmbeddedRoundId> {
+        self.round_control.active_round()
+    }
+    fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+        self.actor
+            .admit_transaction()
+            .map(|lease| Box::new(SentinelAdmission { _lease: lease }) as Box<dyn AdmissionGuard>)
+            .map_err(|error| match error {
+                exomonad_actor::KernelCallFailure::MailboxClosed(_) => {
+                    EmbeddedError::AdmissionClosed
+                }
+                error => EmbeddedError::Host(error.to_string()),
+            })
+    }
+    fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+        let _admission = self.admit()?;
+        let snapshot = Arc::new(
+            self.installation
+                .request_snapshot()
+                .map_err(|error| EmbeddedError::Surface(error.to_string()))?,
+        );
+        Ok(Arc::new(ToolSurface::from_manifest(
+            "admission-sentinel".into(),
+            snapshot.manifest(),
+            Arc::new(SchemaAdmissionDispatcher {
+                identity: self.identity.clone(),
+                snapshot,
+            }),
+        )?))
+    }
+    async fn wake(&self, envelope_id: i64) -> Result<(), String> {
+        self.wakes
+            .send(harness::mailbox::DurableMailboxWake { envelope_id })
+            .map_err(|error| error.to_string())
+    }
+    async fn control(
+        &self,
+        _: harness::embedding::HostControl,
+    ) -> Result<Value, harness::embedding::HostControlError> {
+        panic!("schema admission tests do not request host control")
+    }
+    async fn output_committed(&self, operation: &OperationId) -> Result<(), String> {
+        self.installation
+            .complete(
+                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original_operation(
+                    &self.identity,
+                    operation,
+                )?),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+    async fn output_aborted(&self, operation: &OperationId) -> Result<(), String> {
+        self.installation
+            .abort(
+                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(original_operation(
+                    &self.identity,
+                    operation,
+                )?),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct SchemaAdmissionDispatcher {
+    identity: HostIdentity,
+    snapshot: Arc<EmbeddedPolicySnapshot>,
+}
+
+#[async_trait::async_trait]
+impl harness::provider::Provider for SchemaAdmissionDispatcher {
+    fn tools(&self) -> Vec<Value> {
+        self.snapshot.tools().to_vec()
+    }
+    async fn call(&self, _: &str, _: Value) -> Result<Value, harness::provider::ProviderError> {
+        panic!("schema admission dispatch requires an issued operation")
+    }
+    async fn call_with_context(
+        &self,
+        name: &str,
+        arguments: Value,
+        context: harness::provider::CallContext,
+    ) -> Result<Value, harness::provider::ProviderError> {
+        let operation = context.operation.as_ref().expect("Engine-issued operation");
+        let original = original_operation(&self.identity, operation)
+            .expect("operation belongs to the component host");
+        self.snapshot
+            .dispatch(
+                name.into(),
+                ToolArguments::Structured(arguments),
+                ToolInvocationContext {
+                    origin: exomonad_tool::ToolInvocationOrigin::Model(original),
+                    call_id: operation.call.0.clone(),
+                    namespace: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .map_err(|error| harness::provider::ProviderError::Tool(error.to_string().into()))
+    }
+}
+
 fn operation(actor: ActorRef, call: &str) -> (HostIdentity, OperationId, ToolInvocationContext) {
     let identity = HostIdentity {
         run: "admission".into(),
@@ -141,15 +268,13 @@ async fn schema_argument_and_selected_tool_refusals_acknowledge_only_issued_oper
     };
     let (identity, _, _) = operation(actor.identity(), "schema");
     let (wakes, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let host = EmbeddedHostActor::new(
+    let host = AdmissionHost {
         identity,
-        actor.clone(),
+        actor: actor.clone(),
         installation,
-        Arc::new(Store::memory().unwrap()),
         wakes,
-        Arc::new(EmbeddedRoundControl::default()),
-    )
-    .unwrap();
+        round_control: Arc::new(EmbeddedRoundControl::default()),
+    };
     for (call, name, arguments) in [
         (
             "schema",
@@ -219,15 +344,13 @@ async fn sealed_and_retired_mailboxes_keep_no_admission_acknowledgement() {
     };
     let (identity, _, _) = operation(actor.identity(), "sealed");
     let (wakes, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let host = EmbeddedHostActor::new(
+    let host = AdmissionHost {
         identity,
-        actor.clone(),
+        actor: actor.clone(),
         installation,
-        Arc::new(Store::memory().unwrap()),
         wakes,
-        Arc::new(EmbeddedRoundControl::default()),
-    )
-    .unwrap();
+        round_control: Arc::new(EmbeddedRoundControl::default()),
+    };
     actor.seal_hosted_work().await.unwrap();
     let (_, sealed, invocation) = operation(actor.identity(), "sealed");
     assert!(matches!(
@@ -402,11 +525,11 @@ enum NativeCloseTiming {
     DuringSuccessor,
 }
 
-// Retain the real facade acknowledgement before native closure. This supplies
+// Retain the real policy acknowledgement before mailbox closure. This supplies
 // no native execution proof; the generic actor's realm cleanup is unsupported.
 struct AcknowledgedSchemaRefusal {
     close_timing: NativeCloseTiming,
-    inner: Arc<EmbeddedHostActor>,
+    inner: Arc<AdmissionHost>,
     actor: exomonad_actor::LocalActorRef,
     policy: Arc<dyn ResidentToolEndpoint>,
     store: Arc<Store>,
@@ -585,17 +708,13 @@ async fn schema_refusal_then_native_close(close_timing: NativeCloseTiming) {
     let round = round_control.begin().unwrap();
     let host = Arc::new(AcknowledgedSchemaRefusal {
         close_timing,
-        inner: Arc::new(
-            EmbeddedHostActor::new(
-                identity,
-                actor.clone(),
-                installation,
-                store.clone(),
-                wakes,
-                round_control,
-            )
-            .unwrap(),
-        ),
+        inner: Arc::new(AdmissionHost {
+            identity,
+            actor: actor.clone(),
+            installation,
+            wakes,
+            round_control,
+        }),
         actor: actor.clone(),
         policy,
         store: store.clone(),
