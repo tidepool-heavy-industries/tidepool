@@ -11,7 +11,7 @@ import Tidepool.Agent.Watch.Internal qualified as Watch
 sampleRequest :: Request Int
 sampleRequest = request
   where
-    (request, _) = newRequestHandles () (RequestId 17) (internalAgentRef 23 29)
+    (request, _) = newRequestHandles (RequestId 17) (internalAgentRef 23 29)
 
 awaitSettledDependencies :: [[(Int, Bool)]]
 awaitSettledDependencies = case Watch.settledResponse sampleRequest of

@@ -1117,8 +1117,8 @@ fullMain :: IO ()
 fullMain = do
   let expectedSites =
         [ ("serve", DeliverLiveReentry, SelectedAnswer)
-        , ("request", DeliverExitCellFill, ResponseResultEvidence)
-        , ("requestWithProgress", DeliverExitCellFill, ResponseResultEvidence)
+        , ("request", DeliverExitCellFill, SelectedAnswer)
+        , ("requestWithProgress", DeliverExitCellFill, SelectedAnswer)
         ]
       actualSites =
         [ (vsName spec, vsDelivery spec, vsWireSource spec)

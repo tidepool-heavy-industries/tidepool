@@ -619,8 +619,8 @@ elaboratePreparedSitesTracked env authority siblings bindings = do
                     inputType : _ -> (:[]) <$> siteWireType authority
                       (spec { vsWireSource = source }) inputType
                     [] -> Left "derived site input names a missing type argument"
-                requestTypes <- case (vsWireSource spec, vsDelivery spec) of
-                  (ResponseResultEvidence, DeliverExitCellFill) -> do
+                requestTypes <- case (vsDerivedInput spec, vsDelivery spec) of
+                  (Just (_, ResponseResultEvidence), DeliverExitCellFill) -> do
                     progress <- requestProgressType spec (spInputs plan)
                     Right (Just (spAnswer plan, progress))
                   _ -> Right Nothing

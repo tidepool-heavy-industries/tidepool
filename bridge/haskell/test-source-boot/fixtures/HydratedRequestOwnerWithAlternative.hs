@@ -12,10 +12,10 @@ request :: forall result input. input -> Maybe result
 request _ = Nothing
 
 {-# OPAQUE requestSited #-}
-requestSited :: forall result input. RequestSite '[input] result -> input -> Maybe result
+requestSited :: forall result input. RequestSite '[input, ResponseResult result] result -> input -> Maybe result
 requestSited _ _ = Nothing
 
 {-# OPAQUE requestAlternativeSited #-}
 requestAlternativeSited :: forall result input.
-  RequestSite '[input] result -> input -> Maybe result
+  RequestSite '[input, ResponseResult result] result -> input -> Maybe result
 requestAlternativeSited _ _ = Nothing

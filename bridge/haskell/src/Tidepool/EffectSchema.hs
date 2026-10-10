@@ -117,16 +117,16 @@ sitedVerbs :: [VerbSpec]
 sitedVerbs =
   [ (verb "request" "Tidepool.Actors.Internal.Agent"
       "requestSited" "Tidepool.Actors.Internal.Agent" False [1]
-      DeliverExitCellFill ResponseResultEvidence)
+      DeliverExitCellFill SelectedAnswer)
       { vsDerivedInput = Just (0, ResponseResultEvidence) }
   , (verb "requestWithProgress" "Tidepool.Actors.Internal.Agent"
       "requestWithProgressSited" "Tidepool.Actors.Internal.Agent" False [2, 0]
-      DeliverExitCellFill ResponseResultEvidence)
+      DeliverExitCellFill SelectedAnswer)
       { vsAnswerSource = TypeArgument 1
       , vsDerivedInput = Just (1, ResponseResultEvidence) }
   , (verb "requestWithProgressInto" "Tidepool.Actors.Internal.Agent"
       "requestWithProgressIntoSited" "Tidepool.Actors.Internal.Agent" False [2, 0]
-      DeliverExitCellFill ResponseResultEvidence)
+      DeliverExitCellFill SelectedAnswer)
       { vsAnswerSource = TypeArgument 1
       , vsDerivedInput = Just (1, ResponseResultEvidence) }
   , (verb "currentRequest" "Tidepool.Agent.Reply.Internal"
