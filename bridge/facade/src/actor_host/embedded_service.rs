@@ -488,6 +488,12 @@ pub(super) enum EmbeddedDriverError {
     Engine(#[from] harness::engine::EngineError),
     #[error("native provider admission failed: {0}")]
     NativeAdmission(#[source] Box<exomonad_actor::ResidentActorWorkbenchError>),
+    #[error("round settlement failed: {source}; Engine cleanup failed: {cleanup}")]
+    RoundSettlement {
+        #[source]
+        source: harness::store::StoreError,
+        cleanup: Box<EmbeddedDriverError>,
+    },
     #[error("{0}")]
     Host(String),
 }
@@ -506,12 +512,16 @@ impl From<&str> for EmbeddedDriverError {
 
 impl EmbeddedDriverError {
     pub(super) fn requires_recovery(&self) -> bool {
+        fn store_requires_recovery(error: &harness::store::StoreError) -> bool {
+            matches!(
+                error,
+                harness::store::StoreError::RecoveryRequired(_)
+                    | harness::store::StoreError::AdmissionFenced
+            )
+        }
         fn engine_requires_recovery(error: &harness::engine::EngineError) -> bool {
             match error {
-                harness::engine::EngineError::Store(
-                    harness::store::StoreError::RecoveryRequired(_)
-                    | harness::store::StoreError::AdmissionFenced,
-                ) => true,
+                harness::engine::EngineError::Store(error) => store_requires_recovery(error),
                 harness::engine::EngineError::Cleanup { primary, .. } => {
                     engine_requires_recovery(primary)
                 }
@@ -521,15 +531,19 @@ impl EmbeddedDriverError {
         match self {
             Self::NativeAdmission(error) => error.requires_recovery(),
             Self::Engine(error) => engine_requires_recovery(error),
+            Self::RoundSettlement { source, cleanup } => {
+                store_requires_recovery(source) || cleanup.requires_recovery()
+            }
             Self::Host(_) => false,
         }
     }
 
     pub(super) fn cleanup_failed(&self) -> bool {
-        matches!(
-            self,
-            Self::Engine(harness::engine::EngineError::Cleanup { .. })
-        )
+        match self {
+            Self::Engine(harness::engine::EngineError::Cleanup { .. }) => true,
+            Self::RoundSettlement { cleanup, .. } => cleanup.cleanup_failed(),
+            _ => false,
+        }
     }
 }
 
@@ -779,18 +793,25 @@ where
         } else {
             Ok(false)
         };
-        if let Some(error) = cleanup_failure {
-            if !matches!(&advanced, Ok(true)) {
-                tracing::warn!(
-                    ?actor,
-                    ?advanced,
-                    "embedded head advance failed alongside Engine cleanup"
-                );
+        let advanced = match advanced {
+            Ok(advanced) => advanced,
+            Err(source) => {
+                let error = match cleanup_failure {
+                    Some(cleanup) => EmbeddedDriverError::RoundSettlement {
+                        source,
+                        cleanup: Box::new(cleanup),
+                    },
+                    None => harness::engine::EngineError::Store(source).into(),
+                };
+                observed_round.fail(exomonad_model::ProviderFailure::Other(error.to_string()));
+                return Err(error);
             }
+        };
+        if let Some(error) = cleanup_failure {
             observed_round.fail(exomonad_model::ProviderFailure::Other(error.to_string()));
             return Err(error);
         }
-        if !advanced.map_err(|error| error.to_string())? {
+        if !advanced {
             return Err(format!("embedded conversation {} lost its durable head", actor.0).into());
         }
         drop(round);

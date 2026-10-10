@@ -66,6 +66,20 @@ async fn driver_observed_recovery_escalates_without_erasing_cleanup_uncertainty(
             true,
         ),
         (
+            EmbeddedDriverError::RoundSettlement {
+                source: StoreError::AdmissionFenced,
+                cleanup: Box::new(
+                    EngineError::Cleanup {
+                        primary: Box::new(EngineError::Cancelled { head_request: None }),
+                        cleanup: "native release was not acknowledged".into(),
+                    }
+                    .into(),
+                ),
+            },
+            true,
+            true,
+        ),
+        (
             EmbeddedDriverError::Host("RecoveryRequired: admission fenced".into()),
             false,
             false,
