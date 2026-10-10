@@ -36,6 +36,11 @@ pub mod prepared;
 mod publication;
 mod recovery;
 mod recovery_hydration;
+pub mod recovery_store;
+pub use recovery_store::{
+    DomainSnapshotRoot, PublicSurfaceRoot, RecoveryDomainId, RecoveryDomainState,
+    RecoveryPublicOwnerState, RecoverySnapshotIdentity, RunRecoveryStore, StoreRevision,
+};
 pub use recovery_hydration::{RecoveryRunAuthority, RecoverySuccessorAuthority};
 pub mod registry;
 pub mod render;

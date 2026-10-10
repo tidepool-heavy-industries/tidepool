@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tidepool_repr::Generation;
 use tidepool_toolchain::artifact_inventory::{
     ArtifactBinding, ArtifactBindingNode, ArtifactDependency, ArtifactDescriptor,
-    ArtifactGraphSelection, ArtifactId, ArtifactSelectionId, ArtifactSelectionPlan,
+    ArtifactGraphSelection, ArtifactId, ArtifactSelectionId, ScopeProofV3 as ArtifactSelectionPlan,
     CompilerInputRole, ExactArtifactSelection, NativeGroupBinding,
 };
 use tidepool_toolchain::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
@@ -1305,11 +1305,7 @@ fn validate_graph_selection<'a>(
     if bindings.len() != selection.bindings.len() || !bindings.is_subset(available) {
         return Err(error("duplicate selection binding or missing exact scope"));
     }
-    for rows in [
-        &selection.namespace,
-        &selection.roots,
-        &selection.native_custody,
-    ] {
+    for rows in [&selection.namespace, &selection.native_custody] {
         let unique = rows.iter().copied().collect::<BTreeSet<_>>();
         if unique.len() != rows.len() || !unique.is_subset(&bindings) {
             return Err(error(
@@ -1324,6 +1320,12 @@ fn validate_graph_selection<'a>(
         .collect::<BTreeSet<_>>();
     if groups.len() != selection.native_groups.len() {
         return Err(error("duplicate native group binding"));
+    }
+    let roots = selection.roots.iter().copied().collect::<BTreeSet<_>>();
+    if roots.len() != selection.roots.len()
+        || roots.iter().any(|root| !root.is_retained_in(&bindings, &groups))
+    {
+        return Err(error("selected root has another binding scope"));
     }
     let mut carriers = BTreeMap::new();
     for edge in edges {
@@ -2585,6 +2587,7 @@ mod tests {
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .map(metadata_binding)
+                    .map(ArtifactBindingNode::Artifact)
                     .collect(),
                 native_groups: node
                     .native_groups
@@ -5221,7 +5224,7 @@ mod tests {
             .bindings
             .retain(|binding| binding.artifact == canonical_id);
         selection.namespace = selection.bindings.clone();
-        selection.roots = selection.bindings.clone();
+        selection.roots = selection.bindings.iter().copied().map(ArtifactBindingNode::Artifact).collect();
         selection.native_groups.clear();
         selection.native_custody.clear();
         wire.artifact_bindings = selection.bindings.clone();

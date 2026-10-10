@@ -31,7 +31,7 @@ struct SelectionRecord {
     selections: Vec<ArtifactSelectionId>,
     bindings: Vec<ArtifactBinding>,
     namespace: Vec<ArtifactBinding>,
-    roots: Vec<ArtifactBinding>,
+    roots: Vec<ArtifactBindingNode>,
     native_groups: Vec<NativeGroupBinding>,
     native_custody: Vec<ArtifactBinding>,
 }

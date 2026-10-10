@@ -215,7 +215,7 @@ fn selection(plans: Vec<Arc<ArtifactSelectionPlan>>) -> ArtifactGraphSelection {
         selections: plans,
         bindings: artifacts.clone(),
         namespace: artifacts.iter().take(1).copied().collect(),
-        roots: artifacts.iter().rev().take(1).copied().collect(),
+        roots: artifacts.iter().rev().take(1).copied().map(ArtifactBindingNode::Artifact).collect(),
         native_groups: nodes
             .iter()
             .filter_map(|node| match node {
