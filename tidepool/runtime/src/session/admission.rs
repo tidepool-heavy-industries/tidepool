@@ -1856,11 +1856,7 @@ impl PersistentSession {
                 prepared.projection.receipt().clone(),
             )?;
         let committed = self.adopt_staged_declaration_in(staged);
-        if committed.is_ok()
-            || committed
-                .as_ref()
-                .is_err_and(|error| error.published_declaration_commit().is_some())
-        {
+        if committed.is_ok() {
             settle_checked_snapshot(
                 self,
                 &mut state,
