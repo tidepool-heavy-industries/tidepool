@@ -349,6 +349,7 @@ fn check_observation(
 }
 
 async fn run_history(history: &History, coverage: &mut Coverage) {
+    crate::request::test_support::fresh_history();
     coverage.replay_callbacks += 1;
     let registry = Arc::new(RequestRegistry::default());
     let request_slot = Arc::new(parking_lot::Mutex::new(None));
