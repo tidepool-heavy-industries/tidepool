@@ -670,6 +670,19 @@ impl TestCampaign {
         .unwrap_or_else(|_| panic!("timed out after {limit:?} during {what}"))
     }
 
+    /// A terminal child cannot produce the typed activation being awaited.
+    pub async fn await_native_activation(
+        &mut self,
+        actor: exomonad_actor::ActorRef,
+        what: &str,
+        limit: Duration,
+    ) -> exomonad_actor::ResidentActivation {
+        self.next_deployment(what, limit, |event| {
+            native_activation_event(actor, what, event)
+        })
+        .await
+    }
+
     /// This campaign has no provider process. Acknowledge the exact spawn
     /// after its native policy and workspace attachment are installed.
     pub fn acknowledge_native_spawn(
@@ -963,6 +976,25 @@ pub(super) fn explicit_display_text(response: &serde_json::Value) -> &str {
     );
     assert!(display["output"]["run"].as_str().is_some(), "{response}");
     display["text"].as_str().unwrap()
+}
+
+fn native_activation_event(
+    actor: exomonad_actor::ActorRef,
+    what: &str,
+    event: LocalResidentDeployment,
+) -> Result<exomonad_actor::ResidentActivation, LocalResidentDeployment> {
+    match event {
+        LocalResidentDeployment::SessionReady { activation } if activation.id.actor() == actor => {
+            Ok(activation)
+        }
+        LocalResidentDeployment::Retired {
+            actor: retired,
+            terminal,
+        } if retired == actor => {
+            panic!("{what}: {actor:?} retired before activation: {terminal:?}")
+        }
+        other => Err(other),
+    }
 }
 
 pub(super) async fn dispatch_haskell_script(
@@ -1870,6 +1902,59 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn native_activation_selection_preserves_unrelated_retirement_and_refuses_exact_terminal() {
+        let expected = exomonad_actor::ActorRef {
+            id: exomonad_actor::ActorId(2),
+            incarnation: exomonad_actor::Incarnation(1),
+        };
+        let terminal = exomonad_actor::ActorTerminal {
+            kind: exomonad_actor::ActorExitKind::Failed,
+            summary: "native activation compiler ownership failed".into(),
+            diagnostic: None,
+        };
+        for unrelated in [
+            exomonad_actor::ActorRef {
+                id: exomonad_actor::ActorId(3),
+                ..expected
+            },
+            exomonad_actor::ActorRef {
+                incarnation: exomonad_actor::Incarnation(2),
+                ..expected
+            },
+        ] {
+            let event = LocalResidentDeployment::Retired {
+                actor: unrelated,
+                terminal: terminal.clone(),
+            };
+            let retained = native_activation_event(expected, "activation control", event)
+                .err()
+                .expect("unrelated retirement remains available to its consumer");
+            assert!(
+                matches!(retained, LocalResidentDeployment::Retired { actor, terminal: retained }
+                if actor == unrelated && retained.summary == terminal.summary && retained.kind == terminal.kind)
+            );
+        }
+        let failure = std::panic::catch_unwind(|| {
+            native_activation_event(
+                expected,
+                "activation control",
+                LocalResidentDeployment::Retired {
+                    actor: expected,
+                    terminal,
+                },
+            )
+        })
+        .err()
+        .expect("the exact terminal actor cannot produce activation");
+        let message = failure.downcast_ref::<String>().unwrap();
+        assert!(message.contains("activation control"), "{message}");
+        assert!(
+            message.contains("native activation compiler ownership failed"),
+            "{message}"
+        );
     }
 
     #[tokio::test]

@@ -60,12 +60,8 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
             COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
         ).await;
         assert_eq!(setup["status"], "committed", "{setup}");
-        campaign.next_deployment("source producer typed activation", Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::SessionReady { activation }
-                    if activation.id.actor() == producer.actor.identity() => Ok(activation),
-                other => Err(other),
-            }).await;
+        campaign.await_native_activation(producer.actor.identity(),
+            "source producer typed activation", Duration::from_secs(120)).await;
         assert_eq!(campaign.forest.actor_session(producer.actor.identity()), Some(root_session),
             "captured-context producer retains its issuing machine");
         let first = dispatch_haskell_script_with_deadline(producer.policy.as_ref(),
@@ -189,17 +185,10 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                 assert_eq!(setup["status"], "committed", "{setup}");
                 let root_id = campaign.actor.identity();
                 campaign
-                    .next_deployment(
+                    .await_native_activation(
+                        child_id,
                         "callable child typed activation",
                         Duration::from_secs(120),
-                        |event| match event {
-                            LocalResidentDeployment::SessionReady { activation }
-                                if activation.id.actor() == child_id =>
-                            {
-                                Ok(activation)
-                            }
-                            other => Err(other),
-                        },
                     )
                     .await;
                 let replied = dispatch_haskell_script(child.policy.as_ref(), reply_source).await;
