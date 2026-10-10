@@ -126,9 +126,14 @@ fn existing_key_corruption_and_storage_errors_keep_their_types() {
     );
     struct Refused;
     impl Serialize for Refused {
-        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok,S::Error> { Err(serde::ser::Error::custom("refused leaf encoding")) }
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("refused leaf encoding"))
+        }
     }
-    assert!(matches!(materializer.materialize_value(&Refused), Err(SnapshotError::Malformed(_))));
+    assert!(matches!(
+        materializer.materialize_value(&Refused),
+        Err(SnapshotError::Malformed(_))
+    ));
     struct BrokenStore;
     impl Blockstore for BrokenStore {
         fn get(&self, _: &Cid) -> anyhow::Result<Option<Vec<u8>>> {

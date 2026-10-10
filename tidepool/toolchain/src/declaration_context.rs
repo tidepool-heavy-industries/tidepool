@@ -8374,8 +8374,7 @@ mod tests {
                     0 => previous.clone(),
                     1 => left.clone(),
                     2 => {
-                        let roots = previous.compiler_input_roles().into_iter().map(|role| role.interface()).collect();
-                        previous.select_interface_roots(roots).unwrap()
+                        previous.clone().with_compiler_input_projection(previous.compiler_input_projection().interface_only()).unwrap()
                     },
                     3 => empty.clone(),
                     4 => right.clone(),
@@ -8420,6 +8419,74 @@ mod tests {
                 proptest::prop_assert_eq!(restored.snapshot().graph_selection().unwrap(),context.snapshot().graph_selection().unwrap());
             }
         }
+    }
+
+    #[test]
+    fn small_lexical_edit_materializes_only_changed_fact_paths() {
+        use crate::exact_context::{hydrate_context, Materializer};
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        let inventory = ArtifactInventory::default();
+        let entries = (0..512)
+            .map(|index| {
+                Arc::new(ArtifactEntry::canonical(
+                    crate::certified_products::fixture_module_interface(
+                        [7; 32],
+                        "fixture",
+                        &format!("Owner{index:04}"),
+                        BTreeMap::new(),
+                    ),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), entries)
+            .unwrap();
+        let lexical = (0..512)
+            .map(|index| ExactLexicalNode {
+                owner: identity("fixture", &format!("Owner{index:04}")),
+                imports: vec![],
+            })
+            .collect::<Vec<_>>();
+        let context = ExactDeclarationContext::from_authenticated_execution(
+            [7; 32],
+            &view,
+            projection,
+            lexical.clone(),
+            identity("fixture", "Owner0000"),
+            &[],
+        )
+        .unwrap();
+        let store = MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let base = materializer
+            .materialize_context(None, &context.snapshot())
+            .unwrap();
+        let initial = materializer.finish().unwrap();
+        let baseline_bytes = initial.metrics().staged_bytes;
+        for (cid, bytes) in initial.into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let mut changed = lexical;
+        changed[256].imports.push(identity("fixture", "Owner0000"));
+        let next = context.extend(&[], &[], changed).unwrap();
+        let mut materializer = Materializer::new(&store);
+        let result = materializer
+            .materialize_context(Some(&base), &next.snapshot())
+            .unwrap();
+        let packet = materializer.finish().unwrap();
+        assert_eq!(packet.metrics().changed_entries, 1);
+        assert!(packet.metrics().staged_bytes < baseline_bytes / 8);
+        assert!(packet.metrics().blocks < 12);
+        eprintln!(
+            "512 lexical/role facts: baseline_staged_bytes={baseline_bytes}, edit={:?}",
+            packet.metrics()
+        );
+        for (cid, bytes) in packet.into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let restored = hydrate_context(&store, result.root()).unwrap();
+        assert_eq!(restored.snapshot().lexical(), next.lexical_graph());
     }
 
     #[test]
