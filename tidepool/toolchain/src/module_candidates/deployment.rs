@@ -485,6 +485,21 @@ impl ConfiguredModulePackageOwner {
 pub(super) struct DecodedDeploymentRecord {
     record: Record,
     product: Arc<tidepool_repr::execution_schema::RawModuleProduct>,
+    artifacts: std::sync::OnceLock<Arc<DeploymentArtifactPaths>>,
+}
+
+/// Compiler paths issued once from acquired original bytes. Cloned canonical
+/// owners retain these paths after the run or an earlier offer is released.
+#[derive(Debug)]
+pub(crate) struct DeploymentArtifactPaths {
+    _directory: Arc<tempfile::TempDir>,
+    pub(super) interface: PathBuf,
+    pub(super) packages: PathBuf,
+    pub(super) product: PathBuf,
+    pub(super) canonical_root: PathBuf,
+    pub(super) canonical: crate::recovery_artifacts::RecoveryModuleInterfaceRef,
+    pub(super) graph: Option<([u8; 32], PathBuf)>,
+    pub(crate) origins: crate::declaration_context::original_inputs::OwnedOriginalInputOrigins,
 }
 
 impl DecodedDeploymentRecord {
@@ -501,6 +516,7 @@ impl DecodedDeploymentRecord {
         Ok(Self {
             record,
             product: Arc::new(product),
+            artifacts: std::sync::OnceLock::new(),
         })
     }
 
@@ -510,6 +526,10 @@ impl DecodedDeploymentRecord {
 
     pub(super) fn product(&self) -> &Arc<tidepool_repr::execution_schema::RawModuleProduct> {
         &self.product
+    }
+
+    pub(super) fn artifacts(&self) -> Option<&Arc<DeploymentArtifactPaths>> {
+        self.artifacts.get()
     }
 }
 
@@ -714,6 +734,7 @@ impl DeploymentModulePackage {
         let mut package = Self::read_catalog_with_inventory(path, authority, policy, &inventory)?;
         // Validate configured products before candidate admission.
         package.records = package.read_records(package.producer_identity(), inventory)?;
+        package.materialize_originals()?;
         crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
         Ok(package)
     }
@@ -851,17 +872,158 @@ impl DeploymentModulePackage {
         Ok(self
             .records
             .iter()
-            .zip(&self.catalog.modules)
-            .map(|(record, files)| {
+            .map(|record| {
+                let artifacts = record
+                    .artifacts()
+                    .expect("acquired catalog materialization");
                 (
                     CandidateRecord::Deployment(Arc::clone(record)),
                     super::CandidateOrigin::Deployment {
-                        interface: self.artifact_root.join(&files.interface.path),
-                        packages: self.artifact_root.join(&files.packages.path),
+                        interface: artifacts.interface.clone(),
+                        packages: artifacts.packages.clone(),
                     },
                 )
             })
             .collect())
+    }
+
+    fn materialize_originals(&self) -> Result<(), ModulePackageError> {
+        use crate::declaration_context::original_inputs::{
+            OriginalInputKind as Kind, OriginalInputOrigin, OwnedOriginalInputOrigins,
+        };
+        let directory =
+            Arc::new(tempfile::tempdir().map_err(|e| io(Path::new("catalog inputs"), e))?);
+        let root = directory.path();
+        let inventory = Arc::new(InventoryOperation::new(super::product_decode_limits()));
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
+            Arc::clone(&inventory),
+        );
+        for (record, files) in self.records.iter().zip(&self.catalog.modules) {
+            crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
+            let native_directory =
+                PathBuf::from("native").join(super::hex(&record.original_owner.module_version));
+            let interface = write_ref(
+                root,
+                native_directory.join("original.hi"),
+                &record.interface,
+                RECORD_LIMIT,
+                &inventory,
+            )?;
+            let packages = write_ref(
+                root,
+                native_directory.join("original.packages"),
+                &record.package_imports,
+                RECORD_LIMIT,
+                &inventory,
+            )?;
+            let product = write_ref(
+                root,
+                native_directory.join("original.tpmod"),
+                &record.products,
+                super::PRODUCT_MODULE_MAX_BYTES,
+                &inventory,
+            )?;
+            let canonical_owner = record
+                .module_interface_proof
+                .as_ref()
+                .ok_or(ModulePackageError::Format("canonical input custody"))?;
+            let canonical = crate::recovery_artifacts::materialize_module_interface(
+                root,
+                canonical_owner,
+                &mut validation,
+                crate::recovery_artifacts::MaterializationMode::Scratch,
+            )
+            .map_err(canonical_error)?;
+            let mut origins = Vec::new();
+            let mut origin = |kind, relative: &Path, digest, bytes| {
+                origins.push(OriginalInputOrigin {
+                    kind,
+                    path: self.artifact_root.join(relative),
+                    sha256: digest,
+                    bytes,
+                });
+            };
+            origin(
+                Kind::Interface,
+                &files.interface.path,
+                record.original_owner.skinny_iface_sha256,
+                record.interface.len() as u64,
+            );
+            origin(
+                Kind::Packages,
+                &files.packages.path,
+                super::parse_sha(&files.packages.sha256)
+                    .ok_or(ModulePackageError::Format("package input seal"))?,
+                files.packages.length,
+            );
+            origin(
+                Kind::Native,
+                &files.products.path,
+                record.original_owner.product_sha256,
+                files.products.length,
+            );
+            let companion = &files.module_interface;
+            if companion.interface.interface_path != files.interface.path {
+                origin(
+                    Kind::Interface,
+                    &companion.interface.interface_path,
+                    canonical_owner.interface_sha256(),
+                    canonical_owner.interface_bytes().len() as u64,
+                );
+            }
+            if companion.interface.package_imports_path != files.packages.path {
+                origin(
+                    Kind::Packages,
+                    &companion.interface.package_imports_path,
+                    canonical_owner.package_imports_sha256(),
+                    canonical_owner.package_imports_bytes().len() as u64,
+                );
+            }
+            origin(
+                Kind::Certificate,
+                &companion.certificate_path,
+                companion.certificate_sha256,
+                canonical_owner.certificate_bytes().len() as u64,
+            );
+            if let Some(core) = &companion.core {
+                origin(Kind::Core, &core.path, core.sha256, core.bytes);
+            }
+            if let Some(digest) = record.execution_source_sha256 {
+                let reference = self
+                    .catalog
+                    .execution_graphs
+                    .iter()
+                    .find(|reference| super::parse_sha(&reference.sha256) == Some(digest))
+                    .ok_or(ModulePackageError::Format("execution input custody"))?;
+                origin(Kind::Graph, &reference.path, digest, reference.length);
+            }
+            let graph = record
+                .execution_source
+                .as_ref()
+                .map(|graph| {
+                    graph
+                        .capture_descriptor(root)
+                        .map(|path| (graph.digest(), path))
+                        .map_err(|error| io(root, error))
+                })
+                .transpose()?;
+            let origins = OwnedOriginalInputOrigins::from_authenticated_acquisition(origins)
+                .map_err(|_| ModulePackageError::Format("original input origins"))?;
+            record
+                .artifacts
+                .set(Arc::new(DeploymentArtifactPaths {
+                    _directory: Arc::clone(&directory),
+                    interface: root.join(interface.path),
+                    packages: root.join(packages.path),
+                    product: root.join(product.path),
+                    canonical_root: root.to_owned(),
+                    canonical,
+                    graph,
+                    origins,
+                }))
+                .map_err(|_| ModulePackageError::Format("original inputs already materialized"))?;
+        }
+        Ok(())
     }
 
     fn read_records(

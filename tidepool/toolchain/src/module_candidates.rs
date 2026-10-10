@@ -367,6 +367,7 @@ pub(crate) struct CandidateSet {
     pub manifest_path: PathBuf,
     pub by_owner: BTreeMap<(String, String), CandidateBundle>,
     pub(crate) native_availability: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
+    pub(crate) catalog_owner: Option<Arc<deployment::DeploymentModulePackage>>,
 }
 
 /// Emit receipt-derived evidence only after products and target owners passed
@@ -501,6 +502,12 @@ impl std::ops::Deref for CandidateRecord {
 }
 
 impl CandidateRecord {
+    fn acquired_artifacts(&self) -> Option<&Arc<deployment::DeploymentArtifactPaths>> {
+        match self {
+            Self::Deployment(record) => record.artifacts(),
+            Self::Encoded(_) => None,
+        }
+    }
     fn product(&mut self, decoded: Arc<RawModuleProduct>) -> CandidateProduct {
         let bytes = match self {
             Self::Encoded(record) => {
@@ -2018,7 +2025,10 @@ fn select_acquired_inner(
         );
     }
     crate::host_work::checkpoint().map_err(deployment::ModulePackageError::Interrupted)?;
-    let selected = select_records_inner(endpoint_identity, include, scratch, records, context);
+    let mut selected = select_records_inner(endpoint_identity, include, scratch, records, context);
+    if let Some(selected) = &mut selected {
+        selected.catalog_owner = package.cloned();
+    }
     // Internal optional-record readers can refuse a record. A stopped scoped
     // operation must escape this policy front door as interruption, never a miss.
     if selected.is_none() {
@@ -2396,8 +2406,9 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                 graph_bytes = next_graph_bytes;
                 graph
             };
-            if validate_original_execution(&record, Arc::clone(&graph), &mut package_validation)
-                .is_none()
+            if record.acquired_artifacts().is_none()
+                && validate_original_execution(&record, Arc::clone(&graph), &mut package_validation)
+                    .is_none()
             {
                 if omit_or_refuse_candidate(
                     &origin,
@@ -2447,6 +2458,10 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             },
             (None, None) => continue,
         };
+        let canonical = match record.acquired_artifacts() {
+            Some(custody) => canonical.with_catalog_input_custody(Arc::clone(custody)),
+            None => canonical,
+        };
         let Some(source_sha256) = parse_sha(&record.source_sha256) else {
             if omit_or_refuse_candidate(
                 &origin,
@@ -2459,7 +2474,9 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             }
             continue;
         };
-        if let Err(error) =
+        if let Err(error) = if record.acquired_artifacts().is_some() {
+            Ok(())
+        } else {
             crate::certified_products::validate_canonical_native_bytes_with_operation(
                 &computed_owner(&record),
                 &record.original_certification,
@@ -2469,7 +2486,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                 &canonical,
                 &package_validation.inventory,
             )
-        {
+        } {
             let reason = if operation_budget_error(&error) {
                 CacheOfferOmission::OperationBudget
             } else {
@@ -2620,7 +2637,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             );
             continue;
         }
-        let product_sha: [u8; 32] = Sha256::digest(&record.products).into();
+        let product_sha = record.original_owner.product_sha256;
         let Some(evidence_sha) = record.evidence.json_sha256().map(|digest| hex(&digest)) else {
             continue;
         };
@@ -2668,13 +2685,22 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             }
         };
         let canonical = &record.canonical;
-        let canonical_reference = crate::recovery_artifacts::materialize_module_interface(
-            &scratch,
-            canonical,
-            &mut package_validation,
-            crate::recovery_artifacts::MaterializationMode::Scratch,
-        )
-        .ok()?;
+        let (canonical_root, canonical_reference) = match record.record.acquired_artifacts() {
+            Some(artifacts) => (
+                artifacts.canonical_root.clone(),
+                artifacts.canonical.clone(),
+            ),
+            None => (
+                scratch.clone(),
+                crate::recovery_artifacts::materialize_module_interface(
+                    &scratch,
+                    canonical,
+                    &mut package_validation,
+                    crate::recovery_artifacts::MaterializationMode::Scratch,
+                )
+                .ok()?,
+            ),
+        };
         let core_reference = canonical_reference.core.as_ref()?;
         let bundle = CandidateBundle {
             owner: owner.clone(),
@@ -2704,9 +2730,15 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             return None;
         }
         let selected = &by_owner[&(record.unit.clone(), record.module.clone())];
-        let product_path =
-            scratch.join(format!("candidate-{}.tpmod", hex(&owner.module_version.0)));
-        tidepool_atomic_write::write_best_effort(&product_path, selected.product.bytes()).ok()?;
+        let product_path = match selected.product.bytes {
+            CandidateProductBytes::Deployment(ref record) => record.artifacts()?.product.clone(),
+            CandidateProductBytes::Owned(_) => {
+                let path =
+                    scratch.join(format!("candidate-{}.tpmod", hex(&owner.module_version.0)));
+                tidepool_atomic_write::write_best_effort(&path, selected.product.bytes()).ok()?;
+                path
+            }
+        };
         manifest.push(candidate_manifest_row(CandidateManifestRow {
             unit: &owner.unit,
             module: &owner.module,
@@ -2723,9 +2755,9 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             packages_sha256: &sha(&selected.package_imports_bytes),
             product: &product_path,
             canonical_requirements: canonical.requirements(),
-            certificate: &scratch.join(&canonical_reference.certificate_path),
+            certificate: &canonical_root.join(&canonical_reference.certificate_path),
             certificate_sha256: &canonical_reference.certificate_sha256,
-            core: &scratch.join(&core_reference.path),
+            core: &canonical_root.join(&core_reference.path),
             core_sha256: &core_reference.sha256,
         }));
     }
@@ -2762,7 +2794,18 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             .collect::<BTreeMap<_, _>>()
             .into_iter()
             .map(|(digest, graph)| {
-                let path = graph.capture_descriptor(&scratch).ok()?;
+                let retained = by_owner.values().find_map(|bundle| {
+                    let custody = bundle.original_module_interface.catalog_input_custody()?;
+                    custody
+                        .graph
+                        .as_ref()
+                        .filter(|(seal, _)| *seal == digest)
+                        .map(|(_, path)| path.clone())
+                });
+                let path = match retained {
+                    Some(path) => path,
+                    None => graph.capture_descriptor(&scratch).ok()?,
+                };
                 Some(Value::Array(vec![
                     Value::Text(hex(&digest)),
                     Value::Text(path.to_string_lossy().into_owned()),
@@ -2807,6 +2850,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
         manifest_path,
         by_owner,
         native_availability,
+        catalog_owner: None,
     })
 }
 

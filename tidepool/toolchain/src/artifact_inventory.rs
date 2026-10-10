@@ -1737,6 +1737,25 @@ impl std::fmt::Debug for ArtifactView {
     }
 }
 impl ArtifactView {
+    /// Provenance follows the selected certified payload's issuing owner.
+    pub(crate) fn original_input_origins(
+        &self,
+        id: ArtifactId,
+    ) -> Vec<crate::declaration_context::original_inputs::OwnedOriginalInputOrigins> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        self.read_projection(&state)
+            .entries
+            .iter()
+            .filter(|entry| entry.descriptor.id == id)
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => product.module_interface(),
+                ArtifactPayload::Canonical(interface) => Some(interface),
+                ArtifactPayload::Interface(_, _) => None,
+            })
+            .filter_map(|interface| interface.original_input_origins().cloned())
+            .collect()
+    }
+
     fn new(lease: ViewLease) -> Self {
         Self {
             lease: Arc::new(lease),

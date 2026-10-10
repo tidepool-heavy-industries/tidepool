@@ -504,6 +504,7 @@ pub(crate) struct CertifiedModuleInterface {
     certificate: Arc<[u8]>,
     core: Option<Arc<[u8]>>,
     origin: CanonicalOrigin,
+    input_custody: Option<Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>>,
 }
 
 impl PartialEq for CertifiedModuleInterface {
@@ -520,6 +521,25 @@ impl PartialEq for CertifiedModuleInterface {
 impl Eq for CertifiedModuleInterface {}
 
 impl CertifiedModuleInterface {
+    pub(crate) fn with_catalog_input_custody(
+        mut self,
+        custody: Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>,
+    ) -> Self {
+        self.input_custody = Some(custody);
+        self
+    }
+
+    pub(crate) fn original_input_origins(
+        &self,
+    ) -> Option<&crate::declaration_context::original_inputs::OwnedOriginalInputOrigins> {
+        self.input_custody.as_ref().map(|custody| &custody.origins)
+    }
+
+    pub(crate) fn catalog_input_custody(
+        &self,
+    ) -> Option<Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>> {
+        self.input_custody.clone()
+    }
     pub(crate) fn origin(&self) -> CanonicalOrigin {
         self.origin.clone()
     }
@@ -1046,6 +1066,7 @@ pub(super) fn issue_interfaces(
             certificate: certificate.into(),
             core: core.map(Into::into),
             origin,
+            input_custody: None,
         });
     }
     Ok(issued)
@@ -1167,6 +1188,7 @@ pub(super) fn recover_interface(
         certificate: certificate.into(),
         core: core.map(Into::into),
         origin,
+        input_custody: None,
     })
 }
 

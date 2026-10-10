@@ -33,7 +33,7 @@ impl OriginalInputKind {
     pub(crate) fn byte_limit(self) -> u64 {
         match self {
             Self::Packages | Self::Certificate => 4 * 1024 * 1024,
-            Self::Graph => 64 * 1024 * 1024,
+            Self::Graph | Self::Native => 64 * 1024 * 1024,
             _ => 32 * 1024 * 1024,
         }
     }

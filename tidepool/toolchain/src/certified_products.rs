@@ -13245,6 +13245,7 @@ pub(crate) mod tests {
         let current = (*a.evidence).clone();
         (
             CandidateSet {
+                catalog_owner: None,
                 manifest_path: root.join("unused.cbor"),
                 by_owner: BTreeMap::from([
                     (("main".into(), "A".into()), a),
