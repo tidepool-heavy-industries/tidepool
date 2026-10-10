@@ -2030,11 +2030,7 @@ impl ArtifactInventory {
                         ArtifactInventoryFailure::NativeRootOutsideView { artifact: original },
                     ));
                 }
-                for group in graph
-                    .native_groups
-                    .iter()
-                    .filter(|group| group.binding.artifact == original)
-                {
+                for group in &graph.native_groups {
                     let node = InventoryNodeKey::Group(*group);
                     if planned.contains_key(&node.logical()) {
                         published_groups
@@ -5222,6 +5218,148 @@ mod tests {
                 );
                 assert_eq!(admitted.capture_graph_selection(), unchanged);
             }
+        }
+    }
+
+    #[test]
+    fn published_original_admission_keeps_transitive_exact_group_choices() {
+        use crate::declaration_context::ExactDeclarationContext;
+        use crate::declaration_join::ExactLexicalNode;
+
+        let inventory = ArtifactInventory::default();
+        let child = issued_native_groups("Child", vec![(7, vec![])], &[], &BTreeMap::new());
+        let root = issued_native_groups(
+            "Root",
+            vec![(7, vec![issued_source(&child, 7)])],
+            &[&child],
+            &BTreeMap::new(),
+        );
+        let target = entry_in_unit("fixture", "Target", vec![]);
+        let carriers = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![
+                    Arc::new(root.clone()),
+                    Arc::new(child.clone()),
+                    Arc::new(target.clone()),
+                ],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let original = inventory
+            .admit_shared_with_demand(
+                &carriers,
+                vec![Arc::new(root.clone())],
+                NativeArtifactDemand::AllGroups,
+            )
+            .unwrap();
+        let sibling = inventory
+            .admit_shared_with_demand(
+                &carriers,
+                vec![
+                    Arc::new(child.clone()),
+                    Arc::new(entry_in_unit("fixture", "Unrelated", vec![])),
+                ],
+                NativeArtifactDemand::AllGroups,
+            )
+            .unwrap();
+        let original_child = original
+            .capture_graph_selection()
+            .native_groups
+            .into_iter()
+            .find(|group| group.binding.artifact == child.descriptor.id)
+            .unwrap();
+        let sibling_child = sibling.capture_graph_selection().native_groups[0];
+        assert_ne!(original_child, sibling_child);
+        let projection = CompilerInputProjection::from_issued_entries(&[
+            Arc::new(root.clone()),
+            Arc::new(child.clone()),
+            Arc::new(target.clone()),
+        ])
+        .unwrap();
+        let lexical = vec![
+            ExactLexicalNode {
+                owner: target.descriptor.owner.clone(),
+                imports: vec![root.descriptor.owner.clone()],
+            },
+            ExactLexicalNode {
+                owner: root.descriptor.owner.clone(),
+                imports: vec![child.descriptor.owner.clone()],
+            },
+            ExactLexicalNode {
+                owner: child.descriptor.owner.clone(),
+                imports: vec![],
+            },
+        ];
+        let issued = ExactDeclarationContext::from_authenticated_execution(
+            [2; 32],
+            &original,
+            projection,
+            lexical.clone(),
+            target.descriptor.owner.clone(),
+            &lexical
+                .iter()
+                .map(|node| node.owner.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let publication = issued
+            .issue_published_source_original("revision", "input", &root.descriptor.owner)
+            .unwrap();
+        let published = publication.context();
+        let expected = published
+            .artifact_view()
+            .capture_graph_selection()
+            .native_groups;
+        assert!(expected.contains(&original_child));
+        assert!(!expected.contains(&sibling_child));
+        for joined in [
+            original.merge(&sibling).unwrap(),
+            sibling.merge(&original).unwrap(),
+        ] {
+            let groups = joined.capture_graph_selection().native_groups;
+            assert!(groups.contains(&original_child));
+            assert!(groups.contains(&sibling_child));
+            let scopes_before = inventory.0.lock().unwrap().selection_plans.len();
+            let admitted = inventory
+                .admit_projected(
+                    &joined,
+                    vec![Arc::new(root.clone())],
+                    published.compiler_input_projection(),
+                )
+                .unwrap();
+            let selected = admitted
+                .select_admission_roots(vec![root.descriptor.id])
+                .unwrap();
+            assert_eq!(selected.capture_graph_selection().native_groups, expected);
+            assert_eq!(
+                inventory.0.lock().unwrap().selection_plans.len(),
+                scopes_before
+            );
+            let recovered_inventory = ArtifactInventory::default();
+            let recovered = recovered_inventory
+                .recover_selection(
+                    &recovered_inventory.empty_view(),
+                    joined.entries(),
+                    &joined.capture_graph_selection(),
+                    &joined.binding_dependencies(),
+                )
+                .unwrap();
+            let repeated = recovered_inventory
+                .admit_projected(
+                    &recovered,
+                    vec![Arc::new(root.clone())],
+                    published.compiler_input_projection(),
+                )
+                .unwrap();
+            assert_eq!(
+                repeated
+                    .select_admission_roots(vec![root.descriptor.id])
+                    .unwrap()
+                    .capture_graph_selection()
+                    .native_groups,
+                expected
+            );
         }
     }
 
