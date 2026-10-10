@@ -284,6 +284,18 @@ impl WorkbenchPublicOwner {
             .is_none_or(|native| native.is_ready())
     }
 
+    pub(crate) fn with_admission<T>(
+        &self,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, ResidentActorWorkbenchError> {
+        match &self.readiness {
+            Some(native) => native.with_admission(operation).map_err(|error| {
+                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+            }),
+            None => Ok(operation()),
+        }
+    }
+
     pub(crate) fn is_current(&self) -> bool {
         self.readiness
             .as_ref()
