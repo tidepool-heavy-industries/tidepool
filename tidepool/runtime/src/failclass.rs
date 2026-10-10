@@ -88,8 +88,12 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         }
         // The declaration source is valid; its durable recovery artifact is
         // missing, corrupt, or incompatible with this runtime.
-        SessionError::RecoveryManifest { .. } | SessionError::RecoveryFormatRefused { .. }
-        | SessionError::RecoveryStore(_) | SessionError::RecoverySnapshot(_) | SessionError::RecoveryArtifacts(_) => {
+        SessionError::RecoveryManifest { .. }
+        | SessionError::RecoveryFormatRefused { .. }
+        | SessionError::RecoveryStore(_)
+        | SessionError::RecoveryStoreRefused(_)
+        | SessionError::RecoverySnapshot(_)
+        | SessionError::RecoveryArtifacts(_) => {
             FailureEnvelope::new(FailureClass::Infra, Phase::Run, err.to_string())
         }
         // Admission resource refusal is distinct from immutable artifact loss.

@@ -1075,10 +1075,7 @@ impl RuntimeCheckedPrefix {
             .as_ref()
             .map(|store| store.lease_admission())
             .transpose()
-            .map_err(|error| SessionError::RecoveryManifest {
-                path: error.path.clone(),
-                detail: error.to_string(),
-            })?;
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         state.in_flight = Some(execution);
         Ok(prepared)
     }
@@ -1612,10 +1609,7 @@ impl PersistentSession {
             .as_ref()
             .map(|store| store.lease_admission())
             .transpose()
-            .map_err(|error| SessionError::RecoveryManifest {
-                path: error.path.clone(),
-                detail: error.to_string(),
-            })?;
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         // Mounting a host payload never executes or completes the placeholder.
         state.reservation = None;
         Ok(())
@@ -1723,10 +1717,7 @@ impl PersistentSession {
             .as_ref()
             .map(|store| store.lease_admission())
             .transpose()
-            .map_err(|error| SessionError::RecoveryManifest {
-                path: error.path.clone(),
-                detail: error.to_string(),
-            })?;
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         state.reservation = Some(reservation);
         drop(state);
         Ok(prepared)
@@ -2240,10 +2231,7 @@ impl PersistentSession {
                 .as_ref()
                 .map(|store| store.lease_admission())
                 .transpose()
-                .map_err(|error| SessionError::RecoveryManifest {
-                    path: error.path.clone(),
-                    detail: error.to_string(),
-                })?;
+                .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             self.lib_mut()
                 .seed_scope(public_scope, admitted.declaration_tip);
             self.mint_detached_scope(public_scope)
@@ -2277,10 +2265,7 @@ impl PersistentSession {
             .as_ref()
             .map(|store| store.lease_admission())
             .transpose()
-            .map_err(|error| SessionError::RecoveryManifest {
-                path: error.path.clone(),
-                detail: error.to_string(),
-            })?;
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         Ok(prepared)
     }
 
@@ -2515,10 +2500,7 @@ impl PersistentSession {
                 .as_ref()
                 .map(|store| store.lease_admission())
                 .transpose()
-                .map_err(|error| SessionError::RecoveryManifest {
-                    path: error.path.clone(),
-                    detail: error.to_string(),
-                })?;
+                .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             self.ensure_machine_incarnation();
         }
         let visibility = self
@@ -2577,10 +2559,7 @@ impl PersistentSession {
                 .as_ref()
                 .map(|store| store.lease_admission())
                 .transpose()
-                .map_err(|error| SessionError::RecoveryManifest {
-                    path: error.path.clone(),
-                    detail: error.to_string(),
-                })?;
+                .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             self.retain_lexical_scope(scope)?
         };
         if self.lib().durable_graph.is_some() {
@@ -2778,10 +2757,7 @@ impl PersistentSession {
             .as_ref()
             .map(|store| store.lease_admission())
             .transpose()
-            .map_err(|error| SessionError::RecoveryManifest {
-                path: error.path.clone(),
-                detail: error.to_string(),
-            })?;
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         self.set_val_gen(last_value_generation);
         Ok(prepared)
     }

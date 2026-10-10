@@ -429,12 +429,12 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
                     prefix.admission().visibility().scope,
                     native.unwrap()
                 ),
-                Err(crate::session::SessionError::RecoveryManifest { .. })
+                Err(crate::session::SessionError::RecoveryStore(_))
             ));
         } else {
             assert!(matches!(
                 session.admit_checked_item(prefix.clone(), item),
-                Err(crate::session::SessionError::RecoveryManifest { .. })
+                Err(crate::session::SessionError::RecoveryStore(_))
             ));
         }
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);

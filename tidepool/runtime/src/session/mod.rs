@@ -39,11 +39,11 @@ mod publication;
 mod recovery;
 mod recovery_hydration;
 pub mod recovery_store;
+pub use recovery_hydration::{RecoveryRunAuthority, RecoverySuccessorAuthority};
 pub use recovery_store::{
     DomainSnapshotRoot, PublicSurfaceRoot, RecoveryDomainId, RecoveryDomainState,
     RecoveryPublicOwnerState, RecoverySnapshotIdentity, RunRecoveryStore, StoreRevision,
 };
-pub use recovery_hydration::{RecoveryRunAuthority, RecoverySuccessorAuthority};
 pub mod registry;
 pub mod render;
 pub mod resident;
@@ -420,6 +420,8 @@ pub enum SessionError {
     StaleStagedDeclaration,
     #[error(transparent)]
     RecoveryStore(Box<recovery_store::StoreError>),
+    #[error(transparent)]
+    RecoveryStoreRefused(recovery_store::StoreRefusal),
     #[error(transparent)]
     RecoverySnapshot(Box<tidepool_toolchain::exact_context::SnapshotError>),
     #[error(transparent)]
@@ -1100,10 +1102,7 @@ impl SessionLib {
                 state
                     .store
                     .ensure_ready()
-                    .map_err(|error| SessionError::RecoveryManifest {
-                        path: state.path.clone(),
-                        detail: error.to_string(),
-                    })?;
+                    .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
                 Ok(state.allocation_ceiling)
             }
             None => Ok(self.log.generation()),
@@ -1411,10 +1410,7 @@ impl SessionLib {
             })?;
         if let Err(error) = state.store.ensure_ready() {
             self.generation_lease = None;
-            return Err(SessionError::RecoveryManifest {
-                path: state.path.clone(),
-                detail: error.to_string(),
-            });
+            return Err(SessionError::RecoveryStore(Box::new(error)));
         }
         let prepared =
             self.log
@@ -1432,10 +1428,7 @@ impl SessionLib {
                 Ok(admission) => admission,
                 Err(error) => {
                     self.generation_lease = None;
-                    return Err(SessionError::RecoveryManifest {
-                        path: state.path.clone(),
-                        detail: error.to_string(),
-                    });
+                    return Err(SessionError::RecoveryStore(Box::new(error)));
                 }
             };
             self.local_generation_issued = true;
@@ -1465,10 +1458,7 @@ impl SessionLib {
             Ok(admission) => admission,
             Err(error) => {
                 self.generation_lease = None;
-                return Err(SessionError::RecoveryManifest {
-                    path: state.path.clone(),
-                    detail: error.to_string(),
-                });
+                return Err(SessionError::RecoveryStore(Box::new(error)));
             }
         };
         self.generation_lease = Some(generation_lease::GenerationRangeLease::confirmed(ceiling));
@@ -1498,17 +1488,11 @@ impl SessionLib {
                 Ok(allocation_ceiling)
             }
             recovery_store::StoreDisposition::Refused(error) => {
-                Err(SessionError::RecoveryManifest {
-                    path: state.path.clone(),
-                    detail: format!("{error:?}"),
-                })
+                Err(SessionError::RecoveryStoreRefused(error))
             }
             recovery_store::StoreDisposition::RecoveryRequired(error) => {
                 self.generation_lease = None;
-                Err(SessionError::RecoveryManifest {
-                    path: state.path.clone(),
-                    detail: error.to_string(),
-                })
+                Err(SessionError::RecoveryStore(Box::new(error)))
             }
         }
     }
@@ -1530,10 +1514,7 @@ impl SessionLib {
         state
             .store
             .ensure_ready()
-            .map_err(|error| SessionError::RecoveryManifest {
-                path: state.path.clone(),
-                detail: error.to_string(),
-            })?;
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         if self.local_generation_issued {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
@@ -1571,10 +1552,7 @@ impl SessionLib {
         state
             .unconfirmed
             .confirm()
-            .map_err(|error| SessionError::RecoveryManifest {
-                path: state.path.clone(),
-                detail: error.to_string(),
-            })?;
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         Ok(())
     }
 
@@ -2756,13 +2734,9 @@ impl SessionLib {
             let store = self
                 .held_recovery_store()?
                 .expect("attached store preflighted");
-            let _admission =
-                store
-                    .lease_admission()
-                    .map_err(|error| SessionError::RecoveryManifest {
-                        path: error.path.clone(),
-                        detail: error.to_string(),
-                    })?;
+            let _admission = store
+                .lease_admission()
+                .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             assert!(self.log.commit_reserved_authored(generation, turn));
             self.set_scope_tip_in(scope, generation);
             Ok(generation)
