@@ -3,8 +3,8 @@
 -- Original source recipes supplement GHC splice execution. Their identities
 -- never authorize a lexical import or replace a retained native interface.
 module Tidepool.ExecutionSource
-  ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
-  , ExecutionSourceRef(..), decodeExecutionSourceGraph, decodeExecutionSourceReferences, executionIdentityKey
+  ( ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
+  , ExecutionSourceRef(..), decodeExecutionSourceGraph, decodeExecutionSourceBody, decodeExecutionSourceReferences, executionIdentityKey
   , executionSourceInheritedOwners
   , ExecutionSourceNode(..), ExecutionSourceFailure(..), ExecutionSourceValidationStage(..)
   , ExecutionSourceInterfaceReason(..), executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure
@@ -36,6 +36,7 @@ import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
 import System.Directory (getFileSize)
 import System.FilePath (isAbsolute)
 import System.IO (IOMode(ReadMode), withBinaryFile)
+import Tidepool.ArtifactBytes
 import Tidepool.DependencyEvidence
 import Tidepool.Session (isReservedSessionModuleName)
 import Tidepool.Timing (emitCount, readTimingEnabled)
@@ -98,8 +99,7 @@ executionSourceInheritedOwners references originals = do
         _ -> Left (ExecutionSourceConflicting key)
 
 data ExecutionSourceGraph = ExecutionSourceGraph
-  { executionGraphSha256 :: String
-  , executionGraphBytes :: BS.ByteString
+  { executionGraphBody :: ArtifactBytes
   , executionGraphProducer :: String
   , executionGraphSemantic :: Maybe String
   , executionGraphIncludes :: [FilePath]
@@ -109,6 +109,12 @@ data ExecutionSourceGraph = ExecutionSourceGraph
   , executionGraphExactImports :: [((String, String), [(String, String)])]
   , executionGraphPackages :: [(String, String, FilePath, String)]
   }
+
+executionGraphSha256 :: ExecutionSourceGraph -> String
+executionGraphSha256 = artifactSha256 . executionGraphBody
+
+executionGraphBytes :: ExecutionSourceGraph -> BS.ByteString
+executionGraphBytes = artifactBytes . executionGraphBody
 
 -- A successful compiler transaction supplies the same original recipe fields
 -- consumed by the wire decoder. Native/interface identities are the already
@@ -160,7 +166,7 @@ issueExecutionSourceRecipe recipe
   | not completeOwners || not generatedMatches || not validOriginals || not validExactImports =
       Left (ExecutionSourceIncomplete ("", "transaction execution recipe"))
   | BS.length bytes > limit = Right Nothing
-  | otherwise = case deserialiseFromBytes (decodeGraph (digest bytes) bytes) (BL.fromStrict bytes) of
+  | otherwise = case deserialiseFromBytes (decodeGraph (captureArtifactBytes bytes)) (BL.fromStrict bytes) of
       Right (remaining, graph) | BL.null remaining -> Right (Just graph)
       _ -> Left (ExecutionSourceIncomplete ("", "transaction execution recipe"))
   where
@@ -240,7 +246,7 @@ issueExecutionSourceRecipe recipe
           <> text' path <> text' sha) (recipePackages recipe)
 
 instance Eq ExecutionSourceGraph where
-  left == right = executionGraphBytes left == executionGraphBytes right
+  left == right = executionGraphBody left == executionGraphBody right
 
 instance Show ExecutionSourceGraph where
   show graph = "ExecutionSourceGraph " ++ show (executionGraphSha256 graph)
@@ -607,8 +613,15 @@ readExecutionSourceGraphsWithFacts readFacts manifest descriptors = do
 decodeExecutionSourceGraph :: String -> BS.ByteString -> Either String ExecutionSourceGraph
 decodeExecutionSourceGraph sha bytes
   | BS.length bytes > executionSourceGraphBytesLimit = Left "original execution graphs exceed 64 MiB"
-  | digest bytes /= sha = Left "original execution graph digest differs"
-  | otherwise = case deserialiseFromBytes (decodeGraph sha bytes) (BL.fromStrict bytes) of
+  | otherwise = do
+      let body = captureArtifactBytes bytes
+      unless (artifactSha256 body == sha) (Left "original execution graph digest differs")
+      decodeExecutionSourceBody body
+
+decodeExecutionSourceBody :: ArtifactBytes -> Either String ExecutionSourceGraph
+decodeExecutionSourceBody body
+  | artifactLength body > executionSourceGraphBytesLimit = Left "original execution graphs exceed 64 MiB"
+  | otherwise = case deserialiseFromBytes (decodeGraph body) (BL.fromStrict (artifactBytes body)) of
       Left reason -> Left (show reason)
       Right (remaining, graph)
         | BL.null remaining -> Right graph
@@ -620,8 +633,8 @@ decodeExecutionSourceReferences = do
   unique "original execution references" (map (executionIdentityKey . executionRefIdentity) references)
   pure references
 
-decodeGraph :: String -> BS.ByteString -> Decoder s ExecutionSourceGraph
-decodeGraph sha bytes = do
+decodeGraph :: ArtifactBytes -> Decoder s ExecutionSourceGraph
+decodeGraph body = do
   array 11
   magic <- text
   version <- decodeWord
@@ -689,7 +702,7 @@ decodeGraph sha bytes = do
   unless (not (null sources) && not (null modules) && not (null owners))
     (fail "empty original execution source proof")
   let evidence = DependencyEvidence safe complete sources resolutions packages modules
-  pure (ExecutionSourceGraph sha bytes producer semantic includes (origin,source) evidence owners exactImports roots)
+  pure (ExecutionSourceGraph body producer semantic includes (origin,source) evidence owners exactImports roots)
 
 withEdgeBudget :: Int -> Int -> (Int -> Decoder s (a, Int)) -> Decoder s [a]
 withEdgeBudget limit budget item = do

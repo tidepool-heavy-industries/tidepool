@@ -67,7 +67,7 @@ module Tidepool.Session
   , injectSessionIface
   , injectSessionIfaceWithBindings
   , injectSessionScope, registerSessionInterfaceLocation
-  , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence
+  , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionInterfaceBody, capturedSessionInterfaceEvidenceBodies
   , injectSessionScopeWithCaptures
     -- * Persistent binder identity
   , sessionBinderName
@@ -81,6 +81,7 @@ module Tidepool.Session
   , evalUserBinder
   ) where
 
+import Tidepool.ArtifactBytes
 import Tidepool.Timing (readTimingEnabled, emitCount)
 import Tidepool.BoundedRead (readFileAtMost)
 import GHC.Driver.Env
@@ -340,18 +341,25 @@ injectSessionIface root sm hsc0 = fst <$> liftIO (injectSessionIfaceWithCapture 
 
 -- | The exact thin-interface bytes consumed by this injection. This snapshot
 -- proves a type dependency; it carries neither source nor executable Core.
-data CapturedSessionInterface = CapturedSessionInterface Module BS.ByteString
-  (Maybe (BS.ByteString, BS.ByteString, [(String,String)]))
+data CapturedSessionInterface = CapturedSessionInterface Module ArtifactBytes
+  (Maybe (ArtifactBytes, ArtifactBytes, [(String,String)]))
 
 capturedSessionInterface :: CapturedSessionInterface -> (Module, BS.ByteString)
-capturedSessionInterface (CapturedSessionInterface owner bytes _) = (owner, bytes)
+capturedSessionInterface (CapturedSessionInterface owner bytes _) = (owner, artifactBytes bytes)
+
+capturedSessionInterfaceBody :: CapturedSessionInterface -> (Module, ArtifactBytes)
+capturedSessionInterfaceBody (CapturedSessionInterface owner body _) = (owner,body)
 
 -- The tuple preserves the existing issuer's package and nominal-requirement
 -- sidecars alongside the decoded binding types. Absence grants no complete
 -- value artifact; metadata-only injection can still use a bare interface.
 capturedSessionInterfaceEvidence
   :: CapturedSessionInterface -> Maybe (BS.ByteString, BS.ByteString, [(String,String)])
-capturedSessionInterfaceEvidence (CapturedSessionInterface _ _ evidence) = evidence
+capturedSessionInterfaceEvidence = fmap (\(packages,requirements,owners) ->
+  (artifactBytes packages,artifactBytes requirements,owners)) . capturedSessionInterfaceEvidenceBodies
+
+capturedSessionInterfaceEvidenceBodies :: CapturedSessionInterface -> Maybe (ArtifactBytes, ArtifactBytes, [(String,String)])
+capturedSessionInterfaceEvidenceBodies (CapturedSessionInterface _ _ evidence) = evidence
 
 injectSessionIfaceWithCapture :: FilePath -> SessionModule -> HscEnv
   -> IO (HscEnv, CapturedSessionInterface)
@@ -415,7 +423,8 @@ injectSessionIfaceWithBindings root sm hsc0 = do
               , Just owner <- [nameModule_maybe (tyConName constructor)]
               , moduleUnit owner == home]
         pure (Just (packages,requirements,nominalOwners))
-      pure (hsc1, typeEnvIds (md_types details), CapturedSessionInterface theMod bytes evidence)
+      pure (hsc1, typeEnvIds (md_types details), CapturedSessionInterface theMod (captureArtifactBytes bytes)
+        (fmap (\(packages,requirements,owners) -> (captureArtifactBytes packages,captureArtifactBytes requirements,owners)) evidence))
   where
     readSelected limit path = do
       bytes <- readFileAtMost path (limit + 1)

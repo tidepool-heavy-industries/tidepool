@@ -2,7 +2,7 @@
 
 module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook) where
 
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (SomeException, IOException, bracket, try)
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
@@ -57,6 +57,7 @@ import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile, hPutStrLn, stderr)
+import Tidepool.ArtifactBytes (artifactBytes)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope )
 import Tidepool.ExtractUtil (getLibdir)
@@ -67,7 +68,7 @@ import Tidepool.ExactScope
   , ExactScope, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, extendExactScopeInputs, ExactInterfaceEvidence(..) )
-import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions)
+import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)
 import Tidepool.GhcPipeline
   ( PreparedPipelineResult(..), PipelineResult(..), PipelineSelection(..)
@@ -131,7 +132,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
   bytes <- BS.readFile corePath
   assert (hexBytes (SHA256.hash bytes) == coreSha) "issued Core seal changed before consumption"
   rawBytes <- requireRight =<< captureFinalizedCore env finalized work
-  assert (bytes == rawBytes) "certification did not retain the original finalized Core bytes"
+  assert (bytes == artifactBytes rawBytes) "certification did not retain the original finalized Core bytes"
   let emptyStubs = ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [])
       initializer = mkInitializerStubLabel (cg_module guts) (fsLit "canonical_test_init")
       nonemptyStubs =
@@ -141,7 +142,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
         ,ForeignStubs (CHeader Outputable.empty) (CStub Outputable.empty [] [initializer])]
   emptyCapture <- requireRight =<< captureFinalizedCore env
     finalized {finalizedTidyGuts = guts {cg_foreign = emptyStubs}} work
-  assert (emptyCapture == bytes) "semantically empty GHC foreign stubs changed canonical Core"
+  assert (artifactBytes emptyCapture == bytes) "semantically empty GHC foreign stubs changed canonical Core"
   forM_ nonemptyStubs $ \stubs -> do
     refusal <- captureFinalizedCore env
       finalized {finalizedTidyGuts = guts {cg_foreign = stubs}} work
@@ -169,6 +170,31 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
     "independent delivery changed the original canonical identity"
   promotionScopeChecks env work scope proof
   capturedConsumerChecks libdir work scope artifact bytes summary proof
+  -- Relocated receipt views may disappear without revoking the compiler-issued
+  -- byte owner. A new materialization writes held bodies; its fresh destination
+  -- still refuses a conflicting file instead of silently accepting that file.
+  let capturedArtifacts = certifiedFinalizedArtifacts (capturedCertifiedProducts capture)
+      firstDirectory = work </> "held-finalized-first"
+      nextDirectory = work </> "held-finalized-next"
+  firstArtifacts <- materializeFinalizedModuleArtifacts firstDirectory capturedArtifacts
+  firstAdmission <- maybe (fail "materialized local admission absent") pure
+    (Map.lookup key (finalizedLocalAdmissions firstArtifacts))
+  let (firstIface,firstPackages,_) = localFinalizedInterface firstAdmission
+      firstPaths = exactPath firstIface : firstPackages : maybe [] (pure . fst) (localFinalizedCore firstAdmission)
+  forM_ firstPaths $ \path -> BS.writeFile path "changed receiving artifact view"
+  revalidateLocalFinalizedAdmission firstAdmission >>= requireRight
+  forM_ firstPaths removeFile
+  nextArtifacts <- materializeFinalizedModuleArtifacts nextDirectory firstArtifacts
+  nextAdmission <- maybe (fail "rematerialized local admission absent") pure
+    (Map.lookup key (finalizedLocalAdmissions nextArtifacts))
+  (nextCore,_) <- maybe (fail "rematerialization lost Core reference") pure (localFinalizedCore nextAdmission)
+  BS.readFile nextCore >>= \actual -> assert (actual == bytes) "rematerialization reopened deleted old Core"
+  heldCore <- maybe (fail "local admission did not hold Core") pure (localFinalizedCoreBody firstAdmission)
+  assert (artifactBytes heldCore == bytes) "materialization changed held Core identity"
+  BS.writeFile nextCore "conflicting fresh output"
+  collision <- try (materializeFinalizedModuleArtifacts nextDirectory firstArtifacts)
+    :: IO (Either SomeException FinalizedModuleArtifacts)
+  assert (case collision of Left _ -> True; Right _ -> False) "fresh materialization accepted conflicting output bytes"
   removeFile source
   exists <- doesFileExist source
   assert (not exists) "source-free roundtrip kept its source"
@@ -200,14 +226,10 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
             (set_mi_usages (usage : mi_usages (hm_iface home)) (hm_iface home))
               == Left CandidateInterfaceRequirementsMismatch)
             "admitted interface usage escaped canonical requirement checks"
-      -- Raw local finalization expresses proof metadata, not request input
-      -- ownership. The production local-native issuer joins it through scope
-      -- extension; an executable consumer must not acquire it implicitly.
-      unowned <- try (admittedCompilerInterface env (LocalInterfaceAdmission localProof) (ms_mod summary))
-        :: IO (Either IOException ModIface)
-      assert (case unowned of
-        Left failure -> "local defining Core has not been captured for execution" `isInfixOf` show failure
-        _ -> False) "raw local finalization silently acquired executable inputs"
+      local <- admittedCompilerInterface env (LocalInterfaceAdmission localProof) (ms_mod summary)
+      assert (mi_module local == ms_mod summary && case mi_extra_decls local of
+          Just _ -> True; Nothing -> False)
+        "compiler-issued local finalization lost its owned defining Core"
       attached <- admittedCompilerInterface env (ModuleInterfaceAdmission proof) (ms_mod summary)
       assert (mi_module attached == ms_mod summary && case mi_extra_decls attached of
           Just _ -> True; Nothing -> False)

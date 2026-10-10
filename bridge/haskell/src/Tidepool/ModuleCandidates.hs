@@ -36,8 +36,8 @@ import System.FilePath (isAbsolute)
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), RuntimeRep(..), Signature(..), ResultContract(..) )
 import Tidepool.ExecutionSource
-  ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..)
-  , decodeExecutionSourceDescriptors, decodeExecutionSourceReferences, readExecutionSourceGraphs, readExecutionSourceGraphsWithFacts, decodeExecutionSourceGraph
+  ( ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..)
+  , decodeExecutionSourceDescriptors, decodeExecutionSourceReferences, readExecutionSourceGraphs, readExecutionSourceGraphsWithFacts, decodeExecutionSourceBody
   , executionSourceGraphsFit, executionIdentityKey, executionSourceOriginalClosure )
 
 data ModuleCandidate = ModuleCandidate
@@ -193,7 +193,7 @@ readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest pa
                   readExecutionSourceGraphsWithFacts (\sha artifact -> do
                     token <- readToken artifact (64 * 1024 * 1024)
                     either fail pure (checkArtifactSeal sha token)
-                    either fail pure (decodeExecutionSourceGraph sha (artifactBytes token))) path descriptors
+                    either fail pure (decodeExecutionSourceBody sha token)) path descriptors
                 pure (map (\candidate -> candidate {candidateInputCustody=Just custody}) <$>
                   attachExecutionSources exactGraphs graphs references producer candidates)
         | otherwise -> pure (Left "candidate manifest has trailing bytes"))

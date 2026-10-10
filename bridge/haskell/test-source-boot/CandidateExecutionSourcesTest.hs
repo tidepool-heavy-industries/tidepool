@@ -17,6 +17,7 @@ import System.Directory (copyFile, createDirectory, listDirectory, removeDirecto
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (IOMode(WriteMode), hSetFileSize, withBinaryFile, openBinaryTempFile, hClose)
 import System.Timeout (timeout)
+import Tidepool.ArtifactBytes (captureArtifactBytes)
 import Tidepool.DependencyEvidence
 import Tidepool.ExactScope
 import Tidepool.ExecutionSource
@@ -60,7 +61,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   -- the graph envelope; no synthetic interface/Core authority is constructed.
   case scopeExecutionGraphs originalScope of
     graph:_ -> do
-      let oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
+      let oversized = graph {executionGraphBody=captureArtifactBytes (BS.replicate (executionSourceGraphBytesLimit+1) 0)}
           offeredBudget = oversized : tail (scopeExecutionGraphs originalScope)
           references = scopeExecutionOwners originalScope
       bounded <- either (fail . show) pure
@@ -238,7 +239,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
         && dependencyImportBoot edge == dependencyResolutionBoot row)
         (dependencyModuleImports (executionNodeModule quoterNode))
       originalEvidence = executionGraphEvidence originalGraph
-      alternateGraph = originalGraph {executionGraphSha256=replicate 64 'd',
+      alternateGraph = originalGraph {executionGraphBody=captureArtifactBytes (BS.singleton 100),
         executionGraphEvidence=originalEvidence {dependencyResolutions=
           [if applies row then row {dependencyResolutionCandidates=
               (work </> "unproven-shadow.hs") : dependencyResolutionCandidates row}
@@ -266,7 +267,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
           [DependencyImport DependencyUnqualified child False (Just (dagPath child))
             | child <- take 2 (drop (index+1) dagNames)] ProductReady
         | (index,name) <- zip [0::Int ..] dagNames]
-      dagGraph = originalGraph {executionGraphSha256=replicate 64 'c',
+      dagGraph = originalGraph {executionGraphBody=captureArtifactBytes (BS.singleton 99),
         executionGraphOwners=[ExecutionSourceOwner (dagIdentity name) True Nothing | name <- dagNames],
         executionGraphExactImports=[],executionGraphEvidence=originalEvidence {
           dependencySources=[DependencySource (dagPath name) (replicate 64 'a') | name <- dagNames],

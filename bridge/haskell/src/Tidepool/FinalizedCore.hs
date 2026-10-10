@@ -48,6 +48,7 @@ import GHC.Unit.Types (Module, UnitId)
 import GHC.Utils.Binary
   ( Binary(..), openBinMem, unsafeUnpackBinBuffer, withBinBuffer )
 import GHC.Utils.Outputable (text, pprCode)
+import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes)
 import Tidepool.ExtractUtil (trySynchronous)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 
@@ -124,7 +125,7 @@ finalizedCoreLimit = 32 * 1024 * 1024
 -- | Capture only the exact finalized pair. The directory argument matches
 -- interface capture callers; this format writes no temporary source or files.
 captureFinalizedCore :: HscEnv -> FinalizedModule -> FilePath
-  -> IO (Either FinalizedCoreFailure BS.ByteString)
+  -> IO (Either FinalizedCoreFailure ArtifactBytes)
 captureFinalizedCore env finalized _directory = case validateFinalized env finalized of
   Left failure -> pure (Left failure)
   Right () -> do
@@ -136,7 +137,7 @@ captureFinalizedCore env finalized _directory = case validateFinalized env final
       Left failure -> Left (FinalizedCoreEncodeFailure (displayException failure))
       Right bytes
         | BS.length bytes > finalizedCoreLimit -> Left FinalizedCoreTooLarge
-        | otherwise -> Right bytes
+        | otherwise -> Right (captureArtifactBytes bytes)
   where
     guts = finalizedTidyGuts finalized
     interface = hm_iface (finalizedHomeModInfo finalized)

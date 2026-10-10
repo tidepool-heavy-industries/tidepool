@@ -57,7 +57,7 @@ import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
-  , revalidateExactScope, writeCheckedExactCompilation, writeRetainedExactCompilation, scopeCanonicalInterfaces, scopeInterfaceBytes, scopeOriginalBytes, canonicalProofInterfaceBytes, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
+  , revalidateExactScope, writeCheckedExactCompilation, writeRetainedExactCompilation, scopeCanonicalInterfaces, scopeInterfaceToken, scopeOriginalBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
   , CanonicalInterfaceProof, captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalSourceSha256 )
@@ -80,7 +80,7 @@ import Tidepool.ExecutionSchema
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(..), SourceRecipeUnavailable(..), ExecutionSourceRecipe(..)
-  , ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
+  , ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceFailure(..), executionIdentityKey, issueExecutionSourceRecipe
   , executionSourceInheritedOwners, ExecutionSourceRef(..), executionSourceProspectiveReferences )
 import Tidepool.ExtractUtil (shaHex)
@@ -589,12 +589,12 @@ newPreparedOriginalInterfaceArtifacts prepared directory =
     result = pprPipelineResult prepared
     readRetained artifact = case compilationScope <$> preparedExactCompilation prepared of
       Just scope | artifact `elem` ([iface | (iface,_,_) <- scopeInterfaces scope] ++ scopeValueInterfaces scope) ->
-        scopeInterfaceBytes scope artifact
+        scopeInterfaceToken scope artifact
       _ -> case [preparedCandidateProof admission | admission <- pprCandidateAdmissions prepared
           , let candidate = preparedCandidateOriginal admission
           , (candidateUnit candidate,candidateModule candidate,candidateInterface candidate)
               == (exactUnit artifact,exactModule artifact,exactPath artifact)] of
-        [proof] -> canonicalProofInterfaceBytes proof artifact
+        [proof] -> canonicalProofInterfaceBody proof artifact
         _ -> fail "retained interface lacks its prepared admission owner"
 
 writeCertifiedProductsKeeping

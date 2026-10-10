@@ -263,7 +263,7 @@ import Tidepool.ExactScope
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements
   , scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
 import Tidepool.ExecutionSource
-  ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
+  ( ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceValidationStage(..), ExecutionSourceInterfaceReason(..)
   , ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey
   , executionSourceGraphsFit

@@ -8,7 +8,7 @@ module Tidepool.RequestInputs
   , mergeCapturedOriginalContent, selectCapturedOriginalContent, capturedOriginalContentKeys
   , requestCaptureByteLimit
   , capturedRequestInputToken
-  , capturedRequestInput, mergeRequestInputs, aliasRequestInputs, requestInputRetained, retainRequestEncodedBytes, requestInputBytes, requestInputCount, revalidateRequestInputs, revalidateRequestInputsWith ) where
+  , capturedRequestInput, mergeRequestInputs, aliasRequestInputs, requestInputRetained, retainRequestEncodedBytes, requestInputBytes, requestInputCount, requestInputBodies, transferRequestInputBodies, revalidateRequestInputs, revalidateRequestInputsWith ) where
 
 import Control.Exception (IOException, try, finally)
 import Control.Monad (unless, when, forM_, foldM)
@@ -39,6 +39,15 @@ requestInputBytes (RequestOriginalInputs _ used _ _ _) = used
 
 requestInputCount :: RequestOriginalInputs -> Int
 requestInputCount (RequestOriginalInputs _ _ inputs _ _) = Map.size inputs
+
+-- Path projection is invocation selection, not authority carried by a body.
+requestInputBodies :: RequestOriginalInputs -> Map.Map FilePath ArtifactBytes
+requestInputBodies (RequestOriginalInputs _ _ inputs _ aliases) =
+  Map.union inputs (Map.mapMaybe (`Map.lookup` inputs) aliases)
+
+transferRequestInputBodies :: [(FilePath,ArtifactBytes)] -> RequestOriginalInputs -> Either String RequestOriginalInputs
+transferRequestInputBodies selected receiving =
+  mergeRequestInputs receiving [RequestOriginalInputs 0 0 (Map.singleton path body) Map.empty Map.empty | (path,body) <- selected]
 
 -- Content has no path, request allowance or publication authority. A receiving
 -- invocation selects its own paths and observations before it can consume it.
@@ -261,16 +270,15 @@ aliasRequestInputs aliasesToAdd receiving = foldM addAlias receiving aliasesToAd
 -- An encoded graph issued inside the request has no mutable producer path.
 -- Its owning scope retains the bytes and facts together; charge those bytes in
 -- the same request budget without introducing a path or a second file store.
-retainRequestEncodedBytes :: [BS.ByteString] -> RequestOriginalInputs -> Maybe RequestOriginalInputs
+retainRequestEncodedBytes :: [ArtifactBytes] -> RequestOriginalInputs -> Maybe RequestOriginalInputs
 retainRequestEncodedBytes [] owner = Just owner
-retainRequestEncodedBytes (bytes:rest) owner@(RequestOriginalInputs limit used files encoded aliases) =
-  let body = captureArtifactBytes bytes
-      sha = artifactSha256 body
+retainRequestEncodedBytes (body:rest) owner@(RequestOriginalInputs limit used files encoded aliases) =
+  let sha = artifactSha256 body
   in case Map.lookup sha encoded of
     Just _ -> retainRequestEncodedBytes rest owner
-    Nothing | used + toInteger (BS.length bytes) <= limit ->
+    Nothing | used + toInteger (artifactLength body) <= limit ->
       retainRequestEncodedBytes rest (RequestOriginalInputs limit
-        (used + toInteger (BS.length bytes)) files
+        (used + toInteger (artifactLength body)) files
         (Map.insert sha body encoded) aliases)
     _ -> Nothing
 

@@ -1,5 +1,6 @@
 module SourceBootCases where
 
+import Tidepool.ArtifactBytes (captureArtifactBytes)
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import CandidateExecutionSourcesTest (executionScopeDescriptorChecks)
 
@@ -222,7 +223,7 @@ import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate, preambleImpor
 import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(..)
-  , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
+  , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
   , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences
   , executionNodeOriginalResolutions
@@ -4504,7 +4505,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
         (executionNodeOriginalResolutions (firstContext:contexts) sharedSupport)
         == Right (map dependencyResolutionCandidates retainedResolutions)
       && case executionNodeOriginalResolutions [firstContext,secondContext {
-          executionGraphSha256=executionGraphSha256 firstContext}] sharedSupport of
+          executionGraphBody=executionGraphBody firstContext}] sharedSupport of
         Left (ExecutionSourceConflicting _) -> True; _ -> False) $
     fail "original witness inventory did not deduplicate identical graphs or refuse conflicting graph bytes"
   let changedSource = secondContext {executionGraphEvidence=(executionGraphEvidence secondContext) {
@@ -4539,7 +4540,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   unless (case executionSourceProspectiveReferences [promised] []
       [reference {executionRefGraph=executionGraphSha256 promised}] of Left _ -> True; _ -> False) $
     fail "missing promised original graph became optional unavailability"
-  let retainedLegacy = legacy {executionGraphSha256=replicate 64 'c'}
+  let retainedLegacy = legacy {executionGraphBody=captureArtifactBytes (BS.singleton 99)}
   nested <- issue legacyRecipe {recipeOwners=[ExecutionSourceOwner target True Nothing,
     ExecutionSourceOwner support False (Just (executionGraphSha256 retainedLegacy))]}
   unless (case executionSourceProspectiveReferences [nested,retainedLegacy] []
@@ -4548,7 +4549,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   unless (case executionSourceProspectiveReferences [legacy]
       [reference {executionRefGraph=replicate 64 'b'}] [] of Left _ -> True; _ -> False) $
     fail "unsupported prospective recipe hid corrupt inherited advertised proof"
-  let oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
+  let oversized = graph {executionGraphBody=captureArtifactBytes (BS.replicate (executionSourceGraphBytesLimit+1) 0)}
   unless (case decodeExecutionSourceGraph (executionGraphSha256 graph)
       (executionGraphBytes oversized) of Left _ -> True; _ -> False) $
     fail "direct graph decoder admitted an oversized byte envelope"

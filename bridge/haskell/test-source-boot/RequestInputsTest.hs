@@ -769,13 +769,13 @@ requestInputBoundaries = withScratch $ \directory -> do
       :: IO (Either IOException (BS.ByteString,RequestOriginalInputs))
     unless (either (const True) (const False) exceeds) (fail "aggregate capture budget was applied per file")
     unless (requestInputBytes bounded == 3) (fail "encoded input accounting differs from retained bytes")
-    unless (case retainRequestEncodedBytes [bytes] bounded of Nothing -> True; _ -> False)
+    unless (case retainRequestEncodedBytes [captureArtifactBytes bytes] bounded of Nothing -> True; _ -> False)
       (fail "new encoded graph bytes bypassed the request aggregate budget")
     let graphBytes = BS.pack [4,5]
     graphOwner <- maybe (fail "bounded encoded graph was refused") pure
-      (retainRequestEncodedBytes [graphBytes] bounded)
+      (retainRequestEncodedBytes [captureArtifactBytes graphBytes] bounded)
     unless (requestInputBytes graphOwner == 5
-        && fmap requestInputBytes (retainRequestEncodedBytes [graphBytes] graphOwner) == Just 5)
+        && fmap requestInputBytes (retainRequestEncodedBytes [captureArtifactBytes graphBytes] graphOwner) == Just 5)
       (fail "encoded graph generations lost accounting or charged the same graph again")
     -- A donor allowance cannot enlarge the receiver. Transfer shares bytes,
     -- including duplicate donors, and observes no current producer path.
