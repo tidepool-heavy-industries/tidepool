@@ -843,7 +843,7 @@ fn campaign_trace_filter_for(profile: &str) -> tracing_subscriber::EnvFilter {
              tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
              exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
              tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
-             exomonad_actor::request=info,tidepool_toolchain::module_candidates=info,\
+             exomonad_actor::request=info,tidepool_toolchain::module_candidates=debug,\
              tidepool_toolchain::artifacts=info,exomonad_actor::workbench_phase=info,\
              exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,\
              exomonad_actor::resident_tools=info,exomonad::content=off,harness::runtime_cost=debug"
@@ -1447,6 +1447,8 @@ mod tests {
                 request = request.0, parent_actor = %parent, activation_actor = %child,
                 parent_execution = %execution, parent_attempt = %attempt,
                 "request activation origin issued");
+            tracing::debug!(target: "tidepool_toolchain::module_candidates",
+                phase = "configured_package_owner_wait", elapsed_ms = 7u64);
             tracing::info!(target: "tidepool_toolchain::module_candidates",
                 phase = "candidate_selection", elapsed_ms = 3u64,
                 exact_context = true, offered = 2u64);
@@ -1463,7 +1465,7 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 3, "only campaign metadata is retained");
+        assert_eq!(rows.len(), 4, "only campaign metadata is retained");
         assert_eq!(rows[0]["target"], "exomonad_actor::request");
         assert_eq!(
             rows[0]["span"],
@@ -1483,8 +1485,12 @@ mod tests {
             })
         );
         assert_eq!(rows[1]["target"], "tidepool_toolchain::module_candidates");
+        assert_eq!(rows[1]["fields"], serde_json::json!({
+            "phase": "configured_package_owner_wait", "elapsed_ms": 7,
+        }));
+        assert_eq!(rows[2]["target"], "tidepool_toolchain::module_candidates");
         assert_eq!(
-            rows[1]["fields"],
+            rows[2]["fields"],
             serde_json::json!({
                 "phase": "candidate_selection",
                 "elapsed_ms": 3,
@@ -1492,9 +1498,9 @@ mod tests {
                 "offered": 2,
             })
         );
-        assert_eq!(rows[2]["target"], "tidepool_toolchain::artifacts");
+        assert_eq!(rows[3]["target"], "tidepool_toolchain::artifacts");
         assert_eq!(
-            rows[2]["fields"],
+            rows[3]["fields"],
             serde_json::json!({
                 "message": "completed private artifact ownership",
                 "phase": "exact_immutable_materialization",
@@ -1523,6 +1529,8 @@ mod tests {
                 "request activation origin issued");
             tracing::debug!(target: "exomonad_harness::timing", phase = "reply_to_successor",
                 wall_ns = 12u64, "coarse workload timing");
+            tracing::debug!(target: "tidepool_toolchain::module_candidates",
+                phase = "configured_package_owner_wait", elapsed_ms = 7u64);
             tracing::info!(target: "tidepool_toolchain::module_candidates",
                 phase = "candidate_selection", offered = 2u64);
             tracing::info!(target: "tidepool_toolchain::artifacts",
@@ -1534,6 +1542,7 @@ mod tests {
         assert!(captured.contains("request activation origin issued"));
         assert!(captured.contains("coarse workload timing"));
         assert!(!captured.contains("candidate_selection"));
+        assert!(!captured.contains("configured_package_owner_wait"));
         assert!(!captured.contains("exact_immutable_materialization"));
         assert!(!captured.contains("compiler compilation event"));
         assert!(!captured.contains("private-content"));

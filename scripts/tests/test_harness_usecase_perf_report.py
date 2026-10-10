@@ -637,6 +637,14 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertIsNone(report["queue_evidence"]["observed_admission_count"])
         self.assertEqual(report["startup_scope"]["owner_status"], "unknown_by_trace_profile")
         self.assertIsNone(report["activation_input_origins"])
+        self.assertEqual(report["phases"][0]["compiler_attribution"], "unknown_by_trace_profile")
+        self.assertIsNone(report["phases"][0]["daemon_service_matched_count"])
+        self.assertIsNone(report["phases"][0]["host_submission_event_count"])
+        self.assertEqual(report["whole_physical_stream_reconciliation"]["physical_service_outcome_status"],
+                         "unknown_by_trace_profile")
+        self.assertIsNone(report["runner"]["diagnostic_evidence_complete"])
+        self.assertEqual(report["runner"]["diagnostic_evidence_status"], "not_collected_by_design")
+        self.assertTrue(report["runner"]["cleanup"]["complete"])
 
     def test_phase_measurements_require_nonnegative_json_integers(self):
         record = self.make_complete_case()

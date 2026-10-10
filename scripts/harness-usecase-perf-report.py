@@ -887,6 +887,8 @@ def analyze(record_path):
     if trace_profile == "minimal":
         # Minimal capture is an overhead control: phase timings and scripted
         # outcomes remain measured, while event-level joins are unavailable.
+        report["runner"]["diagnostic_evidence_complete"] = None
+        report["runner"]["diagnostic_evidence_status"] = "not_collected_by_design"
         report["harness_runtime_cost_trace"] = {
             "status": "not_collected_by_design", "event_count": None,
             "phase_attributed_event_count": None, "unattributed_event_count": None,
@@ -935,6 +937,21 @@ def analyze(record_path):
         report["queue_observations"] = None
         report["unattributed_compiler_submissions"] = None
         report["unmatched_daemon_service_records"] = None
+        for phase in report["phases"]:
+            for name in (
+                "host_submission_event_count", "host_submission_identity_count",
+                "host_submission_events_missing_identity", "host_submission_duplicate_identity_count",
+                "daemon_service_matched_count", "daemon_service_missing_count",
+                "daemon_service_incomplete_count", "daemon_service_ambiguous_count",
+                "globally_unattributed_host_submission_event_count", "dispatch_executions",
+                "call_timing_records", "harness_runtime_cost_events", "harness_runtime_cost_coverage",
+                "host_admission_status", "client_compiler_submissions", "queue_admission_ids",
+                "compiler_request_digest_seen_before",
+            ):
+                phase[name] = None
+            phase["dispatch_attribution"] = "unknown_by_trace_profile"
+            phase["compiler_attribution"] = "unknown_by_trace_profile"
+            phase["store_projection_status"] = "unknown_by_trace_profile"
     return report
 
 
