@@ -122,7 +122,7 @@ impl ChildPlacementCustody {
         }
     }
 
-    fn record_startup_cleanup(&self, cleanup: crate::ResidentCleanupOutcome) {
+    pub(super) fn record_startup_cleanup(&self, cleanup: crate::ResidentCleanupOutcome) {
         let mut phase = self.0.lock();
         if matches!(*phase, ChildPlacementPhase::Prepared(_))
             || matches!(*phase, ChildPlacementPhase::ActorOwned(actor) if actor == cleanup.actor())

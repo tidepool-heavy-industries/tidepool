@@ -76,7 +76,6 @@ where
             .stage_replacement(kernel.identity(), definition)
             .await?;
         let placement_custody = staged.placement_custody.clone();
-        let session_startup_custody = staged.session_startup.clone();
         let root_admission = self
             .environment
             .root_admission_closed
@@ -95,6 +94,7 @@ where
                 "swarm admission is closed".into(),
             ));
         }
+        let session_startup_custody = staged.session_startup.clone();
         let descriptor = staged
             .descriptor
             .clone()
@@ -115,6 +115,7 @@ where
             Ok(successor) => successor,
             Err(error) => {
                 if let Some(cleanup) = crate::local_actor::startup_cleanup(&error) {
+                    placement_custody.record_startup_cleanup(cleanup.clone());
                     if !cleanup.is_confirmed() {
                         return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                             "{error}; replacement candidate cleanup unconfirmed: {cleanup:?}"
