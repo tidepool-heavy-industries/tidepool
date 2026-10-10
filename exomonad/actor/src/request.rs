@@ -23,6 +23,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::{ActorExitKind, ActorRef, ActorTerminal};
+use crate::owned_result::{OwnedResultSnapshot, RequestResultDestination};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeadlineUnit {
@@ -239,6 +241,8 @@ pub enum ReplyError {
     WrongIncarnation,
     InvalidReadiness,
     ProgressTypeMismatch,
+    ReplyResultTypeMismatch,
+    ReplyResultUnavailable,
     CancellationRequested,
 }
 
@@ -357,10 +361,54 @@ enum TargetState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OwnerState {
     Observing,
-    Ready,
+    Ready(RequestSuccess),
     Unavailable(ResponseFailure),
     Abandoned,
 }
+
+/// Typed success and command completion carry different, mandatory evidence.
+#[derive(Debug, Clone)]
+enum RequestSuccess {
+    Typed(Arc<OwnedResultSnapshot>),
+    Command(tidepool_bridge_effects::CommandReport),
+}
+
+impl PartialEq for RequestSuccess {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Typed(left), Self::Typed(right)) => Arc::ptr_eq(left, right),
+            (Self::Command(left), Self::Command(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+impl Eq for RequestSuccess {}
+
+/// One accepted reply attempt. Async incorporation cannot manufacture or copy
+/// this winner; committing consumes it and rechecks the exact request state.
+#[derive(Debug)]
+pub(crate) struct RequestReplyClaim {
+    request: RequestId,
+    target: ActorRef,
+    generation: u64,
+    destination: Arc<RequestResultDestination>,
+}
+
+impl RequestReplyClaim {
+    pub(crate) fn request(&self) -> RequestId { self.request }
+    pub(crate) fn destination(&self) -> Arc<RequestResultDestination> {
+        Arc::clone(&self.destination)
+    }
+}
+
+impl PartialEq for RequestReplyClaim {
+    fn eq(&self, other: &Self) -> bool {
+        self.request == other.request && self.target == other.target
+            && self.generation == other.generation
+            && Arc::ptr_eq(&self.destination, &other.destination)
+    }
+}
+impl Eq for RequestReplyClaim {}
 
 enum ProgressTypeAdmission {
     Unadmitted,
@@ -395,6 +443,8 @@ struct RequestRecord {
     label: String,
     target_state: TargetState,
     owner_state: OwnerState,
+    result_destination: Option<Arc<RequestResultDestination>>,
+    reply_claim: Option<u64>,
     deadline: Option<ActiveRequestDeadline>,
     progress: Option<ProgressSnapshot>,
     progress_type: ProgressTypeAdmission,
@@ -423,7 +473,6 @@ struct RequestRecord {
     /// it is excluded from target-side work and settles only through
     /// [`RequestRegistry::settle_command`].
     command_job: Option<String>,
-    command_report: Option<tidepool_bridge_effects::CommandReport>,
     /// A command record armed for a watch that has not registered yet. It is
     /// not released before that watch names it or is refused.
     held_for_watch: bool,
@@ -514,6 +563,7 @@ struct WatchSnapshot {
     decision: readiness::Decision,
     progress: HashMap<(RequestId, u64), ProgressCapture>,
     commands: HashMap<usize, (String, tidepool_bridge_effects::CommandReport)>,
+    responses: HashMap<usize, Arc<OwnedResultSnapshot>>,
     sources: HashMap<usize, std::sync::Arc<WatchSnapshot>>,
 }
 
@@ -530,6 +580,7 @@ struct WatchRecord {
     state: WatchState,
     progress: HashMap<(RequestId, u64), ProgressCapture>,
     commands: HashMap<usize, (String, tidepool_bridge_effects::CommandReport)>,
+    responses: HashMap<usize, Arc<OwnedResultSnapshot>>,
     /// When the owner last observed this watch (via `observe_watch`) already
     /// settled Ready or Unavailable. Lets delivery acknowledge a queued
     /// `WatchChanged` notice without prompting when the owner polled the
@@ -565,6 +616,7 @@ struct WatchDependency {
 #[derive(Default)]
 struct RequestStateTable {
     next_request: u64,
+    next_reply_claim: u64,
     received_requests: HashMap<ActorRef, u64>,
     next_watch: u64,
     next_watch_waiter: u64,
@@ -596,8 +648,9 @@ enum RequestSettlement {
     CommandComplete {
         report: String,
         revision: Option<String>,
+        value: tidepool_bridge_effects::CommandReport,
     },
-    ReplyComplete(Option<String>),
+    ReplyComplete { claim: RequestReplyClaim, value: Arc<OwnedResultSnapshot>, preview: Option<String> },
     ReplyFailed(String),
     CancellationAcknowledged,
 }
@@ -679,6 +732,8 @@ impl RequestStateTable {
                 label,
                 target_state,
                 owner_state: OwnerState::Observing,
+                result_destination: None,
+                reply_claim: None,
                 deadline: None,
                 progress: None,
                 progress_type: ProgressTypeAdmission::Unadmitted,
@@ -689,7 +744,6 @@ impl RequestStateTable {
                 target_path: None,
                 target_revision: None,
                 command_job,
-                command_report: None,
                 held_for_watch,
             },
         );
@@ -702,29 +756,36 @@ impl RequestStateTable {
         transition: RequestSettlement,
     ) -> Option<SettlementEffects> {
         let releases_command = match transition {
-            RequestSettlement::CommandComplete { report, revision } => {
+            RequestSettlement::CommandComplete { report, revision, value } => {
                 let record = self.requests.get_mut(&request)?;
                 if record.command_job.is_none() || record.target_state == TargetState::Closed {
                     return None;
                 }
                 record.target_state = TargetState::Closed;
                 if record.owner_state == OwnerState::Observing {
-                    record.owner_state = OwnerState::Ready;
+                    record.owner_state = OwnerState::Ready(RequestSuccess::Command(value));
                 }
                 record.reply_preview = Some(report);
                 record.target_revision = revision;
                 true
             }
-            RequestSettlement::ReplyComplete(reply_preview) => {
+            RequestSettlement::ReplyComplete { claim, value, preview } => {
                 let record = self.requests.get_mut(&request)?;
-                if record.target_state != TargetState::Settling {
+                if record.target_state != TargetState::Settling
+                    || record.target != claim.target
+                    || record.reply_claim != Some(claim.generation)
+                    || !record.result_destination.as_ref().is_some_and(|destination| {
+                        Arc::ptr_eq(destination, &claim.destination) && value.belongs_to(destination)
+                    })
+                {
                     return None;
                 }
                 record.target_state = TargetState::Closed;
+                record.reply_claim = None;
                 if record.owner_state == OwnerState::Observing {
-                    record.owner_state = OwnerState::Ready;
+                    record.owner_state = OwnerState::Ready(RequestSuccess::Typed(value));
+                    record.reply_preview = preview;
                 }
-                record.reply_preview = reply_preview;
                 false
             }
             RequestSettlement::ReplyFailed(detail) => {
@@ -766,8 +827,8 @@ impl RequestStateTable {
 }
 
 /// One process-local owner for request identity, terminal state, and watch
-/// readiness. Live request inputs and results remain in the resident Haskell
-/// heap; this table stores only exact actor identities and closed transitions.
+/// readiness. Typed successes retain the runtime-authenticated ROOT-owned
+/// snapshot; watch and source captures share its immutable ownership.
 #[derive(Default)]
 pub(crate) struct RequestRegistry {
     state: Mutex<RequestStateTable>,
@@ -1369,7 +1430,7 @@ impl RequestRegistry {
                 continue;
             }
             match record.owner_state {
-                OwnerState::Ready => status
+                OwnerState::Ready(_) => status
                     .ready_responses
                     .push((*request, record.label.clone())),
                 OwnerState::Unavailable(ref failure) => status.unavailable_responses.push((
@@ -1590,18 +1651,13 @@ impl RequestRegistry {
         request: RequestId,
         report: String,
         revision: Option<String>,
-        value: Option<tidepool_bridge_effects::CommandReport>,
+        value: tidepool_bridge_effects::CommandReport,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
-        if let Some(record) = state.requests.get_mut(&request) {
-            if record.command_report.is_none() {
-                record.command_report = value;
-            }
-        }
         state
             .settle(
                 request,
-                RequestSettlement::CommandComplete { report, revision },
+                RequestSettlement::CommandComplete { report, revision, value },
             )
             .map_or_else(Vec::new, |effects| effects.notifications)
     }
@@ -1810,12 +1866,38 @@ impl RequestRegistry {
         }
     }
 
+    /// Admission binds result ownership before the payload can enter a mailbox.
+    /// Cleanup handoff changes `owner`, never this original issuer destination.
+    pub(crate) fn admit_result_destination(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+        destination: RequestResultDestination,
+    ) -> Result<(), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+        authorize_owner(record, owner)?;
+        if destination.issuer() != owner {
+            return Err(identity_error(owner, destination.issuer()));
+        }
+        if record.target_state != TargetState::Reserved
+            || record.result_destination.is_some()
+            || record.command_job.is_some()
+        {
+            return Err(ReplyError::Stale);
+        }
+        record.result_destination = Some(Arc::new(destination));
+        Ok(())
+    }
+
     pub(crate) fn begin_reply(
         &self,
         target: ActorRef,
         request: RequestId,
-    ) -> Result<(), ReplyError> {
+    ) -> Result<RequestReplyClaim, ReplyError> {
         let mut state = self.state.lock();
+        let generation = state.next_reply_claim.checked_add(1).ok_or(ReplyError::Stale)?;
+        state.next_reply_claim = generation;
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_target(record, target)?;
         match record.target_state {
@@ -1831,10 +1913,12 @@ impl RequestRegistry {
                 {
                     return Err(ReplyError::UpdatePending);
                 }
+                let destination = record.result_destination.clone().ok_or(ReplyError::ReplyResultUnavailable)?;
                 record.target_state = TargetState::Settling;
+                record.reply_claim = Some(generation);
                 record.publish_source_closure();
                 record.progress = None;
-                Ok(())
+                Ok(RequestReplyClaim { request, target, generation, destination })
             }
             TargetState::CancellationRequested { .. }
             | TargetState::AcknowledgingCancellation(_) => Err(ReplyError::CancellationRequested),
@@ -1868,12 +1952,13 @@ impl RequestRegistry {
     /// notice; nothing else on the request depends on it.
     pub(crate) fn finish_reply(
         &self,
-        request: RequestId,
+        claim: RequestReplyClaim,
+        value: Arc<OwnedResultSnapshot>,
         reply_preview: Option<String>,
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
         state
-            .settle(request, RequestSettlement::ReplyComplete(reply_preview))
+            .settle(claim.request, RequestSettlement::ReplyComplete { claim, value, preview: reply_preview })
             .map_or_else(Vec::new, |effects| effects.notifications)
     }
 
@@ -1917,7 +2002,7 @@ impl RequestRegistry {
         let state = self.state.lock();
         let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
         Ok(match &record.owner_state {
-            OwnerState::Ready => ResponseObservation::Ready,
+            OwnerState::Ready(_) => ResponseObservation::Ready,
             OwnerState::Unavailable(failure) => ResponseObservation::Unavailable(failure.clone()),
             OwnerState::Abandoned => ResponseObservation::Unavailable(ResponseFailure::Abandoned),
             OwnerState::Observing => match record.target_state {
@@ -1927,6 +2012,21 @@ impl RequestRegistry {
                 _ => ResponseObservation::Pending(base_pending_progress(&state, request)),
             },
         })
+    }
+
+    /// Borrowed observation returns the same canonical root on every read.
+    /// A released handle grants no new observation, even if a watch retains it.
+    pub(crate) fn observe_response_result(
+        &self,
+        _owner: ActorRef,
+        request: RequestId,
+    ) -> Result<Arc<OwnedResultSnapshot>, ReplyError> {
+        let state = self.state.lock();
+        let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
+        match &record.owner_state {
+            OwnerState::Ready(RequestSuccess::Typed(snapshot)) => Ok(Arc::clone(snapshot)),
+            _ => Err(ReplyError::ReplyResultUnavailable),
+        }
     }
 
     pub(crate) fn cancel_request(
@@ -2123,7 +2223,7 @@ impl RequestRegistry {
                 AbandonResponseOutcome::AbandonedNow
             }
             OwnerState::Abandoned => AbandonResponseOutcome::AlreadyAbandoned,
-            OwnerState::Ready | OwnerState::Unavailable(_) => {
+            OwnerState::Ready(_) | OwnerState::Unavailable(_) => {
                 AbandonResponseOutcome::AlreadyTerminal
             }
         };
@@ -2315,6 +2415,7 @@ impl RequestRegistry {
                 state: WatchState::Pending,
                 progress: HashMap::new(),
                 commands: HashMap::new(),
+                responses: HashMap::new(),
                 observed_ready_at: None,
                 registered_at_unix_ms: unix_time_ms(),
                 transitioned_at_unix_ms: None,
@@ -2380,6 +2481,17 @@ impl RequestRegistry {
             .commands
             .values()
             .find_map(|(captured_job, report)| (captured_job == job).then(|| report.clone())))
+    }
+
+    pub(crate) fn observe_watch_snapshot_response(
+        &self,
+        watch: WatchId,
+        path: &[usize],
+        node: usize,
+    ) -> Result<Arc<OwnedResultSnapshot>, ReplyError> {
+        let state = self.state.lock();
+        snapshot_at(&state, watch, path)?.responses.get(&node).cloned()
+            .ok_or(ReplyError::ReplyResultUnavailable)
     }
 
     pub(crate) fn observe_watch_snapshot_decision(
@@ -2762,7 +2874,7 @@ fn request_has_pending_watcher(state: &RequestStateTable, request: RequestId) ->
 fn is_owner_terminal(state: &OwnerState) -> bool {
     matches!(
         state,
-        OwnerState::Ready | OwnerState::Unavailable(_) | OwnerState::Abandoned
+        OwnerState::Ready(_) | OwnerState::Unavailable(_) | OwnerState::Abandoned
     )
 }
 
@@ -2971,7 +3083,7 @@ fn queue_settlement_notifications(state: &mut RequestStateTable) {
         }
         if record.notify_owner && !record.settlement_notified {
             let transition = match &record.owner_state {
-                OwnerState::Ready => Some(SettlementTransition::Ready),
+                OwnerState::Ready(_) => Some(SettlementTransition::Ready),
                 OwnerState::Unavailable(failure) => {
                     Some(SettlementTransition::Unavailable(failure.clone()))
                 }
@@ -3109,14 +3221,20 @@ impl RequestStateTable {
         }
         for dependency in &watch.dependencies {
             if let Some(record) = state.requests.get(&dependency.request) {
-                if record.owner_state == OwnerState::Ready {
-                    if let (Some(job), Some(report)) = (&record.command_job, &record.command_report)
-                    {
-                        watch
-                            .commands
-                            .entry(dependency.node)
-                            .or_insert_with(|| (job.clone(), report.clone()));
+                match &record.owner_state {
+                    OwnerState::Ready(RequestSuccess::Command(report)) => {
+                        if let Some(job) = &record.command_job {
+                            watch.commands.entry(dependency.node)
+                                .or_insert_with(|| (job.clone(), report.clone()));
+                        }
                     }
+                    OwnerState::Ready(RequestSuccess::Typed(snapshot)) => {
+                        if matches!(dependency.requirement, WatchRequirement::Response { .. }) {
+                            watch.responses.entry(dependency.node)
+                                .or_insert_with(|| Arc::clone(snapshot));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -3162,7 +3280,7 @@ impl RequestStateTable {
                 .get(&request)
                 .map(|record| &record.owner_state)
             {
-                Some(OwnerState::Ready) => return LeafState::Ready,
+                Some(OwnerState::Ready(_)) => return LeafState::Ready,
                 Some(OwnerState::Observing) => return LeafState::Pending,
                 Some(OwnerState::Unavailable(failure)) => failure.clone(),
                 Some(OwnerState::Abandoned) => ResponseFailure::Abandoned,
@@ -3193,11 +3311,13 @@ impl RequestStateTable {
                     })
                 });
                 watch.commands.retain(|node, _| selected.contains(node));
+                watch.responses.retain(|node, _| selected.contains(node));
                 watch.sources.retain(|node, _| selected.contains(node));
                 watch.snapshot = Some(std::sync::Arc::new(WatchSnapshot {
                     decision,
                     progress: std::mem::take(&mut watch.progress),
                     commands: std::mem::take(&mut watch.commands),
+                    responses: std::mem::take(&mut watch.responses),
                     sources: std::mem::take(&mut watch.sources),
                 }));
                 WatchState::Ready
@@ -3205,12 +3325,14 @@ impl RequestStateTable {
             readiness::Outcome::Rejected(error) => {
                 watch.progress.clear();
                 watch.commands.clear();
+                watch.responses.clear();
                 watch.sources.clear();
                 WatchState::Rejected(error)
             }
             readiness::Outcome::Failed(request, failure) => {
                 watch.progress.clear();
                 watch.commands.clear();
+                watch.responses.clear();
                 watch.sources.clear();
                 WatchState::Unavailable { request, failure }
             }

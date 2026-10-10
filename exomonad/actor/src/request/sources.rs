@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::{
     OwnerState, ProgressSnapshot, ReplyError, RequestId, RequestRecord, RequestRegistry,
-    ResponseFailure, TargetState,
+    ResponseFailure, TargetState, RequestSuccess,
 };
 use crate::{ActorRef, LocalActorRef};
 
@@ -30,7 +30,7 @@ pub(crate) enum SourceEvent {
     Progress(ProgressSnapshot),
     ProgressClosed,
     ProgressRejected(ReplyError),
-    Settled(Result<(), ResponseFailure>),
+    Settled(Result<Arc<crate::owned_result::OwnedResultSnapshot>, ResponseFailure>),
     Lifecycle(crate::ActorLifecycle),
     Command(tidepool_bridge_effects::CommandResult),
 }
@@ -320,7 +320,10 @@ impl RequestRecord {
             );
         let settlement = match &self.owner_state {
             OwnerState::Observing => None,
-            OwnerState::Ready => Some(Ok(())),
+            OwnerState::Ready(RequestSuccess::Typed(snapshot)) => Some(Ok(Arc::clone(snapshot))),
+            OwnerState::Ready(RequestSuccess::Command(_)) => Some(Err(ResponseFailure::SettlementFailed(
+                "command completion has no typed request result".into(),
+            ))),
             OwnerState::Unavailable(failure) => Some(Err(failure.clone())),
             OwnerState::Abandoned => Some(Err(ResponseFailure::Abandoned)),
         };

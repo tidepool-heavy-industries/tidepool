@@ -88,7 +88,7 @@ pub(crate) enum RepliesReq {
     ReserveRequestWith(Option<String>, (i64, i64), bool, crate::WorkerLifetime),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     // Duration reaches Core through its generated constructor representation.
-    SubmitRequestWith(i64, HaskellValue, (i64, i64), Option<RequestDuration>),
+    SubmitRequestWith(i64, i64, HaskellValue, (i64, i64), Option<RequestDuration>),
     // The `String` is the bounded reply preview `Tidepool.Agent.Reply.Internal.reply`/
     // `attemptReply` render on the Haskell side (`WorkbenchDisplay`), ahead
     // of the host's own line-boundary truncation in `stage_request_reply`.
@@ -97,7 +97,7 @@ pub(crate) enum RepliesReq {
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     ReplyWith(i64, HaskellValue, String),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
-    ObserveResponseWith(i64),
+    ObserveResponseWith(i64, i64),
     #[haskell(module = "Tidepool.Agent.Reply.Internal")]
     CancelRequestWith(i64),
     RetainRequestWith(i64, crate::WorkerLifetime),
@@ -164,6 +164,7 @@ pub(crate) enum WatchesReq {
     ForgetWatchWith(i64),
     ObserveWatchProgressWith(i64, i64, Vec<i64>, i64, i64),
     ObserveWatchDecisionWith(i64, Vec<i64>),
+    ObserveWatchResponseWith(i64, i64, Vec<i64>, i64),
     ObserveWatchCommandWith(i64, Vec<i64>, String),
 }
 
@@ -381,6 +382,8 @@ fn reply_error_name(error: ReplyError) -> &'static str {
         ReplyError::WrongIncarnation => "ReplyWrongIncarnation",
         ReplyError::InvalidReadiness => "ReplyInvalidReadiness",
         ReplyError::ProgressTypeMismatch => "ReplyProgressTypeMismatch",
+        ReplyError::ReplyResultTypeMismatch => "ReplyResultTypeMismatch",
+        ReplyError::ReplyResultUnavailable => "ReplyResultUnavailable",
         ReplyError::CancellationRequested => "ReplySettlementCancelled",
     }
 }
@@ -463,19 +466,31 @@ impl ToHaskell for RequestAnswer {
         }
         match self {
             Self::Response(Ok(ResponseObservation::Pending(progress))) => {
-                emit!("RawResponsePending", progress)
+                emit!("ResponsePending", progress)
             }
             Self::Response(Ok(ResponseObservation::CancellationPending(reason))) => {
-                emit!("RawResponseCancellationPending", reason)
+                emit!("ResponseCancellationPending", reason)
             }
-            Self::Response(Ok(ResponseObservation::Ready)) => emit!("RawResponseReady"),
+            Self::Response(Ok(ResponseObservation::Ready)) => Err(BridgeError::UnsupportedType(
+                "typed response readiness requires the owned live result".into(),
+            )),
             Self::Response(Ok(ResponseObservation::Unavailable(failure))) => {
-                emit!("RawResponseUnavailable", failure)
+                emit!("ResponseUnavailable", failure)
             }
             Self::Response(Ok(ResponseObservation::Starting(detail))) => {
-                emit!("RawResponseStarting", detail)
+                emit!("ResponseStarting", detail)
             }
-            Self::Response(Err(error)) => emit!("RawResponseRejected", error),
+            Self::Response(Err(error)) => {
+                let rejected = tidepool_bridge::get_qualified(table, "Tidepool.Agent.Reply.Internal.ResponseRejected", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("ResponseRejected".into()))?;
+                let unavailable = tidepool_bridge::get_qualified(table, "Tidepool.Agent.Reply.Internal.ResponseUnavailable", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("ResponseUnavailable".into()))?;
+                visitor.begin_constructor(unavailable, 1)?;
+                visitor.begin_constructor(rejected, 1)?;
+                error.visit(table, visitor)?;
+                visitor.end_constructor()?;
+                visitor.end_constructor()
+            },
             Self::Cancel(Ok(crate::CancelRequestOutcome::Requested)) => {
                 emit!("CancellationRequested")
             }
