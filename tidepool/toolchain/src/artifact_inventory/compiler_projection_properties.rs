@@ -3,14 +3,15 @@
 use super::*;
 use crate::certified_products::{
     tests::{
-        original_groups_fixture, original_groups_fixture_with_interface, recovered_witness_fixtures,
+        original_groups_fixture, original_groups_fixture_in_unit_with_sites, recovered_witness_fixtures,
     },
     PendingImportOwner,
 };
 use crate::declaration_context::ExactDeclarationContext;
 use crate::declaration_join::ExactLexicalNode;
 use proptest::prelude::*;
-use proptest::test_runner::FileFailurePersistence;
+use proptest::test_runner::{contextualize_config, Config, FileFailurePersistence, TestRunner};
+use std::cell::RefCell;
 use sha2::{Digest, Sha256};
 use tidepool_repr::execution_schema::{CachedHomeOwner, SymbolIdentity};
 
@@ -31,19 +32,24 @@ struct Catalog {
 
 fn owner(module: usize) -> ExactModuleIdentity {
     ExactModuleIdentity {
-        unit: "fixture".into(),
-        module: format!("Projection{module}"),
+        unit: format!("projection_unit_{}", module / 2),
+        module: format!("Projection{}", module % 2),
     }
 }
 
 fn binder(module: usize, ordinal: u32) -> SymbolIdentity {
     SymbolIdentity {
-        unit: "fixture".into(),
+        unit: owner(module).unit,
         module: owner(module).module,
         namespace: "value".into(),
         occurrence: format!("entry_{ordinal}"),
         record_parent: None,
     }
+}
+
+fn interface_bytes(module: usize) -> Vec<u8> {
+    let exact = owner(module);
+    format!("{}.{}", exact.unit, exact.module).into_bytes()
 }
 
 impl Catalog {
@@ -68,7 +74,8 @@ impl Catalog {
         let placeholders = (0..VERSIONS)
             .flat_map(|version| (0..MODULES).map(move |module| (module, version)))
             .map(|(module, version)| {
-                original_groups_fixture_with_interface(
+                original_groups_fixture_in_unit_with_sites(
+                    &owner(module).unit,
                     &owner(module).module,
                     ORDINALS
                         .iter()
@@ -76,7 +83,8 @@ impl Catalog {
                         .collect(),
                     version as u8 + 1,
                     &BTreeMap::new(),
-                    owner(module).module.into_bytes(),
+                    interface_bytes(module),
+                    &BTreeMap::new(),
                 )
             })
             .collect::<Vec<_>>();
@@ -106,12 +114,14 @@ impl Catalog {
                             (*ordinal, imports)
                         })
                         .collect();
-                    original_groups_fixture_with_interface(
+                    original_groups_fixture_in_unit_with_sites(
+                        &owner(module).unit,
                         &owner(module).module,
                         groups,
                         version as u8 + 1,
                         &BTreeMap::new(),
-                        owner(module).module.into_bytes(),
+                        interface_bytes(module),
+                        &BTreeMap::new(),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -139,8 +149,8 @@ impl Catalog {
                 let requirements = (module < MODULES - 1)
                     .then(|| {
                         (
-                            ("fixture".to_owned(), owner(module + 1).module),
-                            Sha256::digest(owner(module + 1).module.as_bytes()).into(),
+                            (owner(module + 1).unit, owner(module + 1).module),
+                            Sha256::digest(interface_bytes(module + 1)).into(),
                         )
                     })
                     .into_iter()
@@ -172,10 +182,17 @@ impl Catalog {
                 "variants retain different original bodies"
             );
         }
-        let originals = recovered_witness_fixtures(&finalized)
+        let originals: Vec<_> = recovered_witness_fixtures(&finalized)
             .into_iter()
             .map(|original| Arc::new(ArtifactEntry::original(producer, original.product).unwrap()))
             .collect();
+        assert_eq!(owner(0).module, owner(2).module);
+        assert_ne!(owner(0).unit, owner(2).unit);
+        assert_eq!(
+            originals.iter().map(|entry| entry.descriptor.id).collect::<BTreeSet<_>>().len(),
+            originals.len(),
+            "logical unit/version identities require distinct issued originals"
+        );
         let capture = Arc::new(ArtifactEntry::canonical(
             crate::certified_products::fixture_module_interface(
                 producer,
@@ -768,7 +785,7 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
             .filter_map(|artifact| {
                 artifact.product.as_ref().map(|product| {
                     (
-                        artifact.interface.module.clone(),
+                        (artifact.interface.unit.clone(), artifact.interface.module.clone()),
                         std::fs::read(&product.path).unwrap(),
                     )
                 })
@@ -780,8 +797,8 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
             ArtifactPayload::Original(product) => product.product_bytes().to_vec(),
             _ => unreachable!(),
         };
-        assert_eq!(snapshots(&first)[&owner(module).module], bytes(0));
-        assert_eq!(snapshots(&second)[&owner(module).module], bytes(1));
+        assert_eq!(snapshots(&first)[&(owner(module).unit, owner(module).module)], bytes(0));
+        assert_eq!(snapshots(&second)[&(owner(module).unit, owner(module).module)], bytes(1));
     }
     let again = a
         .prepare_compilation(&scratch.path().join("a2"), PRODUCER)
@@ -939,7 +956,7 @@ fn operation() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn replay(catalog: &Catalog, operations: &[Op]) {
+fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [usize; 13]) {
     let view = catalog.full_view();
     let baseline = view.descriptors();
     let mut actual = std::array::from_fn::<_, 4, _>(|_| catalog.projection(&view, [None; MODULES]));
@@ -1270,20 +1287,27 @@ fn replay(catalog: &Catalog, operations: &[Op]) {
             successes[kind] + refusals[kind] + absent[kind]
         );
     }
-    eprintln!(
-        "compiler_projection_history attempted={attempted:?} successes={successes:?} refusals={refusals:?} absent={absent:?} operations={}",
-        operations.len()
-    );
+    (successes, refusals, absent)
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 64, max_shrink_iters: 4096, failure_persistence: option_env!("TIDEPOOL_PROPTEST_REGRESSIONS").map(|path| Box::new(FileFailurePersistence::Direct(path)) as Box<dyn proptest::test_runner::FailurePersistence>), ..ProptestConfig::default() })]
-    #[test]
-    fn compiler_domains_and_target_roots_match_independent_variant_histories(
-        cross_version in any::<bool>(),
-        generations in prop::array::uniform6(1u64..1000),
-        tail in prop::collection::vec(operation(), 12..48),
-    ) {
+#[test]
+fn compiler_domains_and_target_roots_match_independent_variant_histories() {
+    let mut config = Config::default();
+    if std::env::var_os("PROPTEST_CASES").is_none() { config.cases = 64; }
+    if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() { config.max_shrink_iters = 4096; }
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+    }
+    let mut config = contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(module_path!(), "::compiler_domains_and_target_roots_match_independent_variant_histories"));
+    let configured_cases = config.cases;
+    let callbacks = RefCell::new(0usize);
+    let completed = RefCell::new(0usize);
+    let observed = RefCell::new([[0usize; 13]; 3]);
+    let strategy = (any::<bool>(), prop::array::uniform6(1u64..1000), prop::collection::vec(operation(), 12..48));
+    let result = TestRunner::new(config).run(&strategy, |(cross_version, generations, tail)| {
+        *callbacks.borrow_mut() += 1;
         let catalog = Catalog::new(cross_version, generations);
         let mut operations = vec![
             Op::PublishPrefix { domain: 0 },
@@ -1297,6 +1321,9 @@ proptest! {
             Op::Merge { target: 0, source: 1 },
             Op::Clone { target: 2, source: 0 },
             Op::Restore { domain: 2 },
+            Op::Offer { domain: 1, module: 2, version: 0 },
+            Op::Merge { target: 2, source: 1 },
+            Op::Target { domain: 2, module: 2, version: 0, ordinal: 3 },
             Op::Target { domain: 0, module: 0, version: 1, ordinal: 11 },
             Op::SourceSurface { domain: 2, owners: 6 },
             Op::Demote { domain: 1 },
@@ -1313,6 +1340,13 @@ proptest! {
             Op::ReleaseSegment { domain: 3 },
         ];
         operations.extend(tail);
-        replay(&catalog, &operations);
-    }
+        let outcomes = replay(&catalog, &operations);
+        for (totals, values) in observed.borrow_mut().iter_mut().zip([outcomes.0, outcomes.1, outcomes.2]) {
+            for (total,value) in totals.iter_mut().zip(values) { *total += value; }
+        }
+        *completed.borrow_mut() += 1;
+        Ok(())
+    });
+    eprintln!("compiler_projection_campaign configured_cases={configured_cases} actual_callbacks={} completed_histories={} observed_success_refusal_absent={:?}", callbacks.borrow(), completed.borrow(), observed.borrow());
+    result.unwrap();
 }
