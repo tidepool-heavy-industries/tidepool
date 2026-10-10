@@ -2760,6 +2760,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
     let template = turn::assemble_activation_preview_module(512);
+    let retained_owner = admission.mounted.renderer_owner.clone();
     let compiled = match compile_activation_preview(admission, &template, 512, &includes)
         .expect("prepare a pure display from the original ordinary compiler evidence")
     {
@@ -2772,6 +2773,31 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         compiled.proof().disposition(),
         ActivationPreviewDisposition::Rendered
     );
+    let ActivationRendererNative::Renderable(bundle) = &compiled.renderer.native else {
+        panic!("renderable native custody")
+    };
+    let weak_images = bundle
+        .image_owners()
+        .iter()
+        .map(Arc::downgrade)
+        .collect::<Vec<_>>();
+    assert!(!weak_images.is_empty());
+    let before =
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
+    let repeated = super::super::prepared::NativeImageBundle::prepare_activation_renderer(
+        &compiled.renderer.compiled,
+        &bundle.registry,
+    )
+    .unwrap();
+    assert_eq!(
+        before,
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
+        "same immutable code/literal keys reuse every native image"
+    );
+    for (first, next) in bundle.image_owners().iter().zip(repeated.image_owners()) {
+        assert!(Arc::ptr_eq(first, next));
+    }
+    drop(repeated);
     let ResidentOutcome::Completed { result, .. } = resident
         .run_activation_preview(compiled)
         .expect("execute the original custom dictionary against the original mounted heap input")
@@ -2794,6 +2820,17 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     assert_eq!(
         resident.public_visibility_snapshot_in(ScopeId::ROOT),
         Some(visibility)
+    );
+    drop(resident);
+    assert!(
+        weak_images.iter().all(|image| image.upgrade().is_some()),
+        "original renderer owner retains code after its machine exits"
+    );
+    drop(retained_owner);
+    drop(original_context);
+    assert!(
+        weak_images.iter().all(|image| image.upgrade().is_none()),
+        "last original renderer owner releases native code and literal storage"
     );
 }
 
@@ -4088,7 +4125,7 @@ fn compile_activation_preview(
     template: &str,
     budget: u64,
     includes: &[std::path::PathBuf],
-) -> Result<turn::ActivationPreviewCompilation, turn::TurnFailure> {
+) -> Result<turn::ActivationPreviewCompilation, turn::ActivationRendererFailure> {
     let renderer = match admission
         .acquire_renderer(template, budget)
         .expect("admitted renderer slot")
@@ -4104,5 +4141,5 @@ fn compile_activation_preview(
             panic!("semantic fixture has no unconfirmed native close")
         }
     };
-    turn::bind_activation_renderer(admission, &renderer)
+    turn::bind_activation_renderer(admission, &renderer).map_err(Into::into)
 }

@@ -678,6 +678,268 @@ pub(crate) struct CertifiedTargetImage {
     source_plan: Option<super::persistent::ResolvedSourceDomainPlan>,
 }
 
+/// Strong custody of native code and its literal storage, with no installed state.
+pub(crate) struct NativeImageBundle {
+    pub(super) registry: Arc<ImageRegistry>,
+    images: Vec<Arc<CompiledProgram>>,
+}
+
+impl std::fmt::Debug for NativeImageBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeImageBundle")
+            .field("images", &self.images.len())
+            .finish()
+    }
+}
+
+impl NativeImageBundle {
+    pub(crate) fn prepare_activation_renderer(
+        compiled: &super::turn::CompiledTurn,
+        registry: &Arc<ImageRegistry>,
+    ) -> Result<Self, PreparedRuntimeError> {
+        use tidepool_codegen::prepared_program::{PendingGroupInventory, SourceGroupOutline};
+        use tidepool_repr::execution_schema::CertifiedGroupCode;
+        use tidepool_toolchain::certified_products::PendingImportOwner;
+        let certification = compiled
+            .certification
+            .as_ref()
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        let proof = certification
+            .checked_activation_preview()
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        if !proof.matches_target(&compiled.prepared) {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        }
+        proof
+            .validate_table(&compiled.table)
+            .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
+        proof
+            .validate_yield_sites(&compiled.asks)
+            .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
+        let target_literals =
+            immutable_literal_owners(compiled.prepared.globals(), &certification.target_owners)?;
+        let outlines = certification
+            .groups
+            .iter()
+            .map(|pending| {
+                immutable_literal_owners(pending.group().globals(), pending.imports())?;
+                let imports = pending
+                    .imports()
+                    .iter()
+                    .filter_map(|owner| match owner {
+                        PendingImportOwner::Source { owner, binder, .. } => Some(SourceBinder {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                SourceGroupOutline::from_projected(
+                    pending.owner().clone(),
+                    pending.group(),
+                    imports,
+                )
+                .map_err(Into::into)
+            })
+            .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
+        let roots = certification
+            .target_owners
+            .iter()
+            .filter_map(|owner| match owner {
+                PendingImportOwner::Source { owner, binder, .. } => Some(SourceBinder {
+                    version: owner.module_version.clone(),
+                    binder: binder.clone(),
+                }),
+                _ => None,
+            });
+        // Close only source edges; historical retained contracts do not select a
+        // group or require a live machine merely to compile its definitions.
+        let selected = PendingGroupInventory::new(outlines)?.seal_with_inherited(
+            roots,
+            &BTreeMap::new(),
+            &HashMap::new(),
+        )?;
+        let groups = selected
+            .new_group_indices()
+            .iter()
+            .map(|index| {
+                let pending = &certification.groups[*index];
+                CertifiedGroupCode::admit(pending.owner().clone(), pending.group().clone())
+                    .map(|code| (code, pending.imports()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Native custody must correspond to the exact original owner/ordinal,
+        // not just a binder with the same module-version spelling.
+        for owner in certification
+            .target_owners
+            .iter()
+            .chain(groups.iter().flat_map(|(_, imports)| imports.iter()))
+        {
+            if let PendingImportOwner::Source {
+                owner,
+                original_ordinal,
+                binder,
+            } = owner
+            {
+                if !groups.iter().any(|(code, _)| {
+                    code.owner() == owner
+                        && code.original_ordinal() == *original_ordinal
+                        && code.binders().contains(binder)
+                }) {
+                    return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(
+                        SourceBinder {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+        let mut images = Vec::with_capacity(groups.len() + 1);
+        let mut literals = BTreeMap::new();
+        let mut byte_images = HashMap::new();
+        for (index, (group, imports)) in groups.iter().enumerate() {
+            let definitions = group.definitions();
+            if imports.is_empty()
+                && definitions.globals().is_empty()
+                && matches!(definitions.bindings(), [Group::NonRecursive(top)] if matches!(top.binding.rhs, HeapRhs::Bytes(_)))
+            {
+                let image = CompiledProgram::prepare_group_code(
+                    group,
+                    &[],
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    registry,
+                )
+                .map_err(PreparedRuntimeError::Compile)?;
+                for (binder, literal) in image.source_literals() {
+                    if literals
+                        .insert(binder.clone(), literal.clone())
+                        .is_some_and(|prior| prior != literal)
+                    {
+                        return Err(DemandError::DuplicateBinder(binder).into());
+                    }
+                }
+                byte_images.insert(index, image);
+            }
+        }
+        let target = CompiledProgram::prepare_target_code(
+            &compiled.prepared,
+            &target_literals,
+            &literals,
+            registry,
+        )
+        .map_err(PreparedRuntimeError::Compile)?;
+        let packages = if certification
+            .package_interfaces
+            .matches_target(&compiled.prepared)
+        {
+            target.package_literals(|unit, module| {
+                certification
+                    .package_interfaces
+                    .interface_digest(unit, module)
+            })
+        } else {
+            BTreeMap::new()
+        };
+        images.push(target);
+        for (index, (group, imports)) in groups.iter().enumerate() {
+            let image = match byte_images.remove(&index) {
+                Some(image) => image,
+                None => CompiledProgram::prepare_group_code(
+                    group,
+                    &immutable_literal_owners(group.definitions().globals(), imports)?,
+                    &packages,
+                    &literals,
+                    registry,
+                )
+                .map_err(PreparedRuntimeError::Compile)?,
+            };
+            images.push(image);
+        }
+        tracing::info!(target: "tidepool_runtime::activation_renderer", image_instance = images[0].image_instance_id(), images = images.len(), outcome = "prepared", "activation renderer native custody");
+        Ok(Self {
+            registry: registry.clone(),
+            images,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn image_owners(&self) -> &[Arc<CompiledProgram>] {
+        &self.images
+    }
+}
+
+fn immutable_literal_owners(
+    globals: &[tidepool_repr::execution_schema::GlobalDecl],
+    pending: &[tidepool_toolchain::certified_products::PendingImportOwner],
+) -> Result<Vec<Option<tidepool_codegen::prepared_program::LiteralOwner>>, PreparedRuntimeError> {
+    use tidepool_codegen::prepared_program::LiteralOwner;
+    use tidepool_toolchain::certified_products::PendingImportOwner;
+    if globals.len() != pending.len() {
+        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+    }
+    globals
+        .iter()
+        .zip(pending)
+        .map(|(global, owner)| {
+            let literal = match owner {
+                PendingImportOwner::Source { owner, binder, .. }
+                    if binder == &global.identity
+                        && global.required_generation.is_none()
+                        && binder.unit == owner.unit
+                        && binder.module == owner.module =>
+                {
+                    Some(LiteralOwner::Source {
+                        version: owner.module_version.clone(),
+                        binder: binder.clone(),
+                    })
+                }
+                PendingImportOwner::Package {
+                    unit,
+                    module,
+                    binder,
+                    interface_digest,
+                } if binder == &global.identity
+                    && &binder.unit == unit
+                    && &binder.module == module
+                    && global.required_generation.is_none() =>
+                {
+                    Some(LiteralOwner::Package {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                        binder: binder.clone(),
+                        interface_digest: *interface_digest,
+                    })
+                }
+                PendingImportOwner::Retained {
+                    identity,
+                    generation,
+                } if identity == &global.identity
+                    && global.required_generation == Some(*generation) =>
+                {
+                    None
+                }
+                PendingImportOwner::RetainedPackage {
+                    unit,
+                    module,
+                    binder,
+                    generation,
+                    ..
+                } if binder == &global.identity
+                    && &binder.unit == unit
+                    && &binder.module == module
+                    && global.required_generation == Some(*generation) =>
+                {
+                    None
+                }
+                _ => return Err(PreparedRuntimeError::CertifiedTargetOwners),
+            };
+            Ok(literal)
+        })
+        .collect()
+}
+
 /// An immutable source-produced entry and the native images needed to install it.
 /// This owns no heap, lexical scope, dispatcher, or actor resource grants.
 pub struct PreparedSourceEntry {
@@ -6076,6 +6338,29 @@ pub(super) mod tests {
             }
             assert!(engine.unpin(first));
             assert!(engine.unpin(second));
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(16))]
+        #[test]
+        fn native_code_custody_is_independent_of_retained_binding_ids(ids in proptest::collection::vec(1u64..10000, 1..8), generation in 1u64..128) {
+            use tidepool_repr::execution_schema::{testing, CertifiedGroupCode, GlobalDecl, ModuleVersion};
+            let mut wire = testing::wire_program();
+            wire.globals.push(GlobalDecl { identity: testing::identity("Fixture", "retained"), rep: RuntimeRep::LiftedRef, entry_signature: None, required_evaluated: false, required_generation: Some(generation) });
+            let owner = CachedHomeOwner { unit: "fixture".into(), module: "Fixture".into(), module_version: ModuleVersion([1; 32]), skinny_iface_sha256: [2; 32], product_sha256: [3; 32] };
+            let group = testing::projected_group(wire, 9).unwrap();
+            let code = CertifiedGroupCode::admit(owner.clone(), group.clone()).unwrap();
+            let registry = ImageRegistry::new();
+            let image = CompiledProgram::prepare_group_code(&code, &[None], &BTreeMap::new(), &BTreeMap::new(), &registry).unwrap();
+            let weak = Arc::downgrade(&image);
+            for id in ids {
+                let scoped = CertifiedGroup::admit(owner.clone(), group.clone(), vec![ImportOwner::Retained { id: SessionVarId::from_extract(id), generation }]).unwrap();
+                let selected = DemandedImage::compile(scoped, &registry).unwrap();
+                proptest::prop_assert!(Arc::ptr_eq(&image, selected.image()));
+            }
+            drop(image);
+            proptest::prop_assert!(weak.upgrade().is_none(), "registry alone retains no executable or literal owner");
         }
     }
 
