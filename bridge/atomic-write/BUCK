@@ -91,6 +91,7 @@ export_file(
 
 cxx_library(
     name = "directory_fault_shared",
+    _cxx_toolchain = "toolchains//:c",
     srcs = ["tests/fixtures/directory_fault.c"],
     preferred_linkage = "shared",
     linker_flags = ["-ldl"],

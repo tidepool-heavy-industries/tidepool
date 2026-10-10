@@ -193,6 +193,7 @@ tidepool_rust_isolated_test(
 
 cxx_library(
     name = "binding_directory_fault_shared",
+    _cxx_toolchain = "toolchains//:c",
     srcs = ["tests/fixtures/binding_directory_fault.c"],
     preferred_linkage = "shared",
     linker_flags = ["-ldl"],
@@ -201,6 +202,7 @@ cxx_library(
 
 cxx_library(
     name = "journal_fault_shared",
+    _cxx_toolchain = "toolchains//:c",
     srcs = ["tests/fixtures/journal_fault.c"],
     preferred_linkage = "shared",
     linker_flags = ["-ldl"],

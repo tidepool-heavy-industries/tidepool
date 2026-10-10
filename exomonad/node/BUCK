@@ -269,6 +269,7 @@ tidepool_rust_isolated_test(
 
 cxx_library(
     name = "inbox_directory_fault_shared",
+    _cxx_toolchain = "toolchains//:c",
     srcs = ["src/inbox/fixtures/directory_fault.c"],
     preferred_linkage = "shared",
     linker_flags = ["-ldl"],

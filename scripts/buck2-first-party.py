@@ -1576,6 +1576,7 @@ filegroup(
         CURRENT_QUALIFICATION_SOURCES.add("src/inbox/fixtures/directory_fault.c")
         rules.append('''cxx_library(
     name = "inbox_directory_fault_shared",
+    _cxx_toolchain = "toolchains//:c",
     srcs = ["src/inbox/fixtures/directory_fault.c"],
     preferred_linkage = "shared",
     linker_flags = ["-ldl"],
@@ -1588,6 +1589,7 @@ filegroup(
             CURRENT_QUALIFICATION_SOURCES.add(source)
             rules.append(f'''cxx_library(
     name = "{name}_shared",
+    _cxx_toolchain = "toolchains//:c",
     srcs = ["{source}"],
     preferred_linkage = "shared",
     linker_flags = ["-ldl"],
@@ -1603,6 +1605,7 @@ filegroup(
 
 cxx_library(
     name = "directory_fault_shared",
+    _cxx_toolchain = "toolchains//:c",
     srcs = ["tests/fixtures/directory_fault.c"],
     preferred_linkage = "shared",
     linker_flags = ["-ldl"],

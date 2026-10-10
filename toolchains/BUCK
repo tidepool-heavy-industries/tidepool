@@ -74,6 +74,23 @@ system_cxx_toolchain(
     visibility = ["PUBLIC"],
 )
 
+system_cxx_toolchain(
+    name = "c",
+    compiler = read_root_config("nix", "cc"),
+    cxx_compiler = read_root_config("nix", "cxx"),
+    linker = read_root_config("nix", "cc"),
+    archiver = read_root_config("nix", "ar"),
+    compiler_type = "gcc",
+    link_flags = [
+        "-fuse-ld=lld",
+        "-B" + read_root_config("nix", "lld_bin") + "/",
+        "-B" + read_root_config("nix", "ar").rsplit("/", 1)[0] + "/",
+    ],
+    c_flags = ["-fno-omit-frame-pointer"],
+    cxx_flags = ["-fno-omit-frame-pointer"],
+    visibility = ["PUBLIC"],
+)
+
 system_genrule_toolchain(name = "genrule", visibility = ["PUBLIC"])
 noop_test_toolchain(name = "test", visibility = ["PUBLIC"])
 remote_test_execution_toolchain(
