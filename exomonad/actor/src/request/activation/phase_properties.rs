@@ -142,12 +142,17 @@ fn op(request: usize, action: Action) -> Operation {
     }
 }
 
-fn operations() -> impl Strategy<Value = Operation> {
-    let outcome = prop_oneof![
-        Just(NativeOutcome::Committed),
-        Just(NativeOutcome::Refused),
-        Just(NativeOutcome::RecoveryRequired)
-    ];
+fn operations(with_fences: bool) -> impl Strategy<Value = Operation> {
+    let outcome = if with_fences {
+        prop_oneof![
+            Just(NativeOutcome::Committed),
+            Just(NativeOutcome::Refused),
+            Just(NativeOutcome::RecoveryRequired)
+        ]
+        .boxed()
+    } else {
+        prop_oneof![Just(NativeOutcome::Committed), Just(NativeOutcome::Refused)].boxed()
+    };
     let action = prop_oneof![
         6 => any::<bool>().prop_map(Action::Claim),
         4 => outcome.clone().prop_map(Action::Finish),
@@ -167,12 +172,16 @@ fn operations() -> impl Strategy<Value = Operation> {
         1 => Just(CapabilityRef::Missing),
     ];
     let caller = prop_oneof![6 => Just(Caller::Exact), 1 => Just(Caller::Foreign), 1 => Just(Caller::Restarted)];
-    (0usize..4, reference, caller, action).prop_map(|(request, capability, caller, action)| {
+    (0usize..4, reference, caller, action).prop_map(move |(request, capability, caller, action)| {
         Operation {
             request,
             capability,
             caller,
-            action,
+            action: if !with_fences && matches!(action, Action::FenceOwner) {
+                Action::ObserveOwner
+            } else {
+                action
+            },
         }
     })
 }
@@ -396,42 +405,44 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
     core
 }
 
-fn histories() -> impl Strategy<Value = Vec<Operation>> {
-    let arbitrary = proptest::collection::vec(operations(), 1..65);
-    let guided = (0u8..19, any::<bool>()).prop_flat_map(|(mode, cancel_native)| {
-        let core = guided(mode, cancel_native);
-        (
-            proptest::collection::vec(operations(), 0..8),
-            proptest::collection::vec(proptest::bool::weighted(1.0), core.len()),
-            proptest::collection::vec(operations(), 0..12),
-        )
-            .prop_map(move |(prefix, keep, suffix)| {
-                let mut history: Vec<_> = prefix
-                    .into_iter()
-                    .map(|mut operation| {
-                        operation.request = 3;
-                        operation.capability = CapabilityRef::ForRequest;
-                        if matches!(
-                            operation.action,
-                            Action::RetireOwner
-                                | Action::ObserveOwner
-                                | Action::FenceOwner
-                                | Action::ShutdownTarget
-                        ) {
-                            operation.action = Action::Read;
-                        }
-                        operation
-                    })
-                    .collect();
-                history.extend(
-                    core.iter()
-                        .zip(keep)
-                        .filter_map(|(op, keep)| keep.then_some(*op)),
-                );
-                history.extend(suffix);
-                history
-            })
-    });
+fn histories(with_fences: bool) -> impl Strategy<Value = Vec<Operation>> {
+    let arbitrary = proptest::collection::vec(operations(with_fences), 1..65);
+    let guided = (0u8..if with_fences { 19 } else { 17 }, any::<bool>()).prop_flat_map(
+        move |(mode, cancel_native)| {
+            let core = guided(mode, cancel_native);
+            (
+                proptest::collection::vec(operations(with_fences), 0..8),
+                proptest::collection::vec(proptest::bool::weighted(1.0), core.len()),
+                proptest::collection::vec(operations(with_fences), 0..12),
+            )
+                .prop_map(move |(prefix, keep, suffix)| {
+                    let mut history: Vec<_> = prefix
+                        .into_iter()
+                        .map(|mut operation| {
+                            operation.request = 3;
+                            operation.capability = CapabilityRef::ForRequest;
+                            if matches!(
+                                operation.action,
+                                Action::RetireOwner
+                                    | Action::ObserveOwner
+                                    | Action::FenceOwner
+                                    | Action::ShutdownTarget
+                            ) {
+                                operation.action = Action::Read;
+                            }
+                            operation
+                        })
+                        .collect();
+                    history.extend(
+                        core.iter()
+                            .zip(keep)
+                            .filter_map(|(op, keep)| keep.then_some(*op)),
+                    );
+                    history.extend(suffix);
+                    history
+                })
+        },
+    );
     prop_oneof![1 => arbitrary, 2 => guided]
 }
 
@@ -1388,55 +1399,100 @@ fn config(name: &'static str) -> Config {
     config
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn generated_request_activation_matches_native_evidence() {
+    // Registry histories share their original checked input. This family never
+    // mutates run readiness; fence integration has independent owner epochs.
+    let fixture =
+        crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
+    let coverage = RefCell::new(Coverage::default());
+    TestRunner::new(config(concat!(
+        module_path!(),
+        "::generated_request_activation_matches_native_evidence"
+    )))
+    .run(&histories(false), |history| {
+        run_history(&history, &fixture, false, &mut coverage.borrow_mut())
+    })
+    .unwrap();
+    assert_eq!(coverage.borrow().owner_fences, 0);
+    assert_eq!(coverage.borrow().tentative_claims_after_fence, 0);
+    eprintln!(
+        "ready-only activation histories (FenceOwner excluded): {:#?}",
+        coverage.borrow()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_run_fences_preserve_publication_receipts() {
+    let mut cfg = config(concat!(
+        module_path!(),
+        "::generated_run_fences_preserve_publication_receipts"
+    ));
+    // These histories compile and admit a fresh native machine per replay.
+    // Four cases in each initial-readiness partition bound compiler work;
+    // the inexpensive registry family keeps the full 96-case search above.
+    if std::env::var_os("PROPTEST_CASES").is_none() {
+        cfg.cases = 4;
+    }
     for initially_pending in [false, true] {
         let coverage = RefCell::new(Coverage::default());
-        let result = TestRunner::new(config(concat!(
-            module_path!(),
-            "::generated_request_activation_matches_native_evidence"
-        )))
-        .run(&histories(), |history| {
-            let fixture = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(
-                    crate::resident_workbench::request_tests::activation_publication_phase_fixture(
-                    ),
-                )
-            });
-            run_history(
-                &history,
-                &fixture,
-                initially_pending,
-                &mut coverage.borrow_mut(),
+        TestRunner::new(cfg.clone())
+            .run(&histories(true), |history| {
+                let fixture = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(
+                crate::resident_workbench::request_tests::activation_publication_phase_fixture()
             )
-        });
+                });
+                run_history(
+                    &history,
+                    &fixture,
+                    initially_pending,
+                    &mut coverage.borrow_mut(),
+                )
+            })
+            .unwrap();
         eprintln!(
-            "activation phase initially_pending={initially_pending} generated coverage: {:#?}",
+            "fresh-owner fence histories initially_pending={initially_pending}: {:#?}",
             coverage.borrow()
         );
-        result.unwrap();
     }
 }
 
 #[tokio::test]
 async fn request_activation_phase_support_covers_contract_partitions() {
     let mut coverage = Coverage::default();
-    for initially_pending in [false, true] {
-        for mode in 0..19 {
-            for cancel_native in [false, true] {
-                let fixture =
-                    crate::resident_workbench::request_tests::activation_publication_phase_fixture(
-                    )
-                    .await;
-                run_history(
-                    &guided(mode, cancel_native),
-                    &fixture,
-                    initially_pending,
-                    &mut coverage,
-                )
-                .unwrap();
-            }
+    let ready_fixture =
+        crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
+    for mode in 0..17 {
+        for cancel_native in [false, true] {
+            run_history(
+                &guided(mode, cancel_native),
+                &ready_fixture,
+                false,
+                &mut coverage,
+            )
+            .unwrap();
         }
+    }
+    // Independent authenticated epochs cover the three fence boundaries:
+    // initially fenced, an in-flight producer, and an already committed receipt.
+    for (initially_pending, mode, cancel_native) in [
+        (true, 2, false),
+        (true, 5, false),
+        (false, 18, false),
+        (false, 18, true),
+        (false, 17, false),
+        (false, 17, true),
+    ] {
+        let fixture =
+            crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
+        run_history(
+            &guided(mode, cancel_native),
+            &fixture,
+            initially_pending,
+            &mut coverage,
+        )
+        .unwrap();
     }
     assert!(coverage.claims > 0 && coverage.claim_control_refusals > 0);
     assert!(coverage.lost_waiters > 0 && coverage.finishes_after_lost_waiter > 0);

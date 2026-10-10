@@ -21699,8 +21699,8 @@ pub(crate) mod request_tests {
     }
 
     /// Authentic retained input for request-settlement component histories.
-    /// Compiler/native admission run once; each history owns a fresh native
-    /// decision while sharing the immutable admission and checked input proof.
+    /// Ready-only histories share immutable admitted input with fresh decisions.
+    /// Fence histories use fresh fixtures because a fenced run cannot be revived.
     pub(crate) struct ActivationPublicationPhaseFixture {
         prepared: PreparedActivationInput,
         session: Mutex<Option<Box<ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>>>>,
