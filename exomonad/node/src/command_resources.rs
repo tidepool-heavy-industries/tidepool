@@ -256,6 +256,8 @@ pub struct CommandResources {
     actor_starts: Mutex<u64>,
     #[cfg(test)]
     fail_next_allocation_cleanup: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_next_control_write: Mutex<Option<&'static str>>,
 }
 fn io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
@@ -560,6 +562,8 @@ impl CommandResources {
             actor_starts: Mutex::new(0),
             #[cfg(test)]
             fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_control_write: Mutex::new(None),
         });
         owner.reconcile(events)?;
         let weak = Arc::downgrade(&owner);
@@ -1123,6 +1127,12 @@ impl CommandResources {
     fn configure_command(&self, key: &Key, bytes: u64) -> std::io::Result<PathBuf> {
         let dir = self.actor_directory(&key.0)?.join(&key.1);
         std::fs::create_dir(&dir)?;
+        #[cfg(test)]
+        if let Some(control) = self.fail_next_control_write.lock().take() {
+            // A directory at a control path gives deterministic write and
+            // removal failures on a temporary filesystem, without cgroup access.
+            std::fs::create_dir(dir.join(control))?;
+        }
         let result = (|| {
             std::fs::write(dir.join("memory.max"), bytes.to_string())?;
             std::fs::write(
@@ -1432,6 +1442,7 @@ mod tests {
             policy,
             actor_starts: Mutex::new(0),
             fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
+            fail_next_control_write: Mutex::new(None),
         }
     }
 
@@ -1467,6 +1478,7 @@ mod tests {
             policy,
             actor_starts: Mutex::new(0),
             fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
+            fail_next_control_write: Mutex::new(None),
         };
         owner.reconcile(events).unwrap();
         owner
@@ -1798,6 +1810,30 @@ mod tests {
         assert_eq!(observation.active, 0);
         assert_eq!(observation.retained_allocations, 1);
         assert_eq!(observation.cleanup_failures, 1);
+    }
+
+    #[test]
+    fn failed_setup_retains_the_unissued_allocation_until_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner(root.path());
+        *owner.fail_next_control_write.lock() = Some("memory.max");
+        let directory = root.path().join("actor-1/command-1");
+
+        assert!(matches!(
+            owner.submit("actor-1", "command-1", MIB).unwrap(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ));
+        assert!(directory.is_dir());
+        assert_eq!(owner.observation().retained_allocations, 1);
+        assert!(owner.acknowledge("actor-1", "command-1").is_err());
+        assert!(owner.seal_producer("actor-1").is_err());
+
+        std::fs::remove_dir(directory.join("memory.max")).unwrap();
+        owner.observe();
+        assert!(!directory.exists());
+        assert_eq!(owner.observation().retained_allocations, 0);
+        owner.acknowledge("actor-1", "command-1").unwrap();
+        owner.seal_producer("actor-1").unwrap();
     }
 
     #[test]
