@@ -69,6 +69,226 @@ pub struct ProgramProvenance {
     authenticated_inputs: BTreeMap<u64, AuthenticatedInputContext>,
 }
 
+/// Compiler-selected immutable facts. No runtime execution owner or renderer
+/// is retained here; each installation creates its own execution observation.
+#[derive(Debug, Default)]
+pub(super) struct CompiledProvenancePlan {
+    sites: BTreeMap<u64, YieldSite>,
+    fresh_completion_sites: std::collections::BTreeSet<u64>,
+    native_sites: tidepool_toolchain::checked_cell::SelectedNativeSites,
+    authenticated_inputs: BTreeMap<
+        u64,
+        (
+            Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+            [u8; 32],
+        ),
+    >,
+    original_execution: Option<(
+        Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+        [u8; 32],
+    )>,
+}
+
+impl CompiledProvenancePlan {
+    pub(super) fn build(code: &TurnCode<'_>) -> Result<Self, ResidentError> {
+        let mut provenance = Self {
+            sites: ProgramProvenance::from_sites(&code.sites)?.sites,
+            ..Self::default()
+        };
+        let certification = code.certification.as_ref().as_ref();
+        let original_contexts = if let Some(certification) = certification {
+            let original = match certification.purpose() {
+                TurnPurpose::Execution { execution, .. }
+                | TurnPurpose::HostPrototype(execution) => {
+                    Some(execution.original_contexts(&code.prepared, &code.table, &code.sites))
+                }
+                TurnPurpose::ActivationPreview(proof) => {
+                    Some(proof.original_contexts(&code.prepared, &code.table, &code.sites))
+                }
+                TurnPurpose::Ordinary => {
+                    certification.original_compile_input.as_ref().map(|proof| {
+                        proof.original_contexts(
+                            &code.prepared,
+                            &certification.groups,
+                            &certification.target_owners,
+                            &certification.package_interfaces,
+                            &code.table,
+                            &code.sites,
+                        )
+                    })
+                }
+            };
+            original.transpose().map_err(SessionError::Compile)?
+        } else {
+            None
+        };
+        let (original_interfaces, original_execution) = match original_contexts {
+            Some((interfaces, execution)) => (Some(interfaces), Some(execution)),
+            None => (None, None),
+        };
+        if let Some(original_interfaces) = original_interfaces {
+            provenance.fresh_completion_sites.extend(
+                code.prepared
+                    .sites()
+                    .iter()
+                    .filter(|site| {
+                        site.inputs.is_empty()
+                            && provenance.sites.get(&site.site).is_some_and(|observed| {
+                                observed.inputs.is_empty()
+                                    && observed.origin == site.origin
+                                    && observed.ordinal == site.ordinal
+                            })
+                    })
+                    .map(|site| site.site),
+            );
+            let original_execution =
+                original_execution.ok_or(ResidentError::UnsupportedCheckedTurn)?;
+            let execution_identity = original_execution.semantic_sha256();
+            provenance.original_execution = Some((original_execution, execution_identity));
+            // Site observations and installed native custody can include
+            // earlier entries. A typed target retains its exact issued closure.
+            let issued_sites =
+                certification.and_then(|certification| match certification.purpose() {
+                    TurnPurpose::Execution { execution, .. }
+                    | TurnPurpose::HostPrototype(execution) => execution.selected_native_sites(),
+                    _ => None,
+                });
+            let mut selected_sites = code
+                .prepared
+                .sites()
+                .iter()
+                .map(|site| site.site)
+                .collect::<std::collections::BTreeSet<_>>();
+            if let Some(issued_sites) = issued_sites {
+                issued_sites
+                    .validate_observations(code.sites.iter())
+                    .map_err(SessionError::Compile)?;
+                provenance
+                    .native_sites
+                    .merge(issued_sites)
+                    .map_err(SessionError::Compile)?;
+                selected_sites.extend(issued_sites.ids());
+            } else {
+                selected_sites.extend(
+                    certification
+                        .into_iter()
+                        .flat_map(|certification| certification.groups.iter())
+                        .flat_map(|group| group.group().definitions().sites())
+                        .map(|site| site.site),
+                );
+            }
+            let descriptors = original_interfaces.artifact_view().descriptors();
+            let home_units = descriptors
+                .iter()
+                .map(|descriptor| descriptor.owner.unit.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            let owners = descriptors
+                .iter()
+                .map(|descriptor| (&descriptor.owner, descriptor.id))
+                .collect::<BTreeMap<_, _>>();
+            for site in provenance.sites.values().filter(|site| {
+                selected_sites.contains(&site.site)
+                    && site.input_type_witnesses.len() == site.inputs.len()
+                    && site.input_type_witnesses.iter().any(Option::is_some)
+            }) {
+                let Some(signatures) = &site.request_type_signatures else {
+                    continue;
+                };
+                let mut roots = std::collections::BTreeSet::new();
+                for name in std::iter::once(signatures.reply())
+                    .chain(signatures.progress())
+                    .flat_map(|signature| signature.names())
+                {
+                    if home_units.contains(name.unit()) {
+                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                            unit: name.unit().to_owned(),
+                            module: name.module().to_owned(),
+                        };
+                        let id = owners.get(&owner).ok_or_else(|| SessionError::Compile(crate::CompileError::ExtractFailed(
+                            format!("request native type owner {}:{} is outside its sealed interface closure", name.unit(), name.module()),
+                        )))?;
+                        roots.insert(*id);
+                    }
+                }
+                if let Some(witness) = site.input_type_witnesses.first().and_then(Option::as_ref) {
+                    for (unit, module, seal) in witness.interface_seals() {
+                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                            unit: unit.to_owned(),
+                            module: module.to_owned(),
+                        };
+                        if let Some(id) = owners.get(&owner) {
+                            let descriptor = descriptors
+                                .iter()
+                                .find(|descriptor| descriptor.id == *id)
+                                .expect("selected owner descriptor");
+                            let actual = descriptor
+                                .interface_sha256
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>();
+                            if actual != seal {
+                                return Err(SessionError::Compile(
+                                    crate::CompileError::ExtractFailed(format!(
+                                        "request input interface seal differs for {unit}:{module}"
+                                    )),
+                                )
+                                .into());
+                            }
+                            roots.insert(*id);
+                        } else if home_units.contains(unit) {
+                            return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
+                                format!("request input owner {unit}:{module} is outside its sealed interface closure"),
+                            )).into());
+                        }
+                    }
+                }
+                let interfaces = original_interfaces
+                    .select_interface_roots(roots.into_iter().collect())
+                    .map_err(SessionError::Compile)?;
+                let identity = interfaces.semantic_sha256();
+                provenance
+                    .authenticated_inputs
+                    .insert(site.site, (Arc::new(interfaces), identity));
+            }
+        }
+        Ok(provenance)
+    }
+
+    fn instantiate(&self) -> Arc<ProgramProvenance> {
+        let execution = self.original_execution.as_ref().map(|(context, identity)| {
+            Arc::new(OriginalExecutionContext {
+                identity: *identity,
+                context: context.clone(),
+                renderers: Mutex::default(),
+            })
+        });
+        Arc::new(ProgramProvenance {
+            sites: self.sites.clone(),
+            fresh_completion_sites: self.fresh_completion_sites.clone(),
+            native_sites: self.native_sites.clone(),
+            authenticated_inputs: self
+                .authenticated_inputs
+                .iter()
+                .map(|(site, (types, identity))| {
+                    (
+                        *site,
+                        AuthenticatedInputContext {
+                            types: types.clone(),
+                            type_identity: *identity,
+                            execution: OriginalExecutionContexts::Unique(
+                                execution
+                                    .as_ref()
+                                    .expect("authenticated input has execution custody")
+                                    .clone(),
+                            ),
+                        },
+                    )
+                })
+                .collect(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthenticatedInputContext {
     types: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
@@ -77,6 +297,7 @@ struct AuthenticatedInputContext {
 }
 
 impl AuthenticatedInputContext {
+    #[cfg(test)]
     fn capture(
         types: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
         execution: OriginalExecutionContexts,
@@ -106,6 +327,7 @@ struct OriginalExecutionContext {
 }
 
 impl OriginalExecutionContext {
+    #[cfg(test)]
     fn capture(
         context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
     ) -> Arc<Self> {
@@ -573,6 +795,7 @@ impl HostCarrier {
         let (_, representation) = host_representation(
             &binder,
             &TurnCode {
+                provenance: prototype.code.provenance.clone(),
                 table: std::borrow::Cow::Borrowed(prototype.code.table.as_ref()),
                 sites: std::borrow::Cow::Borrowed(prototype.code.sites.as_ref()),
                 prepared: std::borrow::Cow::Borrowed(prototype.code.prepared.as_ref()),
@@ -594,6 +817,7 @@ impl HostCarrier {
     /// Borrow the immutable compiler proof without changing carrier ownership.
     pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
+            provenance: self.code.provenance.clone(),
             table: std::borrow::Cow::Borrowed(self.code.table.as_ref()),
             sites: std::borrow::Cow::Borrowed(self.code.sites.as_ref()),
             prepared: std::borrow::Cow::Borrowed(self.code.prepared.as_ref()),
@@ -675,6 +899,7 @@ fn json_runtime_layout(prepared: &PreparedProgram) -> Result<JsonLayout<DataConI
 
 fn own_host_code(code: TurnCode<'_>) -> TurnCode<'static> {
     TurnCode {
+        provenance: code.provenance,
         table: std::borrow::Cow::Owned(code.table.into_owned()),
         sites: std::borrow::Cow::Owned(code.sites.into_owned()),
         prepared: std::borrow::Cow::Owned(code.prepared.into_owned()),
@@ -4852,7 +5077,12 @@ where
             .ok_or(ResidentError::UnsupportedCheckedTurn)?
             .host_prototype()
             .map_err(SessionError::Compile)?;
-        code.certification = std::borrow::Cow::Owned(Some(certification));
+        code = TurnCode::new(
+            code.table,
+            code.sites,
+            code.prepared,
+            std::borrow::Cow::Owned(Some(certification)),
+        );
         let prototype = Arc::new(HostBindingPrototype {
             compiler,
             code: Arc::new(code),
@@ -5754,188 +5984,18 @@ where
     }
 
     fn provenance_for(&self, code: &TurnCode<'_>) -> Result<Arc<ProgramProvenance>, ResidentError> {
-        let mut provenance = ProgramProvenance::from_sites(&code.sites)?;
-        let certification = code.certification.as_ref().as_ref();
-        let original_interfaces = if let Some(certification) = certification {
-            let original = match certification.purpose() {
-                TurnPurpose::Execution { execution, .. }
-                | TurnPurpose::HostPrototype(execution) => Some(
-                    execution.original_interface_context(&code.prepared, &code.table, &code.sites),
-                ),
-                TurnPurpose::ActivationPreview(proof) => {
-                    Some(proof.original_interface_context(&code.prepared, &code.table, &code.sites))
-                }
-                TurnPurpose::Ordinary => {
-                    certification.original_compile_input.as_ref().map(|proof| {
-                        proof.original_interface_context(
-                            &code.prepared,
-                            &certification.groups,
-                            &certification.target_owners,
-                            &certification.package_interfaces,
-                            &code.table,
-                            &code.sites,
-                        )
-                    })
-                }
-            };
-            original.transpose().map_err(SessionError::Compile)?
-        } else {
-            None
-        };
-        let original_execution = if let Some(certification) = certification {
-            let original = match certification.purpose() {
-                TurnPurpose::Execution { execution, .. }
-                | TurnPurpose::HostPrototype(execution) => Some(
-                    execution.original_execution_context(&code.prepared, &code.table, &code.sites),
-                ),
-                TurnPurpose::ActivationPreview(proof) => {
-                    Some(proof.original_execution_context(&code.prepared, &code.table, &code.sites))
-                }
-                TurnPurpose::Ordinary => {
-                    certification.original_compile_input.as_ref().map(|proof| {
-                        proof.original_execution_context(
-                            &code.prepared,
-                            &certification.groups,
-                            &certification.target_owners,
-                            &certification.package_interfaces,
-                            &code.table,
-                            &code.sites,
-                        )
-                    })
-                }
-            };
-            original.transpose().map_err(SessionError::Compile)?
-        } else {
-            None
-        };
-        if let Some(original_interfaces) = original_interfaces {
-            provenance.fresh_completion_sites.extend(
-                code.prepared
-                    .sites()
-                    .iter()
-                    .filter(|site| {
-                        site.inputs.is_empty()
-                            && provenance.sites.get(&site.site).is_some_and(|observed| {
-                                observed.inputs.is_empty()
-                                    && observed.origin == site.origin
-                                    && observed.ordinal == site.ordinal
-                            })
-                    })
-                    .map(|site| site.site),
-            );
-            let original_execution =
-                original_execution.ok_or(ResidentError::UnsupportedCheckedTurn)?;
-            let original_execution = OriginalExecutionContext::capture(original_execution);
-            // Site observations and installed native custody can include
-            // earlier entries. A typed target retains its exact issued closure.
-            let issued_sites =
-                certification.and_then(|certification| match certification.purpose() {
-                    TurnPurpose::Execution { execution, .. }
-                    | TurnPurpose::HostPrototype(execution) => execution.selected_native_sites(),
-                    _ => None,
-                });
-            let mut selected_sites = code
-                .prepared
-                .sites()
-                .iter()
-                .map(|site| site.site)
-                .collect::<std::collections::BTreeSet<_>>();
-            if let Some(issued_sites) = issued_sites {
-                issued_sites
-                    .validate_observations(code.sites.iter())
-                    .map_err(SessionError::Compile)?;
-                provenance
-                    .native_sites
-                    .merge(issued_sites)
-                    .map_err(SessionError::Compile)?;
-                selected_sites.extend(issued_sites.ids());
-            } else {
-                selected_sites.extend(
-                    certification
-                        .into_iter()
-                        .flat_map(|certification| certification.groups.iter())
-                        .flat_map(|group| group.group().definitions().sites())
-                        .map(|site| site.site),
-                );
-            }
-            let descriptors = original_interfaces.artifact_view().descriptors();
-            let home_units = descriptors
-                .iter()
-                .map(|descriptor| descriptor.owner.unit.as_str())
-                .collect::<std::collections::BTreeSet<_>>();
-            let owners = descriptors
-                .iter()
-                .map(|descriptor| (&descriptor.owner, descriptor.id))
-                .collect::<BTreeMap<_, _>>();
-            for site in provenance.sites.values().filter(|site| {
-                selected_sites.contains(&site.site)
-                    && site.input_type_witnesses.len() == site.inputs.len()
-                    && site.input_type_witnesses.iter().any(Option::is_some)
-            }) {
-                let Some(signatures) = &site.request_type_signatures else {
-                    continue;
-                };
-                let mut roots = std::collections::BTreeSet::new();
-                for name in std::iter::once(signatures.reply())
-                    .chain(signatures.progress())
-                    .flat_map(|signature| signature.names())
-                {
-                    if home_units.contains(name.unit()) {
-                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                            unit: name.unit().to_owned(),
-                            module: name.module().to_owned(),
-                        };
-                        let id = owners.get(&owner).ok_or_else(|| SessionError::Compile(crate::CompileError::ExtractFailed(
-                            format!("request native type owner {}:{} is outside its sealed interface closure", name.unit(), name.module()),
-                        )))?;
-                        roots.insert(*id);
-                    }
-                }
-                if let Some(witness) = site.input_type_witnesses.first().and_then(Option::as_ref) {
-                    for (unit, module, seal) in witness.interface_seals() {
-                        let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
-                            unit: unit.to_owned(),
-                            module: module.to_owned(),
-                        };
-                        if let Some(id) = owners.get(&owner) {
-                            let descriptor = descriptors
-                                .iter()
-                                .find(|descriptor| descriptor.id == *id)
-                                .expect("selected owner descriptor");
-                            let actual = descriptor
-                                .interface_sha256
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect::<String>();
-                            if actual != seal {
-                                return Err(SessionError::Compile(
-                                    crate::CompileError::ExtractFailed(format!(
-                                        "request input interface seal differs for {unit}:{module}"
-                                    )),
-                                )
-                                .into());
-                            }
-                            roots.insert(*id);
-                        } else if home_units.contains(unit) {
-                            return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
-                                format!("request input owner {unit}:{module} is outside its sealed interface closure"),
-                            )).into());
-                        }
-                    }
-                }
-                let interfaces = original_interfaces
-                    .select_interface_roots(roots.into_iter().collect())
-                    .map_err(SessionError::Compile)?;
-                provenance.authenticated_inputs.insert(
-                    site.site,
-                    AuthenticatedInputContext::capture(
-                        Arc::new(interfaces),
-                        OriginalExecutionContexts::Unique(original_execution.clone()),
-                    ),
-                );
-            }
+        if let Some(plan) = code.provenance.get() {
+            return Ok(plan.instantiate());
         }
-        Ok(Arc::new(provenance))
+        let plan = CompiledProvenancePlan::build(code)?;
+        // Concurrent readers can compute the same immutable plan; only the
+        // retained winner is observed, and failures are never memoized.
+        let _ = code.provenance.set(plan);
+        Ok(code
+            .provenance
+            .get()
+            .expect("plan was initialized")
+            .instantiate())
     }
 
     fn next_cont_id(&self) -> String {
@@ -8657,6 +8717,7 @@ mod authored_publication_tests {
             });
         }
         TurnCode {
+            provenance: Arc::default(),
             prepared: Cow::Owned(testing::prepare(wire).unwrap()),
             table: Cow::Owned(table),
             sites: Cow::Borrowed(&[]),
@@ -9782,6 +9843,7 @@ mod authored_publication_tests {
         let table = session.state.session_table().clone();
         let prepared = testing::prepare(testing::wire_program()).unwrap();
         let code = TurnCode {
+            provenance: Arc::default(),
             prepared: Cow::Owned(prepared),
             table: Cow::Owned(table.clone()),
             sites: Cow::Borrowed(&[]),
@@ -10756,6 +10818,33 @@ mod preview_budget_tests {
             }
         }
         assert_eq!(truncate_preview_at_line("λ".into(), 1), "~");
+    }
+}
+
+#[cfg(test)]
+mod compiled_provenance_plan_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+        #[test]
+        fn immutable_plan_preserves_metadata_without_creating_input_authority(ids in prop::collection::vec(0u64..32, 0..40), copies in 1usize..8) {
+            let sites = ids.into_iter().map(|site| YieldSite {
+                site, origin: "PlanMetadata".into(), ordinal: 0, ty: "Int".into(),
+                modules: vec![], heads: vec![], inputs: vec![], input_type_witnesses: vec![],
+                reply_declaration: None, request_type_signatures: None,
+            }).collect::<Vec<_>>();
+            let code = TurnCode::new(std::borrow::Cow::Owned(DataConTable::new()), std::borrow::Cow::Owned(sites.clone()), std::borrow::Cow::Owned(tidepool_repr::execution_schema::testing::prepare(tidepool_repr::execution_schema::testing::wire_program()).unwrap()), std::borrow::Cow::Owned(None));
+            let plan = CompiledProvenancePlan::build(&code).unwrap();
+            let expected = sites.into_iter().map(|site| (site.site, site)).collect::<BTreeMap<_, _>>();
+            for _ in 0..copies {
+                let observation = plan.instantiate();
+                prop_assert_eq!(&observation.sites, &expected);
+                prop_assert!(observation.authenticated_inputs.is_empty());
+                prop_assert!(observation.fresh_completion_sites.is_empty());
+            }
+        }
     }
 }
 

@@ -362,7 +362,7 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
         DriverCompilePurpose::Bootstrap,
     )
     .expect("the fixed driver has no dependency on the invalid workspace spec");
-    let certification = bootstrap.compiled.certification.as_ref().unwrap();
+    let certification = bootstrap.compiled.certification().unwrap();
     assert!(certification.recovery_products.iter().all(|product| {
         !matches!(
             product.owner().module.as_str(),

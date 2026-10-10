@@ -1351,12 +1351,12 @@ mod tests {
                 type_name: constructor.family.occurrence.clone(),
             });
         }
-        Arc::new(tidepool_runtime::session::CompiledTurn {
-            prepared: Arc::new(testing::prepare(wire).unwrap()),
+        Arc::new(tidepool_runtime::session::CompiledTurn::new(
             table,
-            asks: Vec::new(),
-            warnings: Default::default(),
-            certification: None,
-        })
+            Default::default(),
+            Vec::new(),
+            Arc::new(testing::prepare(wire).unwrap()),
+            None,
+        ))
     }
 }

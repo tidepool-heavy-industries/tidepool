@@ -1840,6 +1840,42 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         .iter()
         .map(|output| source.provenance_for(&output.code()).unwrap())
         .collect::<Vec<_>>();
+    for (output, retained) in outputs.iter().zip(&reobserved) {
+        let recomputed = CompiledProvenancePlan::build(&output.code())
+            .unwrap()
+            .instantiate();
+        assert_eq!(
+            retained, &recomputed,
+            "retained plan agrees with fresh selected-fact recomputation"
+        );
+        for input in retained.authenticated_inputs.values() {
+            let owner = input.execution.require_unique(0).unwrap();
+            let independent = recomputed
+                .authenticated_inputs
+                .values()
+                .find(|other| other.type_identity == input.type_identity)
+                .unwrap()
+                .execution
+                .require_unique(0)
+                .unwrap();
+            assert!(
+                !Arc::ptr_eq(&owner, &independent),
+                "runtime execution owners remain fresh"
+            );
+        }
+        let weak = recomputed
+            .authenticated_inputs
+            .values()
+            .next()
+            .map(|input| Arc::downgrade(&input.execution.require_unique(0).unwrap()));
+        drop(recomputed);
+        if let Some(weak) = weak {
+            assert!(
+                weak.upgrade().is_none(),
+                "compiled plan never retains runtime execution owners"
+            );
+        }
+    }
     let mut observed_unselected_request = false;
     for (index, (value, output)) in values.iter().zip(&outputs).enumerate() {
         assert_eq!(

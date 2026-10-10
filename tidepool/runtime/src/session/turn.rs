@@ -1611,16 +1611,17 @@ pub fn turn_user_code_line_range(wrapped: &str, turn_text: &str) -> Option<(usiz
 #[derive(Debug)]
 pub struct CompiledTurn {
     /// This turn's DataCon metadata.
-    pub table: DataConTable,
+    pub(super) table: DataConTable,
     /// Compile warnings (e.g. `has_io`).
     pub warnings: MetaWarnings,
     /// Typed suspension sites decoded from the `TurnOut` wire payload.
-    pub asks: Vec<YieldSite>,
+    pub(super) asks: Vec<YieldSite>,
     /// The turn's prepared-STG program.
-    pub prepared: Arc<PreparedProgram>,
+    pub(super) prepared: Arc<PreparedProgram>,
     /// Worker-certified original source groups and the target's exact owner
     /// rows. Retained imports still require lexical resolution at admission.
-    pub certification: Option<TurnCertification>,
+    pub(super) certification: Option<TurnCertification>,
+    provenance: Arc<std::sync::OnceLock<super::resident::CompiledProvenancePlan>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1934,10 +1935,41 @@ impl CompiledTurn {
             })
     }
 
+    /// Own compiler outputs; original custody remains validated by its sealed proof.
+    pub fn new(
+        table: DataConTable,
+        warnings: MetaWarnings,
+        asks: Vec<YieldSite>,
+        prepared: Arc<PreparedProgram>,
+        certification: Option<TurnCertification>,
+    ) -> Self {
+        Self {
+            table,
+            warnings,
+            asks,
+            prepared,
+            certification,
+            provenance: Arc::default(),
+        }
+    }
+    pub fn table(&self) -> &DataConTable {
+        &self.table
+    }
+    pub fn sites(&self) -> &[YieldSite] {
+        &self.asks
+    }
+    pub fn prepared(&self) -> &Arc<PreparedProgram> {
+        &self.prepared
+    }
+    pub fn certification(&self) -> Option<&TurnCertification> {
+        self.certification.as_ref()
+    }
+
     /// Borrow immutable inputs when the caller will reuse this artifact.
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
+            provenance: self.provenance.clone(),
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&self.asks),
             prepared: std::borrow::Cow::Borrowed(self.prepared.as_ref()),
@@ -1949,6 +1981,7 @@ impl CompiledTurn {
     #[must_use]
     pub fn into_code(self) -> TurnCode<'static> {
         TurnCode {
+            provenance: self.provenance.clone(),
             table: std::borrow::Cow::Owned(self.table),
             sites: std::borrow::Cow::Owned(self.asks),
             prepared: std::borrow::Cow::Owned(Arc::unwrap_or_clone(self.prepared)),
@@ -1961,10 +1994,50 @@ impl CompiledTurn {
 /// borrowed inputs remain reusable and are copied only at installation.
 #[derive(Clone)]
 pub struct TurnCode<'a> {
-    pub table: std::borrow::Cow<'a, DataConTable>,
-    pub sites: std::borrow::Cow<'a, [YieldSite]>,
-    pub prepared: std::borrow::Cow<'a, PreparedProgram>,
-    pub certification: std::borrow::Cow<'a, Option<TurnCertification>>,
+    pub(super) table: std::borrow::Cow<'a, DataConTable>,
+    pub(super) sites: std::borrow::Cow<'a, [YieldSite]>,
+    pub(super) prepared: std::borrow::Cow<'a, PreparedProgram>,
+    pub(super) certification: std::borrow::Cow<'a, Option<TurnCertification>>,
+    pub(super) provenance: Arc<std::sync::OnceLock<super::resident::CompiledProvenancePlan>>,
+}
+
+impl<'a> TurnCode<'a> {
+    /// Assemble immutable installation inputs; metadata alone grants no original custody.
+    pub fn new(
+        table: std::borrow::Cow<'a, DataConTable>,
+        sites: std::borrow::Cow<'a, [YieldSite]>,
+        prepared: std::borrow::Cow<'a, PreparedProgram>,
+        certification: std::borrow::Cow<'a, Option<TurnCertification>>,
+    ) -> Self {
+        Self {
+            table,
+            sites,
+            prepared,
+            certification,
+            provenance: Arc::default(),
+        }
+    }
+    pub fn table(&self) -> &DataConTable {
+        &self.table
+    }
+    pub fn sites(&self) -> &[YieldSite] {
+        &self.sites
+    }
+    pub fn prepared(&self) -> &PreparedProgram {
+        &self.prepared
+    }
+    pub fn certification(&self) -> Option<&TurnCertification> {
+        self.certification.as_ref().as_ref()
+    }
+    pub fn into_owned(self) -> TurnCode<'static> {
+        TurnCode {
+            table: std::borrow::Cow::Owned(self.table.into_owned()),
+            sites: std::borrow::Cow::Owned(self.sites.into_owned()),
+            prepared: std::borrow::Cow::Owned(self.prepared.into_owned()),
+            certification: std::borrow::Cow::Owned(self.certification.into_owned()),
+            provenance: self.provenance,
+        }
+    }
 }
 
 /// The result of [`run_turn`] — one variant per verdict, each carrying only
@@ -3146,6 +3219,7 @@ fn decode_cell_program_turn(
             bound,
             wrapped_source,
             compiled: CompiledTurn {
+                provenance: Arc::default(),
                 table,
                 warnings,
                 asks,
@@ -3161,6 +3235,7 @@ fn decode_cell_program_turn(
             variant,
             wrapped_source,
             compiled: CompiledTurn {
+                provenance: Arc::default(),
                 table,
                 warnings,
                 asks,
@@ -4258,6 +4333,7 @@ fn compiled_native_output(
     admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<CompiledTurn, CompileError> {
     let compiled = CompiledTurn {
+        provenance: Arc::default(),
         table: table.clone(),
         warnings: warnings.clone(),
         asks,
@@ -4386,6 +4462,7 @@ fn read_compiled_turn(
     )?;
 
     let compiled = CompiledTurn {
+        provenance: Arc::default(),
         table,
         warnings,
         asks,

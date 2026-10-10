@@ -37,7 +37,7 @@ fn probe(label: &str, text: &str, gen: u64) {
         TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => compiled,
         TurnResult::Decl { .. } => panic!("{label}: classified as a declaration"),
     };
-    let prepared = &compiled.prepared;
+    let prepared = &compiled.prepared();
     // The DataConTable and prepared closure share constructor identities: wherever the table and the
     // prepared closure both declare a constructor, the prepared `host_id` IS
     // the host id (both are minted by Tidepool.Identity.varId). The prepared
@@ -52,7 +52,7 @@ fn probe(label: &str, text: &str, gen: u64) {
                 "{}.{}",
                 declaration.identity.module, declaration.identity.occurrence
             );
-            let core_id = compiled.table.get_by_qualified_name(&qualified)?;
+            let core_id = compiled.table().get_by_qualified_name(&qualified)?;
             shared += 1;
             (core_id != declaration.host_id).then_some((qualified, core_id, declaration.host_id))
         })

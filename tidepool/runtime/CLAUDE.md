@@ -40,4 +40,24 @@ hold no machine checkout. Reacquisition validates the mounted input and fresh
 affine admission before invocation. Only `Clean` or `NotStarted` compiler
 settlement permits publication or retry; successful code survives its first
 consumer's exit. Unconfirmed closure and producer panic wake waiters with terminal
-refusal without admitting another producer. Renderable slots publish only after native target, reachable original-group images and literal storage are prepared. They retain immutable native custody, never rendered values or scoped installation plans. Each consumer resolves imports and source domains against its fresh scope before installation. Ready installation carries the complete native bundle and only looks up its exact keys; absent, in-flight, expired or unheld images are typed integrity refusals before installation. Opaque and unavailable outcomes retain no native image bundle.
+refusal without admitting another producer. Renderable slots publish only after
+native target, reachable original-group images and literal storage are prepared.
+They retain immutable native custody, never rendered values or scoped installation
+plans. Each consumer resolves imports and source domains against its fresh scope
+before installation. Ready installation carries the complete native bundle and
+only looks up its exact keys; absent, in-flight, expired or unheld images are typed
+integrity refusals before installation. Opaque and unavailable outcomes retain no
+native image bundle.
+
+Compiled turns retain immutable provenance selections and context identities.
+Installation creates fresh runtime execution observations and still resolves
+current lexical domains, generations, bindings and snapshots. Static plans
+must not retain runtime provenance or renderer owners: a renderer can retain its
+compiled turn, so that reverse ownership would create a cycle. Reconstructing
+compiler inputs issues a new plan owner; borrowing or owning the same immutable
+inputs preserves its plan.
+
+Recovery publication reuses canonical interface references emitted by native
+product materialization only for the exact artifact identity in that same
+compiler context. The materialization owner preserves durable filenames and
+independent interfaces; callers do not supply unverified references to skip IO.

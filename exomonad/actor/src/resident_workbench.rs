@@ -6878,12 +6878,7 @@ fn pending_mode_for(
 /// so the single-checkout fallback after a stale split install can still run
 /// the same compiled turn instead of needing a second GHC compile.
 fn cloned_turn_code(turn: &CompiledTurn) -> TurnCode<'static> {
-    TurnCode {
-        table: std::borrow::Cow::Owned(turn.table.clone()),
-        sites: std::borrow::Cow::Owned(turn.asks.clone()),
-        prepared: std::borrow::Cow::Owned(turn.prepared.as_ref().clone()),
-        certification: std::borrow::Cow::Owned(turn.certification.clone()),
-    }
+    turn.code().into_owned()
 }
 
 /// One split-install attempt's outcome: either the session had no machine
@@ -13904,17 +13899,13 @@ pub(crate) mod request_tests {
                         let residency = session.residency();
                         assert!(carrier
                             .code()
-                            .certification
-                            .as_ref()
-                            .as_ref()
+                            .certification()
                             .unwrap()
                             .checked_execution()
                             .is_none());
                         assert!(carrier
                             .code()
-                            .certification
-                            .as_ref()
-                            .as_ref()
+                            .certification()
                             .unwrap()
                             .checked_prefix()
                             .is_none());
@@ -13953,8 +13944,13 @@ pub(crate) mod request_tests {
                         HostBindingAuthority::Text => HostBindingType::TEXT,
                         HostBindingAuthority::CommandJob => HostBindingType::COMMAND_JOB,
                     };
-                    let mut missing = carrier.code();
-                    missing.certification = std::borrow::Cow::Owned(None);
+                    let original = carrier.code();
+                    let missing = TurnCode::new(
+                        std::borrow::Cow::Borrowed(original.table()),
+                        std::borrow::Cow::Borrowed(original.sites()),
+                        std::borrow::Cow::Borrowed(original.prepared()),
+                        std::borrow::Cow::Owned(None),
+                    );
                     assert!(matches!(
                         HostCarrier::from_checked(
                             reservation.clone(),
@@ -16110,8 +16106,8 @@ pub(crate) mod request_tests {
         ));
         assert!(!Arc::ptr_eq(&fresh.prepared, &loaded.prepared));
         assert_eq!(
-            fresh.prepared.entry.compiled().prepared,
-            loaded.prepared.entry.compiled().prepared
+            fresh.prepared.entry.compiled().prepared(),
+            loaded.prepared.entry.compiled().prepared()
         );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
@@ -16166,8 +16162,8 @@ pub(crate) mod request_tests {
             (recipe, original)
         );
         assert_eq!(
-            retried.prepared.entry.compiled().prepared,
-            fresh.prepared.entry.compiled().prepared
+            retried.prepared.entry.compiled().prepared(),
+            fresh.prepared.entry.compiled().prepared()
         );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
         assert_eq!(
@@ -17929,13 +17925,13 @@ pub(crate) mod request_tests {
                 type_name: constructor.family.occurrence.clone(),
             });
         }
-        Arc::new(tidepool_runtime::session::CompiledTurn {
-            prepared: Arc::new(testing::prepare(wire).unwrap()),
+        Arc::new(tidepool_runtime::session::CompiledTurn::new(
             table,
-            asks: Vec::new(),
-            warnings: Default::default(),
-            certification: None,
-        })
+            Default::default(),
+            Vec::new(),
+            Arc::new(testing::prepare(wire).unwrap()),
+            None,
+        ))
     }
 
     struct ChildOutputLifetime(Arc<tokio::sync::Notify>);
@@ -18805,7 +18801,7 @@ pub(crate) mod request_tests {
             .unwrap()
             .unwrap();
         let expected = Arc::new(
-            note.asks
+            note.sites()
                 .iter()
                 .find_map(|site| site.input_type_witnesses.first().and_then(Option::as_ref))
                 .unwrap()
@@ -20614,7 +20610,7 @@ pub(crate) mod request_tests {
         };
         let compiled = &ready.compiled;
         assert!(
-            compiled.asks.iter().any(|site| site.inputs.len() == 3),
+            compiled.sites().iter().any(|site| site.inputs.len() == 3),
             "currentRequest carries input, result, and ResponseResult result evidence"
         );
     }
@@ -20894,8 +20890,7 @@ pub(crate) mod request_tests {
         };
         assert_eq!(bound.len(), 2, "receiver and original native Unit reply");
         let receiver_interface = receiver
-            .certification
-            .as_ref()
+            .certification()
             .unwrap()
             .checked_execution()
             .unwrap()
@@ -20991,7 +20986,7 @@ pub(crate) mod request_tests {
                     .unwrap(),
             );
             let input = producer
-                .asks
+                .sites()
                 .iter()
                 .filter(|site| !site.inputs.is_empty())
                 .find_map(|site| {
