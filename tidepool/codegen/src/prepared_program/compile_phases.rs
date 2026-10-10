@@ -81,7 +81,7 @@ fn ms(duration: Duration) -> u64 {
 
 /// Emit one compile's attribution. Called exactly once per successful
 /// `compile_with`.
-pub(crate) fn record(phases: &CompilePhases, scale: &CompileScale) {
+pub(crate) fn record(image_instance: u64, phases: &CompilePhases, scale: &CompileScale) {
     let emit_total = phases.emit_dispatchers
         + phases.emit_functions
         + phases.emit_thunks
@@ -97,6 +97,8 @@ pub(crate) fn record(phases: &CompilePhases, scale: &CompileScale) {
         + phases.descriptors;
     tracing::info!(
         target: "tidepool_codegen::prepared_compile",
+        image_instance,
+        process_id = std::process::id(),
         total_ms = ms(total),
         admit_ms = ms(phases.admit),
         plan_ms = ms(phases.plan),

@@ -1080,7 +1080,7 @@ impl<'code> PreparedMachine<'code> {
             self.static_catalog = Some(catalog);
         }
         let compiled = program.get();
-        tracing::info!(target: "tidepool_codegen::image_install", image_instance = compiled.image_instance_id(), outcome = "admitted", "native image install");
+        let image_instance = compiled.image_instance_id();
         // Shared descriptors (interned constructors, external wrappers) have
         // no owner; retiring this program leaves them.
         let shared: HashSet<usize> = compiled
@@ -1124,6 +1124,7 @@ impl<'code> PreparedMachine<'code> {
                 owned_headers,
             },
         );
+        tracing::info!(target: "tidepool_codegen::image_install", image_instance, process_id = std::process::id(), machine_owner = self as *const Self as usize, program = id.0, outcome = "machine_published", "native image install");
         Ok(id)
     }
 

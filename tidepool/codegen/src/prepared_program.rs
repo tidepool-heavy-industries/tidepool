@@ -431,10 +431,10 @@ unsafe extern "C" fn prepared_recorded_failure(vmctx: *mut crate::context::VMCon
     machine.prepared_call_status() as i32
 }
 
-/// Pins generated entries, descriptors and immutable images together. Each run
-/// owns its mutable heap; materialization may force values before releasing it.
 static NEXT_IMAGE_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Pins generated entries, descriptors and immutable images together. Each run
+/// owns its mutable heap; materialization may force values before releasing it.
 pub struct CompiledProgram {
     image_instance: u64,
     definition_facts: Arc<DefinitionFacts>,
@@ -1434,7 +1434,9 @@ impl CompiledProgram {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         phases.descriptors = clock.lap();
         native_metrics.report();
+        let image_instance = NEXT_IMAGE_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         compile_phases::record(
+            image_instance,
             &phases,
             &compile_phases::CompileScale {
                 plan_functions: plan.functions.len(),
@@ -1448,7 +1450,7 @@ impl CompiledProgram {
             },
         );
         Ok(Self {
-            image_instance: NEXT_IMAGE_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            image_instance,
             definition_facts: Arc::new(DefinitionFacts::new(plan.program)),
             pipeline,
             entries,
@@ -1595,6 +1597,6 @@ mod tests;
 
 impl Drop for CompiledProgram {
     fn drop(&mut self) {
-        tracing::info!(target: "tidepool_codegen::image_lifetime", image_instance = self.image_instance, outcome = "released", "native image lifetime");
+        tracing::info!(target: "tidepool_codegen::image_lifetime", image_instance = self.image_instance, process_id = std::process::id(), outcome = "released", "native image lifetime");
     }
 }
