@@ -74,7 +74,7 @@ use tidepool_bridge_effects::CommandPresentation;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
-    truncate_preview_at_line, CellSourceSpan, OutputSink, ParsedBlock, ResidentHole,
+    truncate_preview_at_line, CellSourceSpan, OutputSink, ParsedBlock, ResidentError, ResidentHole,
     ResidentOutcome, ResidentSession, RootCustody, TurnKind, WorkbenchCellItemKind,
     WorkbenchCellSourceItem, WorkbenchDisplayOutput, WorkbenchDisplayPage, WorkbenchExecutionId,
     WorkbenchFailureLayer, WorkbenchFailurePoint, WorkbenchItemReceipt, WorkbenchItemStatus,
@@ -13133,7 +13133,7 @@ where
         if intent
             .manifest
             .as_ref()
-            .map(|manifest| &manifest.public_owner)
+            .map(|manifest| &manifest.public_owner.owner)
             != predecessor
         {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
