@@ -1874,20 +1874,30 @@ impl PersistentSession {
                 item.clone(),
                 prepared.projection.receipt().clone(),
             )?;
-        let committed = self.adopt_staged_declaration_in(staged);
-        if committed.is_ok() {
-            settle_checked_snapshot(
-                self,
-                &mut state,
-                scope,
+        let compile_inputs = state.compile_inputs.clone();
+        let interfaces = state.snapshot.interfaces.clone();
+        let native_imports = state.snapshot.native_imports.clone();
+        self.adopt_staged_declaration_with_activation(staged, |view, visibility, retained| {
+            let view_digest = view.admission_commitment().0;
+            let view = view
+                .with_scoped_injection()
+                .with_compile_inputs(&compile_inputs)
+                .map_err(SessionError::Compile)?;
+            let next = Arc::new(checked_snapshot(
+                view,
+                view_digest,
+                visibility,
+                interfaces,
                 compiler_prefix,
                 prefix.admission.digest(),
-                None,
-                None,
-            )?;
-            state.reservation = None;
-        }
-        committed
+                retained,
+                native_imports,
+            ));
+            Ok(move || {
+                state.snapshot = next;
+                state.reservation = None;
+            })
+        })
     }
 
     pub fn retain_lexical_scope(
