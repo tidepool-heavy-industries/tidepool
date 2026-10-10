@@ -7,4 +7,7 @@ watchSnapshot <- pollWatch callableWatch
 let watchReceipt = case watchSnapshot of { WatchReady receipt -> receipt; _ -> error "settled watch lost its original result" }
 _ <- forgetWatch callableWatch
 display (case (callableValue, responseValue watchReceipt) of
-  ((n, f), (m, g)) -> (n, f 100, m, g (-10), responseExecution callableReceipt == responseExecution watchReceipt, responseWorktree callableReceipt == responseWorktree watchReceipt))
+  ((n, f), (m, g)) -> n == 42 && f 100 == 141
+    && m == 42 && g (-10) == 31
+    && responseExecution callableReceipt == responseExecution watchReceipt
+    && responseWorktree callableReceipt == responseWorktree watchReceipt)

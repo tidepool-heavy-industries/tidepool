@@ -40,7 +40,7 @@ async fn fresh_context_typed_exit_and_replacement_retain_callable_value() {
             tidepool_runtime::session::ResidentSessionState::Gone);
         let returned = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(),
             &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_callable_exit_read.hs"))).await;
-        assert_eq!(committed_display_text(&returned), "(41, 42, 51, 41, 39)", "{returned}");
+        assert_eq!(committed_display_text(&returned), "True", "{returned}");
     })).await;
 }
 
@@ -103,6 +103,23 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
 
 #[tokio::test]
 async fn fresh_context_callable_reply_survives_retirement_and_request_forget() {
+    callable_reply_scenario(
+        "respond ((sessionInput + 1 :: Int), (\\n -> n + sessionInput))",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn fresh_context_callable_oracle_rejects_wrong_closure_value() {
+    callable_reply_scenario(
+        "respond ((sessionInput + 1 :: Int), (\\n -> n + sessionInput + 1))",
+        false,
+    )
+    .await;
+}
+
+async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
     let campaign = TestCampaign::start_with_child_sessions().await;
     campaign
         .run_scenario(|campaign| {
@@ -156,11 +173,7 @@ async fn fresh_context_callable_reply_survives_retirement_and_request_forget() {
                         },
                     )
                     .await;
-                let replied = dispatch_haskell_script(
-                    child.policy.as_ref(),
-                    "respond ((sessionInput + 1 :: Int), (\\n -> n + sessionInput))",
-                )
-                .await;
+                let replied = dispatch_haskell_script(child.policy.as_ref(), reply_source).await;
                 assert_eq!(replied["status"], "replied", "{replied}");
                 campaign
                     .next_deployment(
@@ -222,7 +235,7 @@ async fn fresh_context_callable_reply_survives_retirement_and_request_forget() {
                     .await;
                 assert_eq!(
                     committed_display_text(&read),
-                    "(42, 42, 51, 42, 39, True, True)",
+                    if expected { "True" } else { "False" },
                     "{read}"
                 );
                 let released = campaign
@@ -238,7 +251,7 @@ async fn fresh_context_callable_reply_survives_retirement_and_request_forget() {
                     .await;
                 assert_eq!(
                     committed_display_text(&released),
-                    "(42, 141, 42, 31, True, True)",
+                    if expected { "True" } else { "False" },
                     "{released}"
                 );
             })

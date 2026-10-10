@@ -423,8 +423,7 @@ pub(super) async fn inherited_response_scenario(
     assert_eq!(first["status"], "committed", "{first:?}");
     custody_activation(campaign).await;
 
-    // The observer's inherited source tip includes `worker`, whose typed
-    // ExitCell is still pending at this fork boundary.
+    // The observer inherits `worker` while its typed response is pending.
     let root = campaign.root_installation.policy.clone();
     let observer_policy = root.clone();
     let observer_source = if dedicated {
@@ -599,7 +598,7 @@ pub(super) async fn inherited_response_scenario(
         "expiredForwarded <- pollResponse forwarded\n_ <- case expiredForwarded of { ResponseUnavailable (ResponseRejected ReplyStale) -> pure (); _ -> Effects.error \"borrowed released response did not refuse observation\" }").await;
     assert_committed(&forwarded_expired);
     // A different watch captured successful settlement before source release.
-    // Its decision and the filled Haskell cell remain independently readable.
+    // Its retained result remains independently readable.
     let queued_after_release =
         tests::dispatch_haskell_script(observer.policy.as_ref(),
             "queuedState <- pollWatch queuedWatch\n_ <- case queuedState of { WatchReady answer -> let ((label, values), run) = answer in if label == \"custody\" && values == [2 .. 401] && run 41 == 42 then pure () else Effects.error \"settled watch result changed\"; _ -> Effects.error \"settled watch lost its captured result\" }").await;
