@@ -140,6 +140,27 @@ pub struct PreparedDeclarationBindingChanges {
     observations: Vec<SessionVarId>,
 }
 
+/// Frozen prospective declaration view for a newly minted private capture.
+/// Preparation does not acquire physical custody; cancellation drops only
+/// unpublished roots and temporary references to existing lease chunks.
+pub struct PreparedDetachedBindingScope {
+    child: ScopeId,
+    tip: BindingTip,
+    selection: SourceSelectionView,
+    membership: CapturableMembership,
+    projection: HashTrieMapSync<BindingName, SessionVarId>,
+    capture: PreparedCaptureLeases,
+    next_tip: u64,
+}
+
+struct PreparedCaptureLeases {
+    parent: ScopeId,
+    chunk: Arc<BindingLeaseChunk>,
+    history: CaptureLeaseHistory,
+    bindings: Vec<(SessionVarId, usize)>,
+    sources: Vec<(SourceLeaseKey, usize)>,
+}
+
 struct PreparedNameChanges {
     scope: ScopeId,
     writes: Vec<(BindingName, SessionVarId)>,
@@ -2996,6 +3017,169 @@ impl BindingTable {
         self.seed_scope(tree, parent, child)
     }
 
+    pub fn prepare_seed_detached_scope_for_declaration(
+        &mut self,
+        tree: &ScopeTree,
+        parent: ScopeId,
+        child: ScopeId,
+        origin: &PreparedSourceOwnerOrigin,
+        changes: &PreparedDeclarationBindingChanges,
+    ) -> Result<PreparedDetachedBindingScope, BindingPromotionError> {
+        if !tree.is_live(parent)
+            || !tree.is_live(child)
+            || parent == child
+            || origin.scope != parent
+            || changes.names.scope != parent
+            || self.current.contains_key(&child)
+            || self.tips.contains_key(&child)
+            || self.owned.contains_key(&child)
+            || self.source_owned.contains_key(&child)
+            || self.promoted.contains_key(&child)
+            || self.promoted_source_instances.contains_key(&child)
+            || self.source_selection.contains_key(&child)
+            || self.hidden.contains_key(&child)
+        {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
+        let id = BindingTipId(self.next_tip);
+        let next_tip = self
+            .next_tip
+            .checked_add(1)
+            .ok_or(BindingPromotionError::UnverifiableSourceSelection)?;
+        let projection = if self.tips.contains_key(&parent) || tree.parent_of(parent).is_none() {
+            changes.names.projection.clone().unwrap_or_default()
+        } else {
+            self.prepared_iter_current_in(tree, parent, changes)?
+                .into_iter()
+                .filter(|(_, entry)| !self.scope_local_aliases.contains(&entry.id))
+                .map(|(name, entry)| (name, entry.id))
+                .collect()
+        };
+        let (remap, domains) = origin.selection.fork(id, [origin.selection.current])?;
+        let selection = SourceSelectionView {
+            current: remap[&origin.selection.current],
+            domains: domains.into_iter().collect(),
+        };
+        let membership = self.capture_membership_for_declaration(tree, parent, changes);
+        let capture = self.prepare_capture_leases(parent, &membership)?;
+        let child_membership = CapturableMembership {
+            retained: membership.retained.clone(),
+            source_instances: membership.source_instances.clone(),
+            dependency_ids: HashSet::new(),
+            dependency_revision: self.dependency_revision,
+            dependencies_dirty: false,
+            append_epoch: 1,
+            added_bindings: HashSet::new(),
+            added_sources: HashSet::new(),
+        };
+        let tip = BindingTip {
+            id,
+            visible: projection.clone(),
+            retained: membership.retained,
+            source_instances: membership.source_instances,
+            leases: Arc::clone(&capture.chunk),
+        };
+        self.tips.reserve(1);
+        self.capturable_names.reserve(2);
+        self.capturable_membership.reserve(1);
+        self.source_selection.reserve(2);
+        self.scope_revisions.reserve(2);
+        Ok(PreparedDetachedBindingScope {
+            child,
+            tip,
+            selection,
+            membership: child_membership,
+            projection,
+            capture,
+            next_tip,
+        })
+    }
+
+    pub fn commit_prepared_detached_scope(&mut self, prepared: PreparedDetachedBindingScope) {
+        self.commit_capture_leases(prepared.capture);
+        self.next_tip = prepared.next_tip;
+        self.capturable_names
+            .insert(prepared.child, prepared.projection);
+        self.capturable_membership
+            .insert(prepared.child, prepared.membership);
+        self.source_selection
+            .insert(prepared.child, prepared.selection);
+        self.tips.insert(prepared.child, prepared.tip);
+        self.changed(prepared.child);
+    }
+
+    fn capture_membership_for_declaration(
+        &self,
+        tree: &ScopeTree,
+        parent: ScopeId,
+        changes: &PreparedDeclarationBindingChanges,
+    ) -> CaptureMembership {
+        if !self.tips.contains_key(&parent) && tree.parent_of(parent).is_some() {
+            let snapshot = self
+                .prepared_scope_snapshot_in(tree, parent, None, Some(changes))
+                .expect("parent declaration snapshot was admitted");
+            return CaptureMembership {
+                retained: snapshot.dependencies.into_iter().collect(),
+                source_instances: self
+                    .source_instance_keys_in(tree, parent)
+                    .into_iter()
+                    .collect(),
+                append_epoch: None,
+                added_bindings: HashSet::new(),
+                added_sources: HashSet::new(),
+            };
+        }
+        let projected = self.capturable_membership.get(&parent);
+        let tip = self.tips.get(&parent);
+        let own = self.owned.get(&parent);
+        let promoted = self.promoted.get(&parent);
+        let mut retained = projected
+            .map(|p| p.retained.clone())
+            .or_else(|| tip.map(|t| t.retained.clone()))
+            .unwrap_or_default();
+        let source_instances = projected
+            .map(|p| p.source_instances.clone())
+            .or_else(|| tip.map(|t| t.source_instances.clone()))
+            .unwrap_or_default();
+        let mut added_bindings = projected
+            .map(|p| p.added_bindings.clone())
+            .unwrap_or_default();
+        let added_sources = projected
+            .map(|p| p.added_sources.clone())
+            .unwrap_or_default();
+        let mut append_epoch =
+            projected.and_then(|p| (p.append_epoch != 0).then_some(p.append_epoch));
+        let dependencies = self.dependency_closure_excluding(
+            own.into_iter().flat_map(HashSet::iter).copied(),
+            &changes.observations,
+        );
+        if let Some(projected) = projected {
+            for id in &projected.dependency_ids {
+                if !dependencies.contains(id)
+                    && !own.is_some_and(|set| set.contains(id))
+                    && !tip.is_some_and(|tip| tip.retained.contains(id))
+                    && !promoted.is_some_and(|set| set.contains(id))
+                {
+                    retained.remove_mut(id);
+                    append_epoch = None;
+                }
+            }
+        }
+        for id in dependencies {
+            if !retained.contains(&id) {
+                retained.insert_mut(id);
+                added_bindings.insert(id);
+            }
+        }
+        CaptureMembership {
+            retained,
+            source_instances,
+            append_epoch,
+            added_bindings,
+            added_sources,
+        }
+    }
+
     /// Retain all value generations an exact external facade from `source`
     /// could import, including dependencies its own inherited tip retains,
     /// without making its names visible in `target`.
@@ -3056,19 +3240,19 @@ impl BindingTable {
 
     // Metadata has one latest owner-local history entry. Its Weak chunk never
     // retains roots; captures and live tips own every physical lease.
-    fn capture_leases(
+    fn prepare_capture_leases(
         &mut self,
         parent: ScopeId,
         membership: &CaptureMembership,
-    ) -> Arc<BindingLeaseChunk> {
+    ) -> Result<PreparedCaptureLeases, BindingPromotionError> {
         let retained = &membership.retained;
         let source_instances = &membership.source_instances;
-        let previous = self.capture_history.remove(&parent).and_then(|history| {
+        let previous = self.capture_history.get(&parent).and_then(|history| {
             history.chunk.upgrade().map(|chunk| {
                 (
                     chunk,
-                    history.retained,
-                    history.source_instances,
+                    history.retained.clone(),
+                    history.source_instances.clone(),
                     history.append_epoch,
                 )
             })
@@ -3119,51 +3303,98 @@ impl BindingTable {
                 selected = Some((chunk, bindings, sources));
                 break;
             }
-            // A failed candidate can be the final strong reference. Return
-            // its custody through the same iterative drain mechanism.
-            let released = self.release_chunks(chunk);
-            assert!(
-                released.0.is_empty() && released.1.is_empty(),
-                "candidate remains captured"
-            );
+            // The exclusive checkout still owns the captured tip. Dropping
+            // this temporary candidate cannot release that tip's custody.
+            drop(chunk);
         }
-        let (parents, bindings, sources) = match selected {
+        let (chunk, bindings, sources) = match selected {
             Some((chunk, bindings, sources)) if bindings.is_empty() && sources.is_empty() => {
-                self.capture_history.insert(
-                    parent,
-                    CaptureLeaseHistory {
-                        chunk: Arc::downgrade(&chunk),
-                        retained: retained.clone(),
-                        source_instances: source_instances.clone(),
-                        append_epoch: membership.append_epoch,
-                    },
-                );
-                return chunk;
+                (chunk, bindings, sources)
             }
-            Some((parent, bindings, sources)) => (vec![parent], bindings, sources),
-            None => (
-                Vec::new(),
-                retained.iter().copied().collect(),
-                source_instances.iter().cloned().collect(),
-            ),
+            Some((parent, bindings, sources)) => {
+                let chunk = Arc::new(BindingLeaseChunk {
+                    parents: vec![parent],
+                    bindings: bindings.clone(),
+                    source_instances: sources.clone(),
+                });
+                (chunk, bindings, sources)
+            }
+            None => {
+                let bindings: HashSet<_> = retained.iter().copied().collect();
+                let sources: HashSet<_> = source_instances.iter().cloned().collect();
+                let chunk = Arc::new(BindingLeaseChunk {
+                    parents: Vec::new(),
+                    bindings: bindings.clone(),
+                    source_instances: sources.clone(),
+                });
+                (chunk, bindings, sources)
+            }
         };
-        self.lease_exact_ids(&bindings);
-        self.acquire_source_shares(&sources);
-        let chunk = Arc::new(BindingLeaseChunk {
-            parents,
-            bindings,
-            source_instances: sources,
-        });
-        self.capture_history.insert(
+        let bindings = bindings
+            .into_iter()
+            .map(|id| {
+                self.leases
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .map(|count| (id, count))
+                    .ok_or(BindingPromotionError::LeaseCountExhausted)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let sources = sources
+            .into_iter()
+            .map(|key| {
+                self.source_instances
+                    .get(&key)
+                    .ok_or(BindingPromotionError::MissingOrForeignSourceInstance)?
+                    .shares
+                    .checked_add(1)
+                    .map(|count| (key, count))
+                    .ok_or(BindingPromotionError::LeaseCountExhausted)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.leases.reserve(bindings.len());
+        self.capture_history.reserve(1);
+        let history = CaptureLeaseHistory {
+            chunk: Arc::downgrade(&chunk),
+            retained: retained.clone(),
+            source_instances: source_instances.clone(),
+            append_epoch: membership.append_epoch,
+        };
+        Ok(PreparedCaptureLeases {
             parent,
-            CaptureLeaseHistory {
-                chunk: Arc::downgrade(&chunk),
-                retained: retained.clone(),
-                source_instances: source_instances.clone(),
-                append_epoch: membership.append_epoch,
-            },
-        );
-        chunk
+            chunk,
+            history,
+            bindings,
+            sources,
+        })
+    }
+
+    fn commit_capture_leases(&mut self, prepared: PreparedCaptureLeases) -> Arc<BindingLeaseChunk> {
+        for (id, count) in prepared.bindings {
+            self.leases.insert(id, count);
+        }
+        for (key, count) in prepared.sources {
+            self.source_instances
+                .get_mut(&key)
+                .expect("admitted source slot")
+                .shares = count;
+        }
+        self.capture_history
+            .insert(prepared.parent, prepared.history);
+        prepared.chunk
+    }
+
+    fn capture_leases(
+        &mut self,
+        parent: ScopeId,
+        membership: &CaptureMembership,
+    ) -> Arc<BindingLeaseChunk> {
+        let prepared = self
+            .prepare_capture_leases(parent, membership)
+            .expect("capture custody counts and source slots admitted");
+        self.commit_capture_leases(prepared)
     }
 
     fn release_chunks(
