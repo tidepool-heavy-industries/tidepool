@@ -4070,6 +4070,10 @@ mod tests {
         let root_id = shared_root.descriptor.id;
         let old_child_id = old_child.descriptor.id;
         let new_child_id = new_child.descriptor.id;
+        let old_unread = inventory
+            .admit(&empty, vec![shared_root.clone(), old_child.clone()])
+            .unwrap();
+        assert!(old_unread.reads.read_projection.get().is_none());
         let old = inventory
             .admit(&empty, vec![shared_root.clone(), old_child])
             .unwrap();
@@ -4101,6 +4105,15 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([root_id, new_child_id]),
         );
+        assert!(old_unread.reads.read_projection.get().is_none());
+        assert_eq!(
+            old_unread
+                .artifact_ids()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([root_id, old_child_id])
+        );
+        drop(old_unread);
         drop(old);
         assert_eq!(
             old_selected
