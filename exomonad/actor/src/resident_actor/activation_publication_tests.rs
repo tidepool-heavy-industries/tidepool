@@ -573,7 +573,7 @@ async fn durable_statement_refusal_releases_request_fence_after_waiter_drop() {
 }
 
 #[tokio::test]
-async fn durable_commit_error_fences_provider_and_request_after_waiter_drop() {
+async fn durable_commit_error_fences_provider_and_releases_request_after_waiter_drop() {
     native_operation_sequence(true, NativeFailure::CommitError, true).await;
 }
 
@@ -814,7 +814,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                     .environment
                     .requests
                     .begin_cancellation_acknowledgement(context.actor, request_id),
-                Err(crate::ReplyError::UpdatePending)
+                Ok(crate::CancellationReason::RequesterCancelled)
             );
         }
     }
@@ -832,12 +832,10 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         );
     }
     drop(park);
-    if !matches!(failure, NativeFailure::CommitError) {
-        fixture
-            .environment
-            .requests
-            .finish_cancellation_acknowledgement(request_id);
-    }
+    fixture
+        .environment
+        .requests
+        .finish_cancellation_acknowledgement(request_id);
     if matches!(failure, NativeFailure::CommitError) {
         let error = fixture
             .environment
