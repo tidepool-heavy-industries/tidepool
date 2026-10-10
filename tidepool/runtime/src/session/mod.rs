@@ -1390,6 +1390,7 @@ impl SessionLib {
             recovery_store::StoreDisposition::Committed(recovery_store::CeilingCommit {
                 revision,
                 allocation_ceiling,
+                ..
             }) => {
                 assert!(allocation_ceiling >= target);
                 state.store_revision = revision;

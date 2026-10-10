@@ -437,7 +437,7 @@ impl RunRecoveryStore {
             if current.revision != expected { return Err(StoreRefusal::StaleRevision); }
             if minimum < current.allocation_ceiling { return Err(StoreRefusal::CeilingDecrease); }
             if minimum == current.allocation_ceiling {
-                return Ok(CeilingCommit { revision: expected, allocation_ceiling: minimum });
+                return Ok(CeilingCommit { revision: expected,content_revision:current.content_revision, allocation_ceiling: minimum });
             }
             let revision = increment(expected)?;
             let content = increment(current.content_revision)?;

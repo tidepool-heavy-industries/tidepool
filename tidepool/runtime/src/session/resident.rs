@@ -3414,27 +3414,12 @@ where
         self.state.seal_recovery_initialization_scope(scope)
     }
 
-    pub fn confirm_publication_durability(&mut self) -> Result<(), SessionError> {
-        if !self.state.has_lib() {
-            return Err(SessionError::MissingDeclarationLibrary);
-        }
-        self.state.lib_mut().confirm_recovery_durability()
-    }
-
     pub fn durable_public_readiness(
         &self,
         owner: &super::RecoveryPublicOwner,
         scope: ScopeId,
     ) -> Result<Arc<super::RuntimeDurablePublicReadiness>, SessionError> {
         self.state.durable_public_readiness(owner, scope)
-    }
-
-    pub fn confirm_durable_public_scope(
-        &mut self,
-        owner: &super::RecoveryPublicOwner,
-        scope: ScopeId,
-    ) -> Result<(), SessionError> {
-        self.state.confirm_durable_public_scope(owner, scope)
     }
 
     /// Reserve a fresh interface for one original input. No authored cell or
