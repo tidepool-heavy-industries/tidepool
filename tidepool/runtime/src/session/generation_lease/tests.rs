@@ -569,9 +569,15 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
         .certified_authored_at(Generation(1))
         .is_some());
     let projection = prefix.snapshot();
+    assert_eq!(projection.view().library(), Some(committed.module));
+    let canonical = session.compile_view_in(private).unwrap();
     assert_eq!(
         projection.view().library_import_module(),
-        Some(committed.module.module_name())
+        canonical.library_import_module()
+    );
+    assert_eq!(
+        projection.view().exact_declaration_context(),
+        canonical.exact_declaration_context()
     );
     assert!(session.adopt_checked_declaration(reservation).is_err());
 }
