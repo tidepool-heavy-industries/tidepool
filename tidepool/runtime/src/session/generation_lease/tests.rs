@@ -410,12 +410,12 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
         let missing_scopes = missing_library.scope_tree().len();
         assert!(matches!(
             missing_library.admit_checked_item(prefix.clone(), item.clone()),
-            Err(SessionError::MissingDeclarationLibrary)
+            Err(crate::session::SessionError::MissingDeclarationLibrary)
         ));
         assert_eq!(missing_library.scope_tree().len(), missing_scopes);
         assert!(matches!(
             missing_library.begin_private_execution(ScopeId::ROOT),
-            Err(SessionError::MissingDeclarationLibrary)
+            Err(crate::session::SessionError::MissingDeclarationLibrary)
         ));
         assert_eq!(missing_library.scope_tree().len(), missing_scopes);
         let generation = if native_start {
