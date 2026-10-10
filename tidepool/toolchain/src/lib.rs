@@ -31,6 +31,7 @@ pub mod digest;
 mod execution_source;
 pub mod failclass;
 pub(crate) mod module_candidates;
+pub(crate) mod owned_input_arena;
 pub mod paths;
 pub mod prepared_artifact;
 pub mod recovery_artifacts;
