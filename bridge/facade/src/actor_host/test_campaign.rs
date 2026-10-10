@@ -1680,6 +1680,12 @@ mod tests {
                 proptest::test_runner::FileFailurePersistence::Direct(path),
             ));
         }
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::hosted_round_selection_histories_preserve_arrival_order_and_exact_reply_custody"
+        ));
         // The full arrival history plus selected ordinals is an independent
         // oracle: recompute the oldest unconsumed matching request each time.
         TestRunner::new(config)

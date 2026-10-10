@@ -594,11 +594,19 @@ async fn generated_driver_receipt_histories_preserve_exact_owner_and_cleanup() {
                 kind
             )),
     ];
-    let mut runner = TestRunner::new(Config {
-        cases: 256,
-        source_file: Some(file!()),
-        ..Config::default()
-    });
+    let mut config = Config::default();
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(path),
+        ));
+    }
+    let mut config = proptest::test_runner::contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::generated_driver_receipt_histories_preserve_exact_owner_and_cleanup"
+    ));
+    let mut runner = TestRunner::new(config);
     runner
         .run(&prop::collection::vec(operation, 0..64), |history| {
             let first = ActorRef::first(ActorId(42));

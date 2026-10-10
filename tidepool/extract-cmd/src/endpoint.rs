@@ -2069,6 +2069,172 @@ mod tests {
     use crate::{BinSource, ExtractRequest};
     use std::time::{Duration, Instant};
 
+    fn property_config(cases: u32, test_name: &'static str) -> proptest::test_runner::Config {
+        use proptest::test_runner::{contextualize_config, Config, FileFailurePersistence};
+        let mut config = Config {
+            cases,
+            ..Config::default()
+        };
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        let mut config = contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(test_name);
+        config
+    }
+
+    #[test]
+    fn manual_property_campaign_controls_preserve_cases_seed_shrinking_and_replay() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{FileFailurePersistence, RngSeed, TestCaseError, TestRunner};
+        const MODE: &str = "TIDEPOOL_PROPERTY_CONFIG_PROBE";
+        const NAME: &str = concat!(
+            module_path!(),
+            "::manual_property_campaign_controls_preserve_cases_seed_shrinking_and_replay"
+        );
+        let Ok(mode) = std::env::var(MODE) else {
+            for (mode, cases, shrink) in [
+                ("defaults", None, "4"),
+                ("campaign", Some("1"), "4"),
+                ("no-shrink", Some("1"), "0"),
+                ("disabled", Some("1"), "4"),
+                ("replay", Some("1"), "0"),
+            ] {
+                let mut child = Command::new(std::env::current_exe().unwrap());
+                child.args(["--exact", NAME.split_once("::").unwrap().1, "--nocapture"]);
+                for (name, _) in std::env::vars_os() {
+                    if name
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("PROPTEST_"))
+                    {
+                        child.env_remove(name);
+                    }
+                }
+                child
+                    .env(MODE, mode)
+                    .env("PROPTEST_RNG_SEED", "123")
+                    .env("PROPTEST_MAX_SHRINK_ITERS", shrink);
+                if let Some(cases) = cases {
+                    child.env("PROPTEST_CASES", cases);
+                }
+                if mode == "disabled" {
+                    child.env("PROPTEST_DISABLE_FAILURE_PERSISTENCE", "1");
+                }
+                let output = child.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{mode}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    stdout.contains(&format!("campaign mode={mode} fresh=")),
+                    "child must execute the selected control probe: {stdout}"
+                );
+                print!("{stdout}");
+            }
+            return;
+        };
+        let config = property_config(128, NAME);
+        let expected_cases = if mode == "defaults" { 128 } else { 1 };
+        assert_eq!(config.cases, expected_cases);
+        assert_eq!(config.rng_seed, RngSeed::Fixed(123));
+        assert_eq!(config.source_file, Some(file!()));
+        assert_eq!(config.test_name, Some(NAME));
+        if mode == "disabled" {
+            assert!(config.failure_persistence.is_none());
+        }
+        let mut fresh_config = config.clone();
+        fresh_config.failure_persistence = None;
+        let sample = || {
+            let values = RefCell::new(Vec::new());
+            TestRunner::new(fresh_config.clone())
+                .run(&any::<u64>(), |value| {
+                    values.borrow_mut().push(value);
+                    Ok(())
+                })
+                .unwrap();
+            values.into_inner()
+        };
+        let fresh = sample();
+        assert_eq!(fresh.len(), expected_cases as usize);
+        assert_eq!(
+            fresh,
+            sample(),
+            "environment seed must reproduce the fresh sequence"
+        );
+        let shrinking = RefCell::new(Vec::new());
+        let failure = TestRunner::new(fresh_config).run(&(1u64..1024), |value| {
+            shrinking.borrow_mut().push(value);
+            Err(TestCaseError::fail("deliberate control probe"))
+        });
+        assert!(failure.is_err());
+        let shrinking = shrinking.into_inner();
+        if config.max_shrink_iters == 0 {
+            assert_eq!(shrinking.len(), 1);
+        } else {
+            assert_eq!(config.max_shrink_iters, 4);
+            assert!(shrinking.len() > 1 && shrinking.len() <= 5);
+        }
+        println!(
+            "campaign mode={mode} fresh={} seed={} failure_callbacks={} shrink_limit={}",
+            fresh.len(),
+            config.rng_seed,
+            shrinking.len(),
+            config.max_shrink_iters
+        );
+        if mode == "replay" {
+            let directory = tempfile::tempdir().unwrap();
+            let seed_path = directory.path().join("regressions.txt");
+            let seed_path = seed_path.to_str().unwrap();
+            let mut persisted = config;
+            persisted.failure_persistence =
+                Some(Box::new(FileFailurePersistence::Direct(seed_path)));
+            let generated = RefCell::new(Vec::new());
+            assert!(TestRunner::new(persisted.clone())
+                .run(&any::<u64>(), |value| {
+                    generated.borrow_mut().push(value);
+                    Err(TestCaseError::fail("persisted control probe"))
+                })
+                .is_err());
+            assert_eq!(generated.borrow().len(), 1);
+            assert_eq!(
+                persisted
+                    .failure_persistence
+                    .as_ref()
+                    .unwrap()
+                    .load_persisted_failures2(persisted.source_file)
+                    .len(),
+                1
+            );
+            persisted.cases = 0;
+            let replayed = RefCell::new(Vec::new());
+            TestRunner::new(persisted.clone())
+                .run(&any::<u64>(), |value| {
+                    replayed.borrow_mut().push(value);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(*replayed.borrow(), *generated.borrow());
+            persisted.cases = 1;
+            let callbacks = RefCell::new(0);
+            TestRunner::new(persisted)
+                .run(&any::<u64>(), |_| {
+                    *callbacks.borrow_mut() += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                *callbacks.borrow(),
+                2,
+                "persisted replay does not consume a fresh case"
+            );
+            println!("persistence generated_failures=1 replay_only_callbacks=1 fresh=1 replay=1 total_callbacks=2");
+        }
+    }
+
     fn direct_handshake_fixture(directory: &Path, phase: u8) -> LaunchSpec {
         let source = directory.join("endpoint.rs");
         std::fs::write(&source, include_str!("test_fixtures/control_ack_worker.rs")).unwrap();
@@ -2420,16 +2586,14 @@ mod tests {
     #[test]
     fn compiler_input_file_histories_preserve_physical_custody() {
         use proptest::prelude::*;
-        use proptest::test_runner::{Config, TestRunner};
-        let mut config = Config {
-            cases: 128,
-            ..Config::default()
-        };
-        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
-            config.failure_persistence = Some(Box::new(
-                proptest::test_runner::FileFailurePersistence::Direct(path),
-            ));
-        }
+        use proptest::test_runner::TestRunner;
+        let config = property_config(
+            128,
+            concat!(
+                module_path!(),
+                "::compiler_input_file_histories_preserve_physical_custody"
+            ),
+        );
         let directory = tempfile::tempdir().unwrap();
         let spec = direct_handshake_fixture(directory.path(), 6);
         let program = spec.program;
@@ -3109,16 +3273,14 @@ mod tests {
     #[test]
     fn scoped_daemon_host_preparation_has_no_admission_and_reuses_exact_binding() {
         use proptest::prelude::*;
-        use proptest::test_runner::{Config, TestRunner};
-        let mut config = Config {
-            cases: 128,
-            ..Config::default()
-        };
-        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
-            config.failure_persistence = Some(Box::new(
-                proptest::test_runner::FileFailurePersistence::Direct(path),
-            ));
-        }
+        use proptest::test_runner::TestRunner;
+        let config = property_config(
+            128,
+            concat!(
+                module_path!(),
+                "::scoped_daemon_host_preparation_has_no_admission_and_reuses_exact_binding"
+            ),
+        );
         let mut runner = TestRunner::new(config);
         // Host reads/work can surround any physical request. Exact protocol
         // admissions independently distinguish availability from capacity use.
@@ -3335,18 +3497,13 @@ mod tests {
     #[test]
     fn host_after_response_and_projection_histories_preserve_owned_transaction_until_close() {
         use proptest::prelude::*;
-        use proptest::test_runner::{Config, TestRunner};
+        use proptest::test_runner::TestRunner;
         #[derive(Clone, Debug)]
         enum Step {
             HostRead,
             Request,
         }
-        let mut config = Config::default();
-        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
-            config.failure_persistence = Some(Box::new(
-                proptest::test_runner::FileFailurePersistence::Direct(path),
-            ));
-        }
+        let config = property_config(256, concat!(module_path!(), "::host_after_response_and_projection_histories_preserve_owned_transaction_until_close"));
         let strategy = (
             proptest::collection::vec(
                 prop_oneof![Just(Step::HostRead), Just(Step::Request)],

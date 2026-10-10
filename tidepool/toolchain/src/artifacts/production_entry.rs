@@ -1014,6 +1014,12 @@ mod source_selection_tests {
             .len();
         let mut config = property_config();
         config.cases = 16;
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::linked_entry_reopens_exact_selection_in_new_process_without_source_replay"
+        ));
         let mut runner = proptest::test_runner::TestRunner::new(config);
         runner
             .run(

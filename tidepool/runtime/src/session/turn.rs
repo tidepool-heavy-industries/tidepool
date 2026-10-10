@@ -3358,10 +3358,22 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             })
             .collect::<Vec<_>>();
         assert!(!native.is_empty() && !captures.is_empty());
-        let mut runner = proptest::test_runner::TestRunner::new(proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config {
             cases: 32,
             ..Default::default()
-        });
+        };
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::audit_compiler_issued_item_receipts"
+        ));
+        let mut runner = proptest::test_runner::TestRunner::new(config);
         runner
             .run(
                 &(0_usize..native.len(), 0_usize..captures.len()),
