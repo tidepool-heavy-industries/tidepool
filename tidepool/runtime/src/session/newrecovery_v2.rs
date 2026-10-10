@@ -2472,12 +2472,15 @@ mod tests {
         )> = OnceLock::new();
         let (producer, products, native_groups) = PRODUCTS.get_or_init(|| {
             tidepool_testing::eval_harness::require_extract();
-            let compiled = tidepool_toolchain::artifacts::compile_targets(
-                include_str!("fixtures/recovery-control.hs"),
-                &["answer"],
-                &[],
-                |_, _, _| {},
-            )
+            let compiled = tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::compile_targets(
+                    include_str!("fixtures/recovery-control.hs"),
+                    &["answer"],
+                    &[],
+                    |_, _, _| {},
+                    settlement,
+                )
+            })
             .expect("production compilation of recovery control");
             let descriptors = compiled.artifact_view.descriptors();
             let producer = descriptors
@@ -2537,12 +2540,15 @@ mod tests {
         static FIXTURE: OnceLock<CompiledGroupSelection> = OnceLock::new();
         let fixture = FIXTURE.get_or_init(|| {
             tidepool_testing::eval_harness::require_extract();
-            let compiled = tidepool_toolchain::artifacts::compile_targets(
-                include_str!("fixtures/recovery-group-selection.hs"),
-                &["early", "late", "isolated"],
-                &[],
-                |_, _, _| {},
-            )
+            let compiled = tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::compile_targets(
+                    include_str!("fixtures/recovery-group-selection.hs"),
+                    &["early", "late", "isolated"],
+                    &[],
+                    |_, _, _| {},
+                    settlement,
+                )
+            })
             .expect("production compilation of independent native groups");
             let descriptors = compiled.artifact_view.descriptors();
             let original = descriptors
@@ -3314,7 +3320,9 @@ mod tests {
         let bytes = serde_json::to_vec(&successor).unwrap();
         let decoded: RecoveryGraph = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, successor);
-        eprintln!("persistent-recovery history_rows=128 retained_payload_copies=0 snapshot_and_candidate_roots_shared=true");
+        eprintln!(
+            "persistent-recovery history_rows=128 retained_payload_copies=0 snapshot_and_candidate_roots_shared=true"
+        );
     }
 
     #[test]

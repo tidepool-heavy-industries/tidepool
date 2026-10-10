@@ -3261,8 +3261,10 @@ mod tests {
             .expect("non-empty declaration receipt");
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
-        validate_declaration_candidate(candidate, lib.include_dir())
-            .expect("stage and validate declaration")
+        tidepool_testing::with_settlement(|settlement| {
+            validate_declaration_candidate(candidate, lib.include_dir(), settlement)
+        })
+        .expect("stage and validate declaration")
     }
 
     #[test]
@@ -3282,10 +3284,13 @@ mod tests {
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
         assert!(validate_declaration_candidate(candidate.clone(), lib.include_dir()).is_err());
-        let staged = validate_declaration_candidate(
-            candidate.with_source_layer(&[helper.path().to_path_buf()]),
-            lib.include_dir(),
-        )
+        let staged = tidepool_testing::with_settlement(|settlement| {
+            validate_declaration_candidate(
+                candidate.with_source_layer(&[helper.path().to_path_buf()]),
+                lib.include_dir(),
+                settlement,
+            )
+        })
         .expect("actor helper import must resolve while staging the declaration");
         assert!(staged
             .items()
@@ -3330,7 +3335,10 @@ mod tests {
                 .high_water(),
             Generation(1)
         );
-        let staged = validate_declaration_candidate(candidate, lib.include_dir()).unwrap();
+        let staged = tidepool_testing::with_settlement(|settlement| {
+            validate_declaration_candidate(candidate, lib.include_dir(), settlement)
+        })
+        .unwrap();
         let exact_evidence = staged.certified_authored.clone().unwrap();
         let original_root = exact_evidence
             .projection
@@ -3741,8 +3749,10 @@ mod tests {
             .expect("non-empty declaration receipt");
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
-        let error = validate_declaration_candidate(candidate, lib.include_dir())
-            .expect_err("ill-typed declaration must fail staging");
+        let error = tidepool_testing::with_settlement(|settlement| {
+            validate_declaration_candidate(candidate, lib.include_dir(), settlement)
+        })
+        .expect_err("ill-typed declaration must fail staging");
         let SessionError::ValidationFailed(failure) = error else {
             panic!("expected structured validation failure, got {error:?}");
         };
@@ -3786,22 +3796,27 @@ mod tests {
             effects[0].as_path(),
             effects[1].as_path(),
         ];
-        let bound = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: "old <- pure (OldVersion 1)",
-            templates: std::slice::from_ref(&bind_template),
-            include: &includes,
-            session_root: root.path(),
-            inject_modules: &[],
-            gen: 1,
-            verdict: Some(TurnClassification {
-                kind: TurnKind::Bind,
-                binders: vec!["old".to_owned()],
-                items: Vec::new(),
-            }),
-            target: None,
-            retained_imports: &[],
+        let bound = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: "old <- pure (OldVersion 1)",
+                    templates: std::slice::from_ref(&bind_template),
+                    include: &includes,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: Some(TurnClassification {
+                        kind: TurnKind::Bind,
+                        binders: vec!["old".to_owned()],
+                        items: Vec::new(),
+                    }),
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .expect("compile the value against the original type");
         let TurnResult::Bind { bound, .. } = bound else {
@@ -3819,8 +3834,10 @@ mod tests {
             &injected,
             &injected,
         );
-        validate_declaration_candidate(candidate, lib.include_dir())
-            .expect("a replacement type may shadow the type of a live value");
+        tidepool_testing::with_settlement(|settlement| {
+            validate_declaration_candidate(candidate, lib.include_dir(), settlement)
+        })
+        .expect("a replacement type may shadow the type of a live value");
     }
 
     #[test]

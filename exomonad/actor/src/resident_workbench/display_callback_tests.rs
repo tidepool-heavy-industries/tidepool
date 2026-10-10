@@ -87,20 +87,25 @@ async fn expansion_fences_immediate_handler_before_callback_input() {
         .iter()
         .map(PathBuf::as_path)
         .collect::<Vec<_>>();
-    let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
-        exact_context: None,
-        session_id: Some(session_id),
-        turn_text: &tidepool_testing::fixture_source(
-            "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
-        ),
-        templates: &templates,
-        include: &include,
-        session_root: view.session_root(),
-        inject_modules: &[],
-        gen: view.next_value_generation().0,
-        verdict: None,
-        target: None,
-        retained_imports: &[],
+    let TurnResult::Bind { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            TurnRequest {
+                exact_context: None,
+                session_id: Some(session_id),
+                turn_text: &tidepool_testing::fixture_source(
+                    "exomonad/actor/src/resident_workbench/display_callback_immediate.hs",
+                ),
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &[],
+                gen: view.next_value_generation().0,
+                verdict: None,
+                target: None,
+                retained_imports: &[],
+            },
+            settlement,
+        )
     })
     .unwrap() else {
         panic!("display callback fixture must compile as a bind");

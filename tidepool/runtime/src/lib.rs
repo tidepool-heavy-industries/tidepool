@@ -539,8 +539,10 @@ mod tests {
     fn test_compile_identity() {
         tidepool_testing::eval_harness::require_extract();
         let source = "module Test where\nidentity x = x";
-        let CompileResult { prepared, .. } =
-            compile_haskell(source, "identity", &[]).expect("Failed to compile identity");
+        let CompileResult { prepared, .. } = tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, "identity", &[], settlement)
+        })
+        .expect("Failed to compile identity");
         assert!(!prepared.bytes().is_empty());
         assert!(!prepared.prepared().bindings().is_empty());
     }
@@ -569,8 +571,13 @@ mod tests {
                 .filter(|character| character.is_ascii_alphanumeric())
                 .collect::<String>()
         );
-        let source = format!("module {module} where\nresult :: Int\nresult = error \"diagnostic native execution failure\"\n");
-        let compiled = compile_haskell(&source, "result", &[]).expect("genuine compiler control");
+        let source = format!(
+            "module {module} where\nresult :: Int\nresult = error \"diagnostic native execution failure\"\n"
+        );
+        let compiled = tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(&source, "result", &[], settlement)
+        })
+        .expect("genuine compiler control");
         let prepared = compiled.prepared.into_prepared();
         let entry = prepared.entry();
         let linked = link_program(prepared, &MachineImports::default())
@@ -639,8 +646,10 @@ mod tests {
     fn test_captured_type_simple_list() {
         tidepool_testing::eval_harness::require_extract();
         let source = "module Probe where\n__user :: [Int]\n__user = [1, 2, 3]\n";
-        let CompileResult { warnings, .. } =
-            compile_haskell(source, "__user", &[]).expect("Failed to compile probe");
+        let CompileResult { warnings, .. } = tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, "__user", &[], settlement)
+        })
+        .expect("Failed to compile probe");
         eprintln!("captured_type = {:?}", warnings.captured_type);
         assert_eq!(warnings.captured_type.as_deref(), Some("[Int]"));
     }
@@ -652,8 +661,10 @@ mod tests {
     fn test_captured_type_absent_without_user() {
         tidepool_testing::eval_harness::require_extract();
         let source = "module Probe where\nidentity x = x\n";
-        let CompileResult { warnings, .. } =
-            compile_haskell(source, "identity", &[]).expect("Failed to compile identity");
+        let CompileResult { warnings, .. } = tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, "identity", &[], settlement)
+        })
+        .expect("Failed to compile identity");
         assert_eq!(warnings.captured_type, None);
     }
 
@@ -662,7 +673,9 @@ mod tests {
     fn test_compile_error() {
         tidepool_testing::eval_harness::require_extract();
         let source = "module Test where\nfoo = garbage";
-        let res = compile_haskell(source, "foo", &[]);
+        let res = tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, "foo", &[], settlement)
+        });
         assert!(res.is_err());
         if let Err(CompileError::Diagnostics(diags)) = res {
             assert!(diags
@@ -687,8 +700,10 @@ mod tests {
                        \n\
                        result :: Int\n\
                        result = f 0\n";
-        let CompileResult { warnings, .. } =
-            compile_haskell(source, "result", &[]).expect("Failed to compile result");
+        let CompileResult { warnings, .. } = tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, "result", &[], settlement)
+        })
+        .expect("Failed to compile result");
         assert!(
             !warnings.warnings.is_empty(),
             "expected at least one GHC warning for the overlapping `f` clauses"
@@ -715,7 +730,10 @@ mod tests {
         // this process rather than the first producer's temporary directory.
         let CompileResult {
             warnings: cached, ..
-        } = compile_haskell(source, "result", &[]).expect("Failed to reload cached result");
+        } = tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, "result", &[], settlement)
+        })
+        .expect("Failed to reload cached result");
         assert_eq!(warnings.warnings, cached.warnings);
     }
 
@@ -725,8 +743,10 @@ mod tests {
     fn test_compile_no_warnings_on_clean_source() {
         tidepool_testing::eval_harness::require_extract();
         let source = "module CleanProbe where\nresult :: Int\nresult = 1 + 1\n";
-        let CompileResult { warnings, .. } =
-            compile_haskell(source, "result", &[]).expect("Failed to compile result");
+        let CompileResult { warnings, .. } = tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, "result", &[], settlement)
+        })
+        .expect("Failed to compile result");
         assert!(
             warnings.warnings.is_empty(),
             "expected no warnings for a clean compile, got: {:?}",

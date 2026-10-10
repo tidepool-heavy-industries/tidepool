@@ -117,18 +117,23 @@ async fn run_record_case(source: &str, discriminator: u32) {
     let mut machine =
         ResidentSession::unbootstrapped(NoHandlers, Sink, DEFAULT_NURSERY_SIZE, Some(lib));
     let retained = machine.prepared_retained();
-    let compiled = match run_turn(HaskellTurnRequest {
-        exact_context: None,
-        session_id: None,
-        turn_text: source,
-        templates: &templates,
-        include: &include_refs,
-        session_root: session_root.path(),
-        inject_modules: &[],
-        gen: 1,
-        verdict: None,
-        target: None,
-        retained_imports: &retained,
+    let compiled = match tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            HaskellTurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: source,
+                templates: &templates,
+                include: &include_refs,
+                session_root: session_root.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: None,
+                target: None,
+                retained_imports: &retained,
+            },
+            settlement,
+        )
     })
     .expect("compile lifecycle watcher")
     {

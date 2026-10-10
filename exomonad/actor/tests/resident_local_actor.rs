@@ -1055,22 +1055,27 @@ async fn resident_await_watch_case(case: WatchCase) {
         None
     } else {
         let retained = machine.prepared_retained();
-        let compiled = match run_turn(HaskellTurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: if structured_command {
-                include_str!("resident_local_actor/await_command_policy.hs")
-            } else {
-                include_str!("resident_local_actor/await_watch_policy.hs")
-            },
-            templates: &templates,
-            include: &include_refs,
-            session_root: session_root.path(),
-            inject_modules: &[],
-            gen: 1,
-            verdict: None,
-            target: None,
-            retained_imports: &retained,
+        let compiled = match tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                HaskellTurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: if structured_command {
+                        include_str!("resident_local_actor/await_command_policy.hs")
+                    } else {
+                        include_str!("resident_local_actor/await_watch_policy.hs")
+                    },
+                    templates: &templates,
+                    include: &include_refs,
+                    session_root: session_root.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &retained,
+                },
+                settlement,
+            )
         })
         .expect("compile awaitWatch policy")
         {
@@ -1110,15 +1115,17 @@ async fn resident_await_watch_case(case: WatchCase) {
         let actor = forest
             .new_workbench(
                 "resident-await-watch".into(),
-                exomonad_actor::ActorCapabilities::default().with_effect_keys(if direct_binding_cell {
-                    vec![exomonad_actor::ActorEffectKey::Commands]
-                } else {
-                    vec![
-                        exomonad_actor::ActorEffectKey::Commands,
-                        exomonad_actor::ActorEffectKey::Watches,
-                        exomonad_actor::ActorEffectKey::Sleep,
-                    ]
-                }),
+                exomonad_actor::ActorCapabilities::default().with_effect_keys(
+                    if direct_binding_cell {
+                        vec![exomonad_actor::ActorEffectKey::Commands]
+                    } else {
+                        vec![
+                            exomonad_actor::ActorEffectKey::Commands,
+                            exomonad_actor::ActorEffectKey::Watches,
+                            exomonad_actor::ActorEffectKey::Sleep,
+                        ]
+                    },
+                ),
             )
             .await
             .expect("spawn primary workbench");
@@ -1651,22 +1658,27 @@ async fn resident_cleanup_case(fail_hook: bool) {
     let mut machine =
         ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
     let retained = machine.prepared_retained();
-    let compiled = match run_turn(HaskellTurnRequest {
-        exact_context: None,
-        session_id: None,
-        turn_text: if fail_hook {
-            include_str!("resident_local_actor/policy_failed_hook.hs")
-        } else {
-            include_str!("resident_local_actor/policy.hs")
-        },
-        templates: &templates,
-        include: &include_refs,
-        session_root: session_root.path(),
-        inject_modules: &[],
-        gen: 1,
-        verdict: None,
-        target: None,
-        retained_imports: &retained,
+    let compiled = match tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            HaskellTurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: if fail_hook {
+                    include_str!("resident_local_actor/policy_failed_hook.hs")
+                } else {
+                    include_str!("resident_local_actor/policy.hs")
+                },
+                templates: &templates,
+                include: &include_refs,
+                session_root: session_root.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: None,
+                target: None,
+                retained_imports: &retained,
+            },
+            settlement,
+        )
     })
     .expect("compile resident policy")
     {

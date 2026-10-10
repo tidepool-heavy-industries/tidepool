@@ -74,25 +74,30 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
         ),
     ] {
         let source = tidepool_runtime::session::assemble_expression_module(
-        &format!("{{-# LANGUAGE DataKinds, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, NoImplicitPrelude, TypeOperators, UndecidableInstances #-}}\nmodule {name} where\nimport Tidepool.Prelude\nimport Control.Monad.Freer (Eff)\nimport {imported_row} ({row})\n"),
-        "result",
-        row,
-        "show (length (sort [41, 2, 3]) + 39 :: Int)",
-        tidepool_runtime::session::ExpressionLift::Pure,
-    );
+            &format!(
+                "{{-# LANGUAGE DataKinds, FlexibleContexts, FlexibleInstances, MultiParamTypeClasses, NoImplicitPrelude, TypeOperators, UndecidableInstances #-}}\nmodule {name} where\nimport Tidepool.Prelude\nimport Control.Monad.Freer (Eff)\nimport {imported_row} ({row})\n"
+            ),
+            "result",
+            row,
+            "show (length (sort [41, 2, 3]) + 39 :: Int)",
+            tidepool_runtime::session::ExpressionLift::Pure,
+        );
         let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
         let compile_start = std::time::Instant::now();
-        let compiled = tidepool_runtime::compile_targets(
-            &source,
-            &[target],
-            &source_roots,
-            |stage, elapsed, bytes| {
-                eprintln!(
+        let compiled = tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::compile_targets(
+                &source,
+                &[target],
+                &source_roots,
+                |stage, elapsed, bytes| {
+                    eprintln!(
                     "deployment compile {row}: stage={stage} elapsed_ns={} payload_bytes={bytes}",
                     elapsed.as_nanos(),
                 );
-            },
-        )
+                },
+                settlement,
+            )
+        })
         .expect("package-backed expression compilation");
         eprintln!(
             "deployment compile {row}: total_elapsed_ns={}",
@@ -150,9 +155,9 @@ fn packaged_cohort_executes_and_displays_without_build_inputs() {
         let displayed = tidepool_runtime::value_to_json(&value, &compiled.table, 0);
         assert_eq!(displayed, serde_json::json!("42"));
         eprintln!(
-        "deployment catalog {}: {row}: {} cached owners, {replayed} re-extracted; native display {displayed}",
-        package.catalog_identity(),
-        cached.len(),
-    );
+            "deployment catalog {}: {row}: {} cached owners, {replayed} re-extracted; native display {displayed}",
+            package.catalog_identity(),
+            cached.len(),
+        );
     }
 }

@@ -1089,8 +1089,10 @@ pub(super) fn assert_compiler_work(
                             && global.generation == prior.native().unwrap().generation()
                     })
                     .count();
-                assert_eq!(matching, 1,
-                    "the actual item root must retain the exact prior compiler-issued capture generation");
+                assert_eq!(
+                    matching, 1,
+                    "the actual item root must retain the exact prior compiler-issued capture generation"
+                );
             }
         }
     }
@@ -1510,7 +1512,9 @@ where
                     compile_cell_program_admitted_work_controls(admission.clone(), Some(count))
                 })
             }
-            _ => compile_cell_program_admitted(admission.clone()),
+            _ => tidepool_testing::with_settlement(|settlement| {
+                compile_cell_program_admitted(admission.clone(), settlement)
+            }),
         }
     };
     if matches!(authority_checks, AuthorityChecks::RefusalBranches) {
@@ -1818,8 +1822,14 @@ where
                         })
                     })
                     .expect("the second entry requires a genuinely completed earlier capture");
-                assert!(compiled.prepared.globals().iter().all(|global| global.identity != required.identity),
-                    "the capture obligation must come through the selected original, not direct target globals");
+                assert!(
+                    compiled
+                        .prepared
+                        .globals()
+                        .iter()
+                        .all(|global| global.identity != required.identity),
+                    "the capture obligation must come through the selected original, not direct target globals"
+                );
                 let missing = actual
                     .iter()
                     .copied()
@@ -3346,12 +3356,12 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
     // A value-only publication may have no declaration tip. Its checked value
     // artifact supplies original support when the next compiler request is
     // admitted; that request's retained diagnostic inputs expose the inventory.
-    assert!(view
-        .exact_declaration_context()
-        .is_none_or(|context| context
+    assert!(view.exact_declaration_context().is_none_or(|context| {
+        context
             .lexical_graph()
             .iter()
-            .all(|node| node.owner.module != "QuotedTemplateSupport")));
+            .all(|node| node.owner.module != "QuotedTemplateSupport")
+    }));
     for (label, expression, expected) in [
         ("unrelated_cell_after_quoted_template", "smokeValue + 1", 43),
         ("retained_quoted_template_value", "retainedTask", 42),
