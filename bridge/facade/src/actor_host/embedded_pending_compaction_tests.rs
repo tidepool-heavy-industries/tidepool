@@ -330,6 +330,11 @@ async fn engine_component_carries_raw_and_typed_pending_calls_through_compaction
                     .unwrap();
                 let embedded = attach_actor(
                     &service,
+                    super::provider_attachment::ProviderAttachment::admit(
+                        campaign.forest.clone(),
+                        actor,
+                    )
+                    .unwrap(),
                     campaign.session_root.path(),
                     AgentPath("/root".into()),
                     None,
@@ -564,6 +569,11 @@ async fn engine_component_compaction_failure_continues_once_then_cleans_pending_
                     .unwrap();
                 let embedded = attach_actor(
                     &service,
+                    super::provider_attachment::ProviderAttachment::admit(
+                        campaign.forest.clone(),
+                        actor,
+                    )
+                    .unwrap(),
                     campaign.session_root.path(),
                     AgentPath("/root".into()),
                     None,

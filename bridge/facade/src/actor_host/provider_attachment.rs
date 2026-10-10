@@ -20,6 +20,17 @@ impl ProviderAttachment {
         Ok(Self { forest, admission })
     }
 
+    pub(super) fn actor(&self) -> ActorRef {
+        self.admission.actor()
+    }
+
+    pub(super) fn with_admission<T>(
+        &self,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, ResidentActorWorkbenchError> {
+        self.admission.with_admission(operation)
+    }
+
     pub(super) fn validate(&self) -> Result<(), ResidentActorWorkbenchError> {
         self.forest.validate_provider_attachment(&self.admission)
     }

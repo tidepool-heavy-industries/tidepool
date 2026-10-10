@@ -309,6 +309,7 @@ impl EmbeddedService {
 
 pub(super) async fn attach_actor(
     service: &EmbeddedService,
+    attachment: super::provider_attachment::ProviderAttachment,
     run_root: &Path,
     path: AgentPath,
     parent: Option<AgentPath>,
@@ -325,6 +326,7 @@ pub(super) async fn attach_actor(
     let embedded = service
         .runtime
         .attach(
+            attachment,
             identity,
             installation.actor.clone(),
             policy,
@@ -354,6 +356,7 @@ pub(super) async fn attach_actor(
 
 pub(super) async fn attach_checkpoint_actor(
     runtime: &EmbeddedHarnessRuntime,
+    attachment: super::provider_attachment::ProviderAttachment,
     run_root: &Path,
     installation: LocalResidentInstallation,
     initial_input: Option<String>,
@@ -380,7 +383,7 @@ pub(super) async fn attach_checkpoint_actor(
     };
     let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
     let embedded = runtime
-        .attach_checkpoint(identity, &installation, policy, captured)
+        .attach_checkpoint(attachment, identity, &installation, policy, captured)
         .map_err(|error| error.to_string())?;
     if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
@@ -405,6 +408,7 @@ pub(super) async fn attach_checkpoint_actor(
 
 pub(super) async fn attach_selected_actor(
     runtime: &EmbeddedHarnessRuntime,
+    attachment: super::provider_attachment::ProviderAttachment,
     run_root: &Path,
     parent: super::embedded_context::SelectedProviderParent,
     installation: LocalResidentInstallation,
@@ -433,6 +437,7 @@ pub(super) async fn attach_selected_actor(
     let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
     let embedded = runtime
         .attach(
+            attachment,
             identity,
             installation.actor.clone(),
             policy,
@@ -567,6 +572,7 @@ where
     C: harness::engine::ResponsesTransport,
 {
     let EmbeddedConversation {
+        attachment,
         provider_admission,
         conversation,
         mut incoming,
@@ -643,8 +649,12 @@ where
         let round = round_control
             .begin()
             .map_err(|error| format!("could not begin embedded Engine round: {error}"))?;
-        let observed_round = match provider_admission
-            .begin_provider_turn(provider_thread.clone(), round.id().0.to_string())
+        let observed_round = match attachment
+            .with_admission(|| {
+                provider_admission
+                    .begin_provider_turn(provider_thread.clone(), round.id().0.to_string())
+            })
+            .map_err(|error| error.to_string())?
         {
             Ok(lease) => lease,
             Err(exomonad_actor::NativeProviderStartError::RetirementPending) => {

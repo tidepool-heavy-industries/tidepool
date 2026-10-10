@@ -617,8 +617,8 @@ pub(super) async fn run_interactive_applications(
                                         provider_attachment.validate().map_err(|error| error.to_string())?;
                                         let attachment = async {
                                             match selected_parent {
-                                                Some(parent) => embedded_service::attach_selected_actor(runtime.as_ref(), &run_root, parent, *installation, initial_input).await,
-                                                None => embedded_service::attach_checkpoint_actor(runtime.as_ref(), &run_root, *installation, initial_input).await,
+                                                Some(parent) => embedded_service::attach_selected_actor(runtime.as_ref(), provider_attachment.clone(), &run_root, parent, *installation, initial_input).await,
+                                                None => embedded_service::attach_checkpoint_actor(runtime.as_ref(), provider_attachment.clone(), &run_root, *installation, initial_input).await,
                                             }
                                         };
                                         let mut embedded = tokio::select! {
@@ -690,6 +690,7 @@ pub(super) async fn run_interactive_applications(
                             }
                             let attachment = embedded_service::attach_actor(
                                 service,
+                                provider_attachment.clone(),
                                 &launch_context.run_root,
                                 harness::model::AgentPath("/root".into()),
                                 None,

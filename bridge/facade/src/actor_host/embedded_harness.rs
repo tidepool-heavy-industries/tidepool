@@ -190,6 +190,7 @@ impl EmbeddedHarnessRuntime {
 
     pub(super) fn attach(
         &self,
+        attachment: super::provider_attachment::ProviderAttachment,
         identity: HostIdentity,
         actor: LocalActorRef,
         installation: Arc<EmbeddedPolicyInstallation>,
@@ -208,6 +209,7 @@ impl EmbeddedHarnessRuntime {
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = EmbeddedHostActor::new(
+            attachment.clone(),
             identity,
             actor,
             installation,
@@ -234,6 +236,7 @@ impl EmbeddedHarnessRuntime {
             self.admission_test_hooks.get().cloned(),
         )?;
         Ok(EmbeddedConversation {
+            attachment,
             provider_admission,
             conversation,
             incoming,
@@ -244,6 +247,7 @@ impl EmbeddedHarnessRuntime {
 
     pub(super) fn attach_checkpoint(
         &self,
+        attachment: super::provider_attachment::ProviderAttachment,
         identity: HostIdentity,
         installation: &LocalResidentInstallation,
         policy: Arc<EmbeddedPolicyInstallation>,
@@ -291,6 +295,7 @@ impl EmbeddedHarnessRuntime {
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = EmbeddedHostActor::new(
+            attachment.clone(),
             identity,
             actor,
             policy,
@@ -322,6 +327,7 @@ impl EmbeddedHarnessRuntime {
             self.admission_test_hooks.get().cloned(),
         )?;
         Ok(EmbeddedConversation {
+            attachment,
             provider_admission,
             conversation,
             incoming,
@@ -379,6 +385,7 @@ fn attach_native_provider(
 }
 
 pub(super) struct EmbeddedConversation {
+    pub(super) attachment: super::provider_attachment::ProviderAttachment,
     pub(super) provider_admission: exomonad_actor::NativeProviderAdmission,
     pub(super) conversation: Arc<Conversation>,
     pub(super) incoming: mpsc::UnboundedReceiver<DurableMailboxWake>,
@@ -574,6 +581,7 @@ impl EmbeddedActorBinding {
 /// The run runtime owns Store and its scheduler; this host supplies authority
 /// and an identity-only wake channel for their existing mailbox path.
 pub(super) struct EmbeddedHostActor {
+    attachment: super::provider_attachment::ProviderAttachment,
     identity: HostIdentity,
     actor: LocalActorRef,
     installation: Arc<EmbeddedPolicyInstallation>,
@@ -599,6 +607,7 @@ impl EmbeddedHostActor {
     }
 
     pub(super) fn new(
+        attachment: super::provider_attachment::ProviderAttachment,
         identity: HostIdentity,
         actor: LocalActorRef,
         installation: Arc<EmbeddedPolicyInstallation>,
@@ -607,7 +616,8 @@ impl EmbeddedHostActor {
         round_control: Arc<EmbeddedRoundControl>,
     ) -> Result<Self, EmbeddedError> {
         let exact_actor = actor.identity();
-        if installation.actor() != exact_actor
+        if attachment.actor() != exact_actor
+            || installation.actor() != exact_actor
             || identity.incarnation != exact_actor.incarnation.0.to_string()
         {
             return Err(EmbeddedError::Binding(
@@ -615,7 +625,11 @@ impl EmbeddedHostActor {
                     .into(),
             ));
         }
+        attachment
+            .validate()
+            .map_err(|error| EmbeddedError::Binding(error.to_string()))?;
         Ok(Self {
+            attachment,
             identity,
             actor,
             installation,
@@ -660,8 +674,9 @@ impl HostActor for EmbeddedHostActor {
 
     fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
         self.store.ensure_ready()?;
-        self.actor
-            .admit_transaction()
+        self.attachment
+            .with_admission(|| self.actor.admit_transaction())
+            .map_err(|error| EmbeddedError::Host(error.to_string()))?
             .map(|lease| Box::new(StoreAdmission { _lease: lease }) as Box<dyn AdmissionGuard>)
             .map_err(embedded_admission_error)
     }
@@ -670,8 +685,9 @@ impl HostActor for EmbeddedHostActor {
         // A request must pin its handler before retirement closes admission.
         // The short lease also prevents cleanup from overtaking snapshot capture.
         let _admission = self
-            .actor
-            .admit_transaction()
+            .attachment
+            .with_admission(|| self.actor.admit_transaction())
+            .map_err(|error| EmbeddedError::Host(error.to_string()))?
             .map_err(embedded_admission_error)?;
         self.store.ensure_ready()?;
         let snapshot = Arc::new(
@@ -2526,13 +2542,28 @@ mod tests {
                         },
                     ] {
                         assert!(scratch_runtime
-                            .attach(foreign, campaign.actor.clone(), installation.clone(), None)
+                            .attach(
+                                super::super::provider_attachment::ProviderAttachment::admit(
+                                    campaign.forest.clone(),
+                                    actor,
+                                )
+                                .unwrap(),
+                                foreign,
+                                campaign.actor.clone(),
+                                installation.clone(),
+                                None,
+                            )
                             .is_err());
                     }
                     let (wakes, _incoming) = mpsc::unbounded_channel();
                     let scratch = tempfile::tempdir().unwrap();
                     let store = Arc::new(Store::open(scratch.path().join("store.sqlite")).unwrap());
                     let host = EmbeddedHostActor::new(
+                        super::super::provider_attachment::ProviderAttachment::admit(
+                            campaign.forest.clone(),
+                            actor,
+                        )
+                        .unwrap(),
                         identity,
                         campaign.actor.clone(),
                         installation.clone(),

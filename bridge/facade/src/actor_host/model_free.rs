@@ -138,7 +138,14 @@ impl ModelFreeSession {
         )?;
         let (source, descriptor, machine, outcome, program, child_session_factory, image_registry) =
             super::run_compiler_preparation(|settlement| {
-                let (source, root, program, child_session_factory, image_registry) = compile_root(
+                let super::CompiledRoot {
+                    source,
+                    root,
+                    program,
+                    child_session_factory,
+                    image_registry,
+                    ..
+                } = compile_root(
                     config,
                     &session_directory,
                     &worktree_directory,

@@ -1761,6 +1761,15 @@ impl ActorProviderAdmission {
     pub fn placement(&self) -> crate::ActorPlacement {
         self.owner.placement()
     }
+
+    /// Admit one synchronous provider transition under the original native run
+    /// fence. The operation must not await or reenter the recovery store.
+    pub fn with_admission<T>(
+        &self,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, ResidentActorWorkbenchError> {
+        self.owner.with_admission(operation)
+    }
 }
 
 #[derive(tidepool_bridge_derive::ToHaskell)]

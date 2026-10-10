@@ -1962,21 +1962,27 @@ async fn run_owned(
         root_binding_path: config.root_binding_path.clone(),
         manifest: None,
     };
-    let (source, root, program, child_session_factory, image_registry) =
-        run_compiler_preparation(|settlement| {
-            compile_root(
-                &config,
-                &config.run_directory,
-                &worktree_directory,
-                worktrees.clone(),
-                worktree_authority.clone(),
-                source_layers.as_ref(),
-                Arc::clone(&host_incarnation),
-                run_journal_mode,
-                Some(&mut embedded_startup),
-                settlement,
-            )
-        })?;
+    let CompiledRoot {
+        source,
+        root,
+        program,
+        child_session_factory,
+        image_registry,
+        recovery_store,
+    } = run_compiler_preparation(|settlement| {
+        compile_root(
+            &config,
+            &config.run_directory,
+            &worktree_directory,
+            worktrees.clone(),
+            worktree_authority.clone(),
+            source_layers.as_ref(),
+            Arc::clone(&host_incarnation),
+            run_journal_mode,
+            Some(&mut embedded_startup),
+            settlement,
+        )
+    })?;
     let prior_actor_records = actor_recovery.records();
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, entry) = root.into_parts();
@@ -2477,6 +2483,9 @@ async fn run_owned(
         loop {
             tokio::select! {
                 biased;
+                failure = recovery_store.wait_recovery_required() => {
+                    break Err(runtime_error(format!("native run store requires authenticated recovery: {failure}")));
+                }
                 failure = run_store.wait_recovery_required() => {
                     break Err(runtime_error(format!("embedded run store requires authenticated recovery: {failure}")));
                 }
@@ -3387,13 +3396,15 @@ fn compile_driver(
 /// executable entry, its compiled driver turn (reused as-is by a factory-built
 /// child machine — see the composite facade test), and the composition
 /// root's one [`exomonad_actor::ChildSessionFactory`].
-type CompiledRoot = (
-    ActorWorkbenchSource,
-    ExomonadRoot,
-    Arc<tidepool_runtime::session::CompiledTurn>,
-    exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
-    Arc<tidepool_runtime::session::ImageRegistry>,
-);
+struct CompiledRoot {
+    source: ActorWorkbenchSource,
+    root: ExomonadRoot,
+    program: Arc<tidepool_runtime::session::CompiledTurn>,
+    child_session_factory:
+        exomonad_actor::ChildSessionFactory<ExomonadHandlerStack, CapturedOutput>,
+    image_registry: Arc<tidepool_runtime::session::ImageRegistry>,
+    recovery_store: Arc<tidepool_runtime::session::RunRecoveryStore>,
+}
 
 #[tracing::instrument(
     target = "tidepool::actor_host::startup",
@@ -3620,14 +3631,15 @@ fn compile_root(
                 .map_err(std::io::Error::other)?,
         );
     }
-    let workbench = host_workbench_source(config, preamble, include, toolset_support)?;
-    Ok((
-        workbench,
-        ResidentActorRoot::pending(descriptor, machine, entry),
-        compiled,
+    let source = host_workbench_source(config, preamble, include, toolset_support)?;
+    Ok(CompiledRoot {
+        source,
+        root: ResidentActorRoot::pending(descriptor, machine, entry),
+        program: compiled,
         child_session_factory,
         image_registry,
-    ))
+        recovery_store,
+    })
 }
 
 fn host_workbench_source(
