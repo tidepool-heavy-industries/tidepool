@@ -819,23 +819,26 @@ impl TestCampaign {
     }
 }
 
+fn campaign_trace_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::new(
+        "warn,tidepool::actor_host::startup=info,tidepool_runtime::compile=info,\
+         tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
+         exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
+         tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
+         exomonad_actor::request=info,exomonad_actor::workbench_phase=info,exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,exomonad_actor::resident_tools=info,exomonad::content=off,harness::runtime_cost=debug",
+    )
+}
+
 /// Retain phase and compile observations across the host's executor threads.
 /// An isolated native test owns the global subscriber; an already-installed
 /// measurement subscriber keeps its filter and writer. Explicit trace files
 /// remain supported, otherwise libtest's writer retains JSON in test output.
 pub(super) fn install_tracing() {
-    let filter = tracing_subscriber::EnvFilter::new(
-        "warn,tidepool::actor_host::startup=info,tidepool_runtime::compile=info,\
-         tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
-         exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
-         tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
-         exomonad_actor::workbench_phase=info,exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,exomonad_actor::resident_tools=info,exomonad::content=off,harness::runtime_cost=debug",
-    );
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_ansi(false)
         .with_thread_names(true)
-        .with_env_filter(filter)
+        .with_env_filter(campaign_trace_filter())
         .with_span_events(
             tracing_subscriber::fmt::format::FmtSpan::NEW
                 | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
@@ -1388,6 +1391,66 @@ pub(super) fn hosted_test_settings(
 mod tests {
     use super::*;
     use std::future::Future;
+
+    #[test]
+    fn scoped_trace_filter_retains_request_receipts_and_excludes_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("trace.jsonl");
+        let file = std::fs::File::create(&path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_env_filter(campaign_trace_filter())
+            .with_writer(std::sync::Mutex::new(file))
+            .finish();
+        let request = exomonad_actor::RequestId(7);
+        let parent = exomonad_actor::ActorRef::first(exomonad_actor::ActorId(1));
+        let child = exomonad_actor::ActorRef {
+            id: exomonad_actor::ActorId(2),
+            incarnation: exomonad_actor::Incarnation(3),
+        };
+        let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([2; 16]);
+        let attempt = uuid::Uuid::from_bytes([3; 16]);
+        tracing::subscriber::with_default(subscriber, || {
+            // The registry's internal queue gate is exercised by actor tests;
+            // this control checks the shared subscriber with its typed wire fields.
+            let parent_cell = tracing::info_span!(target: "exomonad_actor::workbench_phase",
+                "cell", actor = %parent, execution = %execution);
+            let _parent_cell = parent_cell.enter();
+            tracing::info!(target: "exomonad_actor::request",
+                request = request.0, parent_actor = %parent, activation_actor = %child,
+                parent_execution = %execution, parent_attempt = %attempt,
+                "request activation origin issued");
+            tracing::trace!(target: crate::exomonad::CONTENT_TARGET, source = "private-content");
+            tracing::info!(target: crate::exomonad::CONTENT_TARGET, source = "private-content");
+            tracing::warn!(target: crate::exomonad::CONTENT_TARGET, source = "private-content");
+        });
+        let captured = std::fs::read_to_string(&path).unwrap();
+        let rows = captured
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "only receipt metadata is retained");
+        assert_eq!(rows[0]["target"], "exomonad_actor::request");
+        assert_eq!(
+            rows[0]["span"],
+            serde_json::json!({
+                "name": "cell", "actor": parent.to_string(), "execution": execution.to_string(),
+            })
+        );
+        assert_eq!(
+            rows[0]["fields"],
+            serde_json::json!({
+                "message": "request activation origin issued",
+                "request": request.0,
+                "parent_actor": parent.to_string(),
+                "activation_actor": child.to_string(),
+                "parent_execution": execution.to_string(),
+                "parent_attempt": attempt.to_string(),
+            })
+        );
+        assert!(!captured.contains("private-content"));
+    }
 
     #[test]
     fn ghc_compile_rejection_requires_authored_error_diagnostic_data() {
