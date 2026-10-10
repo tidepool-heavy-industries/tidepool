@@ -688,6 +688,23 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual(result["status"], "partial_or_unknown")
         self.assertIn("validation lacks matching physical request/worker identity", result["problems"])
 
+    def test_registry_wait_sum_preserves_unknown_decision_durations(self):
+        def observe(*waits):
+            rows = [{"target": "tidepool_codegen::image_registry", "fields": {
+                "message": "native image registry decision", "process_id": 99,
+                "image_registry": 3, "image_entry": 7, "shared_wait_ns": wait}}
+                for wait in waits]
+            return reporter.owned_artifact_observations(rows, [])[
+                "registry_wait_ns_observed"]
+
+        self.assertEqual(observe(0, 0), 0)
+        self.assertEqual(observe(0, 5), 5)
+        self.assertIsNone(observe(0, None))
+        for invalid in (-1, True, 1.5, "invalid"):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(observe(0, invalid))
+        self.assertIsNone(observe())
+
     def test_phase_measurements_require_nonnegative_json_integers(self):
         record = self.make_complete_case()
         phase_path = self.root / "artifacts/phases.jsonl"

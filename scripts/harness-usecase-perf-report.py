@@ -512,8 +512,10 @@ def owned_artifact_observations(host_rows, daemon_rows):
         "machine_installations_observed": observed_count(install_events),
         "native_producer_outcomes_observed": dict(Counter(event["fields"].get("outcome") for event in producer_events)) or None,
         "registry_dispositions_observed": dict(Counter(event["fields"].get("disposition") for event in decisions)) or None,
-        "registry_wait_ns_observed": (sum(nonnegative_integer(event["fields"].get("shared_wait_ns")) or 0
-                                         for event in decisions) if decisions else None),
+        "registry_wait_ns_observed": (sum(nonnegative_integer(event["fields"].get("shared_wait_ns"))
+                                         for event in decisions)
+            if decisions and all(nonnegative_integer(event["fields"].get("shared_wait_ns")) is not None
+                                 for event in decisions) else None),
         "successful_native_functions_defined_observed": (sum(nonnegative_integer(event["fields"].get("functions_defined")) or 0
             for event in compile_events) if compile_events and all(nonnegative_integer(event["fields"].get("functions_defined")) is not None
             for event in compile_events) else None),
