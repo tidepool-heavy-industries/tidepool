@@ -190,7 +190,7 @@ impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
 }
 
 /// One parked parent continuation paired with exclusive ownership of its child
-/// entry. Compiler provenance travels with the rooted entry itself.
+/// entry. Its issuing session and compiler provenance travel with the value.
 pub struct ResidentActorStart {
     pub(crate) parent_hole: ResidentHole,
     pub(crate) child: CapturedChildLaunch,
@@ -205,7 +205,7 @@ pub(crate) struct CapturedChildLaunch {
     pub lifetime: WorkerLifetime,
     pub descriptor: ActorDescriptor,
     pub spawn: Option<SpawnDefinition>,
-    pub entry: RootCustody,
+    pub entry: crate::MailboxValue,
     pub launch_worktrees: Vec<String>,
     pub record_workspace: Option<tidepool_bridge_effects::WtWorkspaceHandle>,
     pub seed: Option<ChildSessionSeed>,
@@ -381,7 +381,7 @@ impl ResidentActorStart {
                 lifetime,
                 descriptor,
                 spawn: Some(SpawnDefinition { context, workspace }),
-                entry,
+                entry: crate::MailboxValue::new(session_id, entry),
                 launch_worktrees: Vec::new(),
                 record_workspace: None,
                 seed,
@@ -456,7 +456,7 @@ impl ResidentActorStart {
                 lifetime: WorkerLifetime::ActorOwned,
                 descriptor,
                 spawn: None,
-                entry,
+                entry: crate::MailboxValue::new(session_id, entry),
                 launch_worktrees: Vec::new(),
                 record_workspace: workspace,
                 seed,

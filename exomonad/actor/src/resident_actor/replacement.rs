@@ -318,76 +318,46 @@ where
                 "replacement must preserve the actor's worktree custody",
             ));
         }
-        // See `resident_actor.rs::try_start_child`'s matching resolution: a
-        // replacement that names the predecessor's own session needs
-        // nothing further. One that names a freshly minted session instead
-        // (an eligible `SelectedContext` replacement) provisions that
-        // session's dedicated machine and crosses the entry into it with
-        // `ResidentActorRunner::transfer_custody`, getting the new
-        // session's own lexical scope, never the predecessor's.
-        let (entry, request_value) =
-            if descriptor.placement().session == self.descriptor.placement().session {
-                (entry, checkpoint.value.clone())
-            } else if !self.environment.runner.supports_child_sessions() {
-                // See `resident_actor.rs::try_start_child`'s matching fallback:
-                // `capture_decoded` minted no real lexical scope for this
-                // (eligible) replacement, only a placeholder.
-                let lexical_scope = self
-                    .environment
-                    .runner
-                    .mint_lexical_scope(self.descriptor.placement().session)
-                    .await?;
-                descriptor = descriptor
-                    .with_session(self.descriptor.placement().session)
-                    .with_lexical_scope(lexical_scope);
-                *placement = descriptor.placement();
-                (entry, checkpoint.value.clone())
-            } else {
-                let child_session = descriptor.placement().session;
-                let lexical_scope = self
-                    .environment
-                    .runner
-                    .provision_child_session(
-                        child_session,
-                        descriptor.placement().resource_scope,
-                        seed.as_ref(),
-                        descriptor.source_layer(),
-                    )
-                    .await
-                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-                descriptor = descriptor.with_lexical_scope(lexical_scope);
-                *placement = descriptor.placement();
-                let entry = self
-                    .environment
-                    .runner
-                    .transfer_custody(
-                        entry,
-                        self.descriptor.placement().session,
-                        child_session,
-                        descriptor.placement().resource_scope,
-                    )
-                    .await?;
-                // `checkpoint.value` is a shared, non-consuming root: several
-                // callers may still read the predecessor's own checkpoint (a
-                // retry, or recovery after this replacement itself fails), so
-                // it crosses through the SAME borrow-export path
-                // `resume_progress_observation` uses for a published progress
-                // snapshot (`import_shared_custody`), never a consuming
-                // `transfer_custody` — the predecessor's own copy stays exactly
-                // as it was.
-                let request_value = self
-                    .environment
-                    .runner
-                    .import_shared_custody(
-                        Arc::clone(&checkpoint.value),
-                        self.descriptor.placement().session,
-                        child_session,
-                        descriptor.placement().resource_scope,
-                    )
-                    .await?;
-                (entry, Arc::new(request_value))
-            };
+        // Placement belongs to the successor; the entry still belongs to its
+        // controlling caller and the checkpoint belongs to this predecessor.
+        if descriptor.placement().session != self.descriptor.placement().session
+            && !self.environment.runner.supports_child_sessions()
+        {
+            let lexical_scope = self
+                .environment
+                .runner
+                .mint_lexical_scope(self.descriptor.placement().session)
+                .await?;
+            descriptor = descriptor
+                .with_session(self.descriptor.placement().session)
+                .with_lexical_scope(lexical_scope);
+            *placement = descriptor.placement();
+        } else if descriptor.placement().session != self.descriptor.placement().session {
+            let lexical_scope = self
+                .environment
+                .runner
+                .provision_child_session(
+                    descriptor.placement().session,
+                    descriptor.placement().resource_scope,
+                    seed.as_ref(),
+                    descriptor.source_layer(),
+                )
+                .await
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+            descriptor = descriptor.with_lexical_scope(lexical_scope);
+            *placement = descriptor.placement();
+        }
         let context = descriptor.session_context(actor);
+        let (entry, request_value) = self
+            .environment
+            .runner
+            .prepare_replacement_inputs(
+                context.clone(),
+                entry,
+                self.descriptor.placement().session,
+                Arc::clone(&checkpoint.value),
+            )
+            .await?;
         let realm = context.placement.resource_scope;
         let runner = &self.environment.runner;
         let mut outcome = runner

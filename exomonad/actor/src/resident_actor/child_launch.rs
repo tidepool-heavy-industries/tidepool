@@ -428,11 +428,11 @@ where
                 .placement_custody
                 .update(descriptor.placement());
         }
-        // Transfer the captured closure after releasing the parent checkout.
+        // Resolve placement before transferring the source-paired entry.
         // A session carrying RepoEvent stays on its existing machine.
-        let entry = if descriptor.placement().session == context.placement.session {
-            entry
-        } else if !environment.runner.supports_child_sessions() {
+        if descriptor.placement().session != context.placement.session
+            && !environment.runner.supports_child_sessions()
+        {
             // Eligible, but this host never installed a child-session
             // factory/bootstrap program (`ResidentActorRunner::supports_child_sessions`)
             // — fall back to the launching session, rather than failing an
@@ -450,8 +450,7 @@ where
             continuation
                 .placement_custody
                 .update(descriptor.placement());
-            entry
-        } else {
+        } else if descriptor.placement().session != context.placement.session {
             let child_session = descriptor.placement().session;
             let lexical_scope = environment
                 .runner
@@ -467,16 +466,17 @@ where
             continuation
                 .placement_custody
                 .update(descriptor.placement());
-            environment
-                .runner
-                .transfer_custody(
-                    entry,
-                    context.placement.session,
-                    child_session,
-                    descriptor.placement().resource_scope,
-                )
-                .await?
-        };
+        }
+        let entry = environment
+            .runner
+            .transfer_mailbox_value(
+                descriptor.session_context(context.actor),
+                entry,
+                descriptor.placement().session,
+                descriptor.placement().resource_scope,
+            )
+            .await?
+            .into_custody();
         // The checkout-derived include roots were fixed before any fresh
         // child machine bootstrapped inherited declarations.
         let allocated_label = descriptor.display_label().to_string();

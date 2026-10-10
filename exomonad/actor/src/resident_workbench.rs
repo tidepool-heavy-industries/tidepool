@@ -10589,6 +10589,33 @@ where
             .await
     }
 
+    /// Stage the caller's replacement entry and the predecessor's borrowed
+    /// checkpoint in the resolved successor placement. Their issuing sessions
+    /// remain independent, including when the successor shares either machine.
+    pub(crate) async fn prepare_replacement_inputs(
+        &self,
+        context: crate::ActorSessionContext,
+        entry: crate::MailboxValue,
+        predecessor: tidepool_repr::SessionId,
+        checkpoint: Arc<RootCustody>,
+    ) -> Result<(RootCustody, Arc<RootCustody>), ResidentActorWorkbenchError> {
+        let destination = context.placement.session;
+        let owner = context.placement.resource_scope;
+        let entry = self
+            .transfer_mailbox_value(context, entry, destination, owner)
+            .await?
+            .into_custody();
+        let checkpoint = if predecessor == destination {
+            checkpoint
+        } else {
+            Arc::new(
+                self.import_shared_custody(checkpoint, predecessor, destination, owner)
+                    .await?,
+            )
+        };
+        Ok((entry, checkpoint))
+    }
+
     /// Move a rooted value from one resident session's machine to another,
     /// owned by `owner` on the destination. Decomposes through
     /// [`crate::MailboxValue::into_transfer`] first -- a `Runtime` custody
