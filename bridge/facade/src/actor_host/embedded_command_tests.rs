@@ -612,14 +612,20 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
     let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
-            super::test_campaign::configure_shell_workspace(config);
+            super::test_campaign::configure_command_path(config);
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
             std::fs::write(
-                config.workspace.join(".exomonad/AgentSpec.hs"),
+                authored.join("AgentSpec.hs"),
                 tidepool_testing::fixture_source(
                     "bridge/facade/src/actor_host/fixtures/retained_shell_agent_spec.hs",
                 ),
             )
             .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.spec = Some("AgentSpec.agentSpec".into());
+            });
             super::test_campaign::commit_workspace(&config.workspace);
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
@@ -713,7 +719,7 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         assert_eq!(facts["retained_binding"], issued_binding, "{result}");
         let terminal = super::command_jobs_tests::committed(
             campaign,
-            &format!("terminal <- Cmd.await {issued_binding}\ndisplay (Cmd.commandOutcome terminal == Cmd.CommandExited 0 && Cmd.commandCleanup terminal == Cmd.CommandClean)"),
+            &format!("terminal <- Cmd.await {issued_binding}\ndisplay (Cmd.commandOutcome (Cmd.commandResult terminal) == Cmd.CommandExited 0 && Cmd.commandCleanup (Cmd.commandResult terminal) == Cmd.CommandClean)"),
         )
         .await;
         assert_eq!(super::test_campaign::committed_display_text(&terminal), "True", "{terminal}");
