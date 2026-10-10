@@ -19,6 +19,11 @@ does not replace the requested progress. Browser-provider barriers should
 likewise reject an unexpected delivered result instead of waiting for a
 second result on an already settled call.
 
+Host liveness observation must support nested and concurrent barriers. Share
+the retained terminal observation of the host's single readiness receiver;
+never hold that receiver's mutex across a caller's progress future. Test
+barrier composition and cancelled or late observers through this shared owner.
+
 Rich views and human forms share `FormHost`, installed before actor admission.
 A form-unavailable campaign that still publishes views needs the production
 display delegate and an explicit typed refusal at form opening.
