@@ -775,6 +775,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT",
     "TIDEPOOL_CELL_TEST_EXTRACT",
     "TIDEPOOL_COMPILER_DEPLOYMENT",
+    "TIDEPOOL_COMPILER_MODULES",
     "TIDEPOOL_EFFECTS_SOURCE_ROOT",
     "TIDEPOOL_EXTRACT",
     "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES",
@@ -1461,6 +1462,20 @@ tidepool_buildscript_run(
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [",
                 '        "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",',
+                "    ],", "    expected_count = 1,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                runtime_arguments(env, resources, worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
+            env, resources, worker = test_runtime_inputs(package_name, "toolchain_linked_entry_reopen_test", unit=True)
+            env["TIDEPOOL_COMPILER_MODULES"] = "$(location //build/package:native_catalog)/catalog.json"
+            resources.append("//build/package:native_catalog")
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_linked_entry_reopen_test",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [",
+                '        "artifacts::production_entry::source_selection_tests::linked_entry_reopens_exact_selection_in_new_process_without_source_replay",',
                 "    ],", "    expected_count = 1,", "    ignored = True,",
                 "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
                 runtime_arguments(env, resources, worker),

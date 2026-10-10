@@ -475,6 +475,34 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
                          "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PRELUDE_DIR"):
             self.assertIn(variable, group["resource_env"])
 
+    def test_linked_entry_reopen_control_declares_catalog_and_matched_compiler(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        group = self.rule("tidepool/toolchain", "toolchain_linked_entry_reopen_test",
+                          "tidepool_rust_test_cases")
+        self.assertEqual(group["binary"], ":tidepool_toolchain_unit_tests_binary")
+        self.assertEqual(group["exact_tests"], [
+            "artifacts::production_entry::source_selection_tests::linked_entry_reopens_exact_selection_in_new_process_without_source_replay",
+        ])
+        self.assertEqual(group["expected_count"], 1)
+        self.assertIs(group["ignored"], True)
+        self.assertIs(group["haskell_worker"], True)
+        self.assertEqual(group["jobs"], 1)
+        self.assertIn("//build/package:native_catalog", group["resources"])
+        self.assertEqual(group["resource_env"]["TIDEPOOL_COMPILER_MODULES"],
+                         "$(location //build/package:native_catalog)/catalog.json")
+        for resource in ("//build/package:compiler_deployment",
+                         "//bridge/haskell:facade_embedded_sources",
+                         "//build/package:tidepool_extract_runtime_libraries"):
+            self.assertIn(resource, group["resources"])
+        for variable in ("TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_EXTRACT",
+                         "TIDEPOOL_EXTRACT_WORKER", "TIDEPOOL_PRELUDE_DIR"):
+            self.assertIn(variable, group["resource_env"])
+        ordinary = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests",
+                             "tidepool_rust_isolated_test")
+        self.assertNotIn("TIDEPOOL_COMPILER_MODULES", ordinary["resource_env"])
+        self.assertNotIn("//build/package:native_catalog", ordinary["resources"])
+
     def test_toolchain_index_view_cohort_uses_shared_binary_without_compiler_resources(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)

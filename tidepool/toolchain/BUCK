@@ -907,6 +907,43 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "toolchain_linked_entry_reopen_test",
+    binary = ":tidepool_toolchain_unit_tests_binary",
+    exact_tests = [
+        "artifacts::production_entry::source_selection_tests::linked_entry_reopens_exact_selection_in_new_process_without_source_replay",
+    ],
+    expected_count = 1,
+    ignored = True,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+        "//build/package:qualification_script",
+        "//build/package:tidepool_extract_runtime_libraries",
+        "toolchains//:python",
+        "//build/package:native_catalog",
+    ],
+    resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT": "$(location //build/package:qualification_script)",
+        "TIDEPOOL_CATALOG_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_COMPILER_MODULES": "$(location //build/package:native_catalog)/catalog.json",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "toolchain_compiler_free_index_view_tests",
     binary = ":tidepool_toolchain_unit_tests_binary",
     exact_tests = [
