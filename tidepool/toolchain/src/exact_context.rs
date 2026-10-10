@@ -407,8 +407,8 @@ where
     })
 }
 
-/// Scope facts have a separately authenticated binding identity. Equality is
-/// compact; the immutable issuing owner never substitutes rows under that ID.
+/// Scope facts keep their complete immutable proof. Independently decoded
+/// facts with the same claimed scope identity need not have the same body.
 #[derive(Clone, Debug)]
 pub struct ImmutableScopeProofRef(Arc<ScopeFact>);
 
@@ -443,7 +443,7 @@ impl ImmutableScopeProofRef {
 
 impl PartialEq for ImmutableScopeProofRef {
     fn eq(&self, other: &Self) -> bool {
-        self.proof().selection == other.proof().selection
+        Arc::ptr_eq(&self.0, &other.0) || self.proof() == other.proof()
     }
 }
 impl Eq for ImmutableScopeProofRef {}

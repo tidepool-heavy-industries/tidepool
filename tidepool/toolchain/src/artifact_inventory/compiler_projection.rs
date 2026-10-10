@@ -6,7 +6,7 @@ use super::*;
 /// Persisted input-role facts. The interface is exact type custody; an original
 /// offer additionally grants reuse of one authenticated immutable implementation.
 /// Constructing or decoding this record grants neither role.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompilerInputRole {
     InterfaceOnly {
@@ -25,6 +25,51 @@ pub enum CompilerInputRole {
         selection_sha256: [u8; 32],
     },
 }
+
+impl PartialEq for CompilerInputRole {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::InterfaceOnly { interface: left }, Self::InterfaceOnly { interface: right }) => {
+                left == right
+            }
+            (
+                Self::ReusableOriginal {
+                    interface: li,
+                    original: lo,
+                },
+                Self::ReusableOriginal {
+                    interface: ri,
+                    original: ro,
+                },
+            ) => li == ri && lo == ro,
+            (
+                Self::PublishedSourceOriginal {
+                    interface: li,
+                    original: lo,
+                    source_revision: lr,
+                    original_input_identity: lp,
+                    selection: ls,
+                    selection_sha256: ld,
+                },
+                Self::PublishedSourceOriginal {
+                    interface: ri,
+                    original: ro,
+                    source_revision: rr,
+                    original_input_identity: rp,
+                    selection: rs,
+                    selection_sha256: rd,
+                },
+            ) => {
+                li == ri && lo == ro && lr == rr && lp == rp && ld == rd
+                // Persistent-map equality covers available proof facts too.
+                // Selected semantic identity is observed separately below.
+                && (Arc::ptr_eq(ls.snapshot(), rs.snapshot()) || ls.snapshot() == rs.snapshot())
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for CompilerInputRole {}
 
 impl CompilerInputRole {
     pub fn interface(&self) -> ArtifactId {

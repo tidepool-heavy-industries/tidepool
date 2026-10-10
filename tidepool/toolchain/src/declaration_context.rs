@@ -8395,6 +8395,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn role_snapshot_equality_preserves_proof_availability_and_refuses_false_baselines() {
+        use crate::exact_context::{hydrate_context, Materializer};
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        let source = published_original_history_fixture();
+        let root = identity("fixture", "Alpha");
+        let published = source
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let context = published.context();
+        let original_role = context.compiler_input_roles().remove(0);
+        let CompilerInputRole::PublishedSourceOriginal { selection, .. } = &original_role else {
+            panic!("published issuer role")
+        };
+        let mut graph = selection.graph_selection().clone();
+        let additional = source
+            .artifact_view()
+            .capture_graph_selection()
+            .selections
+            .into_iter()
+            .find(|proof| {
+                !graph
+                    .selections
+                    .iter()
+                    .any(|existing| existing.selection == proof.selection)
+            })
+            .expect("private target proof is absent from the public selection");
+        graph.selections.push(additional);
+        let mut changed_role = original_role.clone();
+        let CompilerInputRole::PublishedSourceOriginal {
+            selection: changed_selection,
+            ..
+        } = &mut changed_role
+        else {
+            unreachable!()
+        };
+        *changed_selection =
+            crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(
+                graph,
+            );
+        assert_eq!(
+            selection, changed_selection,
+            "selected semantic observation ignores available proof transport"
+        );
+        assert_ne!(
+            original_role, changed_role,
+            "durable role facts include complete proof availability"
+        );
+        let mut next = context.snapshot();
+        next.roles.insert(root, changed_role);
+        let store = MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let base = materializer
+            .materialize_context(None, &context.snapshot())
+            .unwrap();
+        for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let mut materializer = Materializer::new(&store);
+        let changed = materializer
+            .materialize_context(Some(&base), &next)
+            .unwrap();
+        assert_ne!(base.root(), changed.root());
+        let blocks = materializer.finish().unwrap();
+        assert!(blocks.metrics().changed_entries > 0);
+        for (cid, bytes) in blocks.into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let mut canonical = Materializer::new(&store);
+        assert_eq!(
+            canonical.materialize_context(None, &next).unwrap().root(),
+            changed.root()
+        );
+        let cold = hydrate_context(&store, changed.root()).unwrap();
+        assert!(
+            context
+                .as_ref()
+                .clone()
+                .bind_snapshot_baseline(&cold)
+                .is_err(),
+            "equal semantic observations cannot attach different durable role facts"
+        );
+
+        let proof = selection.graph_selection().selections[0].clone();
+        let mut altered = proof.as_ref().clone();
+        altered.nodes.pop().expect("nonempty issued scope");
+        assert_ne!(
+            crate::exact_context::ImmutableScopeProofRef::from_issued(proof),
+            crate::exact_context::ImmutableScopeProofRef::from_issued(Arc::new(altered)),
+            "claimed scope identity alone is insufficient for decoded fact equality"
+        );
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(24))]
         #[test]
