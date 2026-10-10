@@ -689,6 +689,19 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
             !retained.original_input_origins(id).is_empty(),
             "semantic equality cannot erase catalog provenance in either admission order"
         );
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                retained.descriptors()[0].producer_sha256,
+                &retained,
+            )
+            .unwrap(),
+        );
+        let first_request = context
+            .prepare_compilation(
+                &fixture._root.path().join("first-scope"),
+                &fixture.authority.producer_identity,
+            )
+            .unwrap();
         let moved = fixture._root.path().join("moved-products");
         fs::rename(&fixture.output, &moved).unwrap();
         let reacquired = Arc::new(
@@ -718,6 +731,53 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
             .collect::<BTreeSet<_>>();
         assert!(paths.iter().any(|path| path.starts_with(&fixture.output)));
         assert!(paths.iter().any(|path| path.starts_with(&moved)));
+        let current = Arc::new(
+            (*context)
+                .clone()
+                .extend_interface_artifacts(&both)
+                .unwrap(),
+        );
+        let current_request = current
+            .prepare_compilation(
+                &fixture._root.path().join("current-scope"),
+                &fixture.authority.producer_identity,
+            )
+            .unwrap();
+        assert_eq!(first_request.artifacts, current_request.artifacts);
+        let image_rows = |path: &Path| {
+            let scope: ciborium::value::Value =
+                ciborium::de::from_reader(fs::read(path).unwrap().as_slice()).unwrap();
+            scope.as_array().unwrap()[10].as_array().unwrap()[1]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        let previous_images = image_rows(&first_request.manifest);
+        let current_images = image_rows(&current_request.manifest);
+        assert_eq!(previous_images.len(), 1);
+        assert_eq!(current_images.len(), 1);
+        assert_eq!(
+            previous_images[0].as_array().unwrap()[3],
+            current_images[0].as_array().unwrap()[3],
+            "strengthening origins does not replace immutable content identity"
+        );
+        let observed = current_images
+            .iter()
+            .flat_map(|image| image.as_array().unwrap()[4].as_array().unwrap())
+            .flat_map(|part| part.as_array().unwrap()[4].as_array().unwrap())
+            .map(|path| PathBuf::from(path.as_text().unwrap()))
+            .collect::<BTreeSet<_>>();
+        assert!(observed
+            .iter()
+            .any(|path| path.starts_with(&fixture.output)));
+        assert!(
+            observed.iter().any(|path| path.starts_with(&moved)),
+            "fresh receiving image must observe current selected custody even when its aliases are inherited"
+        );
+        drop(current_request);
+        drop(current);
+        drop(first_request);
+        drop(context);
         drop(new_selected);
         drop(reacquired);
         drop(selected);
