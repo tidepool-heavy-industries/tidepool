@@ -796,6 +796,7 @@ struct RetainedSourceGraph {
     include_paths: Vec<PathBuf>,
     manifests: Vec<tidepool_toolchain::cache::SourceRootManifest>,
     entries: exomonad_actor::SourceEntryStorage,
+    catalog: tidepool_toolchain::toolchain::CatalogSelection,
 }
 
 impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
@@ -805,6 +806,10 @@ impl exomonad_actor::RetainedSourceLayer for RetainedSourceGraph {
 
     fn include_paths(&self) -> &[PathBuf] {
         &self.include_paths
+    }
+
+    fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+        self.catalog.clone()
     }
 
     fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
@@ -1053,6 +1058,7 @@ impl ExomonadSourceReload {
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
+            catalog: self.frozen.catalog_selection.clone(),
             identities,
             include_paths,
             manifests,
@@ -1081,6 +1087,7 @@ impl ExomonadSourceReload {
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
+            catalog: self.frozen.catalog_selection.clone(),
             identities,
             include_paths,
             manifests,
@@ -1967,6 +1974,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
+            catalog: source.catalog_selection(),
             identities,
             include_paths,
             manifests,
@@ -1985,6 +1993,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
+            catalog: selected.catalog_selection(),
             identities: selected.identities().to_vec(),
             include_paths: selected.include_paths().to_vec(),
             manifests: selected
@@ -2025,6 +2034,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         Ok(self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
+            catalog: self.frozen.catalog_selection.clone(),
             identities,
             include_paths,
             manifests,
@@ -2251,6 +2261,7 @@ impl exomonad_actor::ActorSourceLayers for ExomonadSourceReload {
         let source = self.source_issuer.issue(Arc::new(RetainedSourceGraph {
             _root_owner: Arc::clone(&self.source_owner),
             _prepared_owner: self.frozen.prepared_deployment.clone(),
+            catalog: self.frozen.catalog_selection.clone(),
             identities,
             include_paths,
             manifests,

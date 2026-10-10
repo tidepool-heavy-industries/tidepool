@@ -73,6 +73,10 @@ pub trait RetainedSourceLayer: Send + Sync {
     fn identities(&self) -> &[String];
     fn include_paths(&self) -> &[PathBuf];
 
+    /// Compiler originals acquired with this source graph. An owner with no
+    /// catalog returns `Acquired(None)` rather than consulting ambient state.
+    fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection;
+
     /// Complete ordered manifests acquired by the immutable source owner.
     /// Unprepared/developer owners may omit them and retain fresh inspection.
     fn source_manifests(&self) -> Option<&[tidepool_toolchain::cache::SourceRootManifest]> {
@@ -176,6 +180,14 @@ impl CheckpointSourceLayer {
         self.retained
             .as_ref()
             .map_or(&[], |source| &source.include_paths)
+    }
+
+    #[must_use]
+    pub fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+        self.retained.as_ref().map_or(
+            tidepool_toolchain::toolchain::CatalogSelection::Acquired(None),
+            |source| source._owner.catalog_selection(),
+        )
     }
 
     #[must_use]
@@ -945,6 +957,10 @@ mod source_authority_tests {
     }
 
     impl RetainedSourceLayer for RetainedTree {
+        fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+            tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
+        }
+
         fn identities(&self) -> &[String] {
             &self.identities
         }

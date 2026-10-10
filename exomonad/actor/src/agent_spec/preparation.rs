@@ -1081,6 +1081,7 @@ pub(crate) mod tests {
             &storage,
             "module RetainedMissing where\n__prepared = (1 :: Int)\n",
             OriginalAcquisition::LoadCompleted,
+            &tidepool_toolchain::toolchain::CatalogSelection::Acquired(None),
         );
         assert!(result.is_err());
         assert!(!original.path().join("RetainedMissing.hs").exists());
@@ -1138,7 +1139,13 @@ fn compile_installer(
             &installation.expression,
             &[],
         );
-        retained_installer(&recipe, storage, &wrapper, acquisition)?
+        retained_installer(
+            &recipe,
+            storage,
+            &wrapper,
+            acquisition,
+            &source.catalog_selection(),
+        )?
     } else {
         (
             compile_unprepared_installer(&recipe, &templates, &installation.expression)?,
@@ -1346,10 +1353,11 @@ fn retained_installer(
     storage: &crate::SourceEntryStorage,
     wrapper: &str,
     acquisition: OriginalAcquisition,
+    catalog: &tidepool_toolchain::toolchain::CatalogSelection,
 ) -> Result<(CompiledTurn, ToolsetAcquisition), PreparationFailure> {
     use tidepool_toolchain::artifacts::{
-        load_selected_production_entry, prepare_frozen_production_entry, FrozenEntrySources,
-        ProductionEntrySources,
+        load_selected_production_entry_with_catalog, prepare_frozen_production_entry_with_catalog,
+        FrozenEntrySources, ProductionEntrySources,
     };
     use tidepool_toolchain::toolchain::CompilerDeploymentConfiguration;
     let source_error =
@@ -1450,9 +1458,10 @@ fn retained_installer(
     let fresh =
         if !completed && matches!(storage, crate::SourceEntryStorage::FreshCompilation { .. }) {
             Some(
-                prepare_frozen_production_entry(&sources, &original, &output).map_err(|error| {
-                    PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error))
-                })?,
+                prepare_frozen_production_entry_with_catalog(&sources, &original, &output, catalog)
+                    .map_err(|error| {
+                        PreparationFailure::Compiler(tidepool_runtime::classify_compile(&error))
+                    })?,
             )
         } else {
             None
@@ -1468,10 +1477,11 @@ fn retained_installer(
                     "completed installer requires configured compiler deployment".into(),
                 ));
             };
-            let loaded = load_selected_production_entry(
+            let loaded = load_selected_production_entry_with_catalog(
                 &output,
                 &authority,
                 &ProductionEntrySources::FrozenWorkspace(sources),
+                catalog,
             )
             .map_err(preparation_auth_failure)?;
             // Confirm a previous rename that may have preceded failed parent fsync.

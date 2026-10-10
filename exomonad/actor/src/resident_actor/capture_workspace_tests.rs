@@ -672,6 +672,10 @@ async fn partial_idle_spawn_failure_cleans_invocation_child_and_preserves_captur
 
 struct EmptyRetainedSource;
 impl crate::RetainedSourceLayer for EmptyRetainedSource {
+    fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+        tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
+    }
+
     fn identities(&self) -> &[String] {
         &[]
     }

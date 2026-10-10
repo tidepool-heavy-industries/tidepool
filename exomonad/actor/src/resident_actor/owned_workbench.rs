@@ -2997,6 +2997,10 @@ mod authority_tests {
     }
 
     impl crate::RetainedSourceLayer for SourceOwner {
+        fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+            tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
+        }
+
         fn identities(&self) -> &[String] {
             &self.identities
         }

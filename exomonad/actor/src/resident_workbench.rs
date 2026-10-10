@@ -15382,6 +15382,10 @@ pub(crate) mod request_tests {
             manifests: Vec<tidepool_toolchain::cache::SourceRootManifest>,
         }
         impl crate::RetainedSourceLayer for Snapshot {
+            fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+                tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
+            }
+
             fn identities(&self) -> &[String] {
                 &self.identity
             }
@@ -15691,6 +15695,10 @@ pub(crate) mod request_tests {
             entries: crate::SourceEntryStorage,
         }
         impl crate::RetainedSourceLayer for Snapshot {
+            fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
+                tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
+            }
+
             fn identities(&self) -> &[String] {
                 &self.identities
             }
