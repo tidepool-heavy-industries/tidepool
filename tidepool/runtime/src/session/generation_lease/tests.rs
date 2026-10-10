@@ -31,3 +31,29 @@ fn confirmed_tail_at_max_is_consumable_then_typed_exhaustion() {
     );
     assert_eq!(requested_end(end, 0).unwrap(), end);
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config { cases: 128, ..Default::default() })]
+    #[test]
+    fn full_u64_arithmetic_matches_independent_wide_integer_model(
+        consumed in proptest::prelude::any::<u64>(),
+        amount in proptest::prelude::any::<u64>(),
+        other in proptest::prelude::any::<u64>(),
+    ) {
+        let wide_end = u128::from(consumed) + u128::from(amount);
+        let actual_end = requested_end(Generation(consumed), amount);
+        if wide_end > u128::from(u64::MAX) {
+            proptest::prop_assert_eq!(actual_end, Err(GenerationExhausted { consumed: Generation(consumed), requested: amount }));
+        } else {
+            proptest::prop_assert_eq!(actual_end.unwrap().0, wide_end as u64);
+        }
+        let ceiling = consumed.min(other);
+        let end = consumed.max(other);
+        if ceiling < end {
+            let expected = (u128::from(ceiling) + 64).max(u128::from(end)).min(u128::from(u64::MAX));
+            let actual = refill_ceiling(Generation(ceiling), Generation(end));
+            proptest::prop_assert_eq!(u128::from(actual.0), expected);
+            proptest::prop_assert!(actual.0 >= end);
+        }
+    }
+}

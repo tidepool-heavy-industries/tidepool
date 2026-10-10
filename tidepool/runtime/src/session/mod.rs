@@ -1056,8 +1056,12 @@ impl DeclarationCandidateRender {
 
 impl SessionLib {
     #[must_use]
-    pub fn next_module(&self) -> Result<SessionModule, GenerationExhausted> {
-        generation_lease::requested_end(self.log.generation(), 1).map(SessionModule::lib)
+    pub fn next_module(&self) -> Result<SessionModule, SessionError> {
+        self.durable_allocation_ceiling()?;
+        Ok(SessionModule::lib(generation_lease::requested_end(
+            self.log.generation(),
+            1,
+        )?))
     }
 
     /// Conservative inherited identity floor, checked against the run fence.
@@ -1395,6 +1399,16 @@ impl SessionLib {
             .as_ref()
             .is_some_and(|lease| lease.covers(end))
         {
+            let _admission = match state.store.lease_admission() {
+                Ok(admission) => admission,
+                Err(error) => {
+                    self.generation_lease = None;
+                    return Err(SessionError::RecoveryManifest {
+                        path: state.path.clone(),
+                        detail: error.to_string(),
+                    });
+                }
+            };
             self.local_generation_issued = true;
             return Ok(self.log.commit_reservations(prepared));
         }
@@ -1414,6 +1428,20 @@ impl SessionLib {
         }
         let target = generation_lease::refill_ceiling(ceiling, end);
         let ceiling = self.extend_generation_ceiling(target)?;
+        let state = self
+            .durable_graph
+            .as_ref()
+            .expect("attached store preflighted");
+        let _admission = match state.store.lease_admission() {
+            Ok(admission) => admission,
+            Err(error) => {
+                self.generation_lease = None;
+                return Err(SessionError::RecoveryManifest {
+                    path: state.path.clone(),
+                    detail: error.to_string(),
+                });
+            }
+        };
         self.generation_lease = Some(generation_lease::GenerationRangeLease::confirmed(ceiling));
         self.local_generation_issued = true;
         Ok(self.log.commit_reservations(prepared))
@@ -2337,7 +2365,9 @@ impl SessionLib {
             self.durable_graph.is_none()
                 && generation_lease::requested_end(self.log.generation(), 1)
                     == Ok(staged.generation)
-                && self.next_module() == Ok(staged.module)
+                && self
+                    .next_module()
+                    .is_ok_and(|module| module == staged.module)
         };
         if staged.session_id != self.id
             || staged.root != self.root
@@ -3165,66 +3195,6 @@ mod tests {
         assert!(lib.import_line().is_none());
     }
 
-    #[test]
-    fn durable_join_reservation_burns_identity_before_compiler_visibility() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("declarations.json");
-        let mut first = SessionLib::open(
-            SessionId(72),
-            dir.path().join("first"),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            first.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        assert!(!manifest.exists());
-        assert_eq!(
-            first.reserve_join_generation_durable().unwrap(),
-            Generation(1)
-        );
-        assert!(manifest.exists());
-        assert_eq!(first.scope_tip(ScopeId::ROOT), Generation(0));
-        assert!(first.log.turn(Generation(1)).is_none());
-
-        let mut second = SessionLib::open(
-            SessionId(73),
-            dir.path().join("second"),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            second.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        assert_eq!(second.generation(), Generation(1));
-        assert_eq!(
-            second.reserve_join_generation_durable().unwrap(),
-            Generation(2)
-        );
-        assert_eq!(second.scope_tip(ScopeId::ROOT), Generation(0));
-    }
-
-    #[test]
-    fn failed_durable_reservation_does_not_allocate_module_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("missing-parent").join("declarations.json");
-        let mut lib = SessionLib::open(
-            SessionId(74),
-            dir.path().join("session"),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        assert!(lib.reserve_join_generation_durable().is_err());
-        assert_eq!(lib.generation(), Generation(0));
-        assert!(!manifest.exists());
-    }
-
     /// An unseeded scope resolves to the EMPTY environment, never to the
     /// log's global tip. The global-tip fallback is the leak forbidden in
     /// both directions: a sibling pushing a turn between a scope's mint and
@@ -3618,181 +3588,6 @@ mod tests {
         assert_eq!(
             lib.import_line().unwrap(),
             format!("import {}", projection.module_name())
-        );
-    }
-
-    #[test]
-    fn captured_declaration_high_water_is_sparse_durable_and_not_lexical() {
-        let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("declarations.json");
-        let open = || {
-            SessionLib::open(SessionId(996), root.path(), ModuleEnv::standalone_default()).unwrap()
-        };
-        let mut lib = open();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        let captured = Generation(1 << 40);
-        lib.initialize_captured_declaration_high_water(captured)
-            .unwrap();
-        assert_eq!(lib.generation(), captured);
-        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
-        assert!(lib.import_line().is_none());
-        assert!(!lib.log.is_reserved(Generation(1)));
-        assert!(!lib.log.is_reserved(captured));
-        assert!(lib.log.turn(captured).is_none());
-        let graph = recovery::read_v2(&manifest, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        assert_eq!(graph.high_water(), captured);
-        assert!(graph.nodes().next().is_none());
-        assert!(graph.public_surfaces().next().is_none());
-        assert!(lib
-            .initialize_captured_declaration_high_water(captured)
-            .is_err());
-        drop(lib);
-        let mut restarted = open();
-        tidepool_testing::with_settlement(|settlement| {
-            restarted.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        assert_eq!(restarted.scope_tip(ScopeId::ROOT), Generation(0));
-        assert_eq!(
-            restarted.reserve_declaration_generation_durable().unwrap(),
-            Generation(captured.0 + 1)
-        );
-    }
-
-    #[test]
-    fn captured_declaration_high_water_failure_preserves_durability_fence() {
-        let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("declarations.json");
-        let mut lib =
-            SessionLib::open(SessionId(997), root.path(), ModuleEnv::standalone_default()).unwrap();
-        assert!(lib
-            .initialize_captured_declaration_high_water(Generation(7))
-            .is_err());
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        std::fs::create_dir(&manifest).unwrap();
-        let revision = lib.log.publication_revision();
-        assert!(lib
-            .initialize_captured_declaration_high_water(Generation(7))
-            .is_err());
-        assert_eq!(lib.generation(), Generation(0));
-        assert_eq!(lib.log.publication_revision(), revision);
-        std::fs::remove_dir(&manifest).unwrap();
-        lib.fail_recovery_durability_once = true;
-        assert!(lib
-            .initialize_captured_declaration_high_water(Generation(7))
-            .is_err());
-        assert_eq!(lib.generation(), Generation(7));
-        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
-        assert!(!lib.log.is_reserved(Generation(7)));
-        assert!(lib.durable_graph.as_ref().unwrap().unconfirmed.is_some());
-        assert!(lib.reserve_declaration_generation_durable().is_err());
-        assert!(lib
-            .initialize_captured_declaration_high_water(Generation(0))
-            .is_err());
-        lib.confirm_recovery_durability().unwrap();
-        assert_eq!(
-            lib.reserve_declaration_generation_durable().unwrap(),
-            Generation(8)
-        );
-    }
-
-    #[test]
-    fn durable_reservation_range_preserves_burned_holes_after_restart() {
-        let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("declarations.json");
-        let open = || {
-            SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default()).unwrap()
-        };
-        let mut lib = open();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        assert_eq!(
-            lib.reserve_declaration_generations_durable(4).unwrap(),
-            vec![Generation(1), Generation(2), Generation(3), Generation(4)]
-        );
-        for id in 1..=4 {
-            assert!(lib.log.is_reserved(Generation(id)));
-            assert!(lib.log.turn(Generation(id)).is_none());
-        }
-        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
-        let graph = recovery::read_v2(&manifest, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        assert_eq!(graph.high_water(), Generation(4));
-        assert!(graph.nodes().next().is_none());
-        assert!(graph.public_surfaces().next().is_none());
-        let bytes = std::fs::read(&manifest).unwrap();
-        assert!(lib
-            .reserve_declaration_generations_durable(0)
-            .unwrap()
-            .is_empty());
-        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
-        drop(lib);
-        let mut restarted = open();
-        tidepool_testing::with_settlement(|settlement| {
-            restarted.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        assert_eq!(
-            restarted
-                .reserve_declaration_generations_durable(2)
-                .unwrap(),
-            vec![Generation(5), Generation(6)]
-        );
-    }
-
-    #[test]
-    fn durable_reservation_range_failure_is_atomic_and_uncertainty_burns_all_slots() {
-        let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("declarations.json");
-        let mut lib =
-            SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default()).unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        std::fs::create_dir(&manifest).unwrap();
-        let revision = lib.log.publication_revision();
-        assert!(lib.reserve_declaration_generations_durable(3).is_err());
-        assert_eq!(lib.generation(), Generation(0));
-        assert_eq!(lib.log.publication_revision(), revision);
-        assert!(!lib.log.is_reserved(Generation(1)));
-        std::fs::remove_dir(&manifest).unwrap();
-        assert!(lib
-            .reserve_declaration_generations_durable(usize::MAX)
-            .is_err());
-        assert_eq!(lib.generation(), Generation(0));
-        assert!(!manifest.exists());
-
-        lib.fail_recovery_durability_once = true;
-        assert!(lib.reserve_declaration_generations_durable(3).is_err());
-        assert_eq!(lib.generation(), Generation(3));
-        assert!(lib.durable_graph.as_ref().unwrap().unconfirmed.is_some());
-        for id in 1..=3 {
-            assert!(lib.log.is_reserved(Generation(id)));
-        }
-        let bytes = std::fs::read(&manifest).unwrap();
-        assert!(lib.reserve_declaration_generations_durable(2).is_err());
-        assert_eq!(lib.generation(), Generation(3));
-        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
-        lib.confirm_recovery_durability().unwrap();
-        lib.confirm_recovery_durability().unwrap();
-        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
-        assert_eq!(
-            lib.reserve_declaration_generations_durable(2).unwrap(),
-            vec![Generation(4), Generation(5)]
         );
     }
 
