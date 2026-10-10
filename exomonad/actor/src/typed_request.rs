@@ -69,3 +69,91 @@ pub(crate) fn decode_typed_request_site(
         response,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_signatures_preserve_input_progress_and_raw_reply_roles() {
+        let sites = crate::request::test_support::request_signature_sites();
+        let requests = sites.iter().collect::<Vec<_>>();
+        assert_eq!(
+            requests.len(),
+            2,
+            "both actual authored helpers issue requests"
+        );
+        for site in requests {
+            let layout = site.request_input_layout().unwrap();
+            let signature = decode_typed_request_site(site.site as i64, Some(site)).unwrap();
+            assert_eq!(signature.response.expected_type(), "Int");
+            let progress = layout.signatures().progress().is_some();
+            assert_eq!(
+                signature.input_type,
+                if progress { "Ordering" } else { "Bool" }
+            );
+            assert_eq!(
+                signature.response.progress_type.as_deref(),
+                if progress { Some("Maybe Bool") } else { None }
+            );
+            assert_eq!(layout.response_index(), if progress { 2 } else { 1 });
+            assert!(layout
+                .response()
+                .signature()
+                .names()
+                .iter()
+                .any(|name| name.module() == "Tidepool.Agent.Reply.Internal"
+                    && name.occurrence() == "ResponseResult"));
+
+            // Presentation edits cannot change compiler-issued role selection.
+            let mut renamed = site.clone();
+            renamed.ty = "unrelated displayed answer".into();
+            for input in &mut renamed.inputs {
+                input.ty = "unrelated displayed live input".into();
+            }
+            assert_eq!(
+                decode_typed_request_site(site.site as i64, Some(&renamed)).unwrap(),
+                signature
+            );
+
+            let mut malformed = site.clone();
+            malformed.request_type_signatures = None;
+            assert!(matches!(
+                decode_typed_request_site(site.site as i64, Some(&malformed)),
+                Err(RequestSignatureError::Layout(
+                    RequestInputLayoutError::MissingSignatures { .. }
+                ))
+            ));
+            for count in 0..=4 {
+                if count == site.inputs.len() {
+                    continue;
+                }
+                let mut malformed = site.clone();
+                malformed.inputs.resize(count, site.inputs[0].clone());
+                assert!(matches!(malformed.request_input_layout(),
+                    Err(RequestInputLayoutError::InputArity { actual, expected, .. })
+                        if actual == count && expected == site.inputs.len()));
+            }
+            let mut malformed = site.clone();
+            malformed.input_type_witnesses.pop();
+            assert!(matches!(
+                malformed.request_input_layout(),
+                Err(RequestInputLayoutError::WitnessArity { .. })
+            ));
+            for index in 0..site.inputs.len() {
+                let mut malformed = site.clone();
+                malformed.input_type_witnesses[index] = None;
+                assert!(matches!(malformed.request_input_layout(),
+                    Err(RequestInputLayoutError::MissingWitness { index: missing, .. }) if missing == index));
+            }
+        }
+        assert!(matches!(
+            decode_typed_request_site(-1, None),
+            Err(RequestSignatureError::InvalidSite(-1))
+        ));
+        assert!(matches!(
+            decode_typed_request_site(17, None),
+            Err(RequestSignatureError::MissingSite(17))
+        ));
+    }
+}

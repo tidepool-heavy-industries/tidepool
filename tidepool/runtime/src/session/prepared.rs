@@ -12004,6 +12004,45 @@ pub(super) mod tests {
         assert!(!wrong
             .request_scope_types_match(&evidence, 43)
             .expect("bounded request compatibility"));
+        let (wrapped_source, _) = PreparedEngine::bootstrap(typed_site_program(
+            51,
+            response_result_types(
+                &[DeclarationForm::Text, DeclarationForm::Integer],
+                1,
+                &response_family,
+            ),
+            2,
+            &[0],
+        ))
+        .unwrap();
+        let wrapped_evidence = wrapped_source.request_site_type_evidence(51).unwrap();
+        assert!(
+            !recipient
+                .request_scope_types_match(&wrapped_evidence, 42)
+                .unwrap(),
+            "the response wrapper cannot substitute for the original raw result"
+        );
+        for count in 0..=5 {
+            let inputs = [0, 1, 2, 2, 2].into_iter().take(count).collect::<Vec<_>>();
+            let (accessor, _) = PreparedEngine::bootstrap(typed_site_program(
+                60 + count as u64,
+                response_result_types(
+                    &[DeclarationForm::Text, DeclarationForm::Integer],
+                    1,
+                    &response_family,
+                ),
+                0,
+                &inputs,
+            ))
+            .unwrap();
+            assert_eq!(
+                accessor
+                    .request_scope_types_match(&evidence, 60 + count as u64)
+                    .unwrap(),
+                count == 3,
+                "only the exact input/raw reply/canonical response layout matches"
+            );
+        }
     }
 
     fn attested_request_program(reply: ConstructorReply) -> PreparedProgram {

@@ -60,6 +60,10 @@ fn suspended(outcome: ResidentOutcome) -> (ResidentHole, HaskellValue) {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_source(include_str!("fixtures/result-request.hs"))
+    }
+
+    fn with_source(source: &str) -> Self {
         tidepool_testing::eval_harness::require_extract();
         let surface = TestEffectSurface::minimal(&[
             tidepool_mcp::agent_tools_decl(),
@@ -135,7 +139,7 @@ impl Fixture {
             panic!("receiver fixture must supply native bindings")
         };
         assert_eq!(bound.len(), 3);
-        let producer = match compile(include_str!("fixtures/result-request.hs"), 2) {
+        let producer = match compile(source, 2) {
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => compiled,
             TurnResult::Decl(_) => panic!("request fixture must execute"),
         };
@@ -338,6 +342,59 @@ impl Fixture {
 fn fixture() -> &'static parking_lot::Mutex<Fixture> {
     static FIXTURE: OnceLock<parking_lot::Mutex<Fixture>> = OnceLock::new();
     FIXTURE.get_or_init(|| parking_lot::Mutex::new(Fixture::new()))
+}
+
+/// Read metadata from the two actual compiler-attested submission frames.
+/// Unexecuted library sites in the immutable program do not select requests.
+pub(crate) fn request_signature_sites() -> Vec<tidepool_runtime::YieldSite> {
+    let mut fixture = Fixture::with_source(include_str!("fixtures/request-signature-progress.hs"));
+    let (submission, _, site) = fixture.submission(RequestId(51));
+    fixture
+        .resident
+        .request_result_type_witness(site, &submission)
+        .unwrap();
+    let first = fixture
+        .resident
+        .parked_program_provenance(&submission)
+        .unwrap()
+        .site(site)
+        .unwrap()
+        .clone();
+    let (reservation, _) = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            fixture
+                .resident
+                .resume(submission, Ok::<(), ()>(()), settlement)
+        })
+        .unwrap(),
+    );
+    let (submission, payload) = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            fixture
+                .resident
+                .resume(reservation, Ok::<i64, ()>(52), settlement)
+        })
+        .unwrap(),
+    );
+    let RepliesReq::SubmitRequestWith(_, site, _, _, _) =
+        RepliesReq::from_value(&payload, fixture.resident.data_con_table()).unwrap()
+    else {
+        panic!("the second actual request must reach typed submission")
+    };
+    let site = u64::try_from(site).unwrap();
+    fixture
+        .resident
+        .request_result_type_witness(site, &submission)
+        .unwrap();
+    let second = fixture
+        .resident
+        .parked_program_provenance(&submission)
+        .unwrap()
+        .site(site)
+        .unwrap()
+        .clone();
+    fixture.abort_submission(&submission, "signature metadata observed");
+    vec![first, second]
 }
 
 /// Reuse authentic immutable compiler products with a fresh mutable machine

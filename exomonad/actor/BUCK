@@ -274,6 +274,7 @@ rust_filegroup(
         "src/request.rs": "exomonad/actor/src/request.rs",
         "src/request/activation.rs": "exomonad/actor/src/request/activation.rs",
         "src/request/activation/phase_properties.rs": "exomonad/actor/src/request/activation/phase_properties.rs",
+        "src/request/fixtures/request-signature-progress.hs": "exomonad/actor/src/request/fixtures/request-signature-progress.hs",
         "src/request/fixtures/result-receiver.hs": "exomonad/actor/src/request/fixtures/result-receiver.hs",
         "src/request/fixtures/result-request.hs": "exomonad/actor/src/request/fixtures/result-request.hs",
         "src/request/invocation.rs": "exomonad/actor/src/request/invocation.rs",
@@ -814,6 +815,7 @@ filegroup(
         "exomonad/actor/src/request.rs": "src/request.rs",
         "exomonad/actor/src/request/activation.rs": "src/request/activation.rs",
         "exomonad/actor/src/request/activation/phase_properties.rs": "src/request/activation/phase_properties.rs",
+        "exomonad/actor/src/request/fixtures/request-signature-progress.hs": "src/request/fixtures/request-signature-progress.hs",
         "exomonad/actor/src/request/fixtures/result-receiver.hs": "src/request/fixtures/result-receiver.hs",
         "exomonad/actor/src/request/fixtures/result-request.hs": "src/request/fixtures/result-request.hs",
         "exomonad/actor/src/request/invocation.rs": "src/request/invocation.rs",
@@ -1089,6 +1091,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6c6f63616c5f6163746f722f6661696c7572655f6f726967696e2e6873",
     src = "src/local_actor/failure_origin.hs",
     out = "failure_origin.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f726571756573742f66697874757265732f726571756573742d7369676e61747572652d70726f67726573732e6873",
+    src = "src/request/fixtures/request-signature-progress.hs",
+    out = "request-signature-progress.hs",
     visibility = ["PUBLIC"],
 )
 

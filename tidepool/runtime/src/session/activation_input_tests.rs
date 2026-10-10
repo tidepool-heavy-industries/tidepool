@@ -4639,3 +4639,109 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
     destination.settle_dropped_custody();
     assert_eq!(destination.outstanding_custody(), 0);
 }
+
+#[test]
+fn request_input_layout_captures_original_nominal_input_and_optional_progress() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-request-layout.hs"),
+        true,
+        SessionId(1760),
+    );
+    let mut resident = fixture.fresh();
+    let mut reservation = fixture.start(&mut resident);
+    for (index, progress) in [false, true].into_iter().enumerate() {
+        let (submission, activation) =
+            fixture.deliver(&mut resident, reservation, 51 + index as i64);
+        let site = parked_site(&mut resident, &activation);
+        let provenance = resident.parked_program_provenance(&activation).unwrap();
+        let metadata = provenance.site(site).unwrap();
+        let layout = metadata.request_input_layout().unwrap();
+        assert_eq!(layout.signatures().reply().presentation(), "()");
+        assert!(
+            layout
+                .input()
+                .signature()
+                .names()
+                .iter()
+                .any(|name| name.module() == "ActivationInputOriginal"
+                    && name.occurrence() == "Input")
+        );
+        assert_eq!(layout.progress().is_some(), progress);
+        if progress {
+            let witness = layout.progress().unwrap();
+            assert!(witness
+                .signature()
+                .names()
+                .iter()
+                .any(|name| name.module() == "ActivationInputOriginal"
+                    && name.occurrence() == "Input"));
+            assert!(witness
+                .signature()
+                .names()
+                .iter()
+                .any(|name| name.occurrence() == "Maybe"));
+            assert_ne!(witness, layout.input());
+        }
+        assert!(layout
+            .response()
+            .signature()
+            .names()
+            .iter()
+            .any(|name| name.module() == "Tidepool.Agent.Reply.Internal"
+                && name.occurrence() == "ResponseResult"));
+        let expected_response = resident
+            .request_result_type_witness(site, &submission)
+            .unwrap();
+        assert_eq!(expected_response.as_ref(), layout.response());
+
+        let row = resident
+            .parked
+            .iter()
+            .position(|entry| entry.name == activation.cont_id())
+            .unwrap();
+        let genuine = resident.parked[row].provenance.clone();
+        let mut incomplete = (*genuine).clone();
+        incomplete
+            .sites
+            .get_mut(&site)
+            .unwrap()
+            .input_type_witnesses[layout.response_index()] = None;
+        resident.parked[row].provenance = Arc::new(incomplete);
+        let baseline = resident.outstanding_custody();
+        assert!(
+            matches!(resident.capture_activation_input(&activation, RealmId::ROOT, site),
+            Err(ResidentError::MissingActivationInputWitness { site: rejected }) if rejected == site)
+        );
+        assert_eq!(
+            resident.outstanding_custody(),
+            baseline,
+            "incomplete final response evidence cannot capture a value"
+        );
+        resident.parked[row].provenance = genuine;
+
+        let input = resident
+            .capture_activation_input(&activation, RealmId::ROOT, site)
+            .unwrap();
+        assert_eq!(input.input_type_witness.as_ref(), layout.input());
+        assert_eq!(input.progress_type_witness.is_some(), progress);
+        if let Some(witness) = &input.progress_type_witness {
+            assert_eq!(witness.as_ref(), layout.progress().unwrap());
+        }
+        assert_eq!(
+            input.input_type(),
+            layout.input().signature().presentation()
+        );
+        assert!(resident.discard_custody(input.custody));
+        assert!(matches!(
+            fixture.resume_activation(&mut resident, activation),
+            ResidentOutcome::Completed { .. }
+        ));
+        let outcome = settle_request_submission(&mut resident, submission);
+        if index == 0 {
+            reservation = suspended(outcome);
+        } else {
+            assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+            break;
+        }
+    }
+}

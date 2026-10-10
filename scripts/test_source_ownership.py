@@ -98,6 +98,7 @@ TEST_ONLY_MODULES = {
 
 TEST_ONLY_FIXTURES = {
     'exomonad-actor': frozenset({
+        'exomonad/actor/src/request/fixtures/request-signature-progress.hs',
         'exomonad/actor/src/request/fixtures/result-receiver.hs',
         'exomonad/actor/src/request/fixtures/result-request.hs',
         'exomonad/actor/src/resident_workbench/replacement_inputs.hs',
@@ -154,6 +155,7 @@ TEST_ONLY_FIXTURES = {
         'exomonad/actor/src/resident_workbench/display_callback_immediate.hs',
     }),
     'tidepool-runtime': frozenset({
+        'tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs',
         'tidepool/runtime/src/session/fixtures/ProvenanceSharedRequest.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-request.hs',

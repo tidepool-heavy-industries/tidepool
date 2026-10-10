@@ -277,6 +277,7 @@
     "exomonad/actor/src/fixtures/request-alias-borrow.hs",
     "exomonad/actor/src/fixtures/scope-live-result.hs",
     "exomonad/actor/src/local_actor/failure_origin.hs",
+    "exomonad/actor/src/request/fixtures/request-signature-progress.hs",
     "exomonad/actor/src/request/fixtures/result-receiver.hs",
     "exomonad/actor/src/request/fixtures/result-request.hs",
     "exomonad/actor/src/resident_actor/capture_workspace_child.hs",
@@ -328,6 +329,7 @@
     "exomonad/examples/workspace/.exomonad/checks/background-command-example.hs",
     "exomonad/examples/workspace/.exomonad/checks/workspace-quantities.hs",
     "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
+    "tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs",
     "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
     "tidepool/runtime/src/session/fixtures/activation-input-twenty-renderers.hs"
   ]

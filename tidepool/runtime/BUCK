@@ -234,6 +234,7 @@ rust_filegroup(
         "src/session/fixtures/activation-input-private-source.hs": "tidepool/runtime/src/session/fixtures/activation-input-private-source.hs",
         "src/session/fixtures/activation-input-receiver.hs": "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
         "src/session/fixtures/activation-input-replacement.hs": "tidepool/runtime/src/session/fixtures/activation-input-replacement.hs",
+        "src/session/fixtures/activation-input-request-layout.hs": "tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs",
         "src/session/fixtures/activation-input-resident-original.hs": "tidepool/runtime/src/session/fixtures/activation-input-resident-original.hs",
         "src/session/fixtures/activation-input-resident-request.hs": "tidepool/runtime/src/session/fixtures/activation-input-resident-request.hs",
         "src/session/fixtures/activation-input-resident-shadow.hs": "tidepool/runtime/src/session/fixtures/activation-input-resident-shadow.hs",
@@ -441,6 +442,7 @@ rust_filegroup(
         "src/session/fixtures/activation-input-private-source.hs": "tidepool/runtime/src/session/fixtures/activation-input-private-source.hs",
         "src/session/fixtures/activation-input-receiver.hs": "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
         "src/session/fixtures/activation-input-replacement.hs": "tidepool/runtime/src/session/fixtures/activation-input-replacement.hs",
+        "src/session/fixtures/activation-input-request-layout.hs": "tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs",
         "src/session/fixtures/activation-input-resident-original.hs": "tidepool/runtime/src/session/fixtures/activation-input-resident-original.hs",
         "src/session/fixtures/activation-input-resident-request.hs": "tidepool/runtime/src/session/fixtures/activation-input-resident-request.hs",
         "src/session/fixtures/activation-input-resident-shadow.hs": "tidepool/runtime/src/session/fixtures/activation-input-resident-shadow.hs",
@@ -606,6 +608,7 @@ tidepool_rust_binary(
     ],
     test_fixtures = [
         "tidepool/runtime/src/session/fixtures/ProvenanceSharedRequest.hs",
+        "tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs",
         "tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs",
         "tidepool/runtime/src/session/fixtures/activation-preview-retained-request.hs",
         "tidepool/runtime/src/session/fixtures/checked-cell-template.hs",
@@ -1186,6 +1189,7 @@ filegroup(
         "tidepool/runtime/src/session/fixtures/activation-input-private-source.hs": "src/session/fixtures/activation-input-private-source.hs",
         "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs": "src/session/fixtures/activation-input-receiver.hs",
         "tidepool/runtime/src/session/fixtures/activation-input-replacement.hs": "src/session/fixtures/activation-input-replacement.hs",
+        "tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs": "src/session/fixtures/activation-input-request-layout.hs",
         "tidepool/runtime/src/session/fixtures/activation-input-resident-original.hs": "src/session/fixtures/activation-input-resident-original.hs",
         "tidepool/runtime/src/session/fixtures/activation-input-resident-request.hs": "src/session/fixtures/activation-input-resident-request.hs",
         "tidepool/runtime/src/session/fixtures/activation-input-resident-shadow.hs": "src/session/fixtures/activation-input-resident-shadow.hs",
@@ -1332,6 +1336,13 @@ export_file(
     name = "haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d72656365697665722e6873",
     src = "src/session/fixtures/activation-input-receiver.hs",
     out = "activation-input-receiver.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d726571756573742d6c61796f75742e6873",
+    src = "src/session/fixtures/activation-input-request-layout.hs",
+    out = "activation-input-request-layout.hs",
     visibility = ["PUBLIC"],
 )
 
