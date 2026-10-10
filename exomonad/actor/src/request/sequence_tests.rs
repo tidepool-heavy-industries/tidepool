@@ -392,6 +392,20 @@ fn compare<T: std::fmt::Debug + PartialEq>(
 }
 
 fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCaseError> {
+    run_history_with_mutation(history, coverage, None)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RootMutation {
+    ReadyWithoutTypedRoot,
+    ForgetCapturedRoot,
+}
+
+fn run_history_with_mutation(
+    history: &History,
+    coverage: &mut Coverage,
+    mutation: Option<RootMutation>,
+) -> Result<(), TestCaseError> {
     let registry = RequestRegistry::default();
     let owner = ActorRef::first(ActorId(1));
     let targets: Vec<_> = history
@@ -805,6 +819,39 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                         diagnostic: None,
                     },
                 );
+            }
+        }
+
+        if let Some(mutation) = mutation {
+            let mut state = registry.state.lock();
+            match mutation {
+                RootMutation::ReadyWithoutTypedRoot => {
+                    if let Some(record) = state.requests.get_mut(&id).filter(|record| {
+                        matches!(
+                            record.owner_state,
+                            OwnerState::Ready(RequestSuccess::Typed(_))
+                        )
+                    }) {
+                        // Reintroduce metadata readiness with no typed request root.
+                        record.owner_state = OwnerState::Ready(RequestSuccess::Command(
+                            test_support::command_report(),
+                        ));
+                    }
+                }
+                RootMutation::ForgetCapturedRoot
+                    if matches!(action, Action::Release) && requests[key].released =>
+                {
+                    for watch in state.watches.values_mut() {
+                        watch.responses.clear();
+                        if let Some(snapshot) = &mut watch.snapshot {
+                            Arc::get_mut(snapshot)
+                                .expect("flat model watches have no nested snapshot owners")
+                                .responses
+                                .clear();
+                        }
+                    }
+                }
+                RootMutation::ForgetCapturedRoot => {}
             }
         }
 
@@ -1236,4 +1283,58 @@ fn generated_request_lifecycle_matches_observable_model() {
     });
     eprintln!("request sequence coverage: {:#?}", coverage.borrow());
     result.unwrap();
+}
+
+#[test]
+fn generated_histories_shrink_missing_ready_and_forgotten_root_mutants() {
+    use proptest::test_runner::TestError;
+    let core = guided(vec![0, 1], 0, false, false);
+    let histories = proptest::collection::vec(proptest::bool::weighted(1.0), core.operations.len())
+        .prop_map(move |included| History {
+            target_keys: core.target_keys.clone(),
+            operations: core
+                .operations
+                .iter()
+                .zip(included)
+                .filter_map(|(operation, include)| include.then_some(*operation))
+                .collect(),
+        });
+    for (mutation, missing) in [
+        (
+            RootMutation::ReadyWithoutTypedRoot,
+            "successful request has no root",
+        ),
+        (
+            RootMutation::ForgetCapturedRoot,
+            "captured watch lost result root",
+        ),
+    ] {
+        let mut runner = TestRunner::new(Config {
+            cases: 16,
+            max_shrink_iters: 512,
+            failure_persistence: None,
+            ..Config::default()
+        });
+        let probes = RefCell::new(0usize);
+        let result = runner.run(&histories, |history| {
+            *probes.borrow_mut() += 1;
+            run_history_with_mutation(&history, &mut Coverage::default(), Some(mutation))
+        });
+        let Err(TestError::Fail(reason, minimal)) = result else {
+            panic!("root oracle did not detect {mutation:?}: {result:?}")
+        };
+        assert!(
+            reason.to_string().contains(missing),
+            "wrong mutant failure: {reason}"
+        );
+        assert!(*probes.borrow() > 1, "mutation must exercise shrinking");
+        eprintln!(
+            "detected {mutation:?} with {} probes; minimized history: {minimal:#?}; {reason}",
+            probes.borrow()
+        );
+        assert!(
+            run_history_with_mutation(&minimal, &mut Coverage::default(), Some(mutation)).is_err()
+        );
+        run_history(&minimal, &mut Coverage::default()).unwrap();
+    }
 }

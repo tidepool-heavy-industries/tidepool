@@ -1,6 +1,6 @@
 //! Shared ownership of one runtime-authenticated successful result.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{resident::BindingLease, RootCustody, RuntimeResultPublication};
@@ -61,7 +61,8 @@ impl std::fmt::Debug for RequestResultDestination {
 #[derive(Debug)]
 pub(crate) struct OwnedResultSnapshot {
     publication: Arc<RuntimeResultPublication>,
-    destination: Arc<RequestResultDestination>,
+    destination: Weak<RequestResultDestination>,
+    session: SessionId,
 }
 
 impl OwnedResultSnapshot {
@@ -77,7 +78,8 @@ impl OwnedResultSnapshot {
         }
         Ok(Arc::new(Self {
             publication: Arc::new(publication),
-            destination,
+            session: destination.session(),
+            destination: Arc::downgrade(&destination),
         }))
     }
 
@@ -88,7 +90,7 @@ impl OwnedResultSnapshot {
         self.publication.type_witness()
     }
     pub(crate) fn session(&self) -> SessionId {
-        self.destination.session()
+        self.session
     }
     pub(crate) fn publication(&self) -> &RuntimeResultPublication {
         &self.publication
@@ -97,6 +99,6 @@ impl OwnedResultSnapshot {
         Arc::clone(&self.publication)
     }
     pub(crate) fn belongs_to(&self, destination: &Arc<RequestResultDestination>) -> bool {
-        Arc::ptr_eq(&self.destination, destination)
+        Weak::ptr_eq(&self.destination, &Arc::downgrade(destination))
     }
 }

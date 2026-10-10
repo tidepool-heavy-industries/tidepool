@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod result_tests;
+#[cfg(test)]
 mod sequence_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -791,21 +793,21 @@ impl RequestStateTable {
                 if record.target_state != TargetState::Settling
                     || record.target != claim.target
                     || record.reply_claim != Some(claim.generation)
-                    || !record
-                        .result_destination
-                        .as_ref()
-                        .is_some_and(|destination| {
-                            Arc::ptr_eq(destination, &claim.destination)
-                                && value.belongs_to(destination)
-                        })
                 {
                     return None;
                 }
                 record.target_state = TargetState::Closed;
                 record.reply_claim = None;
                 if record.owner_state == OwnerState::Observing {
-                    record.owner_state = OwnerState::Ready(RequestSuccess::Typed(value));
-                    record.reply_preview = preview;
+                    if value.belongs_to(&claim.destination) {
+                        record.owner_state = OwnerState::Ready(RequestSuccess::Typed(value));
+                        record.reply_preview = preview;
+                    } else {
+                        record.owner_state =
+                            OwnerState::Unavailable(ResponseFailure::SettlementFailed(
+                                "reply result belongs to a different request admission".into(),
+                            ));
+                    }
                 }
                 false
             }
@@ -813,6 +815,7 @@ impl RequestStateTable {
                 if let Some(record) = self.requests.get_mut(&request) {
                     if record.target_state == TargetState::Settling {
                         record.target_state = TargetState::Closed;
+                        record.reply_claim = None;
                         if record.owner_state == OwnerState::Observing {
                             record.owner_state =
                                 OwnerState::Unavailable(ResponseFailure::SettlementFailed(detail));
@@ -3213,6 +3216,17 @@ fn queue_settlement_notifications(state: &mut RequestStateTable) {
 
 impl RequestStateTable {
     fn reevaluate_watches(&mut self) -> Vec<WatchNotification> {
+        for record in self.requests.values_mut() {
+            // A pending target still owes native settlement after its owner
+            // stops. An accepted reply's affine claim holds the admission pin
+            // through incorporation; terminal roots retain only their custody.
+            if record.target_state == TargetState::Closed
+                || (record.reply_claim.is_some()
+                    && matches!(record.owner_state, OwnerState::Unavailable(_)))
+            {
+                record.result_destination = None;
+            }
+        }
         queue_settlement_notifications(self);
         let mut notifications = Vec::new();
         // A source must already exist at admission, so its monotonic ID is

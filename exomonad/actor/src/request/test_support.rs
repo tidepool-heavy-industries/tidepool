@@ -317,6 +317,10 @@ pub(crate) fn force(snapshot: &OwnedResultSnapshot) -> i64 {
     fixture().lock().force(snapshot)
 }
 
+pub(crate) fn outstanding_custody() -> usize {
+    fixture().lock().resident.outstanding_custody()
+}
+
 pub(crate) fn command_report() -> tidepool_bridge_effects::CommandReport {
     tidepool_bridge_effects::CommandReport {
         command: vec!["true".into()],
