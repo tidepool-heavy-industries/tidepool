@@ -2377,6 +2377,7 @@ enum ReceiptSourceSelection {
 struct ReceiptNativeSelection {
     owner: CachedHomeOwner,
     version: ReceiptSourceVersion,
+    published: Option<crate::artifact_inventory::PublishedOriginalRequirement>,
 }
 
 impl ReceiptSourceSelection {
@@ -2401,6 +2402,13 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn published_original_requirements(
+        &self,
+    ) -> impl Iterator<Item = &crate::artifact_inventory::PublishedOriginalRequirement> {
+        self.native_selections()
+            .filter_map(|native| native.published.as_ref())
+    }
+
     fn visible_modules(
         &self,
     ) -> impl Iterator<Item = (&(String, String), &ReceiptSourceSelection)> {
@@ -2592,6 +2600,22 @@ impl CertifiedSourceSelection {
             })
             .collect::<Vec<_>>();
         let mut selection = Self::from_projected_originals(&products, operation)?;
+        for requirement in projection
+            .roles()
+            .into_iter()
+            .filter_map(crate::artifact_inventory::PublishedOriginalRequirement::from_role)
+        {
+            let owner = &metadata.artifacts[&requirement.original].descriptor.owner;
+            let key = (owner.unit.clone(), owner.module.clone());
+            let Some(ReceiptSourceSelection::Native { native, .. }) =
+                Arc::make_mut(&mut selection.modules).get_mut(&key)
+            else {
+                return Err(CertificationError::Mismatch(
+                    "published compiler native role",
+                ));
+            };
+            native.published = Some(requirement);
+        }
         for entry in entries.values().filter(|entry| {
             !matches!(
                 &entry.payload,
@@ -2734,6 +2758,7 @@ impl CertifiedSourceSelection {
                         native: ReceiptNativeSelection {
                             owner: witness.owner.clone(),
                             version: ReceiptSourceVersion::Original,
+                            published: None,
                         },
                     },
                 )
@@ -2839,6 +2864,7 @@ impl CertifiedSourceSelection {
                 native: ReceiptNativeSelection {
                     owner: owner.clone(),
                     version,
+                    published: None,
                 },
             },
         );
