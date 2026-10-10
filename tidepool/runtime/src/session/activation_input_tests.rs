@@ -3656,17 +3656,12 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         });
     let mut resident = InputFixture::fresh_with_library(library, &recipe);
     assert_eq!(resident.state.lib().scope_tip(ScopeId::ROOT), Generation(0));
+    let durable_ceiling = recovery.state().allocation_ceiling;
     assert_eq!(
-        resident
-            .state
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .graph
-            .high_water(),
-        resident.state.lib().generation(),
+        super::recovery_test_fixture::graph(resident.state.lib()).high_water(),
+        durable_ceiling,
     );
+    assert!(durable_ceiling >= resident.state.lib().generation());
     let public = resident.mint_scope(ScopeId::ROOT).unwrap();
     let durable = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/private-source-input").unwrap(),
