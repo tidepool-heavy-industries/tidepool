@@ -4884,31 +4884,12 @@ mod tests {
         Arc,
     };
 
-    fn check_captured_value_epoch_reattachment(demands_epoch: bool) {
+    fn capture_test_value(
+        original: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        demands_epoch: bool,
+    ) -> Arc<super::CheckedValueArtifact> {
         use super::*;
         let producer = [2; 32];
-        let epoch = |version| {
-            crate::certified_products::fixture_finalized_product(
-                crate::certified_products::tests::original_groups_fixture_with_interface(
-                    "Epoch",
-                    vec![(7, vec![])],
-                    version,
-                    &BTreeMap::new(),
-                    vec![version; 16],
-                ),
-                producer,
-            )
-        };
-        let context = |version| {
-            Arc::new(
-                crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
-                    .unwrap()
-                    .extend_checked_original_products(producer, &[epoch(version)])
-                    .unwrap(),
-            )
-        };
-        let original = context(1);
-        let child = context(2);
         let inputs = CheckedValueInputs::capture_raw(vec![]).unwrap();
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(1));
         let path = inputs.root().join(owner.relative_hi_path());
@@ -4944,7 +4925,7 @@ mod tests {
             },
             producer,
             context: original.semantic_sha256(),
-            declaration_context: original.clone(),
+            declaration_context: Arc::clone(original),
             retained_projections: vec![],
             receipt_digest: [4; 32],
             checked_source: String::new(),
@@ -4958,8 +4939,38 @@ mod tests {
             value_inputs: inputs.clone(),
         };
         let captured = inputs
-            .capture_output(1, &cell, &original, &[], &original)
+            .capture_output(1, &cell, original, &[], original)
             .unwrap();
+        captured
+    }
+
+    fn check_captured_value_epoch_reattachment(demands_epoch: bool) {
+        use super::*;
+        let producer = [2; 32];
+        let epoch = |version| {
+            crate::certified_products::fixture_finalized_product(
+                crate::certified_products::tests::original_groups_fixture_with_interface(
+                    "Epoch",
+                    vec![(7, vec![])],
+                    version,
+                    &BTreeMap::new(),
+                    vec![version; 16],
+                ),
+                producer,
+            )
+        };
+        let context = |version| {
+            Arc::new(
+                crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_checked_original_products(producer, &[epoch(version)])
+                    .unwrap(),
+            )
+        };
+        let original = context(1);
+        let child = context(2);
+        let captured = capture_test_value(&original, demands_epoch);
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(1));
         let epoch_ids = original.artifact_view().artifact_ids();
         assert!(epoch_ids
             .iter()
@@ -4987,7 +4998,6 @@ mod tests {
                 .all(|role| !epoch_ids.contains(&role.interface())));
         }
         let custody = captured.artifact_view().artifact_ids();
-        drop(cell);
         drop(original);
         assert_eq!(captured.artifact_view().artifact_ids(), custody);
     }
@@ -4996,6 +5006,129 @@ mod tests {
     fn captured_value_reattachment_preserves_custody_without_selecting_unused_epoch() {
         check_captured_value_epoch_reattachment(false);
         check_captured_value_epoch_reattachment(true);
+    }
+
+    #[test]
+    fn captured_value_keeps_duplicate_native_binding_custody_without_namespace_roles() {
+        use super::*;
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, ArtifactPayload, CompilerInputProjection,
+        };
+        use crate::certified_products::{fixture_module_core, fixture_module_interface};
+        let producer = [2; 32];
+        let child = fixture_module_interface(producer, "fixture", "Child", BTreeMap::new());
+        let next = fixture_module_core(&child, b"different certified child Core".to_vec());
+        assert_eq!(child.interface_sha256(), next.interface_sha256());
+        let product = crate::certified_products::tests::original_groups_fixture(
+            "Root",
+            vec![(7, vec![])],
+            1,
+            &BTreeMap::new(),
+        );
+        let product = crate::certified_products::fixture_finalized_product_with_requirements(
+            product,
+            producer,
+            Some(BTreeMap::from([(
+                ("fixture".into(), "Child".into()),
+                child.interface_sha256(),
+            )])),
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let native = ArtifactEntry::original(producer, product).unwrap();
+        let native_id = native.descriptor.id;
+        let value = ArtifactEntry::canonical(fixture_module_interface(
+            producer,
+            "fixture",
+            "Value",
+            BTreeMap::new(),
+        ));
+        let inventory = ArtifactInventory::default();
+        let old = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![
+                    native.clone(),
+                    ArtifactEntry::canonical(child),
+                    value.clone(),
+                ],
+            )
+            .unwrap();
+        let new = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![native, ArtifactEntry::canonical(next), value.clone()],
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[Arc::new(value)]).unwrap();
+        let grown = old.merge_selected(&new, &projection).unwrap();
+        assert!(
+            matches!(grown.select_roots(vec![native_id]), Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::BindingAmbiguity { .. }))
+        );
+        let original = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &grown,
+                projection,
+                vec![],
+                crate::declaration_join::ExactModuleIdentity {
+                    unit: "fixture".into(),
+                    module: "Value".into(),
+                },
+                &[],
+            )
+            .unwrap(),
+        );
+        let original_graph = original.artifact_view().capture_graph_selection();
+        let originals = original_graph
+            .bindings
+            .iter()
+            .filter(|binding| binding.artifact == native_id)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(originals.len(), 2);
+        let captured = capture_test_value(&original, false);
+        let graph = captured.artifact_view().capture_graph_selection();
+        assert!(originals.is_subset(&graph.bindings.iter().copied().collect()));
+        assert_eq!(graph.native_groups, original_graph.native_groups);
+        assert!(captured
+            .compiler_artifact_view()
+            .capture_graph_selection()
+            .bindings
+            .iter()
+            .all(|binding| binding.artifact != native_id));
+        assert!(captured
+            .compiler_input_projection()
+            .roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(captured
+            .artifact_view()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.payload, ArtifactPayload::Original(_))));
+        let edges = captured.artifact_view().binding_dependencies();
+        drop(old);
+        drop(new);
+        drop(grown);
+        drop(original);
+        assert_eq!(captured.artifact_view().binding_dependencies(), edges);
+        let restored_inventory = ArtifactInventory::default();
+        let restored = restored_inventory
+            .recover_selection(
+                &restored_inventory.empty_view(),
+                captured.artifact_view().entries(),
+                &graph,
+                &edges,
+            )
+            .unwrap();
+        assert_eq!(restored.capture_graph_selection(), graph);
+        drop(captured);
+        drop(restored);
+        assert_eq!(inventory.node_count(), 0);
+        assert_eq!(restored_inventory.node_count(), 0);
     }
 
     fn signature_codec_fixture() -> ciborium::Value {
