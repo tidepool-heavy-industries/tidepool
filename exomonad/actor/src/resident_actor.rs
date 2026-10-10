@@ -4926,8 +4926,12 @@ where
         tracing::info!(target: "exomonad_actor::workbench_phase", parent = %context.actor, label = %start.child.descriptor.display_label(), phase = "child_launch_requested", "actor phase");
         let crate::ResidentActorStart { parent_hole, child } = start;
         let spawn_reply = child.spawn.is_some();
-        let placement_custody =
-            child_launch::ChildPlacementCustody::new(child.descriptor.placement());
+        let placement_custody = if child.descriptor.placement().session == context.placement.session
+        {
+            child_launch::ChildPlacementCustody::new(child.descriptor.placement())
+        } else {
+            child_launch::ChildPlacementCustody::reserved(child.descriptor.placement())
+        };
         let placement_startup = placement_custody.startup_guard();
         let placement_registration = effect_owner
             .ephemeral_work()
@@ -4949,14 +4953,6 @@ where
                 seed,
                 exit_destination,
             } = child;
-            let child_session_startup = (descriptor.placement().session
-                != context.placement.session
-                && self.environment.runner.supports_child_sessions())
-            .then(|| {
-                self.environment
-                    .runner
-                    .child_session_startup_lease(descriptor.placement().session)
-            });
             let checkpoint_preview = descriptor
                 .checkpoint_token()
                 .map(|token| {
@@ -5088,7 +5084,6 @@ where
                 spawn_admission,
                 inherited_source,
                 retained_checkpoint_scope,
-                child_session_startup,
                 invocation_work: invocation_work.clone(),
             })
         })();

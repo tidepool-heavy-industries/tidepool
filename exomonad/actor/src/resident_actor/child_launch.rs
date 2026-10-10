@@ -252,7 +252,6 @@ pub(super) struct ChildLaunchAdmission {
     pub spawn_admission: Option<crate::SpawnAdmission>,
     pub inherited_source: Option<crate::CheckpointSourceLayer>,
     pub retained_checkpoint_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
-    pub child_session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
     pub invocation_work: Option<Arc<InvocationWork>>,
 }
 
@@ -356,12 +355,6 @@ where
         admission,
     } = *prepared;
     let _startup_guard = SpawnStartupGuard(continuation.spawn_admission.clone());
-    // A failed spawn can drop its behavior before refusal cleanup finishes.
-    // Keep the original machine preparation lease outside that await.
-    let _session_startup_custody = admission
-        .as_ref()
-        .ok()
-        .and_then(|admission| admission.child_session_startup.clone());
     let context = &continuation.context;
     let result = Box::pin(async {
         let ChildLaunchAdmission {
@@ -370,9 +363,11 @@ where
             spawn_admission,
             inherited_source,
             retained_checkpoint_scope,
-            child_session_startup,
             invocation_work,
         } = admission?;
+        // Keep the issued lease through spawn refusal cleanup as well as in
+        // the behavior. There is no discard authority before publication.
+        let mut child_session_startup = None;
         let crate::start::CapturedChildLaunch {
             lifetime,
             mut descriptor,
@@ -495,7 +490,7 @@ where
                 .with_lexical_scope(placement.lexical_scope);
         } else if descriptor.placement().session != context.placement.session {
             let child_session = descriptor.placement().session;
-            let lexical_scope = environment
+            let provisioned = environment
                 .runner
                 .provision_child_session(
                     child_session,
@@ -505,10 +500,11 @@ where
                 )
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-            descriptor = descriptor.with_lexical_scope(lexical_scope);
+            descriptor = descriptor.with_lexical_scope(provisioned.lexical_scope);
+            child_session_startup = Some(provisioned.startup_lease);
             continuation
                 .placement_custody
-                .update(descriptor.placement());
+                .provisioned(descriptor.placement());
         }
         let entry = environment
             .runner
@@ -1009,11 +1005,11 @@ mod tests {
                     Ok(Box::new(session(id, &root_path)))
                 }))
                 .with_child_bootstrap_program(bootstrap_program());
-            let startup = runner.child_session_startup_lease(id);
-            runner
+            let startup = runner
                 .provision_child_session(id, RealmId::fresh(), None, &[])
                 .await
-                .unwrap();
+                .unwrap()
+                .startup_lease;
             let (placement, captured) = captured_placement(&machines, id);
             let custody = ChildPlacementCustody::new(placement);
             let actor = ActorRef::first(crate::ActorId(973));

@@ -374,7 +374,7 @@ where
                 .with_session(placement.session)
                 .with_lexical_scope(placement.lexical_scope);
         } else if descriptor.placement().session != self.descriptor.placement().session {
-            let lexical_scope = self
+            let provisioned = self
                 .environment
                 .runner
                 .provision_child_session(
@@ -385,14 +385,8 @@ where
                 )
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-            descriptor = descriptor.with_lexical_scope(lexical_scope);
-            // Provisioning publishes synchronously after its final await. Only
-            // that successful publication issues authority to discard the machine.
-            candidate.session_startup = Some(
-                self.environment
-                    .runner
-                    .child_session_startup_lease(descriptor.placement().session),
-            );
+            descriptor = descriptor.with_lexical_scope(provisioned.lexical_scope);
+            candidate.session_startup = Some(provisioned.startup_lease);
             candidate.placement.provisioned(descriptor.placement());
         }
         let context = descriptor.session_context(actor);

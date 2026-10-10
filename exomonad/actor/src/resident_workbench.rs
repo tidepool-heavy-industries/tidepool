@@ -2594,6 +2594,11 @@ pub(crate) struct ChildSessionStartupLease {
     custody: Arc<ChildSessionStartupCustody>,
 }
 
+pub(crate) struct ProvisionedChildSession {
+    pub(crate) lexical_scope: tidepool_codegen::scope::ScopeId,
+    pub(crate) startup_lease: ChildSessionStartupLease,
+}
+
 struct ChildSessionStartupCustody {
     discard: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>,
 }
@@ -3757,9 +3762,9 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// Both identity allocators advance past the captured parent counters without
     /// installing any additional lexical roots.
     ///
-    /// Returns the child's own freshly minted lexical scope
-    /// (`ActorDescriptor::with_lexical_scope` replaces the placeholder the
-    /// parent minted at capture time with this one). The caller still owns
+    /// Returns the child's freshly minted lexical scope and its startup
+    /// custody. Dropping an unadmitted result discards only this new machine.
+    /// The caller still owns
     /// crossing the entry itself into this machine — `transfer_custody`,
     /// not this call, which never touches any value's custody.
     pub(crate) async fn provision_child_session(
@@ -3768,7 +3773,7 @@ impl<H, O> ResidentActorRunner<H, O> {
         resource_scope: RealmId,
         seed: Option<&crate::start::ChildSessionSeed>,
         source_layer: &[PathBuf],
-    ) -> Result<tidepool_codegen::scope::ScopeId, String>
+    ) -> Result<ProvisionedChildSession, String>
     where
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
@@ -3872,7 +3877,10 @@ impl<H, O> ResidentActorRunner<H, O> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id);
-        Ok(lexical_scope)
+        Ok(ProvisionedChildSession {
+            lexical_scope,
+            startup_lease: self.child_session_startup_lease(session_id),
+        })
     }
 
     /// Attempt to release `session_id`'s dedicated machine now that its
@@ -4034,7 +4042,7 @@ impl<H, O> ResidentActorRunner<H, O> {
         Ok(())
     }
 
-    pub(crate) fn child_session_startup_lease(
+    fn child_session_startup_lease(
         &self,
         session_id: tidepool_repr::SessionId,
     ) -> ChildSessionStartupLease
@@ -4061,10 +4069,7 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// [`Self::retire_child_session`]: this call site is the one place a
     /// child session with nothing depending on it is removed outright, so
     /// a failed launch never orphans a registered-but-unowned machine.
-    /// Called from both `try_start_child` and `replacement.rs`'s matching
-    /// resolution on any error after their own `provision_child_session`
-    /// call succeeds.
-    pub(crate) fn discard_child_session(&self, session_id: tidepool_repr::SessionId) {
+    fn discard_child_session(&self, session_id: tidepool_repr::SessionId) {
         self.access.finish_child_session_teardown(session_id, None);
         if self
             .access
@@ -18602,7 +18607,7 @@ pub(crate) mod request_tests {
         // synchronously blocked, proving the factory is off the async thread.
         assert!(machines.kind(id).is_none());
         task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), dropped.notified())
             .await
@@ -18639,11 +18644,15 @@ pub(crate) mod request_tests {
                 ChildOutput(Arc::new(ChildOutputLifetime(Arc::clone(&factory_dropped)))),
             ))
         }));
-        let scope = runner
+        let provisioned = runner
             .provision_child_session(id, RealmId::ROOT, None, &[])
             .await
             .unwrap();
-        assert_ne!(scope, tidepool_codegen::scope::ScopeId::ROOT);
+        assert_ne!(
+            provisioned.lexical_scope,
+            tidepool_codegen::scope::ScopeId::ROOT
+        );
+        provisioned.startup_lease.admitted();
         assert_eq!(
             machines.kind(id),
             Some(tidepool_runtime::session::registry::SlotKind::Idle)
@@ -19018,7 +19027,7 @@ pub(crate) mod request_tests {
             }))
             .with_child_bootstrap_program(Arc::new(compiled));
         let owner = RealmId::fresh();
-        runner
+        let provisioned = runner
             .provision_child_session(child_id, owner, None, &[])
             .await
             .expect("fresh child session provisions through its real factory");
@@ -19036,9 +19045,8 @@ pub(crate) mod request_tests {
         let parent_checkout = machines
             .checkout_run(parent_id)
             .expect("hold the source checkout so custody transfer must wait");
-        let lease = runner.child_session_startup_lease(child_id);
         let mut preparation = Box::pin(async {
-            let _lease = lease;
+            let _lease = provisioned.startup_lease;
             runner
                 .transfer_custody(entry, parent_id, child_id, owner)
                 .await
