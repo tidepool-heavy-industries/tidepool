@@ -708,7 +708,7 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
             .expect("retained command binding");
         let terminal_evidence = super::tests::dispatch_haskell_script_result(
             campaign.root_installation.policy.as_ref(),
-            &format!("Cmd.await {issued_binding} >>= display"),
+            &format!("Cmd.await {issued_binding}"),
         )
         .await;
         let facts = &result["items"][0]["value"];
@@ -717,12 +717,13 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         assert_eq!(facts["outcome"], serde_json::json!({"tag": "OutcomeExited", "contents": 0}), "{result}");
         assert_eq!(facts["cleanup"], "CleanupClean", "{result}");
         assert_eq!(facts["retained_binding"], issued_binding, "{result}");
+        assert_eq!(terminal_evidence.expect("retained await succeeds")["status"], "committed");
         let terminal = super::command_jobs_tests::committed(
             campaign,
-            &format!("terminal <- Cmd.await {issued_binding}\ndisplay (Cmd.commandOutcome (Cmd.commandResult terminal) == Cmd.CommandExited 0 && Cmd.commandCleanup (Cmd.commandResult terminal) == Cmd.CommandClean)"),
+            &format!("terminal <- Cmd.await {issued_binding}\nCmd.commandOutcome (Cmd.commandResult terminal) == Cmd.CommandExited 0 && Cmd.commandCleanup (Cmd.commandResult terminal) == Cmd.CommandClean"),
         )
         .await;
-        assert_eq!(super::test_campaign::committed_display_text(&terminal), "True", "{terminal}");
+        assert_eq!(terminal["items"].as_array().unwrap().last().unwrap()["output"], "True", "{terminal}");
         assert!(output.contains(text), "{output}");
         bindings.push(
             result["items"][0]["installedBindings"][0]
@@ -735,13 +736,13 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
     let recovered = super::command_jobs_tests::committed(
         campaign,
         &format!(
-            "retainedFirst <- Cmd.readStdout {}\nretainedSecond <- Cmd.readStdout {}\ndisplay (retainedFirst == Right \"embedded-host-command\" && retainedSecond == Right \"second-embedded-command\" && {} /= {})",
+            "retainedFirst <- Cmd.readStdout {}\nretainedSecond <- Cmd.readStdout {}\nretainedFirst == Right \"embedded-host-command\" && retainedSecond == Right \"second-embedded-command\" && {} /= {}",
             bindings[0], bindings[1], bindings[0], bindings[1],
         ),
     )
     .await;
     assert_eq!(
-        super::test_campaign::committed_display_text(&recovered),
+        recovered["items"].as_array().unwrap().last().unwrap()["output"],
         "True",
         "a later binding preserves both independently retained command outputs"
     );
