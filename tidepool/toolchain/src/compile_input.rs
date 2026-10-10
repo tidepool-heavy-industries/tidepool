@@ -132,6 +132,34 @@ impl SealedOriginalCompileInput {
         Ok(self.original_execution.clone())
     }
 
+    /// Validate the exact output once before transferring both original contexts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn original_contexts(
+        &self,
+        prepared: &PreparedProgram,
+        groups: &[PendingCertifiedGroup],
+        target_owners: &[PendingImportOwner],
+        package_interfaces: &CertifiedTargetPackageInterfaces,
+        table: &DataConTable,
+        yield_sites: &[YieldSite],
+    ) -> Result<
+        (
+            Arc<crate::declaration_context::ExactDeclarationContext>,
+            Arc<crate::declaration_context::ExactDeclarationContext>,
+        ),
+        CompileError,
+    > {
+        let interfaces = self.original_interface_context(
+            prepared,
+            groups,
+            target_owners,
+            package_interfaces,
+            table,
+            yield_sites,
+        )?;
+        Ok((interfaces, self.original_execution.clone()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn published_source_original_selection(
         &self,
@@ -964,6 +992,41 @@ mod tests {
     }
 
     #[test]
+    fn paired_original_contexts_preserve_issuer_and_individual_observations() {
+        for producer in [
+            b"first compiler producer".as_slice(),
+            b"second compiler producer".as_slice(),
+        ] {
+            let proof = package_context_proof(producer);
+            let (interfaces, execution) = proof
+                .original_contexts(
+                    &proof.target,
+                    &proof.groups,
+                    &proof.target_owners,
+                    &proof.package_interfaces,
+                    &proof.table,
+                    &proof.sites,
+                )
+                .unwrap();
+            assert_eq!(interfaces, original_context(&proof));
+            assert_eq!(
+                execution,
+                proof
+                    .original_execution_context(
+                        &proof.target,
+                        &proof.groups,
+                        &proof.target_owners,
+                        &proof.package_interfaces,
+                        &proof.table,
+                        &proof.sites
+                    )
+                    .unwrap()
+            );
+            assert_ne!(interfaces.semantic_sha256(), execution.semantic_sha256());
+        }
+    }
+
+    #[test]
     fn sealed_package_context_preserves_original_producer_after_empty_projection() {
         let proof = package_context_proof(b"original compiler producer");
         let original = original_context(&proof);
@@ -1020,7 +1083,7 @@ mod tests {
             });
         let changed = tidepool_repr::execution_schema::testing::prepare(changed).unwrap();
         assert!(first_proof
-            .original_interface_context(
+            .original_contexts(
                 &changed,
                 &first_proof.groups,
                 &first_proof.target_owners,
@@ -1030,17 +1093,26 @@ mod tests {
             )
             .is_err());
         let mut edited_table = DataConTable::new();
-        edited_table.insert(tidepool_repr::DataCon {
-            id: tidepool_repr::DataConId(99),
-            name: "Edited".into(),
-            tag: 1,
-            rep_arity: 0,
-            field_bangs: vec![],
-            qualified_name: None,
-            type_name: "Edited".into(),
-        });
+        edited_table
+            .insert_checked(tidepool_repr::DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Edited".into(),
+                    record_parent: None,
+                },
+                id: tidepool_repr::DataConId(99),
+                name: "Edited".into(),
+                tag: 1,
+                rep_arity: 0,
+                field_bangs: vec![],
+                qualified_name: None,
+                type_name: "Edited".into(),
+            })
+            .expect("valid fixture metadata");
         assert!(first_proof
-            .original_interface_context(
+            .original_contexts(
                 &first_proof.target,
                 &first_proof.groups,
                 &first_proof.target_owners,
@@ -1062,7 +1134,7 @@ mod tests {
             request_type_signatures: None,
         }];
         assert!(first_proof
-            .original_interface_context(
+            .original_contexts(
                 &first_proof.target,
                 &first_proof.groups,
                 &first_proof.target_owners,

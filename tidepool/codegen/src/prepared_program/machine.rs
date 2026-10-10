@@ -1080,6 +1080,7 @@ impl<'code> PreparedMachine<'code> {
             self.static_catalog = Some(catalog);
         }
         let compiled = program.get();
+        let image_instance = compiled.image_instance_id();
         // Shared descriptors (interned constructors, external wrappers) have
         // no owner; retiring this program leaves them.
         let shared: HashSet<usize> = compiled
@@ -1123,6 +1124,7 @@ impl<'code> PreparedMachine<'code> {
                 owned_headers,
             },
         );
+        tracing::info!(target: "tidepool_codegen::image_install", image_instance, process_id = std::process::id(), machine_owner = self as *const Self as usize, program = id.0, outcome = "machine_published", "native image install");
         Ok(id)
     }
 
@@ -1775,6 +1777,9 @@ impl<'code> PreparedMachine<'code> {
             work.push(unsafe { root.read() } as usize);
             if let Some(evidence) = evidence {
                 mark_program(evidence.reply.owner(), &mut live, &mut program_work);
+                if let Some(owner) = evidence.reply.site_owner() {
+                    mark_program(owner, &mut live, &mut program_work);
+                }
                 mark_program(evidence.runner, &mut live, &mut program_work);
             }
         }

@@ -1769,6 +1769,29 @@ impl<'a> Validator<'a> {
                 ConstructorReply::Static(node) => {
                     self.type_node(node)?;
                 }
+                ConstructorReply::StaticWithSite {
+                    reply,
+                    field,
+                    payload_field,
+                    capture_input: _,
+                } => {
+                    self.type_node(reply)?;
+                    if field == 0
+                        || !matches!(
+                            declaration.field_reps.get(field as usize),
+                            Some(RuntimeRep::LiftedRef) | Some(RuntimeRep::Int(64))
+                        )
+                        || field == payload_field
+                        || !matches!(
+                            declaration.field_reps.get(payload_field as usize),
+                            Some(RuntimeRep::LiftedRef) | Some(RuntimeRep::UnliftedRef)
+                        )
+                    {
+                        return Err(ParseError::InvalidLayout(
+                            "StaticWithSite request requires distinct non-leading Int site and managed payload fields".into(),
+                        ));
+                    }
+                }
                 ConstructorReply::AtSite => {
                     if !matches!(
                         declaration.field_reps.first(),
@@ -3158,6 +3181,56 @@ mod tests {
         assert!(matches!(
             validate_program(&program, &requirements(), DecodeLimits::default()),
             Err(ParseError::InvalidReference(detail)) if detail.contains("type root")
+        ));
+    }
+
+    #[test]
+    fn nonleading_sites_require_distinct_valid_carrier_and_payload_fields() {
+        let mut program = valid_program();
+        program.types = text_graph();
+        let mut constructor = empty_constructor("Request", 1, 1);
+        constructor.field_reps = vec![
+            RuntimeRep::Int(64),
+            RuntimeRep::Int(64),
+            RuntimeRep::LiftedRef,
+        ];
+        constructor.strict_fields = vec![true, true, false];
+        constructor.layout = CheckedLayout {
+            fields: constructor
+                .field_reps
+                .iter()
+                .enumerate()
+                .map(|(index, rep)| FieldLayout {
+                    rep: *rep,
+                    offset: index as u32 * 8,
+                })
+                .collect(),
+            alignment: 8,
+            payload_size: 24,
+            root_mask: vec![false, false, true],
+        };
+        program.constructors = vec![constructor];
+        let reply = |field, payload_field| ConstructorReply::StaticWithSite {
+            reply: TypeNodeId(0),
+            field,
+            payload_field,
+            capture_input: Some(0),
+        };
+        program.constructor_replies = vec![(ConstructorId(0), reply(1, 2))];
+        validate_program(&program, &requirements(), DecodeLimits::default()).unwrap();
+        for (field, payload) in [(0, 2), (3, 2), (1, 1), (1, 3), (1, 0)] {
+            program.constructor_replies[0].1 = reply(field, payload);
+            assert!(matches!(
+                validate_program(&program, &requirements(), DecodeLimits::default()),
+                Err(ParseError::InvalidLayout(_))
+            ));
+        }
+        program.constructors[0].field_reps[1] = RuntimeRep::Word(64);
+        program.constructors[0].layout.fields[1].rep = RuntimeRep::Word(64);
+        program.constructor_replies[0].1 = reply(1, 2);
+        assert!(matches!(
+            validate_program(&program, &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(_))
         ));
     }
 

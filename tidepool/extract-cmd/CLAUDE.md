@@ -41,8 +41,9 @@ An ordinary one-shot response is delivered only after the worker acknowledges
 transaction cleanup, so a client closing after receiving it preserves the warm
 worker. Explicit transactions stream request responses and acknowledge cleanup
 separately when the client closes the transaction.
-Request-owned input descriptors and owned lookup directories stay alive through that acknowledgement. Scoped
-callers register the original descriptor with the transaction owner; uncertain
+Request-owned input descriptors and owned lookup directories stay alive through
+that acknowledgement. Scoped callers register the original physical owner with
+the transaction owner; uncertain
 settlement carries physical custody in the retained close evidence. A request
 response, cancelled waiter or missing scope does not establish input release.
 Standalone input-owning invocations consume the exact bound endpoint into an
@@ -184,6 +185,12 @@ for immutable endpoint identity, it uses the workspace tracing stack because
 the compiler CLI owns daemon process observability. Its wire formats are small,
 versioned, and implemented in-repo. Keep framing and field validation here;
 keep compiler interpretation in the Haskell worker.
+
+Encoded request fields are transport data until operation admission. Admit one
+operation before its compiler or artifact I/O, and dispatch on that admitted sum
+rather than flag precedence. Activation preview refines a turn, inspection queries
+share one inspection operation, and declaration operations carry their manifest
+and output together. Common compiler context does not select another operation.
 
 When adding a request field:
 

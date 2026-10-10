@@ -35,8 +35,9 @@ pub fn reflect() -> Effect {
         description: &[
             "Read your own recent conversation as data. `reflect n` returns your latest ",
             "n turns including the active turn, oldest first, each carrying the recorded ",
-            "messages, tool calls and tool results that belong to it. An active turn has ",
-            "`completed_at = Nothing`; pending results are never invented. Fewer than n ",
+            "messages, tool calls and tool results that belong to it. `turnState` records ",
+            "response progress independently of optional timestamps; pending results ",
+            "are never invented. Fewer than n ",
             "turns returns the ones that exist and `n <= 0` returns none. It reads only the caller's own ",
             "conversation — there is no argument naming another actor or a file. ",
             "`Left ReflectUnbound` means this context has no bound conversation to ",
@@ -110,12 +111,34 @@ pub fn reflect() -> Effect {
                 ],
             },
             TypeDef {
+                name: "ConversationTurnState",
+                wire_rust: Some("RfTurnState"),
+                haskell_module: None,
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        SumVariant { ctor: "TurnInProgress", fields: VariantFields::Positional(Vec::new()), doc: &[] },
+                        SumVariant { ctor: "TurnCompleted", fields: positional_fields![HsType::maybe(HsType::Text)], doc: &["The exact provider response identity, when recorded."] },
+                        SumVariant { ctor: "TurnInterrupted", fields: VariantFields::Positional(Vec::new()), doc: &[] },
+                        SumVariant { ctor: "TurnUnknown", fields: VariantFields::Positional(Vec::new()), doc: &[] },
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: WIRE,
+                domain: None,
+                doc: &[
+                    "Recorded model-response progress, independent of timestamps.",
+                    "TurnUnknown means retained history lacks a response observation.",
+                    "TurnCompleted describes the response; a tool result may still be pending.",
+                ],
+            },
+            TypeDef {
                 name: "ConversationTurn",
                 wire_rust: Some("RfConversationTurn"),
                 haskell_module: None,
                 shape: TypeShape::Record {
                     fields: vec![
                         field("turnIdentity", "identity", HsType::Text),
+                        field("turnState", "state", HsType::Named("ConversationTurnState")),
                         field("turnStartedAt", "started_at", HsType::maybe(HsType::Text)),
                         field(
                             "turnCompletedAt",
@@ -133,8 +156,9 @@ pub fn reflect() -> Effect {
                 derives: WIRE,
                 domain: None,
                 doc: &[
-                    "One recorded turn in provider order. An unfinished active turn has",
-                    "no completion timestamp and contains only items recorded so far.",
+                    "One runtime request in recorded order, with its exact provider response",
+                    "identity when available. Timestamps may be absent in every state;",
+                    "only recorded items are returned.",
                 ],
             },
             TypeDef {
@@ -188,8 +212,8 @@ pub fn reflect() -> Effect {
             doc: &[
                 "`reflect n` reads your OWN latest n conversation turns including the active",
                 "turn, oldest first, each carrying recorded messages, tool calls and tool",
-                "results. An unfinished turn has `turnCompletedAt = Nothing`; pending tool",
-                "results are never invented. Fewer than n turns returns the ones that exist,",
+                "results. `turnState` distinguishes progress from missing timestamps; pending",
+                "tool results are never invented. Fewer than n turns returns the ones that exist,",
                 "and `n <= 0` returns none.",
                 "Natural spelling: `Right recent <- reflect 5`. `Left ReflectUnbound`",
                 "means this context has no conversation of its own — no other actor's is",

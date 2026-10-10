@@ -1802,7 +1802,11 @@ where
                     )
                     .unwrap();
                 let context = proof
-                    .original_execution_context(&compiled.prepared, &compiled.table, &compiled.asks)
+                    .original_execution_context(
+                        &compiled.prepared(),
+                        &compiled.table(),
+                        &compiled.asks,
+                    )
                     .unwrap();
                 let requirements = context
                     .artifact_view()
@@ -1825,14 +1829,8 @@ where
                         })
                     })
                     .expect("the second entry requires a genuinely completed earlier capture");
-                assert!(
-                    compiled
-                        .prepared
-                        .globals()
-                        .iter()
-                        .all(|global| global.identity != required.identity),
-                    "the capture obligation must come through the selected original, not direct target globals"
-                );
+                assert!(compiled.prepared().globals().iter().all(|global| global.identity != required.identity),
+                    "the capture obligation must come through the selected original, not direct target globals");
                 let missing = actual
                     .iter()
                     .copied()

@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use exomonad_actor::{
     ActorRef, ConversationReader, ConversationRole as Role, ConversationTurn,
-    ConversationUnavailable, TurnItem,
+    ConversationTurnState, ConversationUnavailable, TurnItem,
 };
 use harness::{
     embedding::HostIdentity,
     item::Item,
-    model::{ConversationIdentity, RequestId},
-    store::Store,
+    model::RequestId,
+    store::{EmbeddedConversationHistory, EmbeddedModelResponseState, Store},
 };
 
 pub(super) fn run_conversation_reader(
@@ -40,19 +40,10 @@ pub(super) fn conversation_reader(
             let Some(identity) = identity_for(actor) else {
                 return Err(ConversationUnavailable::Unbound);
             };
-            let head = store.embedded_agent_head(&identity).map_err(unreadable)?;
-            let Some(head) = head else {
-                return Ok(Vec::new());
-            };
-            let origin = ConversationIdentity::Embedded {
-                run: identity.run,
-                actor: identity.actor,
-                incarnation: identity.incarnation,
-            };
-            let state = store
-                .context_request_state(&head, &origin)
+            let history = store
+                .embedded_conversation_history(&identity)
                 .map_err(unreadable)?;
-            Ok(recent_turns(state.history, count))
+            Ok(recent_turns(history, count))
         })
     })
 }
@@ -61,15 +52,41 @@ fn unreadable(error: impl std::fmt::Display) -> ConversationUnavailable {
     ConversationUnavailable::Unreadable(error.to_string())
 }
 
-fn recent_turns(
-    history: Vec<(RequestId, harness::item::ItemHash, Item)>,
-    limit: usize,
-) -> Vec<ConversationTurn> {
+fn recent_turns(history: EmbeddedConversationHistory, limit: usize) -> Vec<ConversationTurn> {
     if limit == 0 {
         return Vec::new();
     }
-
+    let EmbeddedConversationHistory {
+        head,
+        history,
+        mut responses,
+    } = history;
     let mut turns = Vec::new();
+    let mut add_turn = |request: RequestId| ConversationTurn {
+        state: match responses
+            .remove(&request)
+            .expect("snapshot observed every history request")
+        {
+            EmbeddedModelResponseState::InProgress => ConversationTurnState::InProgress,
+            EmbeddedModelResponseState::Completed { response_id } => {
+                ConversationTurnState::Completed {
+                    provider_response_id: response_id,
+                }
+            }
+            EmbeddedModelResponseState::Interrupted => ConversationTurnState::Interrupted,
+            EmbeddedModelResponseState::Unknown => ConversationTurnState::Unknown,
+        },
+        turn: request.0,
+        started_at: None,
+        completed_at: None,
+        items: Vec::new(),
+    };
+    // An admitted model request may not have emitted any items yet.
+    if let Some(head) =
+        head.filter(|head| history.last().is_none_or(|(request, _, _)| request != head))
+    {
+        turns.push(add_turn(head));
+    }
     for (request, _, item) in history.into_iter().rev() {
         if turns
             .last()
@@ -78,12 +95,7 @@ fn recent_turns(
             if turns.len() == limit {
                 break;
             }
-            turns.push(ConversationTurn {
-                turn: request.0,
-                started_at: None,
-                completed_at: None,
-                items: Vec::new(),
-            });
+            turns.push(add_turn(request));
         }
         if let Some(item) = project_item(&item) {
             turns
@@ -148,7 +160,24 @@ fn rendered(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::recent_turns;
-    use harness::{item::ItemHash, model::RequestId};
+    use harness::{
+        item::ItemHash,
+        model::RequestId,
+        store::{EmbeddedConversationHistory, EmbeddedModelResponseState},
+    };
+
+    fn snapshot(
+        history: Vec<(RequestId, ItemHash, harness::item::Item)>,
+    ) -> EmbeddedConversationHistory {
+        EmbeddedConversationHistory {
+            head: history.last().map(|(request, _, _)| request.clone()),
+            responses: history
+                .iter()
+                .map(|(request, _, _)| (request.clone(), EmbeddedModelResponseState::Unknown))
+                .collect(),
+            history,
+        }
+    }
     use serde_json::json;
 
     fn item(value: serde_json::Value) -> (RequestId, ItemHash, harness::item::Item) {
@@ -185,7 +214,7 @@ mod tests {
             ),
         ];
 
-        let latest = recent_turns(history.clone(), 1);
+        let latest = recent_turns(snapshot(history.clone()), 1);
         assert_eq!(latest.len(), 1);
         assert_eq!(latest[0].turn, "latest");
         assert_eq!(latest[0].started_at, None);
@@ -202,9 +231,11 @@ mod tests {
                 if call == "call-1" && output == "found"
         ));
 
-        assert_eq!(recent_turns(history, 10).len(), 2);
-        assert!(recent_turns(vec![item(json!({"type":"reasoning"}))], 10)[0]
-            .items
-            .is_empty());
+        assert_eq!(recent_turns(snapshot(history), 10).len(), 2);
+        assert!(
+            recent_turns(snapshot(vec![item(json!({"type":"reasoning"}))]), 10)[0]
+                .items
+                .is_empty()
+        );
     }
 }

@@ -388,6 +388,8 @@ impl TestCampaign {
     ) -> R {
         let campaign = tokio::sync::Mutex::new(Some(self));
         let observation = std::cell::RefCell::new(None);
+        let diagnostics =
+            super::hosted_test_context::HostedTestDiagnostics::root_from_environment();
         let (scenario, cleanup, report_errors) = super::hosted_test_context::settle_scenario(
             async {
                 let mut owner = campaign.lock().await;
@@ -407,11 +409,28 @@ impl TestCampaign {
                 observation.replace(Some(result));
                 settled
             },
-            |_, _| Ok(()),
+            |scenario, cleanup| match &diagnostics {
+                Ok(Some(root)) => {
+                    super::hosted_test_context::HostedTestDiagnostics::report_model_free(
+                        root,
+                        scenario,
+                        cleanup,
+                        observation
+                            .borrow()
+                            .as_ref()
+                            .map(|outcome| format!("{outcome:?}")),
+                    )
+                }
+                Ok(None) => Ok(()),
+                Err(error) => Err(error.clone()),
+            },
         )
         .await;
         if let Err(error) = &cleanup {
             eprintln!("model-free campaign cleanup failed: {error}");
+        }
+        for error in &report_errors {
+            eprintln!("model-free campaign outcome reporting failed: {error}");
         }
         let result = match scenario {
             Ok(result) => result,
@@ -836,13 +855,19 @@ fn campaign_trace_filter_for(profile: &str) -> tracing_subscriber::EnvFilter {
         "minimal" => {
             "warn,tidepool::actor_host::startup=info,exomonad_harness::timing=debug,\
                       exomonad_actor::request=info,exomonad_actor::workbench_phase=info,\
-                      exomonad::content=off"
+                      tidepool_extract_cmd::endpoint=info,exomonad_actor::resident_tools=info,\
+                      exomonad_actor::call_timing=info,tidepool_runtime::prepared_install=info,\
+                      tidepool_codegen::prepared_compile=info,tidepool_codegen::image_registry=info,\
+                      tidepool_codegen::image_lifetime=info,tidepool_codegen::image_install=info,\
+                      tidepool_runtime::activation_renderer_install=info,exomonad::content=off"
         }
         _ => {
             "warn,tidepool::actor_host::startup=info,tidepool_runtime::compile=info,\
              tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
              exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
-             tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
+             tidepool_codegen::prepared_compile=info,tidepool_codegen::image_registry=info,\
+             tidepool_codegen::image_lifetime=info,tidepool_codegen::image_install=info,\
+             tidepool_runtime::activation_renderer_install=info,tidepool_extract_cmd::endpoint=debug,\
              exomonad_actor::request=info,tidepool_toolchain::module_candidates=debug,\
              tidepool_toolchain::artifacts=info,exomonad_actor::workbench_phase=info,\
              exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,\
@@ -1576,11 +1601,20 @@ mod tests {
             tracing::info!(target: "tidepool_toolchain::artifacts",
                 phase = "exact_immutable_materialization", retained_entries = 2u64);
             tracing::info!(target: "tidepool_runtime::compile", "compiler compilation event");
+            tracing::info!(target: "tidepool_codegen::image_registry", image_entry = 3u64,
+                "native image registry decision");
+            tracing::info!(target: "tidepool_codegen::prepared_compile", functions_defined = 4u64,
+                "prepared compile");
+            tracing::info!(target: "exomonad_actor::call_timing", compile_ms = 5u64,
+                "compiler round timing");
             tracing::info!(target: crate::exomonad::CONTENT_TARGET, source = "private-content");
         });
         let captured = std::fs::read_to_string(path).unwrap();
         assert!(captured.contains("request activation origin issued"));
         assert!(captured.contains("coarse workload timing"));
+        assert!(captured.contains("native image registry decision"));
+        assert!(captured.contains("prepared compile"));
+        assert!(captured.contains("compiler round timing"));
         assert!(!captured.contains("candidate_selection"));
         assert!(!captured.contains("configured_package_owner_wait"));
         assert!(!captured.contains("exact_immutable_materialization"));

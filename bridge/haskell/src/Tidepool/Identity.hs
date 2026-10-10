@@ -5,6 +5,7 @@
 -- canonicalized closed program.
 module Tidepool.Identity
   ( varId
+  , nameSymbolIdentity
   , stableVarId
   , fieldParentDisamb
   , normalizeMod
@@ -27,9 +28,23 @@ import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, occNameString)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Var (Var, varName, varUnique)
-import GHC.Unit.Module (moduleName, moduleNameString)
+import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Types (unitString)
+import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import GHC.Utils.Fingerprint (Fingerprint(..), fingerprintString)
 import qualified Numeric
+
+-- | Preserve the defining owner issued by GHC. A name without an actual
+-- module has no nominal package authority; callers handle local names explicitly.
+nameSymbolIdentity :: Text -> Name -> Maybe SymbolIdentity
+nameSymbolIdentity namespace name = do
+  owner <- nameModule_maybe name
+  pure (SymbolIdentity (T.pack (unitString (moduleUnit owner)))
+    (T.pack (moduleNameString (moduleName owner))) namespace
+    (T.pack (occNameString (nameOccName name)))
+    (if isExternalName name
+       then T.pack . unpackFS <$> fieldOcc_maybe (nameOccName name)
+       else Nothing))
 
 varId :: Var -> Word64
 varId value = case isDataConId_maybe value of

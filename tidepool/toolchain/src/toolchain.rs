@@ -638,12 +638,6 @@ impl AdmittedCompilerEndpoint {
     pub fn deployment(&self) -> &AdmittedCompilerDeployment {
         &self.deployment
     }
-    pub fn execute(
-        self,
-        command: &tidepool_extract_cmd::ExtractCmd,
-    ) -> Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError> {
-        self.endpoint.execute(command)
-    }
     /// Retain exact input descriptors with the existing compiler owner. Local
     /// uncertainty preserves the completed action and close evidence together.
     /// The sink must outlive an unwinding standalone invocation; scoped work

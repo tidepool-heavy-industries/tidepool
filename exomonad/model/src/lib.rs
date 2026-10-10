@@ -274,19 +274,26 @@ pub enum TurnItem {
     },
 }
 
-/// One COMPLETED provider turn and the items belonging to it, in provider
-/// order.
-///
-/// A turn is the provider's own unit: one request and everything the model
-/// did in answering it. This is distinct from a [`Message`], since one turn
-/// holds several messages and their tool traffic. A turn still in progress
-/// has no completed form and is never represented here.
+/// What the provider history owner has recorded for one model response.
+/// Missing timestamps never determine this state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConversationTurnState {
+    InProgress,
+    Completed {
+        provider_response_id: Option<String>,
+    },
+    Interrupted,
+    /// Retained history has no observation of the original model response.
+    Unknown,
+}
+
+/// One model request and its recorded messages and tool activity, in order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationTurn {
-    /// The provider's own turn identifier.
+    /// Stable runtime request identity; distinct from a provider response ID.
     pub turn: String,
-    /// When the provider opened and closed the turn, as it recorded them.
-    /// Absent means the record carried no timestamp, not an instant zero.
+    pub state: ConversationTurnState,
+    /// Recorded timestamps, when available. Absence does not imply progress.
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub items: Vec<TurnItem>,

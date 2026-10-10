@@ -31,6 +31,18 @@ struct Observations {
     first_child_launch_executions: Option<String>,
     installs: HashMap<String, (BTreeMap<String, String>, usize)>,
     installer_phases: HashMap<String, (BTreeMap<String, String>, Vec<BTreeMap<String, String>>)>,
+    renderer_installs: HashMap<String, Vec<RendererInstall>>,
+    renderer_bundles: HashMap<String, Vec<BTreeMap<String, String>>>,
+    native_images: HashMap<u64, BTreeMap<String, String>>,
+    native_image_observations: HashMap<u64, usize>,
+}
+
+struct RendererInstall {
+    fields: BTreeMap<String, String>,
+    native_compiles: Vec<BTreeMap<String, String>>,
+    published_images: HashSet<u64>,
+    native_compilations_before: u64,
+    native_compilations_after: Option<u64>,
 }
 
 struct ChildLaunch {
@@ -67,7 +79,22 @@ where
         let mut fields = Fields::default();
         attributes.record(&mut fields);
         let span = context.span(id).expect("observed registered span");
-        if attributes.metadata().name() == "compiled_spec_install" {
+        if attributes.metadata().name() == "activation_renderer_install" {
+            let session = fields.0["session"].clone();
+            span.extensions_mut().insert(fields.clone());
+            self.observations
+                    .lock()
+                    .renderer_installs
+                    .entry(session)
+                    .or_default()
+                    .push(RendererInstall {
+                            fields: fields.0,
+                            native_compiles: Vec::new(),
+                            published_images: HashSet::new(),
+                            native_compilations_before: tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
+                            native_compilations_after: None,
+                        });
+        } else if attributes.metadata().name() == "compiled_spec_install" {
             let actor = fields.0["actor"].clone();
             span.extensions_mut().insert(fields.clone());
             assert!(
@@ -100,10 +127,88 @@ where
         }
     }
 
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+    fn on_close(&self, id: tracing::span::Id, context: tracing_subscriber::layer::Context<'_, S>) {
+        let span = context.span(&id).expect("closing registered span");
+        if span.name() == "activation_renderer_install" {
+            let session = span
+                .extensions()
+                .get::<Fields>()
+                .expect("renderer correlation fields")
+                .0["session"]
+                .clone();
+            self.observations
+                .lock()
+                .renderer_installs
+                .get_mut(&session)
+                .expect("renderer invocation precedes its close")
+                .last_mut()
+                .expect("registered renderer invocation")
+                .native_compilations_after = Some(
+                tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(
+                ),
+            );
+        }
+    }
+
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
         let mut fields = Fields::default();
         event.record(&mut fields);
         let mut state = self.observations.lock();
+        if event.metadata().target() == "tidepool_codegen::prepared_compile"
+            && fields.0.contains_key("image_instance")
+        {
+            let image = fields.0["image_instance"].parse().unwrap();
+            *state.native_image_observations.entry(image).or_default() += 1;
+            state.native_images.insert(image, fields.0.clone());
+        }
+        if event.metadata().target() == "tidepool_runtime::activation_renderer"
+            && fields.0.get("outcome").map(String::as_str) == Some("native_image")
+        {
+            state
+                .renderer_bundles
+                .entry(fields.0["bundle_target"].clone())
+                .or_default()
+                .push(fields.0.clone());
+        }
+        if let Some(scope) = context.event_scope(event) {
+            for ancestor in scope {
+                if ancestor.name() == "activation_renderer_install" {
+                    let session = ancestor
+                        .extensions()
+                        .get::<Fields>()
+                        .expect("renderer correlation fields")
+                        .0["session"]
+                        .clone();
+                    let install = state
+                        .renderer_installs
+                        .get_mut(&session)
+                        .expect("renderer invocation precedes its native events")
+                        .last_mut()
+                        .expect("registered renderer invocation");
+                    match event.metadata().target() {
+                        "tidepool_codegen::prepared_compile"
+                            if fields.0.contains_key("image_instance") =>
+                        {
+                            install.native_compiles.push(fields.0.clone());
+                        }
+                        "tidepool_codegen::image_install"
+                            if fields.0.get("outcome").map(String::as_str)
+                                == Some("machine_published") =>
+                        {
+                            install
+                                .published_images
+                                .insert(fields.0["image_instance"].parse().unwrap());
+                        }
+                        _ => {}
+                    }
+                    break;
+                }
+            }
+        }
         if fields.0.contains_key("compile_request")
             && fields.0.contains_key("request_ordinal")
             && event.metadata().target() == "tidepool_extract_cmd::endpoint"
@@ -374,20 +479,95 @@ async fn production_builtin_toolset_immediate_and_durable_launches_are_fresh() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires exclusive matched compiler daemon and prepared root entry"]
 async fn production_prepared_toolset_one_child_executes_original_native_probe() {
-    prepared_children_execute_original_native_probe(1).await;
+    prepared_children_execute_original_native_probe(
+        1,
+        true,
+        super::hosted_test_context::HostedChildMachines::Shared,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires exclusive matched compiler daemon and prepared root entry"]
 async fn production_prepared_toolset_twenty_children_execute_original_native_probe() {
-    prepared_children_execute_original_native_probe(20).await;
+    prepared_children_execute_original_native_probe(
+        20,
+        true,
+        super::hosted_test_context::HostedChildMachines::Shared,
+    )
+    .await;
 }
 
-async fn prepared_children_execute_original_native_probe(expected_children: usize) {
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires exclusive matched compiler daemon; source preparation is included"]
+async fn source_prepared_toolset_two_children_share_distinct_native_renderer_inputs() {
+    prepared_children_execute_original_native_probe(
+        2,
+        false,
+        super::hosted_test_context::HostedChildMachines::Dedicated,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires exclusive matched compiler daemon; source preparation is included"]
+async fn source_prepared_toolset_two_children_share_native_renderer_in_parent_machine() {
+    prepared_children_execute_original_native_probe(
+        2,
+        false,
+        super::hosted_test_context::HostedChildMachines::Shared,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires exclusive matched compiler daemon and prepared root entry"]
+async fn production_prepared_toolset_twenty_distinct_machines_execute_original_native_probe() {
+    prepared_children_execute_original_native_probe(
+        20,
+        true,
+        super::hosted_test_context::HostedChildMachines::Dedicated,
+    )
+    .await;
+}
+
+fn activation_assignment(request: &harness::transport::ResponsesRequest) -> &str {
+    let previews = request
+        .input
+        .iter()
+        .filter(|item| item.0["role"] == "user")
+        .filter_map(|item| item.0["content"].as_str())
+        .filter_map(|text| {
+            let (_, assignment) =
+                text.split_once("\n\nAssignment (available as `sessionInput :: ")?;
+            let (_, preview) = assignment.split_once("):\n\n")?;
+            Some(
+                preview
+                    .split_once("\n\nReturn with `respond`")
+                    .expect("actual activation message contains its reply contract")
+                    .0
+                    .trim(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        previews.len(),
+        1,
+        "one actual provider-visible activation assignment: {:?}",
+        request.input
+    );
+    previews[0]
+}
+
+async fn prepared_children_execute_original_native_probe(
+    expected_children: usize,
+    frozen_entry: bool,
+    child_machines: super::hosted_test_context::HostedChildMachines,
+) {
     let mut progress = Progress::new(expected_children);
     progress.report();
     assert!(
-        std::env::var_os("TIDEPOOL_PREPARED_ROOT_ENTRY").is_some(),
+        !frozen_entry || std::env::var_os("TIDEPOOL_PREPARED_ROOT_ENTRY").is_some(),
         "the campaign must select its matched bundle-owned fixed driver"
     );
     let socket = std::path::PathBuf::from(
@@ -408,40 +588,51 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
     tracing_subscriber::registry()
         .with(observations.clone())
         .with(tracing_subscriber::fmt::layer().json().with_ansi(false))
-        .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,tidepool::actor_host::startup=info,tidepool_runtime::prepared_install=info,tidepool_codegen::prepared_compile=info"))
+        .with(tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::endpoint=info,exomonad_actor::workbench_phase=info,tidepool::actor_host::startup=info,tidepool_runtime::prepared_install=info,tidepool_runtime::activation_renderer=info,tidepool_runtime::session::resident=info,tidepool_codegen::prepared_compile=info,tidepool_codegen::image_install=info"))
         .try_init().expect("one isolated measurement process owns its subscriber");
     let settings = hosted_test_settings(&files, 2);
     let authored_settings = settings.clone();
     let quotation_input = input.clone();
     let (provider, mut requests) = hosted_script_provider();
-    let host = HostedTestRuntime::start_prepared_configured(&settings, &provider, move |config| {
-        let authored = config.workspace.join(".exomonad");
-        std::fs::create_dir_all(&authored).unwrap();
-        std::fs::write(
-            authored.join("QuotedProvider.hs"),
-            tidepool_testing::fixture_source(
-                "exomonad/actor/src/fixtures/quoted-agent-provider.hs",
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            authored.join("PreparedRuntimeSpec.hs"),
-            tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host/prepared_runtime_spec.hs",
+    let host = HostedTestRuntime::start_prepared_configured_with_child_machines(
+        &settings,
+        &provider,
+        move |config| {
+            let authored = config.workspace.join(".exomonad");
+            std::fs::create_dir_all(&authored).unwrap();
+            std::fs::write(
+                authored.join("QuotedProvider.hs"),
+                tidepool_testing::fixture_source(
+                    "exomonad/actor/src/fixtures/quoted-agent-provider.hs",
+                ),
             )
-            .replace("{quotation-input}", quotation_input.to_str().unwrap()),
-        )
-        .unwrap();
-        crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-            project.launch.embedded = Some(authored_settings);
-            project.haskell.source_roots = vec![".".into()];
-            project.haskell.modules = vec!["PreparedRuntimeSpec".into()];
-            project.haskell.spec = Some("PreparedRuntimeSpec.agentSpec".into());
-        });
-        commit_workspace(&config.workspace);
-    })
+            .unwrap();
+            std::fs::write(
+                authored.join("PreparedRuntimeSpec.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/prepared_runtime_spec.hs",
+                )
+                .replace("{quotation-input}", quotation_input.to_str().unwrap()),
+            )
+            .unwrap();
+            crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+                project.launch.embedded = Some(authored_settings);
+                project.haskell.source_roots = vec![".".into()];
+                project.haskell.modules = vec!["PreparedRuntimeSpec".into()];
+                project.haskell.spec = Some("PreparedRuntimeSpec.agentSpec".into());
+            });
+            commit_workspace(&config.workspace);
+        },
+        child_machines,
+    )
     .await
     .expect("actual production preparation and selected deployment start the host");
+    let root_session = host
+        .context
+        .forest
+        .actor_session(host.context.actor.identity())
+        .expect("the root owns its issued machine session")
+        .to_string();
     host.run_scenario(|host| Box::pin(async move {
         let scenario = async move {
         {
@@ -506,6 +697,9 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         parent_round.call("prepared-children", &children_source);
         let mut children = HashSet::new();
         let mut scopes = HashSet::new();
+        let mut machine_sessions = HashSet::new();
+        let mut preview_bindings = HashSet::new();
+        let mut shared_renderer_images = None;
         let mut rows = Vec::new();
         for ordinal in 1..=expected_children {
             let label = format!("prepared-child-{ordinal}");
@@ -525,6 +719,10 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             let binding = host.context.binding(child.actor).expect("production child attachment");
             let conversation = binding.conversation().unwrap();
             assert_eq!(conversation.identity(), &round.host_identity());
+            let expected_preview = format!("prepared-preview-{ordinal}");
+            let actual_preview = activation_assignment(&round.request).to_owned();
+            assert_eq!(actual_preview, expected_preview,
+                "the actual child's request must display its own distinct native input");
             let installed = host.context.observer.installation(child.actor).await;
             progress.observed_installations += 1;
             let (elapsed, compiler_requests, installer_details, installer_compiler_requests, details, launch_executions, first_launch_executions) = {
@@ -541,6 +739,41 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
                     state.first_child_launch_executions.clone().expect("the first actual child launch was observed"))
             };
             assert!(scopes.insert(details["installation_scope"].clone()), "fresh installation heap scope");
+            let session = details["session"].clone();
+            let new_machine = machine_sessions.insert(session.clone());
+            if child_machines == super::hosted_test_context::HostedChildMachines::Dedicated {
+                assert!(new_machine, "fresh issued child machine session");
+                assert_ne!(session, root_session, "dedicated children use a machine independent of their parent");
+            } else {
+                assert_eq!(session, root_session, "the production default retains its shared parent machine");
+            }
+            let renderer = {
+                let state = observations.observations.lock();
+                let renderer = state.renderer_installs.get(&session)
+                    .expect("this child's issued machine executed its renderer")
+                    .last().expect("actual renderer invocation");
+                assert!(renderer.native_compiles.is_empty(), "native construction during a fresh renderer installation: {:?}", renderer.native_compiles);
+                assert_eq!(renderer.native_compilations_after, Some(renderer.native_compilations_before), "successful native construction count must remain unchanged throughout the actual renderer invocation");
+                assert!(preview_bindings.insert((session, renderer.fields["binding"].clone())), "fresh input binding authority");
+                let images: Vec<u64> = serde_json::from_str(&renderer.fields["native_images"]).unwrap();
+                assert!(!images.is_empty(), "a renderable invocation retains its native target");
+                for image in &images {
+                    assert_eq!(state.native_image_observations.get(image), Some(&1), "each retained image has one actual successful construction");
+                }
+                assert!(renderer.published_images.contains(&images[0]), "the target actually installed on this child machine");
+                assert!(renderer.published_images.iter().all(|image| images.contains(image)), "every installed renderer image belongs to its retained complete bundle");
+                let bundle = &state.renderer_bundles[&images[0].to_string()];
+                assert_eq!(bundle.iter().map(|image| image["image_instance"].parse::<u64>().unwrap()).collect::<Vec<_>>(), images, "prepared custody includes the exact complete image set used for installation");
+                assert!(bundle.iter().any(|image| image["role"] == "source"), "the fixture exercises original home-source code custody");
+                assert!(bundle.iter().filter(|image| image["role"] == "source").any(|image| state.native_images[&image["image_instance"].parse::<u64>().unwrap()]["literal_storage_entries"].parse::<usize>().unwrap() > 0), "the original home-source image owns actual literal storage");
+                assert!(images.iter().any(|image| state.native_images[image]["constructors"].parse::<usize>().unwrap() > 0), "the complete retained bundle owns actual constructor declarations");
+                let custody = images.iter().map(|image| state.native_images[image].clone()).collect::<Vec<_>>();
+                match &shared_renderer_images {
+                    Some(shared) => assert_eq!(&images, shared, "independent child machines reuse every retained native image"),
+                    None => shared_renderer_images = Some(images),
+                }
+                (renderer.fields.clone(), custody)
+            };
             progress.distinct_installation_scopes = scopes.len();
             progress.compiler_requests_during_setup += compiler_requests.len();
             progress.compiler_requests_during_installers += installer_compiler_requests.len();
@@ -602,6 +835,8 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
                     "first_provider_turn":current_executions.lines().count(),
                     "native_reply":replied_executions.lines().count()},
                 "native_reply_accepted":true,"producer":endpoint.producer_hex()});
+            let mut row = row;
+            row["activation_preview"] = serde_json::json!({"expected":expected_preview,"actual":actual_preview,"provider_visible_match":true,"machine_placement":format!("{child_machines:?}"),"renderer":renderer.0,"native_image_custody":renderer.1,"native_compilations_during_install":0});
             eprintln!("prepared-runtime-child {row}");
             rows.push(row);
         }
@@ -619,6 +854,9 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         assert_eq!(progress.compiler_requests_during_installers, 0);
         assert_eq!(observations.observations.lock().installer_phases.len(), expected_children);
         assert_eq!(scopes.len(), children.len());
+        assert_eq!(machine_sessions.len(), if child_machines == super::hosted_test_context::HostedChildMachines::Dedicated { children.len() } else { 1 });
+        assert_eq!(preview_bindings.len(), children.len());
+        assert_eq!(observations.observations.lock().renderer_bundles.len(), 1, "one complete shared native preparation serves all child machines");
         assert_eq!(std::fs::read_to_string(input.with_extension("executions")).unwrap(), prepared_executions,
             "supplied child specs retain original prepared values without replaying external input42");
         progress.quotation_execution_unchanged = true;

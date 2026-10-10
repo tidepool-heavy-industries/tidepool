@@ -322,6 +322,8 @@ impl SourceInstanceLease {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DemandError {
+    #[error("exact prepared native image is unavailable")]
+    MissingPreparedNativeImage,
     #[error("source module {unit}:{module} at {version:?} has conflicting product owners")]
     ConflictingOwner {
         unit: String,
@@ -673,6 +675,43 @@ impl DemandedImage {
         packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
         sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
     ) -> Result<Self, DemandError> {
+        let literals = Self::select_literals(&group, packages, sources)?;
+        let image =
+            registry.get_or_compile_literal_group(&group.code_identity(), &literals, || {
+                CompiledProgram::compile_certified_group_with_literals(&group, &literals)
+                    .map(Arc::new)
+            })?;
+        Ok(Self {
+            group,
+            image,
+            demand: None,
+        })
+    }
+
+    /// Resolve an already prepared image with the ordinary literal selector.
+    /// An unavailable exact key is refused without joining or creating a flight.
+    pub fn lookup_with_literals(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+    ) -> Result<Self, DemandError> {
+        let literals = Self::select_literals(&group, packages, sources)?;
+        let image = registry
+            .lookup_literal_group(&group.code_identity(), &literals)
+            .ok_or(DemandError::MissingPreparedNativeImage)?;
+        Ok(Self {
+            group,
+            image,
+            demand: None,
+        })
+    }
+
+    fn select_literals(
+        group: &CertifiedGroup,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+    ) -> Result<super::package_literals::GroupPackageLiterals, CompileError> {
         let literals =
             super::package_literals::GroupPackageLiterals::select(&group, packages, sources)
                 .map_err(|mut error| {
@@ -684,14 +723,7 @@ impl DemandedImage {
                     }
                     error
                 })?;
-        let image = registry.get_or_compile_literal_group(&group, &literals, || {
-            CompiledProgram::compile_certified_group_with_literals(&group, &literals).map(Arc::new)
-        })?;
-        Ok(Self {
-            group,
-            image,
-            demand: None,
-        })
+        Ok(literals)
     }
 
     pub fn domain(&self) -> SourceInstanceDomain {
@@ -1149,6 +1181,57 @@ mod tests {
             inventory.seal([source("a")]),
             Err(DemandError::MissingSource(missing)) if missing == source("missing")
         ));
+    }
+
+    #[test]
+    fn native_group_preparation_needs_no_retained_runtime_owner() {
+        let mut wire = testing::wire_program();
+        let binder = testing::identity("Fixture", "historical");
+        wire.globals.push(GlobalDecl {
+            identity: binder,
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: Some(7),
+        });
+        let owner = CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        };
+        let projected = testing::projected_group(wire, 9).unwrap();
+        let code = tidepool_repr::execution_schema::CertifiedGroupCode::admit(
+            owner.clone(),
+            projected.clone(),
+        )
+        .unwrap();
+        let registry = ImageRegistry::new();
+        let native = CompiledProgram::prepare_group_code(
+            &code,
+            &[None],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &registry,
+        )
+        .unwrap();
+        for id in [17, 81] {
+            let scoped = CertifiedGroup::admit(
+                owner.clone(),
+                projected.clone(),
+                vec![ImportOwner::Retained {
+                    id: tidepool_repr::SessionVarId::from_extract(id),
+                    generation: 7,
+                }],
+            )
+            .unwrap();
+            let installed_plan = DemandedImage::compile(scoped, &registry).unwrap();
+            assert!(
+                Arc::ptr_eq(&native, installed_plan.image()),
+                "fresh retained owner identity affects installation, not native code"
+            );
+        }
     }
 
     #[test]

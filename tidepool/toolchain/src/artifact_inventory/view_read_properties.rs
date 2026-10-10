@@ -3,7 +3,10 @@
 //! the inventory graph again.
 use super::*;
 use proptest::prelude::*;
-use proptest::test_runner::{FileFailurePersistence, TestCaseError};
+use proptest::test_runner::{
+    contextualize_config, FileFailurePersistence, TestCaseError, TestRunner,
+};
+use std::cell::RefCell;
 use std::sync::{mpsc, Barrier};
 use std::time::Duration;
 
@@ -11,6 +14,7 @@ const OWNERS: usize = 5;
 
 struct Catalog {
     entries: Vec<ArtifactEntry>,
+    dependency_facts: [u8; OWNERS],
 }
 
 impl Catalog {
@@ -63,11 +67,259 @@ impl Catalog {
                 BTreeMap::new(),
             ),
         ));
-        Self { entries }
+        Self {
+            entries,
+            dependency_facts: *masks,
+        }
     }
 
     fn owner(&self, index: usize) -> ExactModuleIdentity {
         self.entries[index].descriptor.owner.clone()
+    }
+}
+
+// This oracle starts from issued fixture operands, not the graph whose edge
+// construction and cached getters are being checked. Logical indices are kept
+// independent of production graph slots and content-id ordering.
+fn check_constructed_projection(
+    view: &ArtifactView,
+    catalog: &Catalog,
+    roots: &BTreeSet<usize>,
+) -> Result<(), TestCaseError> {
+    let mut reachable = roots.clone();
+    loop {
+        let prior = reachable.len();
+        let next: Vec<_> = reachable
+            .iter()
+            .flat_map(|source| {
+                (0..OWNERS).filter(move |target| {
+                    *source != *target && catalog.dependency_facts[*source] & (1 << target) != 0
+                })
+            })
+            .collect();
+        reachable.extend(next);
+        if reachable.len() == prior {
+            break;
+        }
+    }
+    let ids: BTreeSet<_> = reachable
+        .iter()
+        .map(|i| catalog.entries[*i].descriptor.id)
+        .collect();
+    let expected_roots: BTreeSet<_> = roots
+        .iter()
+        .map(|i| catalog.entries[*i].descriptor.id)
+        .collect();
+    let expected_edges: BTreeSet<_> = reachable
+        .iter()
+        .flat_map(|source| {
+            reachable.iter().filter_map(move |target| {
+                (*source != *target && catalog.dependency_facts[*source] & (1 << target) != 0)
+                    .then_some((
+                        catalog.entries[*source].descriptor.id,
+                        catalog.entries[*target].descriptor.id,
+                        ArtifactDependency::Interface,
+                    ))
+            })
+        })
+        .collect();
+    prop_assert_eq!(
+        view.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+        ids.clone()
+    );
+    prop_assert_eq!(
+        view.root_entries()
+            .into_iter()
+            .map(|entry| entry.descriptor.id)
+            .collect::<BTreeSet<_>>(),
+        expected_roots
+    );
+    prop_assert_eq!(
+        view.dependencies().into_iter().collect::<BTreeSet<_>>(),
+        expected_edges.clone()
+    );
+    let metadata = view.metadata_snapshot();
+    prop_assert_eq!(
+        metadata.artifacts.keys().copied().collect::<BTreeSet<_>>(),
+        ids
+    );
+    prop_assert_eq!(
+        metadata.dependencies().into_iter().collect::<BTreeSet<_>>(),
+        expected_edges
+    );
+    let selected: BTreeMap<_, _> = metadata
+        .entries
+        .iter()
+        .map(|(owner, entry)| (owner.clone(), entry.descriptor.id))
+        .collect();
+    let expected: BTreeMap<_, _> = reachable
+        .iter()
+        .map(|i| {
+            let descriptor = &catalog.entries[*i].descriptor;
+            (descriptor.owner.clone(), descriptor.id)
+        })
+        .collect();
+    prop_assert_eq!(selected, expected);
+    Ok(())
+}
+
+#[derive(Default, Debug)]
+struct ConstructionCoverage {
+    callbacks: usize,
+    completed_histories: usize,
+    eager_reads: usize,
+    delayed_first_reads: usize,
+    sparse_reads: usize,
+    reclaimed_slot_reuses: usize,
+}
+
+fn construction_history(
+    catalog: &Catalog,
+    root_mask: u8,
+    read_schedule: &[bool; 5],
+    coverage: &mut ConstructionCoverage,
+) -> Result<(), TestCaseError> {
+    let inventory = ArtifactInventory::default();
+    let all = inventory
+        .admit(&inventory.empty_view(), catalog.entries[..OWNERS].to_vec())
+        .unwrap();
+    let all_roots: BTreeSet<_> = (0..OWNERS).collect();
+    if read_schedule[0] {
+        check_constructed_projection(&all, catalog, &all_roots)?;
+    }
+    let roots: BTreeSet<_> = (0..OWNERS - 1)
+        .filter(|i| root_mask & (1 << i) != 0)
+        .chain([0])
+        .collect();
+    let peer = all
+        .select_roots(
+            roots
+                .iter()
+                .map(|i| catalog.entries[*i].descriptor.id)
+                .collect(),
+        )
+        .unwrap();
+    if read_schedule[1] {
+        check_constructed_projection(&peer, catalog, &roots)?;
+    }
+    let alias = peer.clone();
+    if read_schedule[2] {
+        check_constructed_projection(&alias, catalog, &roots)?;
+    }
+    let branch_roots = BTreeSet::from([OWNERS - 2]);
+    let branch = all
+        .select_roots(vec![catalog.entries[OWNERS - 2].descriptor.id])
+        .unwrap();
+    let merged = peer.merge(&branch).unwrap();
+    let merged_roots = roots.union(&branch_roots).copied().collect::<BTreeSet<_>>();
+    if read_schedule[3] {
+        check_constructed_projection(&merged, catalog, &merged_roots)?;
+    }
+    // The merged output has not served any production consumer. It can stay
+    // cold while its parents retire and an unrelated graph slot is reclaimed.
+    let cold = merged.reads.read_projection.get().is_none();
+    if read_schedule == &[false; 5] {
+        prop_assert!(
+            cold,
+            "delayed output must remain cold until its first checked read"
+        );
+    }
+    let retired = inventory.0.lock().unwrap().indices
+        [&InventoryNodeKey::Artifact(catalog.entries[OWNERS - 1].descriptor.id)];
+    drop(all);
+    drop(branch);
+    drop(alias);
+    let unrelated = inventory
+        .admit(&peer, vec![catalog.entries[OWNERS + 1].clone()])
+        .unwrap();
+    let reused = inventory.0.lock().unwrap().indices
+        [&InventoryNodeKey::Artifact(catalog.entries[OWNERS + 1].descriptor.id)];
+    prop_assert_eq!(
+        reused,
+        retired,
+        "guided history must actually reuse the retired graph slot"
+    );
+    coverage.reclaimed_slot_reuses += 1;
+    if read_schedule[4] {
+        check_constructed_projection(&peer, catalog, &roots)?;
+    }
+    check_constructed_projection(&merged, catalog, &merged_roots)?;
+    check_constructed_projection(&peer, catalog, &roots)?;
+    coverage.delayed_first_reads += usize::from(cold);
+    drop(unrelated);
+    drop(peer);
+    drop(merged);
+    prop_assert_eq!(inventory.node_count(), 0);
+    Ok(())
+}
+
+#[test]
+fn constructed_projection_matches_issued_facts_with_delayed_and_eager_reads() {
+    let mut config = contextualize_config(property_config());
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::constructed_projection_matches_issued_facts_with_delayed_and_eager_reads"
+    ));
+    let configured_cases = config.cases;
+    let coverage = RefCell::new(ConstructionCoverage::default());
+    let initial_failure = RefCell::new(None);
+    let strategy = (
+        any::<[u8; OWNERS]>(),
+        1u8..=u8::MAX,
+        0u8..16,
+        any::<[bool; 5]>(),
+    );
+    let result =
+        TestRunner::new(config).run(&strategy, |(mut masks, seed, root_mask, schedule)| {
+            coverage.borrow_mut().callbacks += 1;
+            let input = (masks, seed, root_mask, schedule);
+            let outcome = (|| {
+                for mask in &mut masks[..OWNERS - 1] {
+                    *mask &= 15;
+                }
+                masks[OWNERS - 1] = 0;
+                masks[0] |= 1 << 1;
+                masks[1] |= 1 << 2;
+                let catalog = Catalog::new(&masks, seed);
+                prop_assert_eq!(
+                    catalog
+                        .entries
+                        .iter()
+                        .map(|entry| entry.descriptor.id)
+                        .collect::<BTreeSet<_>>()
+                        .len(),
+                    catalog.entries.len()
+                );
+                construction_history(&catalog, root_mask, &[true; 5], &mut coverage.borrow_mut())?;
+                coverage.borrow_mut().eager_reads += 1;
+                construction_history(&catalog, root_mask, &[false; 5], &mut coverage.borrow_mut())?;
+                construction_history(&catalog, root_mask, &schedule, &mut coverage.borrow_mut())?;
+                coverage.borrow_mut().sparse_reads += schedule.iter().filter(|read| **read).count();
+                coverage.borrow_mut().completed_histories += 1;
+                Ok(())
+            })();
+            if outcome.is_err() && initial_failure.borrow().is_none() {
+                *initial_failure.borrow_mut() = Some(input);
+            }
+            outcome
+        });
+    eprintln!(
+        "constructed_read_campaign configured_cases={configured_cases} observed={:?}",
+        coverage.borrow()
+    );
+    eprintln!(
+        "constructed_read_initial_failure={:?} minimized={:?}",
+        initial_failure.borrow(),
+        result
+    );
+    result.unwrap();
+    let observed = coverage.into_inner();
+    if observed.completed_histories > 0 {
+        assert!(
+            observed.delayed_first_reads >= observed.completed_histories,
+            "{observed:?}"
+        );
     }
 }
 

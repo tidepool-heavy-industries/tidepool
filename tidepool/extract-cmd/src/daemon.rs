@@ -4897,11 +4897,17 @@ tidepool-reuse-error: witness failed\n";
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!(target: "tidepool_extract_cmd::daemon", run_id = "minimal",
                 "compiler request started");
+            log_compile_timing(
+                "minimal",
+                "request",
+                b"tidepool-validation {\"schema\":1}\n",
+            );
             tracing::debug!(target: RAW_COMPILER_DETAIL_TARGET, detail = "large payload",
                 "worker timing detail");
         });
         let output = trace.text();
         assert!(output.contains("compiler request started"));
+        assert!(output.contains("tidepool-validation"));
         assert!(!output.contains("worker timing detail"));
         assert!(!output.contains("large payload"));
     }

@@ -118,10 +118,10 @@ runner. The descriptor and command forms are documented in the
 [package guide](../../../build/package/README.md):
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort m1 --output "$M1_EVIDENCE"
 
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort m2 --output "$M2_EVIDENCE" --jobs 3 \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```

@@ -3,6 +3,258 @@ use super::test_campaign::{committed_display_text, dispatch_haskell_script, Test
 use exomonad_actor::{ActorExitKind, ActorTerminal, LocalResidentDeployment};
 use std::time::Duration;
 
+#[tokio::test]
+async fn fresh_context_typed_exit_and_replacement_retain_callable_value() {
+    let campaign = TestCampaign::start_with_child_sessions().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+        let root = campaign.root_installation.policy.clone();
+        let root_id = campaign.actor.identity();
+        let root_session = campaign.forest.actor_session(root_id).unwrap();
+        let installed = dispatch_haskell_script(root.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_callable_exit_setup.hs")).await;
+        assert_eq!(installed["status"], "committed", "{installed}");
+        let predecessor = campaign.forest.inspect_host_graph().into_iter()
+            .find(|node| node.label == "fresh-callable-exit").unwrap();
+        let predecessor_session = campaign.forest.actor_session(predecessor.actor).unwrap();
+        assert_ne!(predecessor_session, root_session, "typed exit crosses actual machines");
+        let replaced = dispatch_haskell_script(root.as_ref(),
+            "callableExitSuccessor <- replaceActor callableExitActor callableExitDefinition").await;
+        assert_eq!(replaced["status"], "committed", "{replaced}");
+        let successor = campaign.forest.inspect_host_graph().into_iter()
+            .find(|node| node.label == "fresh-callable-exit" && node.actor != predecessor.actor).unwrap();
+        let successor_session = campaign.forest.actor_session(successor.actor).unwrap();
+        assert_ne!(successor_session, root_session);
+        assert_ne!(successor_session, predecessor_session, "replacement owns a fresh machine");
+        let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
+        let previous = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(),
+            "previousExit <- awaitExit callableExitActor\ndisplay (case previousExit of { Cancelled _ -> True; _ -> False })")).await;
+        assert_eq!(committed_display_text(&previous), "True", "{previous}");
+        let drained = dispatch_haskell_script(root.as_ref(), "drainActor callableExitSuccessor").await;
+        assert_eq!(drained["status"], "committed", "{drained}");
+        campaign.next_deployment("callable successor retirement", Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::Retired { actor, terminal } if actor == successor.actor => Ok(terminal),
+                other => Err(other),
+            }).await;
+        assert_eq!(campaign.forest.session_state_of(successor_session),
+            tidepool_runtime::session::ResidentSessionState::Gone);
+        let returned = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_callable_exit_read.hs"))).await;
+        assert_eq!(committed_display_text(&returned), "(41, 42, 51, 41, 39)", "{returned}");
+    })).await;
+}
+
+#[tokio::test]
+async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit() {
+    let campaign = TestCampaign::start_with_child_sessions().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+        let root = campaign.root_installation.policy.clone();
+        let root_id = campaign.actor.identity();
+        let root_session = campaign.forest.actor_session(root_id).unwrap();
+        let setup = dispatch_haskell_script(root.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/source_setup.hs")).await;
+        assert_eq!(setup["status"], "committed", "{setup}");
+        let producer = campaign.next_deployment("source producer admission", Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                other => Err(other),
+            }).await;
+        assert_eq!(campaign.forest.actor_session(producer.actor.identity()), Some(root_session),
+            "captured-context producer retains its issuing machine");
+        let first = dispatch_haskell_script(producer.policy.as_ref(),
+            "reportProgress (ProgressNote 1 (+ sessionInput))").await;
+        assert_eq!(first["status"], "committed", "{first}");
+        let installed = dispatch_haskell_script(root.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_result_source_actor.hs")).await;
+        assert_eq!(installed["status"], "committed", "{installed}");
+        let collector = campaign.forest.inspect_host_graph().into_iter()
+            .find(|node| node.label == "ordered-source-collector").unwrap();
+        let collector_session = campaign.forest.actor_session(collector.actor).unwrap();
+        assert_ne!(collector_session, root_session, "source observation crosses actual machines");
+        let published = dispatch_haskell_script(producer.policy.as_ref(),
+            "reportProgress (ProgressNote 2 (* sessionInput))\nreportProgress (ProgressNote 3 (subtract sessionInput))\nrespond (42 :: Int)").await;
+        assert_eq!(published["status"], "replied", "{published}");
+        let settled = dispatch_haskell_script(root.as_ref(),
+            "settled <- watch (Just \"fresh-source-result\") (result answer)").await;
+        assert_eq!(settled["status"], "committed", "{settled}");
+        campaign.next_deployment("source settlement is ready", Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::WatchChanged { notification } if notification.owner == root_id && notification.label == "fresh-source-result" => {
+                    assert_eq!(notification.transition, exomonad_actor::WatchTransition::Ready);
+                    Ok(())
+                }
+                other => Err(other),
+            }).await;
+        let drained = dispatch_haskell_script(root.as_ref(), "drainActor collector").await;
+        assert_eq!(drained["status"], "committed", "{drained}");
+        campaign.next_deployment("source collector retirement", Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::Retired { actor, terminal } if actor == collector.actor => Ok(terminal),
+                other => Err(other),
+            }).await;
+        assert_eq!(campaign.forest.session_state_of(collector_session),
+            tidepool_runtime::session::ResidentSessionState::Gone);
+        let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
+        let collected = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(),
+            "collected <- awaitExit collector\ndisplay (case collected of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False })")).await;
+        assert_eq!(committed_display_text(&collected), "True", "{collected}");
+    })).await;
+}
+
+#[tokio::test]
+async fn fresh_context_callable_reply_survives_retirement_and_request_forget() {
+    let campaign = TestCampaign::start_with_child_sessions().await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let root_session = campaign
+                    .forest
+                    .actor_session(campaign.actor.identity())
+                    .unwrap();
+                let setup_policy = root.clone();
+                let setup = tokio::spawn(async move {
+                    dispatch_haskell_script(
+                        setup_policy.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/fresh_callable_result_setup.hs",
+                        ),
+                    )
+                    .await
+                });
+                let child = campaign
+                    .next_deployment(
+                        "callable child policy installation",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                let child_id = child.actor.identity();
+                let child_session = campaign.forest.actor_session(child_id).unwrap();
+                assert_ne!(
+                    child_session, root_session,
+                    "callable response crosses actual machines"
+                );
+                campaign.acknowledge_native_spawn(&child);
+                let setup = setup.await.unwrap();
+                assert_eq!(setup["status"], "committed", "{setup}");
+                let root_id = campaign.actor.identity();
+                campaign
+                    .next_deployment(
+                        "callable child typed activation",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::SessionReady { activation }
+                                if activation.id.actor() == child_id =>
+                            {
+                                Ok(activation)
+                            }
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                let replied = dispatch_haskell_script(
+                    child.policy.as_ref(),
+                    "respond ((sessionInput + 1 :: Int), (\\n -> n + sessionInput))",
+                )
+                .await;
+                assert_eq!(replied["status"], "replied", "{replied}");
+                campaign
+                    .next_deployment(
+                        "callable watch captures successful settlement",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::WatchChanged { notification }
+                                if notification.owner == root_id
+                                    && notification.label == "fresh-callable-result" =>
+                            {
+                                assert_eq!(
+                                    notification.transition,
+                                    exomonad_actor::WatchTransition::Ready
+                                );
+                                Ok(())
+                            }
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                child
+                    .actor
+                    .shutdown(ActorTerminal {
+                        kind: ActorExitKind::Completed,
+                        summary: "callable result published".into(),
+                        diagnostic: None,
+                    })
+                    .await
+                    .unwrap();
+                campaign
+                    .next_deployment(
+                        "callable child retirement",
+                        Duration::from_secs(120),
+                        |event| match event {
+                            LocalResidentDeployment::Retired { actor, terminal }
+                                if actor == child_id =>
+                            {
+                                Ok(terminal)
+                            }
+                            other => Err(other),
+                        },
+                    )
+                    .await;
+                assert_eq!(
+                    campaign.forest.session_state_of(child_session),
+                    tidepool_runtime::session::ResidentSessionState::Gone
+                );
+                let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let read = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(
+                            root.as_ref(),
+                            &tidepool_testing::fixture_source(
+                                "bridge/facade/src/actor_host/fresh_callable_result_read.hs",
+                            ),
+                        ),
+                    )
+                    .await;
+                assert_eq!(
+                    committed_display_text(&read),
+                    "(42, 42, 51, 42, 39, True, True)",
+                    "{read}"
+                );
+                let released = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(
+                            root.as_ref(),
+                            &tidepool_testing::fixture_source(
+                                "bridge/facade/src/actor_host/fresh_callable_result_release.hs",
+                            ),
+                        ),
+                    )
+                    .await;
+                assert_eq!(
+                    committed_display_text(&released),
+                    "(42, 141, 42, 31, True, True)",
+                    "{released}"
+                );
+            })
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn fresh_context_inherited_response_preserves_value_and_watch_custody() {
+    super::custody_tests::inherited_response_scenario(
+        TestCampaign::start_with_child_sessions().await,
+        true,
+    )
+    .await;
+}
+
 /// A workspace nominal input must keep its original identity while the selected
 /// child compiles its source closure under a narrower invocation effect row.
 #[tokio::test(flavor = "multi_thread")]
@@ -347,6 +599,13 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
             .iter()
             .any(|export| export["identity"]["occurrence"] == "FreshChildNominal")));
 
+    let replied = dispatch_haskell_script(
+        installation.policy.as_ref(),
+        "respond (case sessionInput of FreshParentInput n -> FreshParentReply (n + 1))",
+    )
+    .await;
+    assert_eq!(replied["status"], "replied", "{replied}");
+
     installation
         .actor
         .shutdown(ActorTerminal {
@@ -375,5 +634,15 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         tidepool_runtime::session::ResidentSessionState::Gone,
         "the dedicated child session must be released once its actor retires"
     );
+    let result = campaign
+        .drive_actor_output(
+            &store,
+            dispatch_haskell_script(
+                root.as_ref(),
+                "Right completed <- await (result freshSelectedChild)\ndisplay (case completed of FreshParentReply n -> n)",
+            ),
+        )
+        .await;
+    assert_eq!(committed_display_text(&result), "42", "{result}");
 })).await;
 }

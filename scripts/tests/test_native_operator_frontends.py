@@ -11,6 +11,31 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 class NativeOperatorFrontends(unittest.TestCase):
+    def test_m1_acceptance_selects_descriptor_owner_and_rejects_legacy_pair(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared = root / 'bundle/share/exomonad'
+            shared.mkdir(parents=True)
+            owner = shared / 'qualification.py'
+            owner.write_text("import json, pathlib, sys\n"
+                             "args = sys.argv[1:]\n"
+                             "assert args[0] == 'run'\n"
+                             "pathlib.Path(args[args.index('--output') + 1]).write_text(json.dumps(args))\n")
+            descriptor = shared / 'qualification.json'
+            descriptor.write_text('{}\n')
+            output = root / 'receipt'
+            script = REPO / 'build/testing/run-m1-acceptance.sh'
+            result = subprocess.run(['bash', str(script), str(descriptor), str(output)],
+                                    text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(output.read_text()), ['run', str(descriptor),
+                                                             '--cohort', 'm1', '--output', str(output)])
+            legacy = subprocess.run(['bash', str(script), str(root / 'bundle'),
+                                     str(descriptor), str(root / 'legacy')],
+                                    text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(legacy.returncode, 0)
+            self.assertFalse((root / 'legacy').exists())
+
     def test_main_acceptance_preserves_failure_and_attempts_all_native_owners(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -74,26 +99,34 @@ exit 8
             config = workspace / '.exomonad/config.toml'
             config.write_text('[haskell]\nchecks = ["Project.pass", "Project.fail"]\n')
             bundle = root / 'bundle'
-            owner = bundle / 'share/exomonad/qualification.py'
-            owner.parent.mkdir(parents=True)
+            shared = bundle / 'share/exomonad'
+            shared.mkdir(parents=True)
+            owner = shared / 'qualification.py'
             owner.write_text("""import json, pathlib, sys
 assert sys.argv[1:3] == ['exec', '--report']
 pathlib.Path(sys.argv[3]).write_text(json.dumps(sys.argv[4:]))
 raise SystemExit(9 if sys.argv[-1] == 'Project.fail' else 0)
 """)
-            descriptor = root / 'descriptor'
+            descriptor = shared / 'qualification.json'
+            descriptor.write_text('{}\n')
             reports = root / 'evidence'
             command = ['bash', str(REPO / 'exomonad/scripts/exomonad-check-recipes.sh'),
-                       str(bundle), str(descriptor), str(reports), str(workspace), '2']
+                       str(descriptor), str(reports), str(workspace), '2']
             result = subprocess.run(command, text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 9, result.stdout + result.stderr)
             receipts = [json.loads(path.read_text()) for path in reports.glob('*.process.json')]
             self.assertEqual(len(receipts), 2)
             self.assertTrue(all(receipt[:3] == [str(descriptor), '--', 'check'] for receipt in receipts))
             self.assertEqual({receipt[-1] for receipt in receipts}, {'Project.pass', 'Project.fail'})
+            legacy_reports = root / 'legacy-evidence'
+            legacy = subprocess.run(['bash', str(REPO / 'exomonad/scripts/exomonad-check-recipes.sh'),
+                                     str(bundle), str(descriptor), str(legacy_reports), str(workspace), '2'],
+                                    text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(legacy.returncode, 0)
+            self.assertEqual(list(legacy_reports.glob('*.process.json')), [])
             config.write_text('[haskell]\nchecks = ["Project.pass", "Project.pass"]\n')
             rejected = root / 'rejected'
-            command[4] = str(rejected)
+            command[2] = str(rejected)
             result = subprocess.run(command, text=True, capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(list(rejected.glob('*.process.json')), [])

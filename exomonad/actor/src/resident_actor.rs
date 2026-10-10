@@ -1811,6 +1811,8 @@ fn watch_registration_refusal(error: crate::request::ReplyError) -> String {
             "a request this watch names has an incompatible progress type"
         }
         ReplyError::InvalidReadiness => "this watch's readiness expression is invalid",
+        ReplyError::ReplyResultTypeMismatch => "a request has an incompatible result type",
+        ReplyError::ReplyResultUnavailable => "a request has no admitted result destination",
     };
     format!("watch registration was rejected: {detail}")
 }
@@ -1849,6 +1851,12 @@ fn settlement_refusal(
         }
         ReplyError::InvalidReadiness => {
             format!("request {request} has an invalid readiness expression")
+        }
+        ReplyError::ReplyResultTypeMismatch => {
+            format!("request {request} expects a different result type")
+        }
+        ReplyError::ReplyResultUnavailable => {
+            format!("request {request} has no admitted result destination")
         }
         ReplyError::AlreadySettled => format!("request {request} is already settled"),
         ReplyError::Stale => format!("request {request} is not active for this actor"),
@@ -2790,7 +2798,10 @@ pub struct ResidentKernelBehavior<H, O> {
     after_tool: crate::after_tool::AfterToolLog,
     forest_control: bool,
     pending_program: Option<PendingActorProgram>,
-    pending_reply: Option<crate::RequestId>,
+    pending_reply: Option<crate::request::RequestReplyClaim>,
+    pending_response: Option<Arc<crate::owned_result::OwnedResultSnapshot>>,
+    exit_destination: Option<Arc<crate::owned_result::RequestResultDestination>>,
+    pending_exit: Option<Arc<crate::owned_result::OwnedResultSnapshot>>,
     /// The bounded reply-value preview `stage_request_reply` obtained for
     /// `pending_reply`, if any -- carried to the settlement notice minted
     /// once the resumed continuation settles (`resume`'s `finish_reply`
@@ -3182,7 +3193,7 @@ enum OwnedWorkbenchWait {
     PollExit {
         continuation: ResidentHole,
         target: ActorRef,
-        terminal: Option<ActorTerminal>,
+        terminal: Option<crate::RetainedActorExit>,
     },
     Sleep {
         continuation: ResidentHole,
@@ -3654,6 +3665,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             forest_control: false,
             pending_program: None,
             pending_reply: None,
+            pending_response: None,
+            exit_destination: None,
+            pending_exit: None,
             pending_reply_preview: None,
             pending_cancellation: None,
             suspended_cast: None,
@@ -4933,6 +4947,7 @@ where
                 launch_worktrees,
                 record_workspace,
                 seed,
+                exit_destination,
             } = child;
             let child_session_startup = (descriptor.placement().session
                 != context.placement.session
@@ -5067,6 +5082,7 @@ where
                     launch_worktrees,
                     record_workspace,
                     seed,
+                    exit_destination,
                 },
                 checkpoint_admission,
                 spawn_admission,
@@ -5236,13 +5252,14 @@ where
         &mut self,
         _kernel: &KernelContext,
         context: &ActorSessionContext,
-        request: crate::RequestId,
+        claim: crate::request::RequestReplyClaim,
         result: RootCustody,
         carried_preview: Option<String>,
         _boundary: Option<&tidepool_runtime::session::ContextCheckpointBoundary>,
         _invocation: Option<&InvocationWork>,
         effects: Option<&mut WorkbenchEffectState>,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        let request = claim.request();
         let settled = async {
 
             if self.pending_program.is_some() || self.pending_reply.is_some() {
@@ -5325,7 +5342,7 @@ where
             // program is stabilized.
             self.outstanding_interactive = None;
             self.pending_program = Some(PendingActorProgram { transfer: None, outcome, cleanup: None });
-            self.pending_reply = Some(request);
+            self.pending_reply = Some(claim);
             self.pending_reply_preview = reply_preview;
             if let Some(effects) = effects {
                 self.record_terminal_transfer(effects, request, AcceptedTerminalKind::Reply);
@@ -5746,9 +5763,38 @@ where
                     .map(|observation| {
                         starting_observation(&environment, poll.request, observation)
                     });
+                let (observation, snapshot) = match observation {
+                    Ok(crate::ResponseObservation::Ready) => match environment
+                        .requests
+                        .observe_response_result(context.actor, poll.request)
+                    {
+                        Ok(snapshot) => (Ok(crate::ResponseObservation::Ready), Some(snapshot)),
+                        Err(error) => (Err(error), None),
+                    },
+                    observation => (observation, None),
+                };
                 environment
                     .runner
-                    .resume_response_observation(context.clone(), poll.continuation, observation)
+                    .resume_response_observation(
+                        context.clone(),
+                        poll.continuation,
+                        observation,
+                        snapshot,
+                    )
+                    .await
+            }),
+            ResidentActorBoundary::WatchResponsePoll {
+                continuation,
+                watch,
+                path,
+                node,
+            } => Box::pin(async move {
+                let observation = environment
+                    .requests
+                    .observe_watch_snapshot_response(watch, &path, node);
+                environment
+                    .runner
+                    .resume_watch_response(context.clone(), continuation, observation)
                     .await
             }),
             ResidentActorBoundary::ProgressPoll(poll) => Box::pin(async move {
@@ -6479,16 +6525,17 @@ where
             ResidentActorBoundary::Wait(wait) => Box::pin(async move {
                 let target = self.capture_exit_target(kernel, &effect_owner, wait.target)?;
                 self.record_child_observation(wait.target);
-                let terminal = target.wait().await;
+                target.wait().await;
                 self.environment
                     .runner
-                    .resume_terminal(context.clone(), wait.continuation, terminal)
+                    .resume_terminal(context.clone(), wait.continuation, target)
                     .await
             }),
             ResidentActorBoundary::Poll(poll) => Box::pin(async move {
                 let terminal = kernel
                     .resolve(poll.target)
-                    .and_then(|target| target.terminal().get());
+                    .map(|target| target.terminal().clone())
+                    .filter(|terminal| terminal.get().is_some());
                 let observed = terminal.is_some();
                 let outcome = self
                     .environment
@@ -6702,6 +6749,21 @@ where
                         )
                         .await;
                 }
+                if let Err(error) = self.environment.requests.admit_result_destination(
+                    context.actor,
+                    submission.request,
+                    submission.destination,
+                ) {
+                    return self
+                        .environment
+                        .runner
+                        .resume_value(
+                            context.clone(),
+                            submission.continuation,
+                            Err::<(), _>(RequestError::RequestSubmissionRejected(error)),
+                        )
+                        .await;
+                }
                 let request_deadline = submission
                     .deadline
                     .map(crate::request::ActiveRequestDeadline::start)
@@ -6791,6 +6853,62 @@ where
                         .await;
                     outcome
                 }
+            }),
+            ResidentActorBoundary::ExitPublication {
+                continuation,
+                value,
+            } => Box::pin(async move {
+                let destination = self.exit_destination.clone().ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "typed exit publication has no admitted destination".into(),
+                    )
+                })?;
+                if self.pending_exit.is_some() {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "actor published its exit twice".into(),
+                    ));
+                }
+                self.pending_exit = Some(
+                    self.environment
+                        .runner
+                        .incorporate_result(context.placement.session, value, destination)
+                        .await?,
+                );
+                self.environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
+            }),
+            ResidentActorBoundary::ResponsePublication {
+                continuation,
+                request,
+                value,
+            } => Box::pin(async move {
+                let destination = self
+                    .pending_reply
+                    .as_ref()
+                    .filter(|claim| claim.request() == request)
+                    .map(crate::request::RequestReplyClaim::destination)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "response publication does not belong to the accepted reply".into(),
+                        )
+                    })?;
+                if self.pending_response.is_some() {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "reply wrapper published its response twice".into(),
+                    ));
+                }
+                self.pending_response = Some(
+                    self.environment
+                        .runner
+                        .incorporate_result(context.placement.session, value, destination)
+                        .await?,
+                );
+                self.environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
             }),
             ResidentActorBoundary::ProgressPublication {
                 continuation,
@@ -7017,6 +7135,30 @@ where
                 .await?
             {
                 ResidentActorBoundary::Completed => {
+                    if self.exit_destination.is_some() {
+                        let result = self.pending_exit.take().ok_or_else(|| {
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "typed actor completed without publishing its exit".into(),
+                            )
+                        })?;
+                        let retained = kernel.retained_exit();
+                        match retained
+                            .claim_before_shutdown(|| retained.retain_result(result).is_ok())
+                        {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "typed exit already settled".into(),
+                                ));
+                            }
+                            Err(terminal) => {
+                                return Ok(KernelStep::Stop {
+                                    output: (),
+                                    terminal,
+                                });
+                            }
+                        }
+                    }
                     self.active_input = None;
                     self.set_standing(context.actor, ResidentStanding::Terminal);
                     return Ok(KernelStep::Stop {
@@ -8877,7 +9019,7 @@ where
                             .requests
                             .begin_reply(context.actor, attempt.request)
                         {
-                            Ok(()) => {
+                            Ok(claim) => {
                                 current.inflight_effect = None;
                                 record_workbench_operation(
                                     unit.operations,
@@ -8891,6 +9033,7 @@ where
                                 );
                                 return Ok(FragmentAdvance::Settled(
                                     ResidentWorkbenchStep::Replied {
+                                        claim,
                                         request: attempt.request,
                                         result: attempt.result,
                                         preview: attempt.preview,
@@ -10141,7 +10284,8 @@ where
                         )));
                     }
                     ResidentWorkbenchStep::Replied {
-                        request: request_id,
+                        claim,
+                        request: _,
                         result,
                         preview,
                     } => {
@@ -10150,7 +10294,7 @@ where
                         self.stage_request_reply(
                             kernel,
                             context,
-                            request_id,
+                            claim,
                             result,
                             preview,
                             publication_boundary.as_ref(),
@@ -10560,9 +10704,14 @@ where
                     self.pending_program.take();
                     match transfer.kind {
                         AcceptedTerminalKind::Reply => {
-                            if self.pending_reply == Some(transfer.request) {
+                            if self
+                                .pending_reply
+                                .as_ref()
+                                .is_some_and(|claim| claim.request() == transfer.request)
+                            {
                                 self.pending_reply.take();
                                 self.pending_reply_preview.take();
+                                self.pending_response.take();
                             }
                             notifications = self
                                 .environment
@@ -12083,13 +12232,13 @@ where
                                 .requests
                                 .begin_reply(context.actor, attempt.request)
                             {
-                                Ok(()) => {
+                                Ok(claim) => {
                                     let publication_boundary =
                                         self.checkpoint_publication.boundary().cloned();
                                     self.stage_request_reply(
                                         kernel,
                                         &context,
-                                        attempt.request,
+                                        claim,
                                         attempt.result,
                                         attempt.preview,
                                         publication_boundary.as_ref(),
@@ -12322,7 +12471,8 @@ where
                             cleanup.disarm();
                         }
                     }
-                    if let Some(request) = self.pending_reply.take() {
+                    if let Some(claim) = self.pending_reply.take() {
+                        let request = claim.request();
                         let reply_preview = self.pending_reply_preview.take();
                         // Only this actor can read its own descriptor and
                         // prepared workspace, so its path and seed revision
@@ -12335,10 +12485,25 @@ where
                                 workspace.handle().handle_receipt.source_head.raw.clone()
                             }),
                         );
-                        let notifications = self
-                            .environment
-                            .requests
-                            .finish_reply(request, reply_preview);
+                        let notifications = self.environment.requests.finish_reply(
+                            claim,
+                            match self.pending_response.take() {
+                                Some(response) => response,
+                                None => {
+                                    let detail =
+                                        "reply wrapper completed without publishing its response";
+                                    let notifications = self
+                                        .environment
+                                        .requests
+                                        .fail_reply_settlement(request, detail);
+                                    self.publish_watch_notifications(notifications).await;
+                                    return Err(Self::workbench_failure(
+                                        ResidentActorWorkbenchError::ActorProtocol(detail.into()),
+                                    ));
+                                }
+                            },
+                            reply_preview,
+                        );
                         self.publish_watch_notifications(notifications).await;
                     }
                     if let Some(request) = self.pending_cancellation.take() {
@@ -12360,7 +12525,9 @@ where
                         self.suspended_cast = Some(handler);
                     }
                     self.pending_reply_preview = None;
-                    if let Some(request) = self.pending_reply.take() {
+                    self.pending_response.take();
+                    if let Some(claim) = self.pending_reply.take() {
+                        let request = claim.request();
                         let notifications = self.environment.requests.fail_reply_settlement(
                             request,
                             format!("reply continuation failed after acceptance: {error}"),

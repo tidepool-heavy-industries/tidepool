@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+use std::time::Instant;
 
 use tidepool_repr::execution_schema::{
     CertifiedGroup, CertifiedGroupCode, LinkedProgram, PreparedProgram,
@@ -32,12 +33,15 @@ use super::CompiledProgram;
 
 /// Shared by every [`super::machine::PreparedMachine`] of one run. Cheap to
 /// clone the `Arc` around; the registry itself owns a lock, not a checkout.
-#[derive(Default)]
 pub struct ImageRegistry {
+    identity: u64,
+    next_entry: AtomicU64,
+    next_observation: AtomicU64,
+    next_compile: AtomicU64,
     entries: Mutex<Entries>,
     /// Lifetime lookups that found an existing image. Never decremented.
     hits: AtomicU64,
-    /// Lifetime lookups or admissions that elected a compiler. Never decremented.
+    /// Lifetime unavailable lookups or admissions that elected a compiler. Never decremented.
     misses: AtomicU64,
 }
 
@@ -65,19 +69,171 @@ enum ImageKey {
     ),
 }
 
+impl ImageKey {
+    fn prepared(
+        prepared: &PreparedProgram,
+        literals: &super::package_literals::GroupPackageLiterals,
+    ) -> Self {
+        if literals.iter().next().is_none() {
+            Self::Program(prepared.clone())
+        } else {
+            Self::LiteralProgram(prepared.clone(), literals.clone())
+        }
+    }
+
+    fn group(
+        group: &CertifiedGroupCode,
+        literals: &super::package_literals::GroupPackageLiterals,
+    ) -> Self {
+        if literals.iter().next().is_none() {
+            Self::Group(group.clone())
+        } else {
+            Self::LiteralGroup(group.clone(), literals.clone())
+        }
+    }
+}
+
 enum Entry {
-    Ready(Weak<CompiledProgram>),
+    Ready(ReadyImage),
     Compiling(Arc<Flight>),
 }
 
-#[derive(Default)]
+struct ReadyImage {
+    image: Weak<CompiledProgram>,
+    entry: u64,
+}
+
 struct Flight {
+    entry: u64,
+    compile: u64,
     finished: Mutex<bool>,
     changed: Condvar,
+    outcome: AtomicU64,
+}
+
+static NEXT_REGISTRY: AtomicU64 = AtomicU64::new(1);
+
+impl Default for ImageRegistry {
+    fn default() -> Self {
+        Self {
+            identity: NEXT_REGISTRY.fetch_add(1, Ordering::Relaxed),
+            next_entry: AtomicU64::new(1),
+            next_observation: AtomicU64::new(1),
+            next_compile: AtomicU64::new(1),
+            entries: Mutex::default(),
+            hits: AtomicU64::default(),
+            misses: AtomicU64::default(),
+        }
+    }
+}
+
+/// Linux's monotonic clock also used by the worker. Failed clock reads remain
+/// absent; elapsed durations use Instant independently. No image graph is hashed
+/// or formatted for these bounded observations.
+fn monotonic_ns() -> Option<u64> {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes only the live, correctly aligned timespec.
+    (unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) } == 0)
+        .then(|| (value.tv_sec as u64) * 1_000_000_000 + value.tv_nsec as u64)
+}
+
+#[derive(Clone, Copy)]
+enum Disposition {
+    LiveHit,
+    Absent,
+    Expired,
+    InFlight,
+    ElectedNew,
+    ElectedExpired,
+    Inserted,
+}
+
+impl Disposition {
+    fn label(self) -> &'static str {
+        match self {
+            Self::LiveHit => "live_hit",
+            Self::Absent => "absent",
+            Self::Expired => "expired",
+            Self::InFlight => "in_flight",
+            Self::ElectedNew => "elected_absent",
+            Self::ElectedExpired => "elected_after_expiry",
+            Self::Inserted => "inserted",
+        }
+    }
+}
+
+struct Observation<'a> {
+    registry: &'a ImageRegistry,
+    sequence: u64,
+    operation: &'static str,
+    domain: &'static str,
+    started: Instant,
+    start_ns: Option<u64>,
+    entry: Option<u64>,
+    image: Option<u64>,
+    disposition: Disposition,
+    outcome: &'static str,
+    waits: u64,
+    wait_ns: u64,
+    failed_flights: u64,
+    abandoned_flights: u64,
+}
+
+impl<'a> Observation<'a> {
+    fn new(registry: &'a ImageRegistry, operation: &'static str, key: &ImageKey) -> Self {
+        let domain = match key {
+            ImageKey::Program(_) => "program",
+            ImageKey::LiteralProgram(..) => "literal_program",
+            ImageKey::Group(_) => "group",
+            ImageKey::LiteralGroup(..) => "literal_group",
+        };
+        Self {
+            registry,
+            sequence: registry.next_observation.fetch_add(1, Ordering::Relaxed),
+            operation,
+            domain,
+            started: Instant::now(),
+            start_ns: monotonic_ns(),
+            entry: None,
+            image: None,
+            disposition: Disposition::Absent,
+            outcome: "abandoned",
+            waits: 0,
+            wait_ns: 0,
+            failed_flights: 0,
+            abandoned_flights: 0,
+        }
+    }
+}
+
+impl Drop for Observation<'_> {
+    fn drop(&mut self) {
+        tracing::info!(target: "tidepool_codegen::image_registry",
+            schema = 1, process_id = std::process::id(), clock_domain = "CLOCK_MONOTONIC",
+            observation_sequence = self.sequence, image_registry = self.registry.identity,
+            operation = self.operation, key_domain = self.domain, image_entry = self.entry,
+            image_instance = self.image, disposition = self.disposition.label(),
+            outcome = self.outcome, start_ns = self.start_ns, end_ns = monotonic_ns(),
+            wall_ns = self.started.elapsed().as_nanos() as u64,
+            shared_wait_count = self.waits, shared_wait_ns = self.wait_ns,
+            failed_flights_observed = self.failed_flights, abandoned_flights_observed = self.abandoned_flights,
+            "native image registry decision");
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FlightOutcome {
+    Published = 1,
+    Failed = 2,
+    Abandoned = 3,
+    Superseded = 4,
 }
 
 impl Flight {
-    fn wait(&self) {
+    fn wait(&self) -> u64 {
         let mut finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
         while !*finished {
             finished = self
@@ -85,9 +241,11 @@ impl Flight {
                 .wait(finished)
                 .unwrap_or_else(PoisonError::into_inner);
         }
+        self.outcome.load(Ordering::Relaxed)
     }
 
-    fn finish(&self) {
+    fn finish(&self, outcome: FlightOutcome) {
+        self.outcome.store(outcome as u64, Ordering::Relaxed);
         *self.finished.lock().unwrap_or_else(PoisonError::into_inner) = true;
         self.changed.notify_all();
     }
@@ -100,6 +258,9 @@ struct CompileLease<'a> {
     key: ImageKey,
     flight: Arc<Flight>,
     published: bool,
+    failed: bool,
+    started: Instant,
+    start_ns: Option<u64>,
 }
 
 impl CompileLease<'_> {
@@ -109,22 +270,46 @@ impl CompileLease<'_> {
             .entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (selected, publish) = match entries.images.get(&self.key) {
-            Some(Entry::Ready(existing)) => (existing.upgrade().unwrap_or(image), true),
-            Some(Entry::Compiling(current)) if Arc::ptr_eq(current, &self.flight) => (image, true),
-            Some(Entry::Compiling(_)) => (image, false),
-            None => (image, true),
+        let (selected, entry, publish) = match entries.images.get(&self.key) {
+            Some(Entry::Ready(existing)) => (
+                existing.image.upgrade().unwrap_or(image),
+                existing.entry,
+                true,
+            ),
+            Some(Entry::Compiling(current)) if Arc::ptr_eq(current, &self.flight) => {
+                (image, current.entry, true)
+            }
+            Some(Entry::Compiling(_)) => (image, self.flight.entry, false),
+            None => (image, self.flight.entry, true),
         };
         if publish {
-            entries
-                .images
-                .insert(self.key.clone(), Entry::Ready(Arc::downgrade(&selected)));
+            entries.images.insert(
+                self.key.clone(),
+                Entry::Ready(ReadyImage {
+                    image: Arc::downgrade(&selected),
+                    entry,
+                }),
+            );
         }
         entries.tick();
         self.published = true;
         drop(entries);
-        self.flight.finish();
+        self.record(
+            if publish { "published" } else { "superseded" },
+            Some(selected.image_instance_id()),
+        );
+        self.flight.finish(FlightOutcome::Published);
         selected
+    }
+
+    fn record(&self, outcome: &'static str, image: Option<u64>) {
+        tracing::info!(target: "tidepool_codegen::image_registry",
+            schema = 1, process_id = std::process::id(), clock_domain = "CLOCK_MONOTONIC",
+            image_registry = self.registry.identity, image_entry = self.flight.entry,
+            image_compile = self.flight.compile, image_instance = image, outcome,
+            start_ns = self.start_ns, end_ns = monotonic_ns(),
+            wall_ns = self.started.elapsed().as_nanos() as u64,
+            "native image producer settled");
     }
 }
 
@@ -144,7 +329,12 @@ impl Drop for CompileLease<'_> {
         }
         entries.tick();
         drop(entries);
-        self.flight.finish();
+        self.flight.finish(if self.failed {
+            FlightOutcome::Failed
+        } else {
+            FlightOutcome::Abandoned
+        });
+        self.record(if self.failed { "failed" } else { "abandoned" }, None);
     }
 }
 
@@ -156,7 +346,7 @@ impl Entries {
         self.since_sweep += 1;
         if self.since_sweep >= self.images.len().max(1) {
             self.images.retain(|_, entry| match entry {
-                Entry::Ready(image) => image.strong_count() != 0,
+                Entry::Ready(image) => image.image.strong_count() != 0,
                 Entry::Compiling(_) => true,
             });
             self.since_sweep = 0;
@@ -173,21 +363,61 @@ impl ImageRegistry {
     /// An existing live image compiled for exactly `key`'s content and target.
     #[must_use]
     pub fn lookup(&self, key: &LinkedProgram) -> Option<Arc<CompiledProgram>> {
-        let key = ImageKey::Program(key.prepared().clone());
+        self.lookup_key(ImageKey::Program(key.prepared().clone()))
+    }
+
+    pub(super) fn lookup_literal_prepared(
+        &self,
+        prepared: &PreparedProgram,
+        literals: &super::package_literals::GroupPackageLiterals,
+    ) -> Option<Arc<CompiledProgram>> {
+        self.lookup_key(ImageKey::prepared(prepared, literals))
+    }
+
+    pub(super) fn lookup_literal_group(
+        &self,
+        group: &CertifiedGroupCode,
+        literals: &super::package_literals::GroupPackageLiterals,
+    ) -> Option<Arc<CompiledProgram>> {
+        self.lookup_key(ImageKey::group(group, literals))
+    }
+
+    /// Never elect a compiler or join a flight. The registry lock protects only
+    /// the weak image lookup; a missing, expired or in-flight key is unavailable.
+    fn lookup_key(&self, key: ImageKey) -> Option<Arc<CompiledProgram>> {
+        let mut observation = Observation::new(self, "lookup", &key);
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let found = match entries.images.get(&key) {
-            Some(Entry::Ready(image)) => image.upgrade(),
-            _ => None,
+            Some(Entry::Ready(image)) => {
+                observation.entry = Some(image.entry);
+                let found = image.image.upgrade();
+                observation.disposition = if found.is_some() {
+                    Disposition::LiveHit
+                } else {
+                    Disposition::Expired
+                };
+                found
+            }
+            Some(Entry::Compiling(flight)) => {
+                observation.entry = Some(flight.entry);
+                observation.disposition = Disposition::InFlight;
+                None
+            }
+            None => None,
         };
         if matches!(entries.images.get(&key), Some(Entry::Ready(_))) && found.is_none() {
             entries.images.remove(&key);
         }
         entries.tick();
-        if found.is_some() {
+        if let Some(image) = &found {
             self.hits.fetch_add(1, Ordering::Relaxed);
+            observation.image = Some(image.image_instance_id());
+            observation.outcome = "ready";
         } else {
             self.misses.fetch_add(1, Ordering::Relaxed);
+            observation.outcome = "unavailable";
         }
+        drop(entries);
         found
     }
 
@@ -197,22 +427,41 @@ impl ImageRegistry {
     #[must_use]
     pub fn insert(&self, key: LinkedProgram, image: Arc<CompiledProgram>) -> Arc<CompiledProgram> {
         let key = ImageKey::Program(key.prepared().clone());
+        let mut observation = Observation::new(self, "insert", &key);
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(existing) = match entries.images.get(&key) {
-            Some(Entry::Ready(image)) => image.upgrade(),
+        if let Some((existing, entry)) = match entries.images.get(&key) {
+            Some(Entry::Ready(image)) => image.image.upgrade().map(|live| (live, image.entry)),
             _ => None,
         } {
             entries.tick();
+            observation.entry = Some(entry);
+            observation.image = Some(existing.image_instance_id());
+            observation.disposition = Disposition::LiveHit;
+            observation.outcome = "ready";
+            drop(entries);
             return existing;
         }
-        let displaced = entries
-            .images
-            .insert(key, Entry::Ready(Arc::downgrade(&image)));
+        let entry = match entries.images.get(&key) {
+            Some(Entry::Ready(image)) => image.entry,
+            Some(Entry::Compiling(flight)) => flight.entry,
+            None => self.next_entry.fetch_add(1, Ordering::Relaxed),
+        };
+        let displaced = entries.images.insert(
+            key,
+            Entry::Ready(ReadyImage {
+                image: Arc::downgrade(&image),
+                entry,
+            }),
+        );
         entries.tick();
         drop(entries);
         if let Some(Entry::Compiling(flight)) = displaced {
-            flight.finish();
+            flight.finish(FlightOutcome::Superseded);
         }
+        observation.entry = Some(entry);
+        observation.image = Some(image.image_instance_id());
+        observation.disposition = Disposition::Inserted;
+        observation.outcome = "ready";
         image
     }
 
@@ -244,13 +493,7 @@ impl ImageRegistry {
         literals: &super::package_literals::GroupPackageLiterals,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
-        if literals.iter().next().is_none() {
-            return self.get_or_compile_prepared(prepared, compile);
-        }
-        self.get_or_compile_key(
-            ImageKey::LiteralProgram(prepared.clone(), literals.clone()),
-            compile,
-        )
+        self.get_or_compile_key(ImageKey::prepared(prepared, literals), compile)
     }
 
     /// Share an exact worker-certified source group across concurrent native
@@ -260,22 +503,24 @@ impl ImageRegistry {
         group: &CertifiedGroup,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
-        self.get_or_compile_key(ImageKey::Group(group.code_identity()), compile)
+        self.get_or_compile_group_code(&group.code_identity(), compile)
+    }
+
+    pub fn get_or_compile_group_code<E>(
+        &self,
+        group: &CertifiedGroupCode,
+        compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
+    ) -> Result<Arc<CompiledProgram>, E> {
+        self.get_or_compile_key(ImageKey::Group(group.clone()), compile)
     }
 
     pub(super) fn get_or_compile_literal_group<E>(
         &self,
-        group: &CertifiedGroup,
+        group: &CertifiedGroupCode,
         literals: &super::package_literals::GroupPackageLiterals,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
-        if literals.iter().next().is_none() {
-            return self.get_or_compile_group(group, compile);
-        }
-        self.get_or_compile_key(
-            ImageKey::LiteralGroup(group.code_identity(), literals.clone()),
-            compile,
-        )
+        self.get_or_compile_key(ImageKey::group(group, literals), compile)
     }
 
     fn get_or_compile_key<E>(
@@ -284,45 +529,99 @@ impl ImageRegistry {
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
         enum Admission {
-            Ready(Arc<CompiledProgram>),
+            Ready(Arc<CompiledProgram>, u64),
             Wait(Arc<Flight>),
-            Compile(Arc<Flight>),
+            Compile(Arc<Flight>, bool),
         }
+        let mut observation = Observation::new(self, "get_or_compile", &key);
         let mut compile = Some(compile);
         loop {
             let admission = {
                 let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+                let expired = matches!(entries.images.get(&key), Some(Entry::Ready(image)) if image.image.strong_count() == 0);
                 let admission = match entries.images.get(&key) {
-                    Some(Entry::Ready(image)) => image.upgrade().map(Admission::Ready),
+                    Some(Entry::Ready(image)) => image
+                        .image
+                        .upgrade()
+                        .map(|live| Admission::Ready(live, image.entry)),
                     Some(Entry::Compiling(flight)) => Some(Admission::Wait(Arc::clone(flight))),
                     None => None,
                 };
                 let admission = admission.unwrap_or_else(|| {
-                    let flight = Arc::new(Flight::default());
+                    let flight = Arc::new(Flight {
+                        entry: match entries.images.get(&key) {
+                            Some(Entry::Ready(image)) => image.entry,
+                            _ => self.next_entry.fetch_add(1, Ordering::Relaxed),
+                        },
+                        compile: self.next_compile.fetch_add(1, Ordering::Relaxed),
+                        finished: Mutex::new(false),
+                        changed: Condvar::new(),
+                        outcome: AtomicU64::new(0),
+                    });
                     entries
                         .images
                         .insert(key.clone(), Entry::Compiling(Arc::clone(&flight)));
-                    Admission::Compile(flight)
+                    Admission::Compile(flight, expired)
                 });
                 entries.tick();
                 admission
             };
             match admission {
-                Admission::Ready(image) => {
+                Admission::Ready(image, entry) => {
                     self.hits.fetch_add(1, Ordering::Relaxed);
+                    observation.entry = Some(entry);
+                    observation.image = Some(image.image_instance_id());
+                    observation.disposition = Disposition::LiveHit;
+                    observation.outcome = "ready";
                     return Ok(image);
                 }
-                Admission::Wait(flight) => flight.wait(),
-                Admission::Compile(flight) => {
+                Admission::Wait(flight) => {
+                    let wait = Instant::now();
+                    observation.waits += 1;
+                    match flight.wait() {
+                        value if value == FlightOutcome::Failed as u64 => {
+                            observation.failed_flights += 1
+                        }
+                        value if value == FlightOutcome::Abandoned as u64 => {
+                            observation.abandoned_flights += 1
+                        }
+                        _ => {}
+                    }
+                    observation.wait_ns += wait.elapsed().as_nanos() as u64;
+                }
+                Admission::Compile(flight, expired) => {
                     self.misses.fetch_add(1, Ordering::Relaxed);
-                    let lease = CompileLease {
+                    observation.entry = Some(flight.entry);
+                    observation.disposition = if expired {
+                        Disposition::ElectedExpired
+                    } else {
+                        Disposition::ElectedNew
+                    };
+                    let mut lease = CompileLease {
                         registry: self,
                         key: key.clone(),
                         flight,
                         published: false,
+                        failed: false,
+                        started: Instant::now(),
+                        start_ns: monotonic_ns(),
                     };
-                    let image = compile.take().expect("one compile closure per admission")()?;
-                    return Ok(lease.publish(image));
+                    let span = tracing::info_span!(target: "tidepool_codegen::image_registry", "native_image_producer",
+                        image_registry = self.identity, image_entry = lease.flight.entry, image_compile = lease.flight.compile);
+                    let _entered = span.enter();
+                    match compile.take().expect("one compile closure per admission")() {
+                        Ok(image) => {
+                            let selected = lease.publish(image);
+                            observation.image = Some(selected.image_instance_id());
+                            observation.outcome = "ready";
+                            return Ok(selected);
+                        }
+                        Err(error) => {
+                            lease.failed = true;
+                            observation.outcome = "failed";
+                            return Err(error);
+                        }
+                    }
                 }
             }
         }
@@ -334,7 +633,7 @@ impl ImageRegistry {
         self.hits.load(Ordering::Relaxed)
     }
 
-    /// Lifetime lookups that found nothing and required a compile.
+    /// Lifetime unavailable lookups or admissions that elected a compiler.
     #[must_use]
     pub fn misses(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
@@ -370,6 +669,96 @@ mod tests {
         Arc::new(CompiledProgram::compile(&program()).expect("fixture compiles"))
     }
 
+    #[test]
+    fn observations_preserve_live_reuse_expiry_failure_and_abandonment() {
+        #[derive(Clone)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Writer(Arc::clone(&output));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let registry = ImageRegistry::new();
+            let key = program();
+            let first = registry
+                .get_or_compile(&key, || Ok::<_, ()>(compiled()))
+                .unwrap();
+            let reused = registry
+                .get_or_compile(&key, || -> Result<_, ()> {
+                    panic!("live image must not invoke producer")
+                })
+                .unwrap();
+            assert!(Arc::ptr_eq(&first, &reused));
+            drop(first);
+            drop(reused);
+            assert!(registry
+                .get_or_compile(&key, || Err::<Arc<CompiledProgram>, _>(()))
+                .is_err());
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                registry.get_or_compile(&key, || -> Result<Arc<CompiledProgram>, ()> {
+                    panic!("deliberate producer abandonment")
+                })
+            }));
+            assert!(panic.is_err());
+            let recovered = registry
+                .get_or_compile(&key, || Ok::<_, ()>(compiled()))
+                .unwrap();
+            assert_eq!(registry.hits(), 1);
+            assert_eq!(registry.misses(), 4);
+            drop(recovered);
+        });
+        let bytes = output.lock().unwrap();
+        let rows: Vec<serde_json::Value> = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let decisions: Vec<_> = rows
+            .iter()
+            .filter(|row| row["fields"]["message"] == "native image registry decision")
+            .collect();
+        assert_eq!(decisions.len(), 5);
+        assert_eq!(decisions[1]["fields"]["disposition"], "live_hit");
+        assert_eq!(
+            decisions[0]["fields"]["image_instance"],
+            decisions[1]["fields"]["image_instance"]
+        );
+        assert_eq!(
+            decisions[2]["fields"]["disposition"],
+            "elected_after_expiry"
+        );
+        assert_eq!(
+            decisions[0]["fields"]["image_entry"],
+            decisions[2]["fields"]["image_entry"]
+        );
+        let outcomes: Vec<_> = rows
+            .iter()
+            .filter(|row| row["fields"]["message"] == "native image producer settled")
+            .map(|row| row["fields"]["outcome"].as_str().unwrap())
+            .collect();
+        assert_eq!(outcomes, ["published", "failed", "abandoned", "published"]);
+        for row in decisions {
+            assert_eq!(row["fields"]["clock_domain"], "CLOCK_MONOTONIC");
+            assert!(
+                row["fields"]["end_ns"].as_u64().unwrap()
+                    >= row["fields"]["start_ns"].as_u64().unwrap()
+            );
+        }
+    }
+
     fn wait_for_follower(registry: &ImageRegistry, key: &LinkedProgram) {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
@@ -386,6 +775,50 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn lookup_refuses_absent_expired_and_inflight_without_compiling_or_waiting() {
+        let registry = Arc::new(ImageRegistry::new());
+        let key = program();
+        assert!(registry.lookup(&key).is_none());
+        let image = registry.insert(key.clone(), compiled());
+        assert!(Arc::ptr_eq(&image, &registry.lookup(&key).unwrap()));
+        drop(image);
+        assert!(
+            registry.lookup(&key).is_none(),
+            "weak-only expired image is unavailable"
+        );
+        let (started, observe) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let producer_registry = registry.clone();
+        let producer_key = key.clone();
+        let producer = std::thread::spawn(move || {
+            producer_registry
+                .get_or_compile(&producer_key, || {
+                    started.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok::<_, ()>(compiled())
+                })
+                .unwrap()
+        });
+        observe.recv_timeout(Duration::from_secs(2)).unwrap();
+        let before = CompiledProgram::successful_image_compilations();
+        let (looked_up, observed) = mpsc::channel();
+        let lookup_registry = registry.clone();
+        let lookup = std::thread::spawn(move || {
+            looked_up
+                .send(lookup_registry.lookup(&key).is_none())
+                .unwrap();
+        });
+        assert!(observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("lookup must refuse before producer is released"));
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
+        release.send(()).unwrap();
+        lookup.join().unwrap();
+        let image = producer.join().unwrap();
+        assert!(Arc::ptr_eq(&image, &registry.lookup(&program()).unwrap()));
     }
 
     #[test]

@@ -87,7 +87,7 @@ NATIVE_PACKAGES = frozenset({
     "tidepool-bridge", "tidepool-effect", "tidepool-codegen", "tidepool-extract-cmd",
     "tidepool-extract-report", "tidepool-toolchain", "tidepool-bridge-derive",
     "tidepool-runtime", "tidepool-mcp", "tidepool-handlers", "tidepool",
-    "exomonad-model", "exomonad-model-output", "exomonad-tool", "tidepool-bridge-effects",
+    "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
     "exomonad-node", "exomonad-worktree", "exomonad-actor", "jev-integration",
     "tidepool-testing", "tidepool-test-data", "tidepool-prepared-corpus", "tidepool-protocol",
 })

@@ -37,6 +37,23 @@ pub fn wire_from_prepared(
     }
 }
 
+fn constructor_identity(
+    module: &str,
+    occurrence: &str,
+) -> tidepool_repr::execution_schema::SymbolIdentity {
+    let mut identity = testing::identity(module, occurrence);
+    identity.namespace = "constructor".into();
+    identity
+}
+fn type_identity(
+    module: &str,
+    occurrence: &str,
+) -> tidepool_repr::execution_schema::SymbolIdentity {
+    let mut identity = testing::identity(module, occurrence);
+    identity.namespace = "type".into();
+    identity
+}
+
 /// Closed constructor data for paired metadata/IR structural checks.
 pub fn constructor_program() -> WireProgram {
     use tidepool_repr::execution_schema::{
@@ -45,9 +62,9 @@ pub fn constructor_program() -> WireProgram {
     };
     let mut wire = testing::wire_program();
     wire.constructors.push(ConstructorDecl {
-        identity: testing::identity("Fixture", "Box"),
+        identity: super::prepared::constructor_identity("Fixture", "Box"),
         host_id: tidepool_repr::DataConId(901),
-        family: testing::identity("Fixture", "Box"),
+        family: super::prepared::type_identity("Fixture", "Box"),
         result_rep: RuntimeRep::LiftedRef,
         field_reps: vec![RuntimeRep::Int(64)],
         strict_fields: vec![false],

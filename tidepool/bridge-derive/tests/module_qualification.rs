@@ -38,24 +38,42 @@ fn build_collision_table() -> (DataConTable, DataConId, DataConId) {
     let alpha_id = DataConId(1);
     let beta_id = DataConId(2);
 
-    table.insert(DataCon {
-        id: alpha_id,
-        name: "Read".to_string(),
-        tag: 1,
-        rep_arity: 0,
-        field_bangs: vec![],
-        qualified_name: Some("TestMod.Alpha.Read".to_string()),
-        type_name: String::new(),
-    });
-    table.insert(DataCon {
-        id: beta_id,
-        name: "Read".to_string(),
-        tag: 1,
-        rep_arity: 0,
-        field_bangs: vec![],
-        qualified_name: Some("TestMod.Beta.Read".to_string()),
-        type_name: String::new(),
-    });
+    table
+        .insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "TestMod.Alpha".into(),
+                namespace: "constructor".into(),
+                occurrence: "Read".into(),
+                record_parent: None,
+            },
+            id: alpha_id,
+            name: "Read".to_string(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some("TestMod.Alpha.Read".to_string()),
+            type_name: String::new(),
+        })
+        .expect("valid fixture metadata");
+    table
+        .insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "TestMod.Beta".into(),
+                namespace: "constructor".into(),
+                occurrence: "Read".into(),
+                record_parent: None,
+            },
+            id: beta_id,
+            name: "Read".to_string(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some("TestMod.Beta.Read".to_string()),
+            type_name: String::new(),
+        })
+        .expect("valid fixture metadata");
     (table, alpha_id, beta_id)
 }
 
@@ -119,4 +137,27 @@ fn unknown_qualified_name_reports_qualified_error() {
         }
         other => panic!("expected UnknownDataConQualified, got {other:?}"),
     }
+}
+
+#[test]
+fn module_qualification_refuses_homonymous_units() {
+    let (mut table, alpha_id, _) = build_collision_table();
+    let mut homonym = table.get(alpha_id).unwrap().clone();
+    homonym.id = DataConId(3);
+    homonym.identity.unit = "other-unit".into();
+    table.insert_checked(homonym).unwrap();
+    let error = Alpha::Read.to_value(&table).unwrap_err();
+    let BridgeError::AmbiguousDataConNameArity { candidates, .. } = error else {
+        panic!("qualified spelling must refuse distinct units: {error:?}");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .all(|candidate| candidate.module == "TestMod.Alpha" && candidate.occurrence == "Read"));
+    let mut units: Vec<_> = candidates
+        .iter()
+        .map(|candidate| candidate.unit.as_str())
+        .collect();
+    units.sort();
+    assert_eq!(units, ["fixture", "other-unit"]);
 }

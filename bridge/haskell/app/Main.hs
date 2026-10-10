@@ -126,7 +126,7 @@ import Tidepool.CheckedRecipe
 import Tidepool.ExtractUtil (shaHex, trySynchronous)
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics, reportDiags, reportDiagsWithWarnings )
-import Tidepool.ExtractRequest (RequestShapeError(..), validateRequestShape, WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
+import Tidepool.ExtractRequest (RequestShapeError(..), RequestOperation(..), admitRequestOperation, WorkerRequest(..), workerRequestFromArgv, workerRequestFlag)
 import Tidepool.Introspection (encodeInspectionResults, runInspectionGhc)
 import Tidepool.InspectionRunner (isInspectionTypeQuery, runInspectionRequests)
 import Tidepool.ExactScope
@@ -297,16 +297,20 @@ runGrantedInvocation compilerScope caches parsedWorkerRequest = do
 -- | Dispatch one decoded worker request.
 -- The request owner decodes the offered metadata once. Compiler stages still
 -- authenticate its current bytes and resolution before consuming it.
-newtype AdmittedRequest = AdmittedRequest { admittedRequestScope :: Maybe ExactScope }
+data AdmittedRequest = AdmittedRequest
+  { admittedRequestScope :: Maybe ExactScope
+  , admittedRequestOperation :: RequestOperation
+  }
 
 dispatch
   :: CompilerScope -> RecoveryCaches -> Bool -> WorkerRequest -> IO ExitCode
 dispatch compilerScope caches timing args = do
   admitted <- trySynchronous $ do
-    case validateRequestShape args of
+    operation <- case admitRequestOperation args of
       Left InvalidSourceCheckShape -> fail "source checking cannot carry product or notebook authority"
       Left InvalidCellPlanShape -> throwIO InvalidCellPlanRequest
-      Right () -> pure ()
+      Left failure -> fail (show failure)
+      Right operation -> pure operation
     exact <- forM (requestSessionArtifacts args) $ \manifest -> do
       scope <- scopedReadExactScope compilerScope manifest >>= either fail pure
       forM_ (scopeIncludePaths scope) $ \includes ->
@@ -345,12 +349,12 @@ dispatch compilerScope caches timing args = do
             && Map.null (requestRetainedGenerations args))
             (throwIO CheckedPurposeMismatch)
       pure scope
-    pure (AdmittedRequest exact)
+    pure (AdmittedRequest exact operation)
   case admitted of
     Left failure -> reportDiags (Left failure)
-    Right request -> case requestDeclarationJoin args of
-      Just manifest -> runDeclarationOperation compilerScope args manifest
-      Nothing -> dispatchSource compilerScope caches timing request args
+    Right request -> case admittedRequestOperation request of
+      DeclarationOperation manifest output -> runDeclarationOperation compilerScope args manifest output
+      _ -> dispatchSource compilerScope caches timing request args
 
 dispatchSource :: CompilerScope -> RecoveryCaches -> Bool -> AdmittedRequest -> WorkerRequest -> IO ExitCode
 dispatchSource compilerScope caches timing request args =
@@ -370,18 +374,16 @@ dispatchSource compilerScope caches timing request args =
         | isJust (requestInspectTypeBatch args)
           && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
                                                   -> reportDiags (Left (toException (userError "inspection type batch requires at least two type queries and no other query kinds")))
-        | requestActivationPreview args          -> runActivationPreviewMode (scopedParserFlags compilerScope) compiler caches request args file
-        | requestCheckSource args                 -> runSourceCheckMode compiler args file
-        | requestCellPlan args                    -> runCellPlanMode (scopedParserFlags compilerScope) args file
-        | requestCell args                        -> runCellMode admittedScope caches request args file
-        | requestClassify args                    -> runClassifyMode (scopedParserFlags compilerScope) timing args
-        | not (null (requestInspections args))    -> runInspectionMode admittedScope args file
-        -- A turn may also carry session fields, so it precedes session dispatch.
-        | requestTurn args                        -> runTurnMode admittedScope caches request args file
-        -- Multi-target compilation may also carry a stable-value scope.
-        | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler caches timing args file)
-        -- Normal one-shot extraction.
-        | otherwise                           -> timePhase timing "total" (processFile compiler caches timing args file)
+        | otherwise -> case admittedRequestOperation request of
+            ActivationPreviewOperation -> runActivationPreviewMode (scopedParserFlags compilerScope) compiler caches request args file
+            SourceCheckOperation -> runSourceCheckMode compiler args file
+            CellPlanOperation -> runCellPlanMode (scopedParserFlags compilerScope) args file
+            CellOperation -> runCellMode admittedScope caches request args file
+            ClassificationOperation -> runClassifyMode (scopedParserFlags compilerScope) timing args
+            InspectionOperation -> runInspectionMode admittedScope args file
+            TurnOperation -> runTurnMode admittedScope caches request args file
+            SourceOperation -> timePhase timing "total" (processFile compiler caches timing args file)
+            DeclarationOperation manifest output -> runDeclarationOperation compilerScope args manifest output
 
 -- Compile a pure function over an already mounted input. No value interface
 -- or authored completion is issued by either the opaque probe or final pass.
@@ -479,11 +481,9 @@ runSourceCheckMode compiler args path = do
     pure (crWarnings compiled)
   reportDiagsWithWarnings checked
 
-runDeclarationOperation :: CompilerScope -> WorkerRequest -> FilePath -> IO ExitCode
-runDeclarationOperation compilerScope args manifest = do
+runDeclarationOperation :: CompilerScope -> WorkerRequest -> FilePath -> FilePath -> IO ExitCode
+runDeclarationOperation compilerScope args manifest out = do
   result <- trySynchronous $ do
-    out <- maybe (fail "declaration operation requires an output path") pure
-      (requestDeclarationJoinOut args)
     operation <- readDeclarationOperation manifest
     withScopedExactInterfaceTransaction compilerScope (requestIncludes args) $ \operations ->
       case operation of

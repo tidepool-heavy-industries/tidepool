@@ -9,7 +9,7 @@ preparedReplies <- forM [1..{prepared-child-count} :: Int] $ \ordinal -> do
   actor <- case spawned of
     Left failure -> error ("prepared child spawn failed: " <> Text.pack (show failure))
     Right admitted -> pure admitted
-  requested <- request @Int actor ("execute the prepared probe" :: Text.Text) defaultRequestOptions
+  requested <- request @Int actor (PreparedSpec.NativeInput ordinal) defaultRequestOptions
   answer <- case requested of
     Left failure -> error ("prepared child request failed: " <> Text.pack (show failure))
     Right accepted -> pure accepted

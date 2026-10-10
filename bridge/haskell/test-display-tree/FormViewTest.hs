@@ -4,6 +4,7 @@
 module FormViewTest (formViewTests) where
 import Prelude
 import Control.Exception (evaluate)
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
@@ -11,7 +12,12 @@ import Data.List.NonEmpty (NonEmpty(..))
 import GHC.Generics (Generic)
 import Tidepool.Test.Runner (TestTree, testGroup, testCase)
 import Test.Tasty.HUnit (assertEqual, assertBool)
+import Test.Tasty (askOption, withResource)
 import Test.Tasty.QuickCheck (testProperty, (===), counterexample, Property)
+import Test.Tasty.QuickCheck (QuickCheckTests(..))
+import qualified Test.QuickCheck as QC
+import Test.QuickCheck.Property (Callback(..), CallbackKind(..), callback)
+import System.IO (hPutStrLn, stderr)
 import Tidepool.Aeson.Value
 import Tidepool.Form.Algebra
 import Tidepool.Form.GForm
@@ -24,6 +30,8 @@ import Tidepool.Inspection.Tree (renderTree)
 formViewTests :: TestTree
 formViewTests = testGroup "form-view"
   [ testProperty "applicative independent controls agree with reference" independentControls
+  , generatedFormCampaign
+  , testCase "form model reaches nested branches reused controls and refinements" generatedFormPartitions
   , testProperty "applicative identity retains decode" applicativeIdentity
   , testProperty "applicative composition retains decode" applicativeComposition
   , testProperty "reused subform occurrences stay independent" reusedOccurrences
@@ -73,6 +81,186 @@ reusedOccurrences x y =
       p = prepareForm ((,) <$> shared <*> shared)
   in counterexample "Reusing a Form must allocate two mounted occurrences"
      (decodeSubmission p (draft [("f0",integer x),("f1",integer y)]) === Right (x,y))
+
+-- The model owns the answer values and mounted occurrence order. It never
+-- obtains either from the descriptor or from a successful production decode.
+data Answer = IntAnswer Int | BoolAnswer Bool | TextAnswer Text deriving (Eq, Show)
+data FormAst
+  = Constant Int | IntegerLeaf Int | BooleanLeaf Bool | TextLeaf Text | ChoiceLeaf Bool
+  | Together FormAst FormAst | Branch Bool FormAst FormAst | Reused Int Int
+  | SectionAst FormAst | Positive Int | PositiveTotal Int Int
+  deriving (Show)
+
+instance QC.Arbitrary FormAst where
+  arbitrary = QC.sized (genForm . min 3)
+  shrink (Constant n) = map Constant (QC.shrink n)
+  shrink (IntegerLeaf n) = map IntegerLeaf (QC.shrink n)
+  shrink (BooleanLeaf b) = map BooleanLeaf (QC.shrink b)
+  shrink (TextLeaf t) = map (TextLeaf . T.pack) (QC.shrink (T.unpack t))
+  shrink (ChoiceLeaf b) = map ChoiceLeaf (QC.shrink b)
+  shrink (Together a b) = [a,b] ++ [Together x b | x <- QC.shrink a] ++ [Together a x | x <- QC.shrink b]
+  shrink (Branch selected a b) = [a,b] ++ [Branch selected x b | x <- QC.shrink a] ++ [Branch selected a x | x <- QC.shrink b]
+  shrink (Reused x y) = [Reused a b | (a,b) <- QC.shrink (x,y)]
+  shrink (SectionAst a) = a : map SectionAst (QC.shrink a)
+  shrink (Positive n) = [Positive x | x <- QC.shrink n, x > 0]
+  shrink (PositiveTotal x y) = [PositiveTotal a b | (a,b) <- QC.shrink (x,y), a > 0, b > 0]
+
+genForm :: Int -> QC.Gen FormAst
+genForm depth = QC.frequency $ leaves ++ if depth <= 0 then [] else
+  [ (2,Together <$> child <*> child)
+  , (2,Branch <$> QC.arbitrary <*> child <*> child)
+  , (1,SectionAst <$> child)
+  ]
+  where
+    child = genForm (depth-1)
+    small = QC.chooseInt (-20,20)
+    positive = QC.chooseInt (1,20)
+    leaves =
+      [ (1,Constant <$> small), (2,IntegerLeaf <$> small)
+      , (2,BooleanLeaf <$> QC.arbitrary)
+      , (2,TextLeaf . T.pack <$> QC.elements ["", "same", "hello", "λ"])
+      , (1,ChoiceLeaf <$> QC.arbitrary), (2,Reused <$> small <*> small)
+      , (1,Positive <$> positive), (1,PositiveTotal <$> positive <*> positive)
+      ]
+
+authoredForm :: FormAst -> Form [Answer]
+authoredForm ast = case ast of
+  Constant n -> pure [IntAnswer n]
+  IntegerLeaf _ -> (\n -> [IntAnswer n]) <$> intInput "same" Nothing
+  BooleanLeaf _ -> (\b -> [BoolAnswer b]) <$> boolInput "same" Nothing
+  TextLeaf _ -> (\t -> [TextAnswer t]) <$> textInput "same" Nothing
+  ChoiceLeaf _ -> choice "same" (option (text "same") [IntAnswer 101] :| [option (text "same") [IntAnswer 202]])
+  Together a b -> (++) <$> authoredForm a <*> authoredForm b
+  Branch _ a b -> branches "same" (option (text "same") (authoredForm a) :| [option (text "same") (authoredForm b)])
+  Reused _ _ -> let shared = intInput "same" Nothing
+                in (\x y -> [IntAnswer x,IntAnswer y]) <$> shared <*> shared
+  SectionAst a -> section "same" (authoredForm a)
+  Positive _ -> (\n -> [IntAnswer n]) <$> validate (\n -> ["positive required" | n <= 0]) (intInput "same" Nothing)
+  PositiveTotal _ _ ->
+    validateForm (\answers -> ["positive total required" | sum [n | IntAnswer n <- answers] <= 0])
+      ((\x y -> [IntAnswer x,IntAnswer y]) <$> intInput "same" Nothing <*> intInput "same" Nothing)
+
+-- Width counts all mounted controls, including inactive alternatives. The
+-- independent values below choose one branch; they do not decode wire data.
+formWidth :: FormAst -> Int
+formWidth ast = case ast of
+  Constant _ -> 0
+  Together a b -> formWidth a + formWidth b
+  Branch _ a b -> 1 + formWidth a + formWidth b
+  Reused _ _ -> 2
+  SectionAst a -> formWidth a
+  PositiveTotal _ _ -> 2
+  _ -> 1
+
+data FormModel = FormModel
+  { expectedAnswers :: [Answer]
+  , activeInputs :: [(Text,Value)]
+  , missingFields :: [Maybe Text]
+  , refinementFailures :: [(Text,Value,ValidationError)]
+  } deriving (Show)
+
+modelForm :: Int -> FormAst -> FormModel
+modelForm offset ast = case ast of
+  Constant n -> FormModel [IntAnswer n] [] [] []
+  IntegerLeaf n -> leaf (IntAnswer n) (integer n)
+  BooleanLeaf b -> leaf (BoolAnswer b) (Bool b)
+  TextLeaf t -> leaf (TextAnswer t) (String t)
+  ChoiceLeaf selected -> leaf (IntAnswer (if selected then 202 else 101)) (selection selected)
+  Together a b -> combine (modelForm offset a) (modelForm (offset + formWidth a) b)
+  Branch selected a b ->
+    let chosen = if selected then modelForm (offset+1+formWidth a) b else modelForm (offset+1) a
+    in chosen { activeInputs = (key,selection selected) : activeInputs chosen, missingFields = [Just key] }
+  Reused x y -> combine (modelForm offset (IntegerLeaf x)) (modelForm (offset+1) (IntegerLeaf y))
+  SectionAst a -> modelForm offset a
+  Positive n -> (leaf (IntAnswer n) (integer n))
+    { refinementFailures = [(key,integer 0,ValidationError (Just key) "positive required")] }
+  PositiveTotal x y -> (combine (modelForm offset (IntegerLeaf x)) (modelForm (offset+1) (IntegerLeaf y)))
+    { refinementFailures = [(key,integer (-y),ValidationError Nothing "positive total required")] }
+  where
+    key = field offset
+    selection selected = String (if selected then "o1" else "o0")
+    leaf answer input = FormModel [answer] [(key,input)] [Just key] []
+    combine a b = FormModel (expectedAnswers a ++ expectedAnswers b)
+      (activeInputs a ++ activeInputs b) (missingFields a ++ missingFields b)
+      (refinementFailures a ++ refinementFailures b)
+
+modelAgreement :: FormAst -> Property
+modelAgreement ast =
+  let model = modelForm 0 ast
+      prepared = prepareForm (authoredForm ast)
+      -- Every inactive control has a deliberately invalid value. Acceptance
+      -- therefore witnesses activation instead of merely well-typed branches.
+      inputs = Map.fromList ([(field i,Null) | i <- [0..formWidth ast-1]] ++ activeInputs model)
+      decode = decodeSubmission prepared . Object
+      fieldsEqual expected result = case result of
+        Left errors -> map errorField errors === expected
+        Right answers -> counterexample ("invalid submission accepted: " ++ show answers) False
+      negatives = QC.conjoin $
+        [ fieldsEqual [Just key] (decode (Map.delete key inputs))
+        | (key,_) <- activeInputs model ] ++
+        [ fieldsEqual [Just key] (decode (Map.insert key (Array []) inputs))
+        | (key,_) <- activeInputs model ] ++
+        [ decode (Map.insert key value inputs) === Left [expected]
+        | (key,value,expected) <- refinementFailures model ] ++
+        [ if null (missingFields model) then decode Map.empty === Right (expectedAnswers model)
+          else fieldsEqual (missingFields model) (decode Map.empty) ]
+  in counterexample (show ast ++ "\n" ++ show model) $ case decode inputs of
+      Right answers | answers == expectedAnswers model -> negatives
+      result -> counterexample "valid fixture must agree before negative perturbations" (result === Right (expectedAnswers model))
+
+data FormCampaign = FormCampaign
+  { formCallbacks :: Int, formCompletedCallbacks :: Int
+  , formBranchCallbacks :: Int, formReusedCallbacks :: Int, formNestedBranchCallbacks :: Int
+  } deriving (Show)
+
+generatedFormCampaign :: TestTree
+generatedFormCampaign = askOption $ \(QuickCheckTests configured) ->
+  withResource (newIORef (FormCampaign 0 0 0 0 0))
+    (\counts -> do
+      observed <- readIORef counts
+      hPutStrLn stderr ("form_model_campaign configured_cases=" ++ show configured ++
+        " observed_callbacks_include_shrinking=" ++ show observed)) $
+    \getCounts -> testProperty "generated forms agree with independent occurrence value and activation model" $ \ast ->
+      QC.ioProperty $ do
+        counts <- getCounts
+        modifyIORef' counts $ \seen -> seen
+          { formCallbacks = formCallbacks seen + 1
+          , formBranchCallbacks = formBranchCallbacks seen + fromEnum (hasBranch ast)
+          , formReusedCallbacks = formReusedCallbacks seen + fromEnum (hasReuse ast)
+          , formNestedBranchCallbacks = formNestedBranchCallbacks seen + fromEnum (selectedDepth ast > 1)
+          }
+        pure $ callback (PostTest NotCounterexample $ \_ _ ->
+          modifyIORef' counts $ \seen -> seen { formCompletedCallbacks = formCompletedCallbacks seen + 1 }) (modelAgreement ast)
+  where
+    selectedDepth :: FormAst -> Int
+    selectedDepth (Branch selected a b) = 1 + selectedDepth (if selected then b else a)
+    selectedDepth (Together a b) = max (selectedDepth a) (selectedDepth b)
+    selectedDepth (SectionAst a) = selectedDepth a
+    selectedDepth _ = 0
+    hasBranch (Branch _ _ _) = True
+    hasBranch (Together a b) = hasBranch a || hasBranch b
+    hasBranch (SectionAst a) = hasBranch a
+    hasBranch _ = False
+    hasReuse (Reused _ _) = True
+    hasReuse (Together a b) = hasReuse a || hasReuse b
+    hasReuse (Branch _ a b) = hasReuse a || hasReuse b
+    hasReuse (SectionAst a) = hasReuse a
+    hasReuse _ = False
+
+generatedFormPartitions :: IO ()
+generatedFormPartitions = mapM_ check
+  [ Constant 3, IntegerLeaf 7, BooleanLeaf False, TextLeaf "λ", ChoiceLeaf True
+  , Reused 11 29, Positive 2, PositiveTotal 3 5
+  , Branch False (IntegerLeaf 7) (PositiveTotal 3 5)
+  , Branch True (Positive 2) (Reused 11 29)
+  , Together (Branch True (BooleanLeaf True) (TextLeaf "selected")) (SectionAst (PositiveTotal 2 3))
+  , Branch False (Branch True (Positive 2) (Reused 11 29)) (IntegerLeaf 7)
+  , Branch True (IntegerLeaf 7) (Branch False (SectionAst (PositiveTotal 2 3)) (TextLeaf "unused"))
+  ]
+  where
+    check ast = do
+      result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess = 1, QC.chatty = False } (modelAgreement ast)
+      assertBool (show ast ++ "\n" ++ QC.output result) (QC.isSuccess result)
 
 duplicatePreviews :: IO ()
 duplicatePreviews = do

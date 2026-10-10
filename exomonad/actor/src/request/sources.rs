@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::{
     OwnerState, ProgressSnapshot, ReplyError, RequestId, RequestRecord, RequestRegistry,
-    ResponseFailure, TargetState,
+    RequestSuccess, ResponseFailure, TargetState,
 };
 use crate::{ActorRef, LocalActorRef};
 
@@ -30,7 +30,7 @@ pub(crate) enum SourceEvent {
     Progress(ProgressSnapshot),
     ProgressClosed,
     ProgressRejected(ReplyError),
-    Settled(Result<(), ResponseFailure>),
+    Settled(Result<Arc<crate::owned_result::OwnedResultSnapshot>, ResponseFailure>),
     Lifecycle(crate::ActorLifecycle),
     Command(tidepool_bridge_effects::CommandResult),
 }
@@ -320,7 +320,12 @@ impl RequestRecord {
             );
         let settlement = match &self.owner_state {
             OwnerState::Observing => None,
-            OwnerState::Ready => Some(Ok(())),
+            OwnerState::Ready(RequestSuccess::Typed(snapshot)) => Some(Ok(Arc::clone(snapshot))),
+            OwnerState::Ready(RequestSuccess::Command(_)) => {
+                Some(Err(ResponseFailure::SettlementFailed(
+                    "command completion has no typed request result".into(),
+                )))
+            }
             OwnerState::Unavailable(failure) => Some(Err(failure.clone())),
             OwnerState::Abandoned => Some(Err(ResponseFailure::Abandoned)),
         };
@@ -445,15 +450,25 @@ mod tests {
                 ],
             )
             .unwrap();
-        registry.begin_reply(actor(101), request).unwrap();
-        registry.finish_reply(request, None);
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(actor(101), request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         drop(sources);
         let closed = receive(&mut events).await;
         let settled = receive(&mut events).await;
         assert_eq!((closed.slot, settled.slot), (0, 1));
         assert!(matches!(closed.event, SourceEvent::ProgressClosed));
-        assert!(matches!(settled.event, SourceEvent::Settled(Ok(()))));
+        assert!(
+            matches!(&settled.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+        );
         address.stop(None);
         task.await.unwrap();
         assert!(events.try_recv().is_err());
@@ -481,21 +496,21 @@ mod tests {
                 ],
             )
             .unwrap();
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         let queued_progress = receive(&mut events).await;
         let queued_settlement = receive(&mut events).await;
         assert!(matches!(queued_progress.event, SourceEvent::ProgressClosed));
-        assert!(matches!(
-            queued_settlement.event,
-            SourceEvent::Settled(Ok(()))
-        ));
-        assert!(matches!(
-            registry
+        assert!(
+            matches!(&queued_settlement.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+        );
+        assert!(matches!(&registry
                 .accept_source_delivery(queued_settlement.clone())
-                .event,
-            SourceEvent::Settled(Ok(()))
-        ));
+                .event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41));
 
         registry.forget_response(owner, request).unwrap();
         assert!(matches!(
@@ -563,12 +578,15 @@ mod tests {
                 &[(2, completed, RequestSourceKind::Settlement)],
             )
             .unwrap();
-        registry.begin_reply(target, completed).unwrap();
-        registry.finish_reply(completed, None);
-        assert!(matches!(
-            receive(&mut events).await.event,
-            SourceEvent::Settled(Ok(()))
-        ));
+        let mut reply_claim_completed = Some(registry.begin_reply(target, completed).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_completed,
+            None,
+        );
+        assert!(
+            matches!(&receive(&mut events).await.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+        );
         registry.forget_response(owner, completed).unwrap();
         address.stop(None);
         task.await.unwrap();
@@ -597,8 +615,12 @@ mod tests {
             Ok(super::super::WatchObservation::Pending(_))
         ));
         assert_eq!(registry.state.lock().requests[&request].target, target);
-        registry.begin_reply(target, request).unwrap();
-        let notices = registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        let notices = crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert!(notices
             .iter()
             .all(|notice| notice.owner == successor.identity()));
@@ -642,8 +664,12 @@ mod tests {
             .attach_sources(actor(100), old.clone(), &bindings)
             .unwrap();
         let settle = |request| {
-            registry.begin_reply(actor(101), request).unwrap();
-            registry.finish_reply(request, None);
+            let mut reply_claim_request = Some(registry.begin_reply(actor(101), request).unwrap());
+            crate::request::test_support::complete_optional_reply(
+                &registry,
+                &mut reply_claim_request,
+                None,
+            );
         };
         settle(requests[0]);
         assert_eq!(receive(&mut old_events).await.slot, 0);
@@ -696,8 +722,12 @@ mod tests {
         let own = registry.reserve(actor(100), actor(101));
         registry.mark_queued(actor(100), actor(101), own).unwrap();
         registry.present(actor(101), own).unwrap();
-        registry.begin_reply(actor(101), own).unwrap();
-        registry.finish_reply(own, None);
+        let mut reply_claim_own = Some(registry.begin_reply(actor(101), own).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_own,
+            None,
+        );
         let missing = RequestId(u64::MAX);
         assert!(matches!(
             registry.attach_sources(
@@ -724,7 +754,9 @@ mod tests {
             )
             .unwrap();
         let retained = receive(&mut events).await;
-        assert!(matches!(retained.event, SourceEvent::Settled(Ok(()))));
+        assert!(
+            matches!(&retained.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+        );
         drop(sources);
         address.stop(None);
         task.await.unwrap();
@@ -742,8 +774,12 @@ mod tests {
         let settled = registry.reserve(owner, target);
         registry.mark_queued(owner, target, settled).unwrap();
         registry.present(target, settled).unwrap();
-        registry.begin_reply(target, settled).unwrap();
-        registry.finish_reply(settled, None);
+        let mut reply_claim_settled = Some(registry.begin_reply(target, settled).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_settled,
+            None,
+        );
         let mut sources = registry.attach_sources(owner, recipient, &[]).unwrap();
         sources
             .attach_request(0, settled, RequestSourceKind::Settlement, owner)
@@ -754,7 +790,9 @@ mod tests {
         ));
         let first = receive(&mut events).await;
         assert_eq!(first.slot, 0);
-        assert!(matches!(first.event, SourceEvent::Settled(Ok(()))));
+        assert!(
+            matches!(&first.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+        );
         assert!(events.try_recv().is_err());
         assert_eq!(registry.state.lock().requests[&settled].sources.len(), 1);
         drop(sources);
@@ -806,11 +844,17 @@ mod tests {
             .unwrap();
         recipient.terminal().publish_paused("handler failed".into());
         assert_eq!(registry.state.lock().requests[&request].sources.len(), 1);
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         let first = receive(&mut events).await;
         assert_eq!(first.slot, 0);
-        assert!(matches!(first.event, SourceEvent::Settled(Ok(()))));
+        assert!(
+            matches!(&first.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+        );
 
         // Attachment after publication captures the retained terminal event
         // once under the same request lock.
@@ -819,7 +863,9 @@ mod tests {
             .unwrap();
         let retained = receive(&mut events).await;
         assert_eq!(retained.slot, 1);
-        assert!(matches!(retained.event, SourceEvent::Settled(Ok(()))));
+        assert!(
+            matches!(&retained.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+        );
         assert!(events.try_recv().is_err());
         drop(sources);
         assert!(registry.state.lock().requests[&request].sources.is_empty());
@@ -851,17 +897,29 @@ mod tests {
         sources
             .attach_request(1, after, RequestSourceKind::Settlement, owner)
             .unwrap();
-        registry.begin_reply(target, before).unwrap();
-        registry.finish_reply(before, None);
+        let mut reply_claim_before = Some(registry.begin_reply(target, before).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_before,
+            None,
+        );
         sources.handoff(successor, |_| Ok::<_, ()>(())).unwrap();
         let queued = receive(&mut old_events).await;
         assert_eq!(queued.slot, 0);
-        assert!(matches!(queued.event, SourceEvent::Settled(Ok(()))));
-        registry.begin_reply(target, after).unwrap();
-        registry.finish_reply(after, None);
+        assert!(
+            matches!(&queued.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+        );
+        let mut reply_claim_after = Some(registry.begin_reply(target, after).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_after,
+            None,
+        );
         let subsequent = receive(&mut new_events).await;
         assert_eq!(subsequent.slot, 1);
-        assert!(matches!(subsequent.event, SourceEvent::Settled(Ok(()))));
+        assert!(
+            matches!(&subsequent.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+        );
         assert!(old_events.try_recv().is_err());
         assert!(new_events.try_recv().is_err());
         drop(sources);

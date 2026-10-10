@@ -308,11 +308,15 @@ def analyze(events):
                 or type(request.get('exit_code')) is not int or request['exit_code'] != 0):
             request_problems.append('request did not finish successfully')
         legacy_problems = []
+        seen_legacy = set()
         for observation in request['legacy_observations'] + request['legacy_compile_summaries']:
-            bounded = (len(terminals) == 1 and request['start_row'] < observation['row'] < terminals[0])
+            bounded = len(terminals) == 1
+            if observation['line'] in seen_legacy:
+                bounded = False
+            seen_legacy.add(observation['line'])
             observation['boundary_status'] = 'observed' if bounded else 'UNKNOWN'
             if not bounded:
-                legacy_problems.append(f"row {observation['row']}: legacy diagnostic outside request boundaries")
+                legacy_problems.append(f"row {observation['row']}: legacy diagnostic lacks unique physical terminal or is duplicated")
         request['legacy_status'] = 'UNKNOWN'
         if request['legacy_observations'] and not legacy_problems and not request_problems:
             request['legacy_status'] = 'observed'
@@ -324,16 +328,13 @@ def analyze(events):
                     request['legacy_counts'][name] = request['legacy_counts'].get(name, 0) + value
         request_problems.extend(legacy_problems)
         for detail in request['timing_details']:
-            if detail['row'] <= request['start_row']:
-                detail['_boundary_problem'] = 'task timing detail outside request boundaries'
-            elif len(terminals) != 1 or detail['row'] >= terminals[0]:
-                detail['_boundary_problem'] = 'task timing detail outside request boundaries'
+            if len(terminals) != 1:
+                detail['_boundary_problem'] = 'task timing detail lacks unique physical terminal'
+            detail['correlation_basis'] = 'exact_physical_request_identity; arrival_order_is_not_execution_order'
             if detail.get('_boundary_problem'):
                 request_problems.append(f"row {detail['row']}: {detail['_boundary_problem']}")
         seen_reuse_events = set()
         for event in request['events']:
-            if event['row'] <= request['start_row']:
-                request_problems.append(f"row {event['row']}: reuse event precedes its physical request start")
             terminal_order = 'unknown'
             terminal_row = None
             if len(terminals) == 1:

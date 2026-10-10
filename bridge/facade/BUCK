@@ -1490,6 +1490,7 @@ rust_filegroup(
         "src/actor_host/embedded_recovery.rs": "bridge/facade/src/actor_host/embedded_recovery.rs",
         "src/actor_host/embedded_recovery_tests.rs": "bridge/facade/src/actor_host/embedded_recovery_tests.rs",
         "src/actor_host/embedded_reflect.rs": "bridge/facade/src/actor_host/embedded_reflect.rs",
+        "src/actor_host/embedded_reflect_tests.rs": "bridge/facade/src/actor_host/embedded_reflect_tests.rs",
         "src/actor_host/embedded_restart_driver_tests.rs": "bridge/facade/src/actor_host/embedded_restart_driver_tests.rs",
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
         "src/actor_host/embedded_shutdown_tests.rs": "bridge/facade/src/actor_host/embedded_shutdown_tests.rs",
@@ -1711,6 +1712,13 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs",
         "bridge/facade/src/actor_host/fixtures/retained_handler_tools.hs",
         "bridge/facade/src/actor_host/fixtures/unconstrained_spec_later_helper.hs",
+        "bridge/facade/src/actor_host/fresh_callable_exit_read.hs",
+        "bridge/facade/src/actor_host/fresh_callable_exit_setup.hs",
+        "bridge/facade/src/actor_host/fresh_callable_result_read.hs",
+        "bridge/facade/src/actor_host/fresh_callable_result_release.hs",
+        "bridge/facade/src/actor_host/fresh_callable_result_setup.hs",
+        "bridge/facade/src/actor_host/fresh_inherited_response_observer.hs",
+        "bridge/facade/src/actor_host/fresh_result_source_actor.hs",
         "bridge/facade/src/actor_host/m1_cancel_cell.hs",
         "bridge/facade/src/actor_host/m1_eight_actor_launch.hs",
         "bridge/facade/src/actor_host/m1_warm_cell_workloads.json",
@@ -2585,6 +2593,7 @@ filegroup(
         "bridge/facade/src/actor_host/embedded_recovery.rs": "src/actor_host/embedded_recovery.rs",
         "bridge/facade/src/actor_host/embedded_recovery_tests.rs": "src/actor_host/embedded_recovery_tests.rs",
         "bridge/facade/src/actor_host/embedded_reflect.rs": "src/actor_host/embedded_reflect.rs",
+        "bridge/facade/src/actor_host/embedded_reflect_tests.rs": "src/actor_host/embedded_reflect_tests.rs",
         "bridge/facade/src/actor_host/embedded_restart_driver_tests.rs": "src/actor_host/embedded_restart_driver_tests.rs",
         "bridge/facade/src/actor_host/embedded_service.rs": "src/actor_host/embedded_service.rs",
         "bridge/facade/src/actor_host/embedded_shutdown_tests.rs": "src/actor_host/embedded_shutdown_tests.rs",
@@ -3657,6 +3666,55 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f75736167655f636f6d70617269736f6e732e6873",
     src = "src/actor_host/fixtures/usage_comparisons.hs",
     out = "usage_comparisons.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f63616c6c61626c655f657869745f726561642e6873",
+    src = "src/actor_host/fresh_callable_exit_read.hs",
+    out = "fresh_callable_exit_read.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f63616c6c61626c655f657869745f73657475702e6873",
+    src = "src/actor_host/fresh_callable_exit_setup.hs",
+    out = "fresh_callable_exit_setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f63616c6c61626c655f726573756c745f726561642e6873",
+    src = "src/actor_host/fresh_callable_result_read.hs",
+    out = "fresh_callable_result_read.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f63616c6c61626c655f726573756c745f72656c656173652e6873",
+    src = "src/actor_host/fresh_callable_result_release.hs",
+    out = "fresh_callable_result_release.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f63616c6c61626c655f726573756c745f73657475702e6873",
+    src = "src/actor_host/fresh_callable_result_setup.hs",
+    out = "fresh_callable_result_setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f696e686572697465645f726573706f6e73655f6f627365727665722e6873",
+    src = "src/actor_host/fresh_inherited_response_observer.hs",
+    out = "fresh_inherited_response_observer.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66726573685f726573756c745f736f757263655f6163746f722e6873",
+    src = "src/actor_host/fresh_result_source_actor.hs",
+    out = "fresh_result_source_actor.hs",
     visibility = ["PUBLIC"],
 )
 

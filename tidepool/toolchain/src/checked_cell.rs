@@ -2797,6 +2797,23 @@ impl ExactCompiledItem {
         self.original_interface_context(target, table, sites)?;
         Ok(self.original_execution.clone())
     }
+
+    /// Validate the exact output once before transferring both original contexts.
+    pub fn original_contexts(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<
+        (
+            Arc<crate::declaration_context::ExactDeclarationContext>,
+            Arc<crate::declaration_context::ExactDeclarationContext>,
+        ),
+        CompileError,
+    > {
+        let interfaces = self.original_interface_context(target, table, sites)?;
+        Ok((interfaces, self.original_execution.clone()))
+    }
     pub fn original_interface_context(
         &self,
         target: &tidepool_repr::execution_schema::PreparedProgram,
@@ -3787,7 +3804,7 @@ impl CheckedItemOffer {
             original_execution,
             item: self.item.clone(),
             target: target.clone(),
-            table: read_table(root)?,
+            table: read_table(root, target)?,
             yield_sites_digest: authenticated_sites,
             value_interface,
             generation: self.generation,
@@ -3828,9 +3845,14 @@ fn bound_binder_identities(bound: &[Value]) -> impl Iterator<Item = (&str, u64)>
     })
 }
 
-pub(crate) fn read_table(root: &Path) -> Result<tidepool_repr::DataConTable, CompileError> {
-    let (table, _) =
-        tidepool_repr::serial::read_metadata(&read(root.join("meta.cbor"), 32 * 1024 * 1024)?)?;
+pub(crate) fn read_table(
+    root: &Path,
+    target: &tidepool_repr::execution_schema::PreparedProgram,
+) -> Result<tidepool_repr::DataConTable, CompileError> {
+    let (table, _) = tidepool_repr::serial::read_metadata_for_program(
+        &read(root.join("meta.cbor"), 32 * 1024 * 1024)?,
+        target,
+    )?;
     Ok(table)
 }
 

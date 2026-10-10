@@ -212,6 +212,16 @@ source obligations. `just check` links native consumers without running tests;
 Empty Cargo harnesses remain compile-only and cannot count as passing tests.
 See `bridge/haskell/tests.md` for current suite/resource interfaces.
 
+Use `just check-plan PACKAGE...` to inspect a bounded package selection and
+`swarm-build just check PACKAGE...` to compile its production, unit, binary-test
+and integration consumers from `build/native-targets.json`. Omitting packages
+retains the complete compile check. A focused `test-lib` run does not compile
+integration callers of the same public API; include their owning packages in
+the compile selection when that API changes. The generated roster and runner
+discovery own target labels and test names; do not infer a `:unit_tests` label
+from a package name. Continue with the smallest counted behavioral selections
+after compilation.
+
 Additional focused execution targets include:
 
 | Target | Execution boundary |
@@ -326,8 +336,9 @@ supplies all acceptance/run inputs; no arbitrary libtest/compiler paths or
 independent Nix catalog substitution are accepted. See
 `build/package/README.md` for exact freeze/run/exec commands.
 
-`just exomonad-run BUNDLE DESCRIPTOR REPORT COMMAND...` and
-`just exomonad-init BUNDLE DESCRIPTOR REPORT FLAGS...` use that frozen owner.
+`just exomonad-run DESCRIPTOR REPORT COMMAND...` and
+`just exomonad-init DESCRIPTOR REPORT FLAGS...` select the frozen owner beside
+that descriptor, which preserves intentional replay of historical bundles.
 An unqualified raw bundle build, `--help`, or a catalog self-consistency check
 does not establish the six production M2 gates or M1 browser acceptance.
 Source declarations and their actual executed qualification remain separate

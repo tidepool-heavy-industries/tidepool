@@ -140,26 +140,50 @@ class ExtractHelpers(unittest.TestCase):
 
     def test_native_bundle_selection_preserves_quoted_owner_values(self):
         bundle = self.root / "frozen bundle"
-        owner = bundle / "share/exomonad/qualification.py"
-        owner.parent.mkdir(parents=True)
+        shared = bundle / "share/exomonad"
+        shared.mkdir(parents=True)
+        owner = shared / "qualification.py"
         value = "test 'quoted'\n$(touch should-not-exist)"
         owner.write_text("import sys\n"
-                         "assert sys.argv[1:] == ['environment', 'descriptor name', '--shell']\n"
+                         "assert sys.argv[1:] == ['environment', " + repr(str(shared / 'qualification.json')) + ", '--shell']\n"
                          + "print(" + repr("export TIDEPOOL_NATIVE_LIBTEST=" + shlex.quote(value)) + ")\n")
-        result = self.run_shell("select_native_bundle " + shlex.quote(str(bundle))
-                                + " 'descriptor name'\nprintf '%s' \"$TIDEPOOL_NATIVE_LIBTEST\"")
+        descriptor = shared / 'qualification.json'
+        descriptor.write_text('{}\n')
+        result = self.run_shell("select_native_bundle " + shlex.quote(str(descriptor))
+                                + "\nprintf '%s' \"$TIDEPOOL_NATIVE_LIBTEST\"")
         self.assertEqual(result.stdout, value)
         self.assertFalse((self.root / "should-not-exist").exists())
 
     def test_unverified_bundle_does_not_apply_environment_or_launch(self):
         bundle = self.root / "rejected bundle"
-        owner = bundle / "share/exomonad/qualification.py"
-        owner.parent.mkdir(parents=True)
+        shared = bundle / "share/exomonad"
+        shared.mkdir(parents=True)
+        owner = shared / "qualification.py"
         owner.write_text("import sys\nprint('touch should-not-exist')\nsys.exit(17)\n")
-        self.run_shell("select_native_bundle " + shlex.quote(str(bundle))
-                       + " descriptor\ntouch should-not-launch", success=False)
+        descriptor = shared / 'qualification.json'
+        descriptor.write_text('{}\n')
+        self.run_shell("select_native_bundle " + shlex.quote(str(descriptor))
+                       + "\ntouch should-not-launch", success=False)
         self.assertFalse((self.root / "should-not-exist").exists())
         self.assertFalse((self.root / "should-not-launch").exists())
+
+    def test_descriptor_selects_its_sibling_owner_and_rejects_legacy_pair(self):
+        first = self.root / 'first'
+        second = self.root / 'second'
+        for bundle, value in ((first, 'first'), (second, 'second')):
+            shared = bundle / 'share/exomonad'
+            shared.mkdir(parents=True)
+            (shared / 'qualification.json').write_text('{}\n')
+            (shared / 'qualification.py').write_text(
+                "import sys\nassert sys.argv[1] == 'environment'\n"
+                "print('export SELECTED_OWNER=" + value + "')\n")
+        descriptor = second / 'share/exomonad/qualification.json'
+        result = self.run_shell("select_native_bundle " + shlex.quote(str(descriptor))
+                                + "\nprintf '%s' \"$SELECTED_OWNER\"")
+        self.assertEqual(result.stdout, 'second')
+        result = self.run_shell("select_native_bundle " + shlex.quote(str(first)) + " "
+                                + shlex.quote(str(descriptor)), success=False)
+        self.assertIn('accepts only a qualification descriptor', result.stderr)
 
     def delegated_fixture(self):
         bundle = self.root / 'frozen native bundle'
@@ -177,11 +201,11 @@ class ExtractHelpers(unittest.TestCase):
             "import sys\nassert '--delegated-service' in sys.argv\n"
             "assert '--expected-count' in sys.argv and '1' in sys.argv\nraise SystemExit(7)\n")
         script = LIBRARY.parents[1] / 'exomonad/scripts/test-embedded-command-delegated.sh'
-        return script, bundle, self.root / 'native evidence'
+        return script, shared / 'qualification.json', self.root / 'native evidence'
 
     def test_native_delegated_wrapper_failure_retains_logs_and_reaps_daemon(self):
-        script, bundle, output = self.delegated_fixture()
-        result = subprocess.run(['bash', str(script), str(bundle), 'descriptor', str(output)],
+        script, descriptor, output = self.delegated_fixture()
+        result = subprocess.run(['bash', str(script), str(descriptor), str(output)],
                                 env=self.env, text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
         self.assertTrue((output / 'compiler/daemon.log').exists())
@@ -189,8 +213,8 @@ class ExtractHelpers(unittest.TestCase):
         self.assert_daemon_reaped()
 
     def test_native_delegated_wrapper_signal_during_startup_reaps_daemon(self):
-        script, bundle, output = self.delegated_fixture()
-        process = subprocess.Popen(['bash', str(script), str(bundle), 'descriptor', str(output)],
+        script, descriptor, output = self.delegated_fixture()
+        process = subprocess.Popen(['bash', str(script), str(descriptor), str(output)],
                                    env=self.env | {'DAEMON_MODE': 'hang'},
                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:

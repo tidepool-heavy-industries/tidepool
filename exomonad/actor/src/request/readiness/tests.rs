@@ -238,8 +238,13 @@ fn delayed_registry_history(
             registry.mark_target_unavailable(owner, requests[key]);
             facts[key] = Some(Err(ResponseFailure::TargetUnavailable));
         } else {
-            registry.begin_reply(targets[key], requests[key]).unwrap();
-            registry.finish_reply(requests[key], None);
+            let mut reply_claim_requests_key =
+                Some(registry.begin_reply(targets[key], requests[key]).unwrap());
+            crate::request::test_support::complete_optional_reply(
+                &registry,
+                &mut reply_claim_requests_key,
+                None,
+            );
             facts[key] = Some(Ok(()));
         }
         // The oracle records transitions independently of public reads. The

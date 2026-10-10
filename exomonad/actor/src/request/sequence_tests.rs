@@ -1,4 +1,4 @@
-//! A discovery suite for native request arbitration, independent of Haskell values.
+//! Stateful request arbitration with independently forced native result roots.
 //! Logical request keys survive shrinking; missing watch keys are exercised as stale
 //! handles. The oracle records accepted workflow facts and the owner's first outcome,
 //! never reads the registry's private table, and checks public observations after every
@@ -392,6 +392,20 @@ fn compare<T: std::fmt::Debug + PartialEq>(
 }
 
 fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCaseError> {
+    run_history_with_mutation(history, coverage, None)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RootMutation {
+    ReadyWithoutTypedRoot,
+    ForgetCapturedRoot,
+}
+
+fn run_history_with_mutation(
+    history: &History,
+    coverage: &mut Coverage,
+    mutation: Option<RootMutation>,
+) -> Result<(), TestCaseError> {
     let registry = RequestRegistry::default();
     let owner = ActorRef::first(ActorId(1));
     let targets: Vec<_> = history
@@ -404,6 +418,8 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
         .map(|target| registry.reserve(owner, *target))
         .collect();
     let mut requests = vec![RequestModel::default(); targets.len()];
+    let mut reply_claims: Vec<Option<RequestReplyClaim>> =
+        (0..targets.len()).map(|_| None).collect();
     let mut watches: Vec<WatchModel> = Vec::new();
     let mut event_sequences = BTreeMap::<ActorRef, Vec<u64>>::new();
     let mut last_sequence = BTreeMap::<ActorRef, u64>::new();
@@ -481,7 +497,10 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                         Err(ReplyError::Stale)
                     }
                 });
-                compare(registry.begin_reply(caller_target, id), expected, coverage)?;
+                let actual = registry.begin_reply(caller_target, id).map(|claim| {
+                    reply_claims[key] = Some(claim);
+                });
+                compare(actual, expected, coverage)?;
             }
             Action::FinishReply { failed } => {
                 // These completion hooks consume an already accepted transfer;
@@ -495,9 +514,14 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                     });
                 }
                 notices = if failed {
+                    reply_claims[key] = None;
                     registry.fail_reply_settlement(id, "failed transfer")
                 } else {
-                    registry.finish_reply(id, Some("reply".into()))
+                    test_support::complete_optional_reply(
+                        &registry,
+                        &mut reply_claims[key],
+                        Some("reply".into()),
+                    )
                 };
             }
             Action::Cancel => {
@@ -798,6 +822,50 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
             }
         }
 
+        if let Some(mutation) = mutation {
+            let mut state = registry.state.lock();
+            match mutation {
+                RootMutation::ReadyWithoutTypedRoot => {
+                    if let Some(record) = state.requests.get_mut(&id).filter(|record| {
+                        matches!(
+                            record.owner_state,
+                            OwnerState::Ready(RequestSuccess::Typed(_))
+                        )
+                    }) {
+                        // Reintroduce metadata readiness with no typed request root.
+                        record.owner_state = OwnerState::Ready(RequestSuccess::Command(
+                            test_support::command_report(),
+                        ));
+                    }
+                }
+                RootMutation::ForgetCapturedRoot
+                    if matches!(action, Action::Release) && requests[key].released =>
+                {
+                    for watch in state.watches.values_mut() {
+                        watch.responses.clear();
+                        if let Some(snapshot) = &mut watch.snapshot {
+                            Arc::get_mut(snapshot)
+                                .expect("flat model watches have no nested snapshot owners")
+                                .responses
+                                .clear();
+                        }
+                    }
+                }
+                RootMutation::ForgetCapturedRoot => {}
+            }
+        }
+
+        for (request, model) in ids.iter().zip(&requests) {
+            if !model.released && model.outcome == Some(Ok(())) {
+                let root = registry
+                    .observe_response_result(owner, *request)
+                    .map_err(|error| {
+                        TestCaseError::fail(format!("successful request has no root: {error:?}"))
+                    })?;
+                prop_assert_eq!(test_support::force(&root), 41);
+            }
+        }
+
         // Observe primary request facts independently. Each leaf keeps its
         // first terminal fact; the whole expression keeps its first terminal
         // outcome, including an initial left-biased race.
@@ -875,6 +943,20 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                     }
                     watch.decision = Some(decision);
                     watch.result = WatchResult::Ready;
+                }
+            }
+            if watch.result == WatchResult::Ready {
+                for &(node, ref failure) in &watch.decision.as_ref().unwrap().leaves {
+                    if failure.is_none() {
+                        let root = registry
+                            .observe_watch_snapshot_response(watch.id, &[], node)
+                            .map_err(|error| {
+                                TestCaseError::fail(format!(
+                                    "captured watch lost result root: {error:?}"
+                                ))
+                            })?;
+                        prop_assert_eq!(test_support::force(&root), 41);
+                    }
                 }
             }
             if previous != watch.result {
@@ -1201,4 +1283,58 @@ fn generated_request_lifecycle_matches_observable_model() {
     });
     eprintln!("request sequence coverage: {:#?}", coverage.borrow());
     result.unwrap();
+}
+
+#[test]
+fn generated_histories_shrink_missing_ready_and_forgotten_root_mutants() {
+    use proptest::test_runner::TestError;
+    let core = guided(vec![0, 1], 0, false, false);
+    let histories = proptest::collection::vec(proptest::bool::weighted(1.0), core.operations.len())
+        .prop_map(move |included| History {
+            target_keys: core.target_keys.clone(),
+            operations: core
+                .operations
+                .iter()
+                .zip(included)
+                .filter_map(|(operation, include)| include.then_some(*operation))
+                .collect(),
+        });
+    for (mutation, missing) in [
+        (
+            RootMutation::ReadyWithoutTypedRoot,
+            "successful request has no root",
+        ),
+        (
+            RootMutation::ForgetCapturedRoot,
+            "captured watch lost result root",
+        ),
+    ] {
+        let mut runner = TestRunner::new(Config {
+            cases: 16,
+            max_shrink_iters: 512,
+            failure_persistence: None,
+            ..Config::default()
+        });
+        let probes = RefCell::new(0usize);
+        let result = runner.run(&histories, |history| {
+            *probes.borrow_mut() += 1;
+            run_history_with_mutation(&history, &mut Coverage::default(), Some(mutation))
+        });
+        let Err(TestError::Fail(reason, minimal)) = result else {
+            panic!("root oracle did not detect {mutation:?}: {result:?}")
+        };
+        assert!(
+            reason.to_string().contains(missing),
+            "wrong mutant failure: {reason}"
+        );
+        assert!(*probes.borrow() > 1, "mutation must exercise shrinking");
+        eprintln!(
+            "detected {mutation:?} with {} probes; minimized history: {minimal:#?}; {reason}",
+            probes.borrow()
+        );
+        assert!(
+            run_history_with_mutation(&minimal, &mut Coverage::default(), Some(mutation)).is_err()
+        );
+        run_history(&minimal, &mut Coverage::default()).unwrap();
+    }
 }

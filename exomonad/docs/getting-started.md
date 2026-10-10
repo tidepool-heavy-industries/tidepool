@@ -66,14 +66,15 @@ frontends pass ordinary Exomonad arguments to the verified bundle:
 
 ```bash
 DESCRIPTOR="$FINAL_BUNDLE/share/exomonad/qualification.json"
-just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$NEW_REPORT" \
+just exomonad-run "$DESCRIPTOR" "$NEW_REPORT" \
   new /path/to/your/project
-just exomonad-init "$FINAL_BUNDLE" "$DESCRIPTOR" "$INIT_REPORT" \
+just exomonad-init "$DESCRIPTOR" "$INIT_REPORT" \
   --workspace /path/to/your/project --no-attach
 ```
 
-Use `just exomonad-run BUNDLE DESCRIPTOR REPORT COMMAND ...` for the other
-Exomonad operations described on this page. It records actual process execution;
+Use `just exomonad-run DESCRIPTOR REPORT COMMAND ...` for the other
+Exomonad operations described on this page. The descriptor selects its bundled
+owner and records actual process execution;
 the report alone does not prove a live scenario's replies or cleanup.
 
 Nix supplies pinned toolchain and source inputs; project binaries and catalogs
@@ -88,7 +89,7 @@ deployment artifacts.
 For the frozen native bundle, from the Tidepool checkout:
 
 ```bash
-just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$NEW_REPORT" \
+just exomonad-run "$DESCRIPTOR" "$NEW_REPORT" \
   new /path/to/your/project
 ```
 
@@ -173,7 +174,7 @@ remain raw. Run `exomonad check` before reloading the agent spec.
 ## `exomonad check`: typecheck the workspace without starting anything
 
 ```bash
-just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$CHECK_REPORT" \
+just exomonad-run "$DESCRIPTOR" "$CHECK_REPORT" \
   check --workspace /path/to/your/project
 ```
 
@@ -186,7 +187,7 @@ workspace's own model-free recipe checks, if it declares any.
 Prepare a workspace after its configuration, prompts and source are ready:
 
 ```bash
-just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$PREPARE_REPORT" \
+just exomonad-run "$DESCRIPTOR" "$PREPARE_REPORT" \
   prepare --workspace /path/to/your/project --directory /path/to/deployment
 ```
 
@@ -227,7 +228,7 @@ backend = "embedded"
 For native ChatGPT plan authentication, sign in with a separate Exomonad record:
 
 ```bash
-just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$AUTH_REPORT" \
+just exomonad-run "$DESCRIPTOR" "$AUTH_REPORT" \
   auth login --credential-file /absolute/private/path/chatgpt.json
 ```
 
@@ -285,7 +286,7 @@ workspace's `[models]` aliases. Backend selection is a config setting; `init`
 has no `--backend` flag.
 
 ```bash
-just exomonad-init "$FINAL_BUNDLE" "$DESCRIPTOR" "$INIT_REPORT" \
+just exomonad-init "$DESCRIPTOR" "$INIT_REPORT" \
   --workspace /path/to/your/project
 ```
 

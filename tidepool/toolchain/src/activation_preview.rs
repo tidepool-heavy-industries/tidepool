@@ -170,7 +170,7 @@ impl ActivationPreviewOffer {
             prototype: self.prototype.clone(),
             specification: self.specification.clone(),
             target: target.clone(),
-            table: read_table(root)?,
+            table: read_table(root, target)?,
             yield_sites_digest: crate::artifacts::yield_sites_metadata_digest(&sites)?,
             disposition,
             original_interfaces: Arc::new(ExactDeclarationContext::from_authenticated_interfaces(
@@ -335,6 +335,17 @@ impl ExactCompiledActivationPreview {
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         self.original_interface_context(target, table, sites)?;
         Ok(self.original_execution.clone())
+    }
+
+    /// Validate the exact output once before transferring both original contexts.
+    pub fn original_contexts(
+        &self,
+        target: &PreparedProgram,
+        table: &DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<(Arc<ExactDeclarationContext>, Arc<ExactDeclarationContext>), CompileError> {
+        let interfaces = self.original_interface_context(target, table, sites)?;
+        Ok((interfaces, self.original_execution.clone()))
     }
 }
 

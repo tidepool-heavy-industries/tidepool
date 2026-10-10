@@ -20,6 +20,7 @@ struct ReplyDriver {
     applied: Arc<Notify>,
     resumes: Arc<AtomicUsize>,
     accepted: bool,
+    reply_claim: Option<crate::request::RequestReplyClaim>,
     sibling: Option<oneshot::Receiver<()>>,
     sibling_entered: Arc<Notify>,
     mailbox_calls: Arc<AtomicUsize>,
@@ -140,7 +141,11 @@ impl KernelBehavior for ReplyDriver {
                 let request = driver.request.lock().expect("request retained");
                 match successful {
                     Some(true) => {
-                        driver.registry.finish_reply(request, None);
+                        let claim = driver
+                            .reply_claim
+                            .take()
+                            .expect("accepted reply owns its affine claim");
+                        crate::request::test_support::complete_reply(&driver.registry, claim, None);
                     }
                     Some(false) => {
                         driver
@@ -218,7 +223,7 @@ impl ReplyDriver {
                 WorkbenchRunStatus::Committed,
             )));
         }
-        result.expect("presented request accepts one reply");
+        self.reply_claim = Some(result.expect("presented request accepts one reply"));
         self.accepted = true;
         Ok(KernelStep::ContinueLater(response(
             WorkbenchRunStatus::Replied,
@@ -364,6 +369,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
             applied: applied.clone(),
             resumes: resumes.clone(),
             accepted: false,
+            reply_claim: None,
             sibling: Some(sibling),
             sibling_entered: sibling_entered.clone(),
             mailbox_calls: mailbox_calls.clone(),
@@ -563,7 +569,10 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         }
     }
     // Opposite and repeated completions cannot overwrite the first outcome.
-    registry.finish_reply(request, None);
+    assert!(matches!(
+        registry.begin_reply(actor.identity(), request),
+        Err(crate::ReplyError::Stale | crate::ReplyError::AlreadySettled)
+    ));
     registry.fail_reply_settlement(request, "late failure");
     check_observation(&registry, owner, request, Some(history.completion));
     assert_eq!(resumes.load(Ordering::SeqCst), 1);
@@ -637,7 +646,10 @@ async fn read_operation(
         ReadOperation::StaleSettlement => {
             let missing = crate::RequestId(u64::MAX);
             assert_ne!(request, missing);
-            assert!(registry.finish_reply(missing, None).is_empty());
+            assert!(matches!(
+                registry.begin_reply(actor.identity(), missing),
+                Err(crate::ReplyError::Stale)
+            ));
             assert!(registry
                 .fail_reply_settlement(missing, "stale failure")
                 .is_empty());

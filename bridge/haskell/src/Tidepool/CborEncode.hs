@@ -12,6 +12,7 @@ import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import Tidepool.Metadata (DCMeta(..))
+import Tidepool.ExecutionEncode (encodeSymbol)
 import Tidepool.Binders
   ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..), HostBindingAuthority(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..)
@@ -22,16 +23,16 @@ import Tidepool.Binders
 import Tidepool.CheckedCell (encodeCheckedTypeWitness, encodeRequestTypeSignatures, encodeCellExpressionPlan)
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
--- | 8-byte version header: magic 'TPLR' + version 4.0.
+-- | 8-byte version header: magic 'TPLR' + version 5.0.
 --
 -- Must be kept byte-identical to the Rust reader's own
 -- @VERSION_MAJOR@/@VERSION_MINOR@ (tidepool/repr/src/serial/mod.rs) — there
 -- is no shared formatter across the language boundary, so a version bump
 -- needs a matching change on both sides.
 --
--- 4.0 removes obsolete variable-name and poison tables.
+-- 5.0 requires the complete compiler-issued constructor symbol identity.
 tplrHeader :: ByteString
-tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x04, 0x00, 0x00]
+tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x05, 0x00, 0x00]
 
 -- | Encode the DataCon table + a warnings map: @[entries_array, warnings_map]@.
 -- The warnings map always carries @has_io@; when a captured type is present
@@ -61,7 +62,7 @@ encodeMetadata entries hasIO mCapturedType warnings = tplrHeader <> toStrictByte
             <> foldMap encodeString warnings)
 
 encodeMetaEntry :: DCMeta -> Encoding
-encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, dcmFieldLabels, dcmTypeName, dcmFieldTypes} =
+encodeMetaEntry DCMeta{dcmIdentity, dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, dcmFieldLabels, dcmTypeName, dcmFieldTypes} =
   let
     tagWord :: Word
     tagWord =
@@ -69,14 +70,14 @@ encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, 
         then error "encodeMetaEntry: negative constructor tag"
         else fromIntegral dcmTag
   in
-  -- The Rust reader requires exactly nine elements. Positional constructors
+  -- The Rust reader requires exactly ten elements. Positional constructors
   -- carry an empty labels array. The 8th
   -- element is the rendered name of the constructor's parent TyCon (e.g.
   -- "Verdict"), always present — every DataCon has a parent type. The 9th
   -- element is the constructor's field types, rendered in declaration order
   -- (same @ppr@ convention as the 8th element and asks.json), always present
   -- (empty array for a nullary constructor).
-  encodeListLen 9
+  encodeListLen 10
   <> encodeWord64 dcmId
   <> encodeString dcmName
   <> encodeWord tagWord
@@ -89,6 +90,7 @@ encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, 
   <> encodeString dcmTypeName
   <> encodeListLen (fromIntegral (length dcmFieldTypes))
   <> foldMap encodeString dcmFieldTypes
+  <> encodeSymbol dcmIdentity
 
 --------------------------------------------------------------------------------
 -- Turn-mode rich result (--turn) — independent of the constructor-metadata

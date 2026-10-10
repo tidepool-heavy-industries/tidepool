@@ -15,8 +15,8 @@ use tidepool_repr::execution_schema::{
     ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
-mod finalized_module;
 mod entry_dependencies;
+mod finalized_module;
 pub(crate) use entry_dependencies::EntryDependencySelection;
 mod retained_core;
 pub(crate) use finalized_module::{

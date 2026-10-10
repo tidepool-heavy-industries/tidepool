@@ -31,7 +31,9 @@ use tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct;
 use tidepool_repr::execution_schema::{
     parse_program, DecodeLimits, PreparedProgram, SymbolIdentity,
 };
-use tidepool_repr::serial::{read_metadata, MetaWarnings};
+#[cfg(test)]
+use tidepool_repr::serial::read_metadata;
+use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::DataConTable;
 
 use crate::{timing, CompileError, NominalHead, YieldSite};
@@ -1611,16 +1613,17 @@ pub fn turn_user_code_line_range(wrapped: &str, turn_text: &str) -> Option<(usiz
 #[derive(Debug)]
 pub struct CompiledTurn {
     /// This turn's DataCon metadata.
-    pub table: DataConTable,
+    table: DataConTable,
     /// Compile warnings (e.g. `has_io`).
     pub warnings: MetaWarnings,
     /// Typed suspension sites decoded from the `TurnOut` wire payload.
-    pub asks: Vec<YieldSite>,
+    pub(super) asks: Vec<YieldSite>,
     /// The turn's prepared-STG program.
-    pub prepared: Arc<PreparedProgram>,
+    prepared: Arc<PreparedProgram>,
     /// Worker-certified original source groups and the target's exact owner
     /// rows. Retained imports still require lexical resolution at admission.
-    pub certification: Option<TurnCertification>,
+    pub(super) certification: Option<TurnCertification>,
+    provenance: Arc<std::sync::OnceLock<super::resident::CompiledProvenancePlan>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1845,6 +1848,34 @@ pub(super) fn encode_bound_binder_authority(binder: &BoundBinder) -> CborValue {
 }
 
 impl CompiledTurn {
+    /// Admit ordinary prepared code and its complete nominal metadata together.
+    /// Checked execution authority is attached only by the native output owner.
+    pub fn from_prepared(
+        prepared: Arc<PreparedProgram>,
+        table: DataConTable,
+        warnings: MetaWarnings,
+        asks: Vec<YieldSite>,
+    ) -> Result<Self, CompileError> {
+        table
+            .validate_program(&prepared)
+            .map_err(tidepool_repr::serial::ReadError::ConstructorMetadata)?;
+        Ok(Self {
+            prepared,
+            table,
+            warnings,
+            asks,
+            certification: None,
+            provenance: Arc::default(),
+        })
+    }
+
+    pub fn table(&self) -> &DataConTable {
+        &self.table
+    }
+    pub fn prepared(&self) -> &Arc<PreparedProgram> {
+        &self.prepared
+    }
+
     /// Reconstruct a fresh runtime installation from a complete original entry.
     /// Its original custody is checked by the toolchain loader; mutable runtime
     /// state is created only when this turn is installed in a session.
@@ -1934,10 +1965,18 @@ impl CompiledTurn {
             })
     }
 
+    pub fn sites(&self) -> &[YieldSite] {
+        &self.asks
+    }
+    pub fn certification(&self) -> Option<&TurnCertification> {
+        self.certification.as_ref()
+    }
+
     /// Borrow immutable inputs when the caller will reuse this artifact.
     #[must_use]
     pub fn code(&self) -> TurnCode<'_> {
         TurnCode {
+            provenance: self.provenance.clone(),
             table: std::borrow::Cow::Borrowed(&self.table),
             sites: std::borrow::Cow::Borrowed(&self.asks),
             prepared: std::borrow::Cow::Borrowed(self.prepared.as_ref()),
@@ -1949,6 +1988,7 @@ impl CompiledTurn {
     #[must_use]
     pub fn into_code(self) -> TurnCode<'static> {
         TurnCode {
+            provenance: self.provenance.clone(),
             table: std::borrow::Cow::Owned(self.table),
             sites: std::borrow::Cow::Owned(self.asks),
             prepared: std::borrow::Cow::Owned(Arc::unwrap_or_clone(self.prepared)),
@@ -1961,10 +2001,81 @@ impl CompiledTurn {
 /// borrowed inputs remain reusable and are copied only at installation.
 #[derive(Clone)]
 pub struct TurnCode<'a> {
-    pub table: std::borrow::Cow<'a, DataConTable>,
-    pub sites: std::borrow::Cow<'a, [YieldSite]>,
-    pub prepared: std::borrow::Cow<'a, PreparedProgram>,
-    pub certification: std::borrow::Cow<'a, Option<TurnCertification>>,
+    table: std::borrow::Cow<'a, DataConTable>,
+    pub(super) sites: std::borrow::Cow<'a, [YieldSite]>,
+    prepared: std::borrow::Cow<'a, PreparedProgram>,
+    pub(super) certification: std::borrow::Cow<'a, Option<TurnCertification>>,
+    pub(super) provenance: Arc<std::sync::OnceLock<super::resident::CompiledProvenancePlan>>,
+}
+
+impl<'a> TurnCode<'a> {
+    pub fn table(&self) -> &DataConTable {
+        self.table.as_ref()
+    }
+    pub fn prepared(&self) -> &PreparedProgram {
+        self.prepared.as_ref()
+    }
+
+    pub fn sites(&self) -> &[YieldSite] {
+        &self.sites
+    }
+    pub fn certification(&self) -> Option<&TurnCertification> {
+        self.certification.as_ref().as_ref()
+    }
+
+    /// Borrow the same admitted pair without reconstructing its ownership.
+    pub fn borrowed(&self) -> TurnCode<'_> {
+        TurnCode {
+            provenance: self.provenance.clone(),
+            table: std::borrow::Cow::Borrowed(self.table()),
+            prepared: std::borrow::Cow::Borrowed(self.prepared()),
+            sites: std::borrow::Cow::Borrowed(self.sites.as_ref()),
+            certification: std::borrow::Cow::Borrowed(self.certification.as_ref()),
+        }
+    }
+
+    /// Transfer the admitted pair, copying only inputs that were borrowed.
+    pub fn into_owned(self) -> TurnCode<'static> {
+        TurnCode {
+            provenance: self.provenance,
+            table: std::borrow::Cow::Owned(self.table.into_owned()),
+            prepared: std::borrow::Cow::Owned(self.prepared.into_owned()),
+            sites: std::borrow::Cow::Owned(self.sites.into_owned()),
+            certification: std::borrow::Cow::Owned(self.certification.into_owned()),
+        }
+    }
+
+    /// A host prototype changes the issued purpose and must start a new static
+    /// provenance plan. Its admitted program and constructor metadata stay paired.
+    pub(super) fn into_host_prototype(self) -> Result<TurnCode<'static>, CompileError> {
+        let certification = self
+            .certification()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("host prototype lacks compiler custody".into())
+            })?
+            .host_prototype()?;
+        let mut code = self.into_owned();
+        code.certification = std::borrow::Cow::Owned(Some(certification));
+        code.provenance = Arc::default();
+        Ok(code)
+    }
+
+    /// Installation consumes the program while preserving borrowed metadata.
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        std::borrow::Cow<'a, DataConTable>,
+        std::borrow::Cow<'a, [YieldSite]>,
+        PreparedProgram,
+        std::borrow::Cow<'a, Option<TurnCertification>>,
+    ) {
+        (
+            self.table,
+            self.sites,
+            self.prepared.into_owned(),
+            self.certification,
+        )
+    }
 }
 
 /// The result of [`run_turn`] — one variant per verdict, each carrying only
@@ -2505,6 +2616,27 @@ pub fn bind_activation_renderer(
     ))
 }
 
+/// Preserve frontend language refusal separately from native preparation failure.
+#[derive(Debug, thiserror::Error)]
+pub enum ActivationRendererFailure {
+    #[error(transparent)]
+    Frontend(#[from] TurnFailure),
+    #[error(transparent)]
+    Native(#[from] super::prepared::PreparedRuntimeError),
+}
+
+impl From<CompileError> for ActivationRendererFailure {
+    fn from(error: CompileError) -> Self {
+        Self::Frontend(error.into())
+    }
+}
+
+impl From<std::io::Error> for ActivationRendererFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Frontend(error.into())
+    }
+}
+
 /// Specialize immutable pure renderer code against the original compiler context.
 pub fn compile_activation_renderer(
     admission: &super::RuntimeActivationPreviewAdmission,
@@ -2512,7 +2644,7 @@ pub fn compile_activation_renderer(
     budget: u64,
     includes: &[PathBuf],
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<super::SharedActivationRenderer, TurnFailure> {
+) -> Result<super::SharedActivationRenderer, ActivationRendererFailure> {
     use tidepool_toolchain::activation_preview::{
         ActivationPreviewSelection, ActivationPreviewSpecification,
     };
@@ -2598,7 +2730,24 @@ pub fn compile_activation_renderer(
     proof.validate_table(&compiled.table)?;
     proof.validate_yield_sites(&compiled.asks)?;
     let disposition = proof.disposition();
-    let renderer = Arc::new(super::CompiledActivationRenderer { compiled, proof });
+    let native = match disposition {
+        tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Rendered => {
+            super::resident::ActivationRendererNative::Renderable(
+                super::prepared::NativeImageBundle::prepare_activation_renderer(
+                    &compiled,
+                    &admission.image_registry,
+                )?,
+            )
+        }
+        tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Opaque => {
+            super::resident::ActivationRendererNative::Opaque
+        }
+    };
+    let renderer = Arc::new(super::CompiledActivationRenderer {
+        compiled,
+        proof,
+        native,
+    });
     Ok(match disposition {
         tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Rendered => {
             super::SharedActivationRenderer::Renderable(renderer)
@@ -3111,9 +3260,12 @@ fn decode_cell_program_turn(
     let missing =
         || CompileError::ExtractFailed("complete cell lacks its sealed output observations".into());
     let turn = decode_turn_out(turn_bytes.ok_or_else(missing)?)?;
-    let (table, warnings) = read_metadata(metadata_bytes.ok_or_else(missing)?)?;
     let products = products.ok_or_else(missing)?;
     let prepared = prepared.ok_or_else(missing)?;
+    let (table, warnings) = tidepool_repr::serial::read_metadata_for_program(
+        metadata_bytes.ok_or_else(missing)?,
+        &prepared,
+    )?;
     let certification = TurnCertification {
         artifact_view: products.artifact_view.clone(),
         original_compile_input: None,
@@ -3139,12 +3291,10 @@ fn decode_cell_program_turn(
             variant,
             bound,
             wrapped_source,
-            compiled: CompiledTurn {
-                table,
-                warnings,
-                asks,
-                prepared,
-                certification: Some(certification),
+            compiled: {
+                let mut compiled = CompiledTurn::from_prepared(prepared, table, warnings, asks)?;
+                compiled.certification = Some(certification);
+                compiled
             },
         }),
         DecodedTurnOut::Expr {
@@ -3154,12 +3304,10 @@ fn decode_cell_program_turn(
         } => Ok(TurnResult::Expr {
             variant,
             wrapped_source,
-            compiled: CompiledTurn {
-                table,
-                warnings,
-                asks,
-                prepared,
-                certification: Some(certification),
+            compiled: {
+                let mut compiled = CompiledTurn::from_prepared(prepared, table, warnings, asks)?;
+                compiled.certification = Some(certification);
+                compiled
             },
         }),
         _ => Err(CompileError::ExtractFailed(
@@ -4258,25 +4406,21 @@ fn compiled_native_output(
     products: Option<&tidepool_toolchain::artifacts::SealedTurnProducts>,
     admission: Option<&Arc<super::RuntimeCheckedItemAdmission>>,
 ) -> Result<CompiledTurn, CompileError> {
-    let compiled = CompiledTurn {
-        table: table.clone(),
-        warnings: warnings.clone(),
-        asks,
-        prepared,
-        certification: products
-            .map(|products| -> Result<_, CompileError> {
-                Ok(TurnCertification {
-                    artifact_view: products.artifact_view.clone(),
-                    original_compile_input: products.original_compile_input.clone(),
-                    groups: products.certified_groups.clone(),
-                    target_owners: products.pending_imports.clone(),
-                    package_interfaces: products.package_interfaces.clone(),
-                    recovery_products: products.recovery_products.clone(),
-                    purpose: TurnPurpose::from_sealed(products.checked.as_ref(), admission)?,
-                })
+    let mut compiled =
+        CompiledTurn::from_prepared(prepared, table.clone(), warnings.clone(), asks)?;
+    compiled.certification = products
+        .map(|products| -> Result<_, CompileError> {
+            Ok(TurnCertification {
+                artifact_view: products.artifact_view.clone(),
+                original_compile_input: products.original_compile_input.clone(),
+                groups: products.certified_groups.clone(),
+                target_owners: products.pending_imports.clone(),
+                package_interfaces: products.package_interfaces.clone(),
+                recovery_products: products.recovery_products.clone(),
+                purpose: TurnPurpose::from_sealed(products.checked.as_ref(), admission)?,
             })
-            .transpose()?,
-    };
+        })
+        .transpose()?;
     if let Some(certification) = &compiled.certification {
         certification.validate_checked_table(&compiled.table)?;
     }
@@ -4364,7 +4508,9 @@ fn read_compiled_turn(
     );
 
     let deserialize_start = std::time::Instant::now();
-    let (table, warnings) = read_metadata(&meta_bytes)?;
+    let prepared = read_prepared_program(output_dir)?;
+    let (table, warnings) =
+        tidepool_repr::serial::read_metadata_for_program(&meta_bytes, &prepared)?;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -4374,7 +4520,6 @@ fn read_compiled_turn(
     );
     // Runtime unresolved-error naming — see lib.rs twin sites.
 
-    let prepared = read_prepared_program(output_dir)?;
     let module = extract_module_name(wrapped_source).unwrap_or_else(|| "Input".into());
     let source_path = output_dir.join(format!("{module}.hs"));
     let sealed = seal_turn_outputs(
@@ -4386,29 +4531,14 @@ fn read_compiled_turn(
         PREPARED_SCAFFOLD_TARGET,
     )?;
 
-    let compiled = CompiledTurn {
-        table,
-        warnings,
+    compiled_native_output(
+        &table,
+        &warnings,
         asks,
         prepared,
-        certification: sealed
-            .map(|sealed| -> Result<_, CompileError> {
-                Ok(TurnCertification {
-                    artifact_view: sealed.artifact_view,
-                    original_compile_input: sealed.original_compile_input,
-                    groups: sealed.certified_groups,
-                    target_owners: sealed.pending_imports,
-                    package_interfaces: sealed.package_interfaces,
-                    recovery_products: sealed.recovery_products,
-                    purpose: TurnPurpose::from_sealed(sealed.checked.as_ref(), admission)?,
-                })
-            })
-            .transpose()?,
-    };
-    if let Some(certification) = &compiled.certification {
-        certification.validate_checked_table(&compiled.table)?;
-    }
-    Ok(compiled)
+        sealed.as_ref(),
+        admission,
+    )
 }
 
 /// Read the prepared-STG program the worker wrote for this turn. A requested

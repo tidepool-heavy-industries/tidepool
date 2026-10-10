@@ -123,7 +123,7 @@ pub use resident::{
     ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentParcel,
     ResidentResumeError, ResidentSession, RootCustody, RuntimeActivationInput,
     RuntimeActivationInputAdmission, RuntimeActivationPreviewAdmission, RuntimeProgressPublication,
-    SessionRunContext,
+    RuntimeResultParcel, RuntimeResultPublication, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, HaskellTypeSource, SessionCompileView, SourceImports};
@@ -2482,13 +2482,22 @@ impl SessionLib {
             .path
             .parent()
             .ok_or_else(|| invalid("recovery manifest has no parent"))?;
-        let refs = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
-            root,
-            certified.toolchain_identity_sha256(),
-            &context.recovery_products(),
-        )
-        .map_err(|error| invalid(&error.to_string()))?;
         let own = certified.product().owner();
+        if certified.introduced_exports().iter().any(|export| {
+            export.head.unit != own.unit
+                || export.head.module != own.module
+                || export
+                    .children
+                    .iter()
+                    .any(|child| child.unit != own.unit || child.module != own.module)
+        }) {
+            return Err(invalid(
+                "authored inventory includes nonlocal export identities",
+            ));
+        }
+        let (refs, interfaces) = context
+            .materialize_recovery_products_and_interfaces(root)
+            .map_err(|error| invalid(&error.to_string()))?;
         if refs
             .iter()
             .filter(|reference| {
@@ -2505,18 +2514,6 @@ impl SessionLib {
                 "authored recovery closure lacks its exact declaration owner",
             ));
         }
-        if certified.introduced_exports().iter().any(|export| {
-            export.head.unit != own.unit
-                || export.head.module != own.module
-                || export
-                    .children
-                    .iter()
-                    .any(|child| child.unit != own.unit || child.module != own.module)
-        }) {
-            return Err(invalid(
-                "authored inventory includes nonlocal export identities",
-            ));
-        }
         let exports = certified
             .introduced_exports()
             .iter()
@@ -2527,9 +2524,7 @@ impl SessionLib {
             .map(recovery::RecoveryArtifactClosure::Home)
             .collect::<Vec<_>>();
         artifacts.extend(
-            context
-                .materialize_module_interfaces(root)
-                .map_err(|error| invalid(&error.to_string()))?
+            interfaces
                 .into_iter()
                 .map(recovery::RecoveryArtifactClosure::ModuleInterface),
         );

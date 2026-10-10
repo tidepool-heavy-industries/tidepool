@@ -333,6 +333,11 @@ fn install_compiled_target(
     let target = artifacts.targets.get(target).ok_or_else(|| {
         CompileError::ExtractFailed(format!("compiled artifact has no target {target:?}"))
     })?;
+    artifacts
+        .table
+        .validate_program(target.prepared.prepared())
+        .map_err(tidepool_repr::serial::ReadError::ConstructorMetadata)
+        .map_err(CompileError::from)?;
     let certification = session::turn::TurnCertification::from_artifacts(artifacts, target);
     let resolved = state.resolve_certification_in(
         ScopeId::ROOT,
@@ -488,6 +493,50 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn selected_artifact_revalidates_nominal_metadata_before_installation() {
+        tidepool_testing::eval_harness::require_extract();
+        let source = "module NominalAdmissionControl where\nresult = Just (42 :: Int)\n";
+        let mut artifacts = tidepool_toolchain::artifacts::compile_invocation(
+            &tidepool_toolchain::artifacts::CompileInvocation {
+                source,
+                targets: &["result"],
+                include: &[],
+                fallback_module_name: "NominalAdmissionControl",
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+        let target = artifacts.targets["result"].prepared.prepared();
+        artifacts.table.validate_program(target).unwrap();
+        let declared = target
+            .constructors()
+            .first()
+            .expect("real compiler constructor")
+            .clone();
+        let mut changed = tidepool_repr::DataConTable::new();
+        changed
+            .extend_checked(artifacts.table.iter().cloned().map(|mut row| {
+                if row.id == declared.host_id {
+                    row.identity.unit.push_str("-foreign");
+                }
+                row
+            }))
+            .unwrap();
+        artifacts.table = changed;
+        let mut state = session::PersistentSession::new(None, DEFAULT_NURSERY_SIZE);
+        let error = install_compiled_target(&mut state, &artifacts, "result").unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeError::Compile(CompileError::ReadError(
+                tidepool_repr::serial::ReadError::ConstructorMetadata(
+                    tidepool_repr::datacon_table::ConstructorMetadataMismatch::Identity { .. }
+                )
+            ))
+        ));
+        assert!(state.prepared().is_none());
+    }
 
     struct DiagnosticTestScope {
         _root: tempfile::TempDir,

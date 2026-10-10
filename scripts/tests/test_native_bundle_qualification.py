@@ -560,6 +560,91 @@ class NativeQualificationTests(unittest.TestCase):
                          {'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'})
         self.assertNotIn('measurement_reporter', recursive)
 
+    def test_result_delivery_seals_actual_machine_and_value_premises_separately_from_m2(self):
+        cohorts = qualification.cohorts()
+        result = cohorts['result-delivery']
+        self.assertEqual(result['tests'], list(qualification.RESULT_DELIVERY_CASES))
+        self.assertEqual(result['expected_count'], 6)
+        self.assertFalse(result['ignored'])
+        self.assertEqual(result['compiler_mode'], 'owned-resident')
+        self.assertEqual(result['max_jobs'], 2)
+        self.assertTrue(result['retain_artifacts'])
+        self.assertTrue(result['require_confirmed_cleanup'])
+        self.assertEqual(result['mode'], 'model_free_resident_cluster')
+        self.assertEqual(result['case_premises'], qualification.RESULT_DELIVERY_CASES)
+        self.assertTrue(set(result['tests']).isdisjoint(cohorts['m2']['tests']))
+        self.assertEqual(len(cohorts['m2']['tests']), 9)
+        for premises in result['case_premises'].values():
+            self.assertIn('placement', premises)
+            self.assertIn('input_path', premises)
+
+    def test_result_delivery_preserves_failed_missing_and_unconfirmed_runner_receipts(self):
+        """Synthetic receipts test qualification refusal, not runtime success."""
+        selected = list(qualification.RESULT_DELIVERY_CASES)
+        for mutation in ('control', 'missing', 'duplicate', 'zero', 'unknown',
+                         'failed', 'nonzero_exit', 'missing_hosted_cleanup',
+                         'failed_compiler_cleanup'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / 'descriptor.json'
+                path.write_text('sealed descriptor')
+                descriptor = {
+                    'external_inputs': {'runtime_tools': {'path': '/frozen/tools'}},
+                    'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
+                    'cohorts': qualification.cohorts(), 'environment': {},
+                    'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                    'profile': 'fast-dev', 'stdlib_mode': 'catalog-backed',
+                }
+                output = root / 'evidence'
+
+                def execute(command, **kwargs):
+                    self.assertEqual([command[i + 1] for i, word in enumerate(command)
+                                      if word == '--exact'], selected)
+                    self.assertEqual(command[command.index('--expected-count') + 1], '6')
+                    self.assertIn('--retain-artifacts', command)
+                    self.assertNotIn('--ignored', command)
+                    names = selected[:-1] if mutation == 'missing' else list(selected)
+                    if mutation == 'duplicate':
+                        names[-1] = names[0]
+                    for index, name in enumerate(names):
+                        execution = {
+                            'executed_test_count': 1, 'exit_code': 0,
+                            'process_cleanup_status': 'confirmed',
+                            'hosted_cleanup_status': 'confirmed',
+                            'compiler_cleanup_status': 'confirmed',
+                        }
+                        if index == len(names) - 1:
+                            if mutation in ('zero', 'unknown'):
+                                execution['executed_test_count'] = 0 if mutation == 'zero' else None
+                            elif mutation == 'nonzero_exit':
+                                execution['exit_code'] = 101
+                            elif mutation == 'missing_hosted_cleanup':
+                                del execution['hosted_cleanup_status']
+                            elif mutation == 'failed_compiler_cleanup':
+                                execution['compiler_cleanup_status'] = 'unconfirmed'
+                        qualification.write_json(output / f'tests/{index}.json', {
+                            'test': name, 'execution': execution,
+                            'passed': not (mutation == 'failed' and index == len(names) - 1),
+                        })
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch.dict(os.environ, {}, clear=True), \
+                     patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run', side_effect=execute):
+                    code = qualification.main([
+                        'run', str(path), '--cohort', 'result-delivery',
+                        '--output', str(output), '--jobs', '2'])
+                report = json.loads((output / 'report.json').read_text())
+                self.assertEqual(code, int(mutation != 'control'))
+                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['expected_count'], 6)
+                self.assertEqual(report['runner_exit_code'], 0)
+                self.assertEqual(set(report['case_premises']), set(selected))
+                self.assertEqual(all(case['verified'] for case in report['case_premises'].values()),
+                                 mutation == 'control')
+                for name, case in report['case_premises'].items():
+                    self.assertEqual(case['premises'], qualification.RESULT_DELIVERY_CASES[name])
+
     def test_recursive_m3_requires_both_exact_executed_receipts(self):
         recursive, asynchronous = qualification.M3_RECURSIVE_TESTS
         for mutation in ('control', 'missing_asynchronous', 'duplicate_recursive',
@@ -955,6 +1040,7 @@ class NativeQualificationTests(unittest.TestCase):
                                 'TIDEPOOL_COMPILER_MODULES': '/frozen/catalog/catalog.json',
                                 'TIDEPOOL_COMPILER_DEPLOYMENT': '/frozen/compiler/compiler-deployment.json'},
             }
+            fixture.add_owner_summaries()
             measured = qualification.analyze_harness_performance(
                 descriptor, [record], [runner_path],
                 qualification.cohorts()['harness-performance'],
@@ -979,6 +1065,7 @@ class NativeQualificationTests(unittest.TestCase):
             "control": None,
             "short_unknown_roster": "workload_contract_matches_selected_cohort",
             "missing_wall": "phase_measurements_complete",
+            "missing_owner_summary": "bounded_owner_observations_complete",
             "negative_wall": "phase_measurements_complete",
             "malformed_duplicate_queue": "queue_evidence_complete",
             "missing_compiler_grant": "compiler_job_grants_complete",
@@ -1051,6 +1138,8 @@ class NativeQualificationTests(unittest.TestCase):
                     "stdlib_mode": "catalog-backed", "startup_mode": "prepared",
                     "environment": phases[0]["deployment"],
                 }
+                if mutation != "missing_owner_summary":
+                    fixture.add_owner_summaries()
                 measured = qualification.analyze_harness_performance(
                     descriptor, [record], [runner_path], qualification.cohorts()["harness-performance"],
                     True, descriptor_path)
@@ -1738,7 +1827,7 @@ class NativeQualificationTests(unittest.TestCase):
                               'profile': 'fast-dev', 'native_catalog': {'catalog_sha256': 'c' * 64}}
                 def execute(command, **kwargs):
                     self.assertEqual(command, ['/pinned/runtime-tools/bin/bash', str(root / 'share/exomonad/packaged-catalog-consumer.sh'),
-                        str(root), str(path), '/pinned/runtime-tools/bin/bwrap', str(output), '/pinned/runtime-tools/bin/python3'])
+                        str(path), '/pinned/runtime-tools/bin/bwrap', str(output), '/pinned/runtime-tools/bin/python3'])
                     if passed is not None:
                         qualification.write_json(output / 'tests/case.json', {'test': qualification.CATALOG_TEST,
                             'passed': passed, 'execution': {'executed_test_count': count, 'exit_code': 0}})
@@ -2440,22 +2529,23 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
         namespace_source = script.split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            descriptor = root / 'qualification.json'
+            shared = root / 'share/exomonad'
+            shared.mkdir(parents=True)
+            descriptor = shared / 'qualification.json'
+            policy = shared / 'qualification.py'
             descriptor.write_text(json.dumps({
                 'bundle_root': str(root), 'stdlib_mode': 'catalog-backed',
                 'programs': {'libtest': str(root / 'bin/tidepool-tests'),
                              'runner': str(root / 'runner.py')},
                 'environment': {'TIDEPOOL_COMPILER_MODULES': '/frozen/catalog.json'},
             }))
-            policy = root / 'share/exomonad/qualification.py'
             for older_policy in (False, True):
                 with self.subTest(older_policy=older_policy):
                     if older_policy:
-                        policy.parent.mkdir(parents=True)
                         policy.write_text('# prior bundle without the shared resource policy\n')
                     # No checkout/ambient helper can substitute for the exact
                     # bundled policy; failure occurs before bubblewrap starts.
-                    with patch.object(sys, 'argv', ['namespace', str(root), str(descriptor),
+                    with patch.object(sys, 'argv', ['namespace', str(descriptor),
                                                    '/pinned/bwrap', str(root / 'evidence'), sys.executable]), \
                          patch.object(subprocess, 'run') as execute, \
                          self.assertRaises(KeyError if older_policy else FileNotFoundError):
@@ -2478,6 +2568,8 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
             policy = root / 'share/exomonad/qualification.py'
             policy.parent.mkdir(parents=True)
             shutil.copyfile(SCRIPT, policy)
+            with policy.open('a') as output:
+                output.write("\ndef verify(path):\n    return json.loads(Path(path).read_text())\n")
             paths = {}
             for name in ('TIDEPOOL_COMPILER_MODULES', *optional):
                 path = root / name
@@ -2491,7 +2583,7 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                                          if subset & (1 << index)})
                         environment = dict(reversed(list(selected.items()))) if reverse else dict(selected)
                         environment['TIDEPOOL_EXTRACT_DAEMON_SOCKET'] = '/ambient/daemon.sock'
-                        descriptor = root / 'qualification.json'
+                        descriptor = root / 'share/exomonad/qualification.json'
                         descriptor.write_text(json.dumps({
                             'bundle_root': str(root), 'stdlib_mode': 'catalog-backed',
                             'programs': {'libtest': str(root / 'bin/tidepool-tests'),
@@ -2532,7 +2624,7 @@ class CatalogConsumerNamespaceTests(unittest.TestCase):
                                             runner.resolve_resource_environment(declared)
                             return subprocess.CompletedProcess(command, 0)
 
-                        with patch.object(sys, 'argv', ['namespace', str(root), str(descriptor),
+                        with patch.object(sys, 'argv', ['namespace', str(descriptor),
                                                        '/pinned/bwrap', str(root / 'evidence'), sys.executable]), \
                              patch.object(subprocess, 'run', side_effect=consume), \
                              self.assertRaises(SystemExit) as stopped:

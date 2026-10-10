@@ -8,8 +8,11 @@ identity, so you can rejoin the pair.
 ```haskell signatures
 reflect :: Member Reflect effects => Int -> Eff effects (Either ReflectError [ConversationTurn])
 data ConversationTurn = ConversationTurn
-  { turnIdentity :: Text, turnStartedAt :: Maybe Text
+  { turnIdentity :: Text, turnState :: ConversationTurnState
+  , turnStartedAt :: Maybe Text
   , turnCompletedAt :: Maybe Text, turnItems :: [TurnItem] }
+data ConversationTurnState
+  = TurnInProgress | TurnCompleted (Maybe Text) | TurnInterrupted | TurnUnknown
 data TurnItem
   = TurnMessage ConversationRole Text
   | TurnToolCall Text Text Text
@@ -20,8 +23,13 @@ data ReflectError = ReflectUnbound | ReflectUnreadable Text
 It reads only your own conversation. There is no argument naming another actor
 or a file. `Left ReflectUnbound` means this context has no conversation of its
 own — an operator proxy is one — and no other conversation is returned in its
-place. The active turn has `turnCompletedAt = Nothing` and includes only messages
-and tool activity already recorded; a pending tool result is never fabricated.
+place. `turnIdentity` is the stable runtime request identity;
+`turnState` reports model-response progress. `TurnCompleted responseId` carries
+the separate exact provider response identity when available and means the
+response was recorded, even when a tool result is still pending; `TurnUnknown`
+means retained history has no response observation. Optional timestamps may be
+missing in every state and do not indicate progress. The active turn includes
+only messages and tool activity already recorded; a pending result is never fabricated.
 Fewer than `n` turns returns the ones that exist; `n <= 0` returns none.
 
 Because it is an ordinary effect, a question you ask later — a Jev evaluation

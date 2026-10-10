@@ -1,8 +1,8 @@
 use super::*;
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
-use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError};
-use std::sync::Arc;
+use proptest::test_runner::{contextualize_config, Config, FileFailurePersistence, TestCaseError};
+use std::{cell::RefCell, sync::Arc};
 use tidepool_repr::execution_schema::{Architecture, Endianness, StorageLayout, TargetDescriptor};
 
 const REGIONS: usize = 8;
@@ -15,6 +15,7 @@ struct PoolRegion {
     bytes: usize,
     objects: usize,
     tag: usize,
+    constructor: usize,
 }
 
 fn pool(counts: &[u8; REGIONS]) -> Vec<PoolRegion> {
@@ -58,6 +59,7 @@ fn pool(counts: &[u8; REGIONS]) -> Vec<PoolRegion> {
                 bytes: count as usize * OBJECT_BYTES,
                 objects: count as usize,
                 tag: descriptor.tag() as usize,
+                constructor: index + 1,
             }
         })
         .collect()
@@ -69,6 +71,7 @@ enum Op {
     Remove(usize),
     RemoveStart(usize),
     Admit { region: usize, point: u8 },
+    AdmitTagged { region: usize, point: u8, tag: u8 },
     AdmitInterior { region: usize, object: usize },
     Overlaps { region: usize, point: u8 },
 }
@@ -80,6 +83,11 @@ fn operations() -> impl Strategy<Value = Vec<Op>> {
             (0..REGIONS).prop_map(Op::Remove),
             (0..REGIONS).prop_map(Op::RemoveStart),
             (0..REGIONS, 0u8..5).prop_map(|(region, point)| Op::Admit { region, point }),
+            (0..REGIONS, 0u8..5, 0u8..8).prop_map(|(region, point, tag)| Op::AdmitTagged {
+                region,
+                point,
+                tag
+            }),
             (0..REGIONS, 0..MAX_OBJECTS)
                 .prop_map(|(region, object)| Op::AdmitInterior { region, object }),
             (0..REGIONS, 0u8..7).prop_map(|(region, point)| Op::Overlaps { region, point }),
@@ -104,6 +112,10 @@ fn property_config() -> Config {
 
 #[derive(Debug, Default)]
 struct Coverage {
+    tag_refused: usize,
+    untagged_admitted: usize,
+    descriptor_tag_admitted: usize,
+    tagged_outside: usize,
     insert_new: usize,
     insert_duplicate: usize,
     insert_empty: usize,
@@ -125,6 +137,10 @@ struct Coverage {
 
 impl Coverage {
     fn add(&mut self, other: Self) {
+        self.tag_refused += other.tag_refused;
+        self.untagged_admitted += other.untagged_admitted;
+        self.descriptor_tag_admitted += other.descriptor_tag_admitted;
+        self.tagged_outside += other.tagged_outside;
         self.insert_new += other.insert_new;
         self.insert_duplicate += other.insert_duplicate;
         self.insert_empty += other.insert_empty;
@@ -185,15 +201,69 @@ fn slot_address(region: &PoolRegion, point: u8) -> usize {
     }
 }
 
-fn model_admit(pool: &[PoolRegion], active: &[usize], encoded: usize) -> Option<usize> {
-    let address = encoded & !0b111;
-    active.iter().copied().find(|&id| {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Admission {
+    Outside,
+    Interior(usize),
+    WrongTag(usize, usize),
+    Admitted(usize),
+}
+
+fn model_admit(pool: &[PoolRegion], active: &[usize], encoded: usize) -> Admission {
+    let address = encoded & !7;
+    let tag = encoded & 7;
+    for &id in active {
         let region = &pool[id];
         if region.objects == 0 || address < region.start || address >= region.start + region.bytes {
-            return false;
+            continue;
         }
-        (address - region.start).is_multiple_of(OBJECT_BYTES)
-    })
+        if (address - region.start) % OBJECT_BYTES != 0 {
+            return Admission::Interior(address);
+        }
+        // These nullary constructor facts come from the fixture operand.
+        // The ABI accepts zero as inconclusive and seven as a live descriptor tag.
+        if tag != 0 && tag != 7 && tag != region.constructor {
+            return Admission::WrongTag(address, tag);
+        }
+        return Admission::Admitted(id);
+    }
+    Admission::Outside
+}
+
+fn check_admission(
+    catalog: &StaticRegionCatalog,
+    metrics: &StaticLookupMetrics,
+    pool: &[PoolRegion],
+    active: &[usize],
+    encoded: usize,
+) -> Result<Admission, TestCaseError> {
+    let expected = model_admit(pool, active, encoded);
+    let actual = catalog.admit(encoded, metrics);
+    match (expected, actual) {
+        (Admission::Outside, Ok(None)) => {}
+        (Admission::Admitted(id), Ok(Some(region))) => {
+            prop_assert!(std::ptr::eq(region, pool[id].region.as_ref()));
+        }
+        (
+            Admission::Interior(want),
+            Err(DescriptorTraceError::InvalidManagedPointer { address }),
+        ) => {
+            prop_assert_eq!(address, want);
+        }
+        (
+            Admission::WrongTag(want_address, want_tag),
+            Err(DescriptorTraceError::InvalidManagedTag { address, tag }),
+        ) => {
+            prop_assert_eq!((address, tag as usize), (want_address, want_tag));
+        }
+        (expected, actual) => {
+            return Err(TestCaseError::fail(format!(
+                "encoded={encoded:#x} expected={expected:?} actual={:?}",
+                actual.map(|region| region.is_some())
+            )))
+        }
+    }
+    Ok(expected)
 }
 
 fn model_overlap(pool: &[PoolRegion], active: &[usize], address: usize) -> bool {
@@ -269,28 +339,23 @@ fn run_history(counts: [u8; REGIONS], history: &[Op]) -> Result<Coverage, TestCa
                 let fact = &pool[region];
                 let (address, tag) = probe_address(fact, point);
                 let encoded = address | tag;
-                let expected = model_admit(&pool, &active, encoded);
-                let actual = catalog.admit(encoded, &metrics).map_err(|error| {
-                    TestCaseError::fail(format!(
-                        "valid boundary query unexpectedly errored: {error:?}"
-                    ))
-                })?;
-                match (expected, actual) {
-                    (Some(id), Some(actual)) => {
-                        prop_assert!(std::ptr::eq(actual, pool[id].region.as_ref()));
-                    }
-                    (None, None) => {}
-                    (expected, actual) => {
-                        return Err(TestCaseError::fail(format!(
-                            "admit mismatch: expected {expected:?}, actual {}",
-                            actual.is_some()
-                        )));
-                    }
-                }
-                if expected.is_some() {
+                let expected = check_admission(&catalog, &metrics, &pool, &active, encoded)?;
+                if matches!(expected, Admission::Admitted(_)) {
                     coverage.admit_hit += 1;
                 } else {
                     coverage.admit_miss += 1;
+                }
+            }
+            Op::AdmitTagged { region, point, tag } => {
+                let (address, _) = probe_address(&pool[region], point);
+                let expected =
+                    check_admission(&catalog, &metrics, &pool, &active, address | tag as usize)?;
+                match expected {
+                    Admission::WrongTag(_, _) => coverage.tag_refused += 1,
+                    Admission::Admitted(_) if tag == 0 => coverage.untagged_admitted += 1,
+                    Admission::Admitted(_) if tag == 7 => coverage.descriptor_tag_admitted += 1,
+                    Admission::Outside => coverage.tagged_outside += 1,
+                    _ => {}
                 }
             }
             Op::AdmitInterior { region, object } => {
@@ -300,7 +365,7 @@ fn run_history(counts: [u8; REGIONS], history: &[Op]) -> Result<Coverage, TestCa
                     let address = fact.start + object * OBJECT_BYTES + 8;
                     prop_assert!(address >= fact.start && address < fact.start + fact.bytes);
                     prop_assert!((address - fact.start) % OBJECT_BYTES != 0);
-                    prop_assert!(model_admit(&pool, &active, address).is_none());
+                    check_admission(&catalog, &metrics, &pool, &active, address)?;
                     if !active.contains(&region) {
                         prop_assert!(catalog.admit(address, &metrics).unwrap().is_none());
                     } else {
@@ -335,39 +400,87 @@ fn run_history(counts: [u8; REGIONS], history: &[Op]) -> Result<Coverage, TestCa
         for fact in &pool {
             for object in 0..fact.objects {
                 let encoded = (fact.start + object * OBJECT_BYTES) | fact.tag;
-                let expected = model_admit(&pool, &active, encoded);
-                let actual = catalog.admit(encoded, &metrics).map_err(|error| {
-                    TestCaseError::fail(format!(
-                        "valid object start unexpectedly errored: {error:?}"
-                    ))
-                })?;
-                match (expected, actual) {
-                    (Some(id), Some(actual)) => {
-                        prop_assert!(std::ptr::eq(actual, pool[id].region.as_ref()));
-                    }
-                    (None, None) => {}
-                    (expected, actual) => {
-                        return Err(TestCaseError::fail(format!(
-                            "membership mismatch: expected {expected:?}, actual {}",
-                            actual.is_some()
-                        )));
-                    }
-                }
+                check_admission(&catalog, &metrics, &pool, &active, encoded)?;
             }
         }
     }
     Ok(coverage)
 }
 
-proptest! {
-    #![proptest_config(property_config())]
-    #[test]
-    fn catalog_histories_match_linear_region_facts(
-        counts in prop::array::uniform::<_, REGIONS>(0u8..=MAX_OBJECTS as u8),
-        history in operations(),
-    ) {
-        run_history(counts, &history)?;
-    }
+#[test]
+fn catalog_histories_match_linear_region_facts() {
+    let mut config = contextualize_config(property_config());
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::catalog_histories_match_linear_region_facts"
+    ));
+    let configured_cases = config.cases;
+    let callbacks = RefCell::new(0usize);
+    let completed = RefCell::new(0usize);
+    let coverage = RefCell::new(Coverage::default());
+    let initial_failure = RefCell::new(None);
+    let strategy = (
+        prop::array::uniform::<_, REGIONS>(0u8..=MAX_OBJECTS as u8),
+        operations(),
+    );
+    let result =
+        proptest::test_runner::TestRunner::new(config).run(&strategy, |(mut counts, tail)| {
+            *callbacks.borrow_mut() += 1;
+            let input = (counts, tail.clone());
+            counts[0] = counts[0].max(1);
+            let mut history = vec![
+                Op::Insert(0),
+                Op::AdmitTagged {
+                    region: 0,
+                    point: 0,
+                    tag: 2,
+                },
+                Op::AdmitTagged {
+                    region: 0,
+                    point: 0,
+                    tag: 0,
+                },
+                Op::AdmitTagged {
+                    region: 0,
+                    point: 0,
+                    tag: 7,
+                },
+                Op::Remove(0),
+                Op::AdmitTagged {
+                    region: 0,
+                    point: 0,
+                    tag: 2,
+                },
+                Op::Insert(0),
+                Op::AdmitTagged {
+                    region: 0,
+                    point: 0,
+                    tag: 2,
+                },
+            ];
+            history.extend(tail);
+            match run_history(counts, &history) {
+                Ok(observed) => {
+                    coverage.borrow_mut().add(observed);
+                    *completed.borrow_mut() += 1;
+                    Ok(())
+                }
+                Err(error) => {
+                    if initial_failure.borrow().is_none() {
+                        *initial_failure.borrow_mut() = Some(input);
+                    }
+                    Err(error)
+                }
+            }
+        });
+    eprintln!("static_region_campaign configured_cases={configured_cases} callbacks={} completed={} coverage={:?} initial_failure={:?} minimized={:?}", callbacks.borrow(), completed.borrow(), coverage.borrow(), initial_failure.borrow(), result);
+    result.unwrap();
+    let observed = coverage.into_inner();
+    assert!(observed.tag_refused >= *completed.borrow() * 2);
+    assert!(observed.untagged_admitted >= *completed.borrow());
+    assert!(observed.descriptor_tag_admitted >= *completed.borrow());
+    assert!(observed.tagged_outside >= *completed.borrow());
 }
 
 #[test]

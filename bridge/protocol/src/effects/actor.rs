@@ -1,15 +1,8 @@
 //! The actor-runtime suspension boundary.
 //!
-//! The public Haskell API lives in `Tidepool.Actor`; this schema owns only the
-//! outward runtime requests. A start carries one
-//! existentially row-typed child entry as its field-1 live payload. A wait
-//! carries an exact Rust routing identity and returns terminal metadata. The
-//! successful exit value never crosses either request: it remains in the
-//! managed Haskell cell carried by the corresponding `ActorRef`.
-//!
-//! There is no `tidepool-handlers` handler.  The request is decoded and
-//! serviced by `exomonad-actor`, whose registry owns exact-incarnation wait
-//! semantics.
+//! The public Haskell API lives in `Tidepool.Actor`. Starts and replacements
+//! carry compiler-issued exit witnesses and a row-typed child entry. Typed
+//! terminal observations borrow or import the runtime-owned exit snapshot.
 
 use crate::hs::HsType;
 use crate::schema::{
@@ -22,6 +15,24 @@ fn address_type() -> HsType {
 
 fn launched_actor_type() -> HsType {
     HsType::Tuple(vec![HsType::Int, HsType::Int, HsType::Text])
+}
+
+fn exit_type() -> HsType {
+    HsType::app(HsType::Named("ActorExit"), HsType::Var("exit"))
+}
+
+fn exit_site(reply: HsType) -> Arg {
+    Arg {
+        name: "site",
+        ty: HsType::app(
+            HsType::app(
+                HsType::Named("RequestSite"),
+                HsType::TypeList(vec![HsType::Var("exit")]),
+            ),
+            reply,
+        ),
+        rust: RustBinding::External,
+    }
 }
 
 /// The actor effect's internal start and wait requests.
@@ -152,6 +163,12 @@ pub fn actor() -> Effect {
             },
         ],
         external_types: &[crate::schema::ExternalType {
+            haskell_name: "RequestSite", rust_wire: "i64", core_module: Some("Tidepool.Internal.RequestSite"),
+        }, crate::schema::ExternalType {
+            haskell_name: "ActorRef", rust_wire: "(i64, i64)", core_module: Some("Tidepool.Internal.ActorRef"),
+        }, crate::schema::ExternalType {
+            haskell_name: "ActorExit", rust_wire: "()", core_module: Some("Tidepool.Internal.ActorExit"),
+        }, crate::schema::ExternalType {
             haskell_name: "WorkspaceHandle",
             rust_wire: "tidepool_bridge_effects::WtWorkspaceHandle",
             core_module: None,
@@ -172,6 +189,7 @@ pub fn actor() -> Effect {
                         ty: HsType::Text,
                         rust: RustBinding::Derived,
                     },
+                    exit_site(HsType::Var("siteReply")),
                     Arg {
                         name: "entry",
                         ty: HsType::func(
@@ -204,24 +222,24 @@ pub fn actor() -> Effect {
             Verb {
                 ctor: "ActorWaitWith",
                 method: "actor_wait_with",
-                args: vec![Arg {
+                args: vec![exit_site(exit_type()), Arg {
                     name: "actor",
                     ty: address_type(),
                     rust: RustBinding::Path("(i64, i64)"),
                 }],
-                ret: HsType::Named("ActorTerminalStatus"),
+                ret: exit_type(),
                 errors: None,
                 handling: HandlingClass::Actor,
             },
             Verb {
                 ctor: "ActorPollWith",
                 method: "actor_poll_with",
-                args: vec![Arg {
+                args: vec![exit_site(HsType::maybe(exit_type())), Arg {
                     name: "actor",
                     ty: address_type(),
                     rust: RustBinding::Path("(i64, i64)"),
                 }],
-                ret: HsType::maybe(HsType::Named("ActorTerminalStatus")),
+                ret: HsType::maybe(exit_type()),
                 errors: None,
                 handling: HandlingClass::Actor,
             },
@@ -322,10 +340,11 @@ pub fn actor() -> Effect {
                         ty: address_type(),
                         rust: RustBinding::Path("(i64, i64)"),
                     },
+                    exit_site(HsType::Var("siteReply")),
                     Arg {
                         name: "entry",
                         ty: HsType::func(
-                            HsType::Var("state"),
+                            HsType::Var("exit"),
                             HsType::app(
                                 HsType::app(HsType::Named("Eff"), HsType::Var("childEffs")),
                                 HsType::Unit,
@@ -349,9 +368,7 @@ pub fn actor() -> Effect {
                 handling: HandlingClass::Actor,
             },
         ],
-        // The public wrapper needs the managed cell carried by `ActorRef`, so
-        // it is authored in Tidepool.Actor rather than emitted as a second,
-        // raw helper here.
+        // The public wrappers thread protected sites from their authored calls.
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         generated_handler: false,
@@ -365,7 +382,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn actor_entries_remain_the_field_one_live_payload() {
+    fn actor_entries_remain_the_field_two_live_payload() {
         let effect = actor();
         for constructor in ["ActorStartWith", "ActorReplaceWith"] {
             let verb = effect
@@ -373,7 +390,7 @@ mod tests {
                 .iter()
                 .find(|verb| verb.ctor == constructor)
                 .unwrap();
-            assert!(matches!(verb.args[1].rust, RustBinding::HaskellValue));
+            assert!(matches!(verb.args[2].rust, RustBinding::HaskellValue));
             assert_eq!(
                 verb.args
                     .iter()

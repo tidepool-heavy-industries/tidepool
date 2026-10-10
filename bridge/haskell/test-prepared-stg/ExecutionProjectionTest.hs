@@ -6,9 +6,12 @@ module ExecutionProjectionTest
   , verifyRetainedImportProjectionExposed
   , verifyUnboxedSumJoinProjection
   , verifyHierarchicalTargetModule
+  , verifyTimeEitherShadow
+  , verifyPreparedTime
   ) where
 
 import Tidepool.PreparedStg.Internal (PreparedModule(..))
+import Control.Exception (bracket)
 import Control.Monad (forM_, unless, when)
 import Data.ByteString qualified as BS
 import Data.List (nub)
@@ -33,7 +36,8 @@ import GHC.Types.Var (Id, varName)
 import GHC.Unit.Module (mkModule, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (stringToUnit)
 import GHC.Stg.Syntax
-import System.Directory (getCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, getCurrentDirectory, getTemporaryDirectory, removeFile, removePathForcibly)
+import System.IO (hClose, openTempFile)
 import System.FilePath ((</>))
 import System.Process (readProcess)
 import Tidepool.PreparedStg (pmModule, pmBindings)
@@ -46,13 +50,12 @@ import Tidepool.GhcPipeline
 import Tidepool.PreparedFormatting
   (FormattingAuthority(..), classifyFormatting, resolveFormattingAuthority)
 import Tidepool.PreparedTime
-  (TimeAuthority(..), classifyTime, resolveTimeAuthority)
+  (TimeAuthority(..), TimeError(..), classifyTime, resolveTimeAuthority)
 
 projectProjectionContract :: [PreparedModule] -> IO WireProgram
 projectProjectionContract modules = do
   verifyBuiltinTypeIdentity
   verifyPreparedFormatting
-  verifyPreparedTime
   verifyTagToEnumProjection
   topIdentityAllocationContract
   literalProjectionContract
@@ -1145,9 +1148,9 @@ verifyPreparedTime = do
         , (binding, _) <- pmBindings modul, binder <- topBindersForTest binding
         , occNameString (nameOccName (varName binder)) == "parseISO8601"]
   case (authority, parsers) of
-    (Just (TimeAuthority owner textUnit), [binder]) -> unless
+    (Just (TimeAuthority owner textOwner eitherOwner), [binder]) -> unless
       (case classifyTime
-        (TimeAuthority (mkModule (stringToUnit "wrong-unit") (moduleName owner)) textUnit) binder of
+        (TimeAuthority (mkModule (stringToUnit "wrong-unit") (moduleName owner)) textOwner eitherOwner) binder of
         Right Nothing -> True
         _ -> False)
       (ioError (userError "prepared time matched a same-named wrong-unit parser"))
@@ -1189,14 +1192,14 @@ verifyTimeDependencyShadow = do
         , projectionTextUnit = Nothing
         }
   case (authority, homeShadows, parsers) of
-    (Just trusted@(TimeAuthority _ textUnit), [shadowOwner], [parser]) -> do
+    (Just trusted@(TimeAuthority _ selectedTextOwner _), [shadowOwner], [parser]) -> do
       unless (moduleUnit shadowOwner == stringToUnit "main")
         (ioError (userError "prepared time home Data.Text shadow was not loaded"))
       unless (case classifyTime trusted parser of
         Right (Just _) -> case splitFunTys (idType parser) of
           ([Scaled _ argument], _) -> case splitTyConApp_maybe argument of
             Just (tycon, []) -> case nameModule_maybe (tyConName tycon) of
-              Just textOwner -> moduleUnit textOwner == textUnit
+              Just textOwner -> textOwner == selectedTextOwner
                 && moduleUnit textOwner /= moduleUnit shadowOwner
               Nothing -> False
             _ -> False
@@ -1214,6 +1217,71 @@ verifyTimeDependencyShadow = do
     isTimeIntrinsic (OperationDecl (IntrinsicIdentity name CCall) _) =
       name == "prepared_parse_iso8601"
     isTimeIntrinsic _ = False
+
+-- The shipped Time bytes can load a home Prelude whose Either has the same
+-- defining module and occurrence as the installed type. Observe the actual
+-- GHC-issued owner before asking the classifier to refuse it.
+verifyTimeEitherShadow :: IO ()
+verifyTimeEitherShadow = bracket scratch removePathForcibly $ \directory -> do
+  let eitherDirectory = directory </> "GHC" </> "Internal" </> "Data"
+      fixture = directory </> "TimeEitherAuthorityContract.hs"
+  createDirectoryIfMissing True eitherDirectory
+  writeFile (eitherDirectory </> "Either.hs") (unlines
+    [ "{-# LANGUAGE NoImplicitPrelude #-}"
+    , "module GHC.Internal.Data.Either (Either(..)) where"
+    , "data Either a b = Left a | Right b"
+    ])
+  writeFile (directory </> "Prelude.hs") (unlines
+    [ "{-# LANGUAGE PackageImports #-}"
+    , "module Prelude (module Base, Either(..)) where"
+    , "import \"base\" Prelude as Base hiding (Either(..))"
+    , "import GHC.Internal.Data.Either (Either(..))"
+    ])
+  writeFile fixture (unlines
+    [ "module TimeEitherAuthorityContract where"
+    , "import Data.Text (Text)"
+    , "import Tidepool.Data.Time (UTCTime, parseISO8601)"
+    , "result :: Text -> Either Text UTCTime"
+    , "result = parseISO8601"
+    ])
+  prepared <- runPipelineSelected PreparedStg fixture [directory, "lib"]
+  authority <- resolveTimeAuthority (prHscEnv (pprPipelineResult prepared))
+  trusted <- maybe (fail "time Either shadow lost authenticated source authority") pure authority
+  parser <- case [binder | modul <- pprModules prepared
+      , moduleNameString (moduleName (pmModule modul)) == "Tidepool.Data.Time"
+      , (binding, _) <- pmBindings modul, binder <- topBindersForTest binding
+      , occNameString (nameOccName (varName binder)) == "parseISO8601"] of
+    [binder] -> pure binder
+    _ -> fail "time Either shadow lacks one original parser"
+  case splitFunTys (idType parser) of
+    (_, result) | Just (tycon, _) <- splitTyConApp_maybe result
+      , Just owner <- nameModule_maybe (tyConName tycon) -> do
+        unless (moduleNameString (moduleName owner) == "GHC.Internal.Data.Either"
+            && moduleUnit owner == stringToUnit "main")
+          (fail "time shadow did not retain the real home Either owner")
+    _ -> fail "time shadow parser lacks a nominal Either result"
+  case classifyTime trusted parser of
+    Left InvalidTimeType{} -> pure ()
+    _ -> fail "time authority admitted a home-shadowed Either dependency"
+  let context = ProjectionContext
+        { projectionProfile = "time-either-shadow", projectionToolchain = "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
+        , projectionRetainedGenerations = mempty, projectionCurrentOriginals = mempty
+        , projectionEntry = SymbolIdentity "main" "TimeEitherAuthorityContract" "value" "result" Nothing
+        , projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing
+        , projectionTimeAuthority = Just trusted, projectionJsonAuthority = Nothing
+        , projectionTextUnit = Nothing }
+  case projectPreparedTarget context (pprModules prepared) of
+    Left (UnsupportedPreparedShape detail) | "InvalidTimeType" `Text.isInfixOf` detail -> pure ()
+    _ -> fail "time projection admitted the home-shadowed Either intrinsic"
+  where
+    scratch = do
+      temporary <- getTemporaryDirectory
+      (path, handle) <- openTempFile temporary "time-either-authority"
+      hClose handle
+      removeFile path
+      createDirectoryIfMissing True path
+      pure path
 
 verifyTagToEnumProjection :: IO ()
 verifyTagToEnumProjection = do

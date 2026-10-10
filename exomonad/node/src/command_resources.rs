@@ -155,10 +155,40 @@ impl CommandResourceStatus {
         matches!(self, Self::Queued)
     }
 }
+/// Issued grants may have escaped to a launcher. Unissued allocations never
+/// authorized a process, but their exact directory remains owned until removal.
+#[derive(Clone, Debug)]
+enum AllocationCustody {
+    Issued(PathBuf),
+    Unissued { directory: PathBuf, failure: String },
+}
+impl AllocationCustody {
+    fn directory(&self) -> &PathBuf {
+        match self {
+            Self::Issued(directory) | Self::Unissued { directory, .. } => directory,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SetupFailure {
+    Unallocated(std::io::Error),
+    Retained {
+        directory: PathBuf,
+        setup: std::io::Error,
+        cleanup: std::io::Error,
+    },
+}
+impl From<std::io::Error> for SetupFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Unallocated(error)
+    }
+}
+
 struct Entry {
     status: watch::Sender<CommandResourceStatus>,
     bytes: Option<u64>,
-    directory: Option<PathBuf>,
+    allocation: Option<AllocationCustody>,
     started: bool,
 }
 impl Entry {
@@ -166,9 +196,13 @@ impl Entry {
         Self {
             status: watch::channel(status).0,
             bytes,
-            directory: None,
+            allocation: None,
             started: false,
         }
+    }
+
+    fn directory(&self) -> Option<&PathBuf> {
+        self.allocation.as_ref().map(AllocationCustody::directory)
     }
 
     fn current(&self) -> CommandResourceStatus {
@@ -200,7 +234,7 @@ impl State {
         } else {
             self.cleanup_failures.remove(key);
         }
-        if entry.directory.is_some() {
+        if entry.allocation.is_some() {
             self.retained_allocations.insert(key.clone());
         } else {
             self.retained_allocations.remove(key);
@@ -241,6 +275,18 @@ impl State {
         self.acknowledged.insert(key.clone());
     }
 
+    fn retain_unissued(&mut self, key: &Key, directory: PathBuf, failure: String) {
+        self.release_active(key);
+        self.update_entry(key, |entry| {
+            entry
+                .status
+                .send_replace(CommandResourceStatus::CleanupUnconfirmed {
+                    detail: failure.clone(),
+                });
+            entry.allocation = Some(AllocationCustody::Unissued { directory, failure });
+        });
+    }
+
     fn release_active(&mut self, key: &Key) {
         self.queue.release(key);
         self.active.remove(key);
@@ -256,6 +302,8 @@ pub struct CommandResources {
     actor_starts: Mutex<u64>,
     #[cfg(test)]
     fail_next_allocation_cleanup: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_next_control_write: Mutex<Option<&'static str>>,
 }
 fn io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
@@ -560,6 +608,8 @@ impl CommandResources {
             actor_starts: Mutex::new(0),
             #[cfg(test)]
             fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_control_write: Mutex::new(None),
         });
         owner.reconcile(events)?;
         let weak = Arc::downgrade(&owner);
@@ -643,7 +693,7 @@ impl CommandResources {
                         return Err(io_error("allocation budget differs from admission intent"));
                     }
                     state.update_entry(&key, |entry| {
-                        entry.directory = Some(directory.clone());
+                        entry.allocation = Some(AllocationCustody::Issued(directory.clone()));
                         entry
                             .status
                             .send_replace(CommandResourceStatus::Admitted { cgroup: directory });
@@ -696,7 +746,7 @@ impl CommandResources {
                         return Err(io_error("terminal disposition without admission"));
                     }
                     state.update_entry(&key, |entry| {
-                        entry.directory = None;
+                        entry.allocation = None;
                         entry.status.send_replace(disposition);
                     });
                     state.release_active(&key);
@@ -736,15 +786,42 @@ impl CommandResources {
             }
         }
 
-        let mut known_directories = HashSet::new();
-        let recorded = state
+        let incomplete = state
             .entries
             .iter()
             .filter_map(|(key, entry)| {
-                entry
-                    .directory
-                    .as_ref()
-                    .map(|directory| (key.clone(), directory.clone(), entry.started))
+                (entry.current().is_queued() && entry.allocation.is_none()).then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in incomplete {
+            let directory = self.root.join(&key.0).join(&key.1);
+            match std::fs::metadata(&directory) {
+                Ok(metadata) if metadata.is_dir() => {
+                    state.retain_unissued(
+                        &key,
+                        directory,
+                        "admission has an allocation without a published launch grant".into(),
+                    );
+                }
+                Ok(_) => return Err(io_error("admission allocation is not a directory")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        let mut known_directories = state
+            .entries
+            .values()
+            .filter_map(|entry| entry.directory().cloned())
+            .collect::<HashSet<_>>();
+        let recorded = state
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| match &entry.allocation {
+                Some(AllocationCustody::Issued(directory)) => {
+                    Some((key.clone(), directory.clone(), entry.started))
+                }
+                _ => None,
             })
             .collect::<Vec<_>>();
         for (key, directory, started) in recorded {
@@ -803,7 +880,7 @@ impl CommandResources {
                     },
                     Some(bytes),
                 );
-                entry.directory = Some(command.path());
+                entry.allocation = Some(AllocationCustody::Issued(command.path()));
                 entry.started =
                     read_counter(&command.path().join("cgroup.events"), "populated")? > 0;
                 state.insert_entry(key, entry, false);
@@ -818,8 +895,7 @@ impl CommandResources {
                     && matches!(entry.current(), CommandResourceStatus::Admitted { .. }))
                 .then(|| {
                     entry
-                        .directory
-                        .as_ref()
+                        .directory()
                         .map(|directory| (key.clone(), directory.clone()))
                 })
                 .flatten()
@@ -837,7 +913,7 @@ impl CommandResources {
                     })?;
                     if state.entries.contains_key(&key) {
                         state.update_entry(&key, |entry| {
-                            entry.directory = None;
+                            entry.allocation = None;
                             entry.status.send_replace(disposition);
                         });
                     }
@@ -860,7 +936,7 @@ impl CommandResources {
         let unfinished = state
             .entries
             .iter()
-            .filter(|(_, entry)| entry.directory.is_none() && entry.current().is_queued())
+            .filter(|(_, entry)| entry.allocation.is_none() && entry.current().is_queued())
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for key in unfinished {
@@ -874,6 +950,7 @@ impl CommandResources {
             state.set_status(&key, disposition);
             state.release_active(&key);
         }
+        self.cleanup_unissued(&mut state);
         self.admit_waiters(&mut state);
         Ok(())
     }
@@ -986,6 +1063,13 @@ impl CommandResources {
         if state.active.iter().any(|key| key.0 == producer) {
             return Err(io_error("cannot seal a producer with active commands"));
         }
+        if state
+            .entries
+            .iter()
+            .any(|(key, entry)| key.0 == producer && entry.allocation.is_some())
+        {
+            return Err(io_error("cannot seal a producer with retained allocations"));
+        }
         self.journal.lock().append(JournalEvent::ProducerSealed {
             producer: producer.to_owned(),
         })?;
@@ -994,7 +1078,7 @@ impl CommandResources {
             .entries
             .iter()
             .filter_map(|(key, entry)| {
-                (key.0 == producer && !state.active.contains(key) && entry.directory.is_none())
+                (key.0 == producer && !state.active.contains(key) && entry.allocation.is_none())
                     .then_some(key.clone())
             })
             .collect::<Vec<_>>();
@@ -1014,6 +1098,11 @@ impl CommandResources {
         }
         if state.active.contains(&key) {
             return Err(io_error("cannot acknowledge an active command"));
+        }
+        if state.entries[&key].allocation.is_some() {
+            return Err(io_error(
+                "cannot acknowledge a command with a retained allocation",
+            ));
         }
         if state.acknowledged.contains(&key) {
             return Ok(());
@@ -1070,41 +1159,106 @@ impl CommandResources {
                         requested_bytes: bytes,
                         allocation,
                     }) {
-                        let cleanup = self.remove_allocation_directory(&directory);
-                        if cleanup.is_ok() {
-                            state.release_active(&key);
-                        }
-                        state.update_entry(&key, |entry| {
-                            if cleanup.is_err() {
-                                entry.directory = Some(directory);
+                        match self.remove_allocation_directory(&directory) {
+                            Ok(()) => {
+                                state.release_active(&key);
+                                state.set_status(
+                                    &key,
+                                    CommandResourceStatus::CleanupUnconfirmed {
+                                        detail: format!("allocation publication failed: {error}"),
+                                    },
+                                );
                             }
-                            entry.status.send_replace(CommandResourceStatus::CleanupUnconfirmed {
-                                detail: match cleanup {
-                                    Ok(()) => format!("allocation publication failed: {error}"),
-                                    Err(cleanup) => format!(
-                                        "allocation publication failed: {error}; cleanup failed: {cleanup}"
-                                    ),
-                                },
-                            });
-                        });
+                            Err(cleanup) => state.retain_unissued(
+                                &key,
+                                directory,
+                                format!(
+                                "allocation publication failed: {error}; cleanup failed: {cleanup}"
+                            ),
+                            ),
+                        }
                         continue;
                     }
                     state.update_entry(&key, |entry| {
-                        entry.directory = Some(directory.clone());
+                        entry.allocation = Some(AllocationCustody::Issued(directory.clone()));
                         entry
                             .status
                             .send_replace(CommandResourceStatus::Admitted { cgroup: directory });
                     });
                 }
-                Err(error) => {
+                Err(SetupFailure::Unallocated(error)) => {
                     state.release_active(&key);
+                    let terminal = self.journal.lock().append(JournalEvent::Terminal {
+                        producer: key.0.clone(),
+                        actor: key.0.clone(),
+                        command: key.1.clone(),
+                        disposition: CommandResourceStatus::CancelledBeforeStart,
+                    });
                     state.set_status(
                         &key,
                         CommandResourceStatus::CleanupUnconfirmed {
-                            detail: error.to_string(),
+                            detail: match terminal {
+                                Ok(()) => error.to_string(),
+                                Err(publication) => format!(
+                                    "allocation setup failed: {error}; terminal publication failed: {publication}"
+                                ),
+                            },
                         },
                     );
                 }
+                Err(SetupFailure::Retained {
+                    directory,
+                    setup,
+                    cleanup,
+                }) => {
+                    state.retain_unissued(
+                        &key,
+                        directory,
+                        format!("allocation setup failed: {setup}; cleanup failed: {cleanup}"),
+                    );
+                }
+            }
+        }
+    }
+
+    fn cleanup_unissued(&self, state: &mut State) {
+        let pending = state
+            .retained_allocations
+            .iter()
+            .filter_map(|key| match &state.entries[key].allocation {
+                Some(AllocationCustody::Unissued { directory, failure }) => {
+                    Some((key.clone(), directory.clone(), failure.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (key, directory, failure) in pending {
+            let removed = match self.remove_allocation_directory(&directory) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+            let result = removed.and_then(|()| {
+                self.journal.lock().append(JournalEvent::Terminal {
+                    producer: key.0.clone(),
+                    actor: key.0.clone(),
+                    command: key.1.clone(),
+                    disposition: CommandResourceStatus::CancelledBeforeStart,
+                })
+            });
+            match result {
+                Ok(()) => state.update_entry(&key, |entry| {
+                    entry.allocation = None;
+                    entry
+                        .status
+                        .send_replace(CommandResourceStatus::CancelledBeforeStart);
+                }),
+                Err(error) => state.set_status(
+                    &key,
+                    CommandResourceStatus::CleanupUnconfirmed {
+                        detail: format!("{failure}; cleanup retry unconfirmed: {error}"),
+                    },
+                ),
             }
         }
     }
@@ -1120,9 +1274,15 @@ impl CommandResources {
         std::fs::remove_dir(directory)
     }
 
-    fn configure_command(&self, key: &Key, bytes: u64) -> std::io::Result<PathBuf> {
+    fn configure_command(&self, key: &Key, bytes: u64) -> Result<PathBuf, SetupFailure> {
         let dir = self.actor_directory(&key.0)?.join(&key.1);
         std::fs::create_dir(&dir)?;
+        #[cfg(test)]
+        if let Some(control) = self.fail_next_control_write.lock().take() {
+            // A directory at a control path gives deterministic write and
+            // removal failures on a temporary filesystem, without cgroup access.
+            std::fs::create_dir(dir.join(control))?;
+        }
         let result = (|| {
             std::fs::write(dir.join("memory.max"), bytes.to_string())?;
             std::fs::write(
@@ -1132,10 +1292,14 @@ impl CommandResources {
             std::fs::write(dir.join("memory.oom.group"), "1")
         })();
         if let Err(error) = result {
-            // best-effort: cleanup of a partially-configured directory; the
-            // original `error` is what's reported either way.
-            std::fs::remove_dir(&dir).ok();
-            return Err(error);
+            return Err(match self.remove_allocation_directory(&dir) {
+                Ok(()) => SetupFailure::Unallocated(error),
+                Err(cleanup) => SetupFailure::Retained {
+                    directory: dir,
+                    setup: error,
+                    cleanup,
+                },
+            });
         }
         Ok(dir)
     }
@@ -1190,11 +1354,18 @@ impl CommandResources {
             );
             return Ok(CommandResourceStatus::CancelledBeforeStart);
         }
+        if matches!(
+            state.entries[&key].allocation,
+            Some(AllocationCustody::Unissued { .. })
+        ) {
+            self.cleanup_unissued(&mut state);
+            return Ok(state.entries[&key].current());
+        }
         let (mut released, directory, started) = {
             let entry = &state.entries[&key];
             (
                 entry.current().is_queued(),
-                entry.directory.clone(),
+                entry.directory().cloned(),
                 entry.started,
             )
         };
@@ -1226,7 +1397,7 @@ impl CommandResources {
             })?;
             state.update_entry(&key, |entry| {
                 if directory_removed {
-                    entry.directory = None;
+                    entry.allocation = None;
                 }
                 entry
                     .status
@@ -1240,6 +1411,7 @@ impl CommandResources {
 
     fn observe(&self) {
         let mut state = self.state.lock();
+        self.cleanup_unissued(&mut state);
         let mut released = Vec::new();
         let active = state.active.iter().cloned().collect::<Vec<_>>();
         for key in &active {
@@ -1254,7 +1426,7 @@ impl CommandResources {
             ) {
                 continue;
             }
-            let Some(dir) = entry.directory.clone() else {
+            let Some(dir) = entry.directory().cloned() else {
                 continue;
             };
             let started = entry.started;
@@ -1308,7 +1480,7 @@ impl CommandResources {
             })();
             match result {
                 Ok(true) => {
-                    state.update_entry(key, |entry| entry.directory = None);
+                    state.update_entry(key, |entry| entry.allocation = None);
                     released.push(key.clone());
                 }
                 Ok(false) => {}
@@ -1410,7 +1582,7 @@ impl Drop for ActorStartReservation {
 mod tests {
     use super::*;
 
-    fn owner(root: &Path) -> CommandResources {
+    pub(super) fn owner(root: &Path) -> CommandResources {
         let policy = policy();
         CommandResources {
             root: root.to_path_buf(),
@@ -1432,21 +1604,27 @@ mod tests {
             policy,
             actor_starts: Mutex::new(0),
             fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
+            fail_next_control_write: Mutex::new(None),
         }
     }
 
-    fn owner_with_journal(root: &Path, journal_path: PathBuf) -> CommandResources {
-        std::fs::create_dir_all(root).unwrap();
+    pub(super) fn owner_with_journal(root: &Path, journal_path: PathBuf) -> CommandResources {
+        try_owner_with_journal(root, journal_path).unwrap()
+    }
+
+    pub(super) fn try_owner_with_journal(
+        root: &Path,
+        journal_path: PathBuf,
+    ) -> std::io::Result<CommandResources> {
+        std::fs::create_dir_all(root)?;
         let policy = policy();
         let anchor = DirectoryAnchor::open_existing(
             journal_path.parent().expect("test journal has a parent"),
-        )
-        .unwrap();
+        )?;
         let (journal, events) = Journal::open(
             &anchor,
             journal_path.file_name().expect("test journal has a name"),
-        )
-        .unwrap();
+        )?;
         let owner = CommandResources {
             root: root.to_path_buf(),
             actor_slice: root.to_path_buf(),
@@ -1467,9 +1645,10 @@ mod tests {
             policy,
             actor_starts: Mutex::new(0),
             fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
+            fail_next_control_write: Mutex::new(None),
         };
-        owner.reconcile(events).unwrap();
-        owner
+        owner.reconcile(events)?;
+        Ok(owner)
     }
 
     fn policy() -> CommandResourcePolicy {
@@ -1801,7 +1980,31 @@ mod tests {
     }
 
     #[test]
-    fn allocation_publication_and_cleanup_failure_reopen_as_retained_orphan() {
+    fn failed_setup_retains_the_unissued_allocation_until_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = owner(root.path());
+        *owner.fail_next_control_write.lock() = Some("memory.max");
+        let directory = root.path().join("actor-1/command-1");
+
+        assert!(matches!(
+            owner.submit("actor-1", "command-1", MIB).unwrap(),
+            CommandResourceStatus::CleanupUnconfirmed { .. }
+        ));
+        assert!(directory.is_dir());
+        assert_eq!(owner.observation().retained_allocations, 1);
+        assert!(owner.acknowledge("actor-1", "command-1").is_err());
+        assert!(owner.seal_producer("actor-1").is_err());
+
+        std::fs::remove_dir(directory.join("memory.max")).unwrap();
+        owner.observe();
+        assert!(!directory.exists());
+        assert_eq!(owner.observation().retained_allocations, 0);
+        owner.acknowledge("actor-1", "command-1").unwrap();
+        owner.seal_producer("actor-1").unwrap();
+    }
+
+    #[test]
+    fn allocation_publication_and_cleanup_failure_reopen_as_unissued() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("commands");
         let journal_path = directory.path().join("ownership.jsonl");
@@ -1816,13 +2019,12 @@ mod tests {
             CommandResourceStatus::CleanupUnconfirmed { .. }
         ));
         let observation = owner.observation();
-        assert_eq!(observation.active, 1);
+        assert_eq!(observation.active, 0);
         assert_eq!(observation.retained_allocations, 1);
         assert_eq!(observation.cleanup_failures, 1);
         assert!(
             owner.state.lock().entries[&(String::from("actor-1"), String::from("command-1"))]
-                .directory
-                .as_ref()
+                .directory()
                 .is_some_and(|path| path.is_dir())
         );
         std::fs::write(
@@ -1839,7 +2041,7 @@ mod tests {
             CommandResourceStatus::CleanupUnconfirmed { .. }
         ));
         let observation = reopened.observation();
-        assert_eq!(observation.active, 1);
+        assert_eq!(observation.active, 0);
         assert_eq!(observation.retained_allocations, 1);
         assert_eq!(observation.cleanup_failures, 1);
     }
@@ -1889,3 +2091,7 @@ mod tests {
         assert_eq!(observation.active, 0);
     }
 }
+
+#[cfg(test)]
+#[path = "command_resources/custody_tests.rs"]
+mod custody_tests;

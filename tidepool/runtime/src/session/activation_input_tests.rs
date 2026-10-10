@@ -200,7 +200,7 @@ impl InputFixture {
             .as_ref()
             .and_then(|certificate| certificate.checked_execution())
             .expect("receiver setup has its checked native output proof");
-        assert!(checked_execution.matches_target(&receiver.prepared));
+        assert!(checked_execution.matches_target(&receiver.prepared()));
         let interface = checked_execution
             .value_interface_certificate()
             .expect("receiver setup issued its exact value-interface certificate");
@@ -376,11 +376,11 @@ fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: b
         .is_some_and(|certification| {
             proof.is_some_and(|proof| {
                 proof.matches_bundle(
-                    &compiled.prepared,
+                    &compiled.prepared(),
                     &certification.groups,
                     &certification.target_owners,
                     &certification.package_interfaces,
-                    &compiled.table,
+                    &compiled.table(),
                     &compiled.asks,
                 )
             })
@@ -1343,11 +1343,11 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         .as_ref()
         .unwrap()
         .original_interface_context(
-            &fixture.producer.prepared,
+            &fixture.producer.prepared(),
             &certification.groups,
             &certification.target_owners,
             &certification.package_interfaces,
-            &fixture.producer.table,
+            &fixture.producer.table(),
             &fixture.producer.asks,
         )
         .unwrap();
@@ -1892,6 +1892,42 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         .iter()
         .map(|output| source.provenance_for(&output.code()).unwrap())
         .collect::<Vec<_>>();
+    for (output, retained) in outputs.iter().zip(&reobserved) {
+        let recomputed = CompiledProvenancePlan::build(&output.code())
+            .unwrap()
+            .instantiate();
+        assert_eq!(
+            retained, &recomputed,
+            "retained plan agrees with fresh selected-fact recomputation"
+        );
+        for input in retained.authenticated_inputs.values() {
+            let owner = input.execution.require_unique(0).unwrap();
+            let independent = recomputed
+                .authenticated_inputs
+                .values()
+                .find(|other| other.type_identity == input.type_identity)
+                .unwrap()
+                .execution
+                .require_unique(0)
+                .unwrap();
+            assert!(
+                !Arc::ptr_eq(&owner, &independent),
+                "runtime execution owners remain fresh"
+            );
+        }
+        let weak = recomputed
+            .authenticated_inputs
+            .values()
+            .next()
+            .map(|input| Arc::downgrade(&input.execution.require_unique(0).unwrap()));
+        drop(recomputed);
+        if let Some(weak) = weak {
+            assert!(
+                weak.upgrade().is_none(),
+                "compiled plan never retains runtime execution owners"
+            );
+        }
+    }
     let mut observed_unselected_request = false;
     for (index, (value, output)) in values.iter().zip(&outputs).enumerate() {
         assert_eq!(
@@ -2362,7 +2398,7 @@ fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
         .unwrap()
         .checked_execution()
         .unwrap()
-        .matches_target(&producer.prepared));
+        .matches_target(&producer.prepared()));
     let fixture = InputFixture {
         root,
         session,
@@ -2824,6 +2860,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
     let template = turn::assemble_activation_preview_module(512);
+    let retained_owner = admission.mounted.renderer_owner.clone();
     let compiled = match compile_activation_preview(admission, &template, 512, &includes)
         .expect("prepare a pure display from the original ordinary compiler evidence")
     {
@@ -2836,10 +2873,68 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         compiled.proof().disposition(),
         ActivationPreviewDisposition::Rendered
     );
-    let ResidentOutcome::Completed { result, .. } =
-        tidepool_testing::with_settlement(|settlement| {
-            resident.run_activation_preview(compiled, settlement)
-        })
+    let ActivationRendererNative::Renderable(bundle) = &compiled.renderer.native else {
+        panic!("renderable native custody")
+    };
+    let weak_images = bundle
+        .image_owners()
+        .map(Arc::downgrade)
+        .collect::<Vec<_>>();
+    assert!(!weak_images.is_empty());
+    let before =
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
+    let repeated = super::super::prepared::NativeImageBundle::prepare_activation_renderer(
+        &compiled.renderer.compiled,
+        &resident.state.certified_image_registry(),
+    )
+    .unwrap();
+    assert_eq!(
+        before,
+        tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
+        "same immutable code/literal keys reuse every native image"
+    );
+    eprintln!(
+        "original ordinary-home display Ready bundle images: {}",
+        bundle.image_owners().len()
+    );
+    for (first, next) in bundle.image_owners().zip(repeated.image_owners()) {
+        assert!(Arc::ptr_eq(first, next));
+    }
+    drop(repeated);
+    let before_fault = resident.residency();
+    {
+        let incomplete = bundle.omitting_target_image();
+        let refused = resident.install_turn_program_in_with_images(
+            compiled.admission.scope_lease.scope(),
+            compiled.renderer.compiled.prepared.as_ref().clone(),
+            compiled.renderer.compiled.certification.as_ref(),
+            TurnImageAcquisition::Ready {
+                bundle: &incomplete,
+                table: &compiled.renderer.compiled.table,
+            },
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(ResidentError::Prepared(
+                    PreparedRuntimeError::MissingPreparedNativeImage
+                ))
+            ),
+            "a registry hit outside complete Ready custody is refused"
+        );
+        assert_eq!(
+            resident.residency(),
+            before_fault,
+            "no native program or mutable instance publishes on lookup refusal"
+        );
+        assert_eq!(
+            before,
+            tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
+            "lookup refusal never compiles"
+        );
+    }
+    let ResidentOutcome::Completed { result, .. } = resident
+        .run_activation_preview(compiled)
         .expect("execute the original custom dictionary against the original mounted heap input")
     else {
         panic!("a pure custom input display must complete without suspension");
@@ -2860,6 +2955,17 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     assert_eq!(
         resident.public_visibility_snapshot_in(ScopeId::ROOT),
         Some(visibility)
+    );
+    drop(resident);
+    assert!(
+        weak_images.iter().all(|image| image.upgrade().is_some()),
+        "original renderer owner retains code after its machine exits"
+    );
+    drop(retained_owner);
+    drop(original_context);
+    assert!(
+        weak_images.iter().all(|image| image.upgrade().is_none()),
+        "last original renderer owner releases native code and literal storage"
     );
 }
 
@@ -4178,7 +4284,7 @@ fn compile_activation_preview(
     template: &str,
     budget: u64,
     includes: &[std::path::PathBuf],
-) -> Result<turn::ActivationPreviewCompilation, turn::TurnFailure> {
+) -> Result<turn::ActivationPreviewCompilation, turn::ActivationRendererFailure> {
     let renderer = match admission
         .acquire_renderer(template, budget)
         .expect("admitted renderer slot")
@@ -4198,5 +4304,5 @@ fn compile_activation_preview(
             panic!("semantic fixture has no unconfirmed native close")
         }
     };
-    turn::bind_activation_renderer(admission, &renderer)
+    turn::bind_activation_renderer(admission, &renderer).map_err(Into::into)
 }

@@ -10,7 +10,9 @@ module Tidepool.ExtractRequest
   , StructuredNameNamespace(..)
   , InspectionProvenance(..)
   , WorkerRequest(..)
+  , RequestOperation(..)
   , RequestShapeError(..)
+  , admitRequestOperation
   , validateRequestShape
   , workerRequestFromArgv
   , workerArgv
@@ -128,17 +130,59 @@ data WorkerRequest = WorkerRequest
   }
   deriving (Eq, Show)
 
-data RequestShapeError = InvalidSourceCheckShape | InvalidCellPlanShape
+-- | One operation admitted from the externally encoded request fields. Preview
+-- refines a turn; declaration operations own both their manifest and output.
+data RequestOperation
+  = SourceOperation
+  | TurnOperation
+  | ActivationPreviewOperation
+  | ClassificationOperation
+  | InspectionOperation
+  | CellOperation
+  | CellPlanOperation
+  | SourceCheckOperation
+  | DeclarationOperation FilePath FilePath
+  deriving (Eq, Show)
+
+data RequestShapeError
+  = InvalidSourceCheckShape
+  | InvalidCellPlanShape
+  | IncompleteDeclarationOperation
+  | ConflictingRequestOperations
+  | PreviewRequiresTurn
   deriving (Eq, Show)
 
 -- Keep mode shape policy pure. Manifest contents and exact-scope authority are
 -- admitted by Main at the point where their I/O is performed.
 validateRequestShape :: WorkerRequest -> Either RequestShapeError ()
-validateRequestShape args
+validateRequestShape args = () <$ admitRequestOperation args
+
+admitRequestOperation :: WorkerRequest -> Either RequestShapeError RequestOperation
+admitRequestOperation args
   | requestCheckSource args && not validSourceCheck = Left InvalidSourceCheckShape
   | requestCellPlan args && not validCellPlan = Left InvalidCellPlanShape
-  | otherwise = Right ()
+  | requestActivationPreview args && not (requestTurn args) = Left PreviewRequiresTurn
+  | otherwise = do
+      declaration <- case (requestDeclarationJoin args, requestDeclarationJoinOut args) of
+        (Nothing, Nothing) -> Right []
+        (Just manifest, Just output) -> Right [DeclarationOperation manifest output]
+        _ -> Left IncompleteDeclarationOperation
+      if requestCertifyHomeProducts args && not (null (declaration ++ operations))
+        then Left ConflictingRequestOperations
+        else pure ()
+      case declaration ++ operations of
+        [] -> Right SourceOperation
+        [operation] -> Right operation
+        _ -> Left ConflictingRequestOperations
   where
+    operations = [operation | (selected, operation) <-
+      [ (requestTurn args, if requestActivationPreview args then ActivationPreviewOperation else TurnOperation)
+      , (requestClassify args, ClassificationOperation)
+      , (not (null (requestInspections args)), InspectionOperation)
+      , (requestCell args, CellOperation)
+      , (requestCellPlan args, CellPlanOperation)
+      , (requestCheckSource args, SourceCheckOperation)
+      ] , selected]
     validSourceCheck = length (requestFiles args) == 1 && not (requestCell args)
       && not (requestCellPlan args) && not (requestTurn args) && not (requestClassify args)
       && null (requestInspections args) && not hasSessionScope

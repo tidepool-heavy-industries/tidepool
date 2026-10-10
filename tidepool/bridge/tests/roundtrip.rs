@@ -9,37 +9,26 @@ static TABLE: OnceLock<DataConTable> = OnceLock::new();
 
 fn get_table() -> &'static DataConTable {
     TABLE.get_or_init(|| {
-        // standard_datacon_table() covers Nothing/Just/False/True/(,)/[]/:/
-        // I#/W#/D#/C#/Text; append the constructors it lacks that these
-        // proptests still need (3-tuple, Either) with fresh ids.
+        // The shared table already owns Either; only the triple is additional.
         let mut table = tidepool_test_data::standard_datacon_table();
-        table.insert(DataCon {
-            id: DataConId(100),
-            name: "(,,)".to_string(),
-            tag: 1,
-            rep_arity: 3,
-            field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-            qualified_name: Some("GHC.Tuple.(,,)".into()),
-            type_name: String::new(),
-        });
-        table.insert(DataCon {
-            id: DataConId(101),
-            name: "Right".to_string(),
-            tag: 2,
-            rep_arity: 1,
-            field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: Some("Data.Either.Right".into()),
-            type_name: String::new(),
-        });
-        table.insert(DataCon {
-            id: DataConId(102),
-            name: "Left".to_string(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: Some("Data.Either.Left".into()),
-            type_name: String::new(),
-        });
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Tuple".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "(,,)".into(),
+                    record_parent: None,
+                },
+                id: DataConId(100),
+                name: "(,,)".to_string(),
+                tag: 1,
+                rep_arity: 3,
+                field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
+                qualified_name: Some("GHC.Tuple.(,,)".into()),
+                type_name: String::new(),
+            })
+            .expect("valid fixture metadata");
         table
     })
 }

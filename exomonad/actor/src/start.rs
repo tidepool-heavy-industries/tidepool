@@ -209,6 +209,7 @@ pub(crate) struct CapturedChildLaunch {
     pub launch_worktrees: Vec<String>,
     pub record_workspace: Option<tidepool_bridge_effects::WtWorkspaceHandle>,
     pub seed: Option<ChildSessionSeed>,
+    pub exit_destination: Option<std::sync::Arc<crate::owned_result::RequestResultDestination>>,
 }
 
 /// Selected compiler interface and its original implementation closure captured
@@ -269,12 +270,22 @@ impl ResidentActorStart {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        let (label, profile, workspace) = match ActorReq::from_value(request, table)? {
-            ActorReq::ActorStartWith(label, _, profile, workspace) => (label, profile, workspace),
-            ActorReq::ActorReplaceWith(_, _, label, profile) => (label, profile, None),
+        let (label, site, profile, workspace) = match ActorReq::from_value(request, table)? {
+            ActorReq::ActorStartWith(label, site, _, profile, workspace) => {
+                (label, site, profile, workspace)
+            }
+            ActorReq::ActorReplaceWith(_, site, _, label, profile) => (label, site, profile, None),
             _ => return Err(ActorStartCaptureError::UnexpectedRequest),
         };
-        Self::capture_decoded(
+        let site = u64::try_from(site).map_err(|_| ActorStartCaptureError::UnexpectedRequest)?;
+        let witness = session.request_result_type_witness(site, &parent_hole)?;
+        let destination = std::sync::Arc::new(crate::owned_result::RequestResultDestination::new(
+            parent_actor,
+            session_id,
+            witness,
+            session.lease_bindings(&[]),
+        ));
+        let mut captured = Self::capture_decoded(
             session,
             parent_hole,
             ActorStartRequest {
@@ -285,7 +296,9 @@ impl ResidentActorStart {
                 parent_actor,
             },
             settlement,
-        )
+        )?;
+        captured.child.exit_destination = Some(destination);
+        Ok(captured)
     }
 
     pub(crate) fn capture_spawn<H, O>(
@@ -372,6 +385,7 @@ impl ResidentActorStart {
                 launch_worktrees: Vec::new(),
                 record_workspace: None,
                 seed,
+                exit_destination: None,
             },
         })
     }
@@ -446,6 +460,7 @@ impl ResidentActorStart {
                 launch_worktrees: Vec::new(),
                 record_workspace: workspace,
                 seed,
+                exit_destination: None,
             },
         })
     }

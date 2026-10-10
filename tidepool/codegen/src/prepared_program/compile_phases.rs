@@ -52,6 +52,9 @@ pub(crate) struct CompileScale {
     pub blocks_emitted: u64,
     /// Machine-code bytes the JIT module finalized.
     pub code_bytes: u64,
+    /// Exact immutable literal allocations whose addresses this image embeds.
+    pub literal_storage_entries: usize,
+    pub literal_storage_bytes: usize,
 }
 
 /// A running stage clock. `lap` closes the current stage and opens the next.
@@ -81,7 +84,7 @@ fn ms(duration: Duration) -> u64 {
 
 /// Emit one compile's attribution. Called exactly once per successful
 /// `compile_with`.
-pub(crate) fn record(phases: &CompilePhases, scale: &CompileScale) {
+pub(crate) fn record(image_instance: u64, phases: &CompilePhases, scale: &CompileScale) {
     let emit_total = phases.emit_dispatchers
         + phases.emit_functions
         + phases.emit_thunks
@@ -97,6 +100,8 @@ pub(crate) fn record(phases: &CompilePhases, scale: &CompileScale) {
         + phases.descriptors;
     tracing::info!(
         target: "tidepool_codegen::prepared_compile",
+        image_instance,
+        process_id = std::process::id(),
         total_ms = ms(total),
         admit_ms = ms(phases.admit),
         plan_ms = ms(phases.plan),
@@ -119,6 +124,8 @@ pub(crate) fn record(phases: &CompilePhases, scale: &CompileScale) {
         functions_defined = scale.functions_defined,
         blocks_emitted = scale.blocks_emitted,
         code_bytes = scale.code_bytes,
+        literal_storage_entries = scale.literal_storage_entries,
+        literal_storage_bytes = scale.literal_storage_bytes,
         "prepared compile"
     );
 }

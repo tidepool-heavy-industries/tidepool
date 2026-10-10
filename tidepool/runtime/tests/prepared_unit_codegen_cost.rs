@@ -203,12 +203,12 @@ impl Notebook {
         };
         let compile = compile_started.elapsed();
         if std::env::var_os("TIDEPOOL_UNIT_COST_DUMP_TOPS").is_some() {
-            dump_tops(&compiled.prepared);
+            dump_tops(&compiled.prepared());
         }
         let [binder] = bound.as_slice() else {
             panic!("{text:?} bound {} names", bound.len());
         };
-        let imports = compiled.prepared.globals().len();
+        let imports = compiled.prepared().globals().len();
         let before = self.session.codegen_totals().unwrap_or((0, 0));
         let run_started = Instant::now();
         let outcome = tidepool_testing::with_settlement(|settlement| {

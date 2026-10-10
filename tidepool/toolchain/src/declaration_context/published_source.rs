@@ -694,6 +694,28 @@ mod tests {
                 let interfaces = snapshot
                     .materialize_module_interfaces(scratch.path())
                     .unwrap();
+                let reused_root = tempfile::tempdir().unwrap();
+                let (reused_products, reused_interfaces) = snapshot
+                    .materialize_recovery_products_and_interfaces(reused_root.path())
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&reused_products).unwrap(),
+                    serde_json::to_value(&products).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(&reused_interfaces).unwrap(),
+                    serde_json::to_value(&interfaces).unwrap()
+                );
+                for interface in &reused_interfaces {
+                    assert!(reused_root
+                        .path()
+                        .join(&interface.certificate_path)
+                        .is_file());
+                    assert!(reused_root
+                        .path()
+                        .join(&interface.interface.interface_path)
+                        .is_file());
+                }
                 let roles: Vec<CompilerInputRole> = serde_json::from_slice(
                     &serde_json::to_vec(&snapshot.compiler_input_roles()).unwrap(),
                 )

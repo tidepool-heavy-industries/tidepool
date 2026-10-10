@@ -1069,3 +1069,87 @@ fn valid_artifact_truncations_and_single_bit_mutations_never_panic() {
         }
     }
 }
+
+#[test]
+fn codec_keeps_closed_reply_and_independent_original_site_fields() {
+    let mut program = scalar_program(Cbor::Array(vec![int(4), int(64)]));
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    let symbol = |occurrence: &str| {
+        Cbor::Array(vec![
+            Cbor::Text("fixture".into()),
+            Cbor::Text("Effects".into()),
+            Cbor::Text("constructor".into()),
+            Cbor::Text(occurrence.into()),
+            Cbor::Array(vec![int(0)]),
+        ])
+    };
+    let carrier = Cbor::Array(vec![int(4), int(64)]);
+    let managed = Cbor::Array(vec![int(1)]);
+    fields[8] = Cbor::Array(vec![Cbor::Array(vec![
+        symbol("Request"),
+        symbol("Effect"),
+        Cbor::Array(vec![carrier.clone(), carrier.clone(), managed.clone()]),
+        Cbor::Array(vec![Cbor::Bool(true), Cbor::Bool(true), Cbor::Bool(false)]),
+        Cbor::Array(vec![
+            Cbor::Array(vec![
+                Cbor::Array(vec![carrier.clone(), int(0)]),
+                Cbor::Array(vec![carrier, int(8)]),
+                Cbor::Array(vec![managed, int(16)]),
+            ]),
+            int(8),
+            int(24),
+            Cbor::Array(vec![Cbor::Bool(false), Cbor::Bool(false), Cbor::Bool(true)]),
+        ]),
+        Cbor::Array(vec![int(1)]),
+        int(1),
+        int(1),
+        int(9001),
+    ])]);
+    fields[13] = text_graph_value();
+    let reply = |field, payload, capture| {
+        Cbor::Array(vec![Cbor::Array(vec![
+            int(0),
+            Cbor::Array(vec![int(2), int(0), int(field), int(payload), capture]),
+        ])])
+    };
+    fields[15] = reply(1, 2, int(1));
+    let prepared =
+        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()).unwrap();
+    assert_eq!(
+        prepared.constructor_replies(),
+        &[(
+            ConstructorId(0),
+            ConstructorReply::StaticWithSite {
+                reply: TypeNodeId(0),
+                field: 1,
+                payload_field: 2,
+                capture_input: Some(1),
+            }
+        )]
+    );
+    for (field, payload) in [(0, 2), (5, 2), (1, 1), (1, 5)] {
+        let Cbor::Array(fields) = &mut program else {
+            unreachable!()
+        };
+        fields[15] = reply(field, payload, Cbor::Null);
+        assert!(matches!(
+            parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
+            Err(ParseError::InvalidLayout(_))
+        ));
+    }
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    fields[15] = reply(1, 2, int(u64::from(u32::MAX) + 1));
+    assert!(parse_program(&bytes(&program), &requirements(), DecodeLimits::default()).is_err());
+    let Cbor::Array(fields) = &mut program else {
+        unreachable!()
+    };
+    fields[1] = int(16);
+    assert!(matches!(
+        parse_program(&bytes(&program), &requirements(), DecodeLimits::default()),
+        Err(ParseError::UnsupportedVersion(16))
+    ));
+}

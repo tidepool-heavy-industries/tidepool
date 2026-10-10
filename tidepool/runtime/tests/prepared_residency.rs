@@ -780,7 +780,7 @@ fn resident_turn_carries_worker_certified_import_owners() {
         panic!("expected a compiled first bind turn");
     };
     assert!(
-        first.certification.is_some(),
+        first.certification().is_some(),
         "first turn must be certified"
     );
     let [binder] = bound.as_slice() else {
@@ -805,15 +805,15 @@ fn resident_turn_carries_worker_certified_import_owners() {
     else {
         panic!("expected a compiled bind turn");
     };
-    assert!(!compiled.prepared.globals().is_empty());
+    assert!(!compiled.prepared().globals().is_empty());
     assert_eq!(
         compiled
-            .certification
+            .certification()
             .as_ref()
             .expect("resident turn requires a certified product")
             .target_owners
             .len(),
-        compiled.prepared.globals().len(),
+        compiled.prepared().globals().len(),
         "every prepared global has a sealed worker owner"
     );
     let [binder] = bound.as_slice() else {
@@ -844,7 +844,7 @@ fn certified_resident_turn_compiles_off_checkout_then_installs() {
     else {
         panic!("expected a compiled bind turn");
     };
-    assert!(compiled.certification.is_some());
+    assert!(compiled.certification().is_some());
     let [binder] = bound.as_slice() else {
         panic!("split turn must bind one value");
     };
@@ -969,15 +969,14 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         HostCarrier::from_compiled(&wrong_root, compiled.code(), HostBindingType::JSON_VALUE)
             .is_err()
     );
-    let mut missing_table = compiled.code();
-    missing_table.table = std::borrow::Cow::Owned(tidepool_repr::DataConTable::new());
-    assert!(HostCarrier::from_compiled(
-        json_anchor_binder,
-        missing_table,
-        HostBindingType::JSON_VALUE
+    assert!(CompiledTurn::from_prepared(
+        std::sync::Arc::clone(compiled.prepared()),
+        tidepool_repr::DataConTable::new(),
+        compiled.warnings.clone(),
+        compiled.sites().to_vec(),
     )
     .is_err());
-    assert!(compiled.certification.is_some());
+    assert!(compiled.certification().is_some());
     let json_carrier = HostCarrier::from_compiled(
         json_anchor_binder,
         compiled.code(),
@@ -999,7 +998,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     let [text_anchor_binder] = bound.as_slice() else {
         panic!("text anchor must produce exactly one binder");
     };
-    assert!(compiled.certification.is_some());
+    assert!(compiled.certification().is_some());
     let text_carrier =
         HostCarrier::from_compiled(text_anchor_binder, compiled.code(), HostBindingType::TEXT)
             .expect("compiler issued a complete reusable host representation");
@@ -1017,7 +1016,7 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     let [job_anchor_binder] = bound.as_slice() else {
         panic!("job anchor must produce exactly one binder");
     };
-    assert!(compiled.certification.is_some());
+    assert!(compiled.certification().is_some());
     let job_carrier = HostCarrier::from_compiled(
         job_anchor_binder,
         compiled.code(),

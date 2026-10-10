@@ -14,9 +14,9 @@ pub enum ActorExitKind {
 
 /// Immutable lifecycle result for one exact actor incarnation.
 ///
-/// Successful domain values are deliberately absent. They remain in the
-/// shared Haskell exit cell carried by `Tidepool.Actor.ActorRef`; this record
-/// supplies only the Rust-owned lifecycle fact that sequences reading it.
+/// This serializable metadata describes lifecycle for Rust and Haskell actors.
+/// Typed Haskell domain values are retained by `RetainedActorExit` as a
+/// runtime-issued result snapshot, separately from generic Rust completion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActorTerminal {
@@ -129,6 +129,7 @@ pub struct ActorLifecycleConnection {
 struct LifecycleState {
     current: ActorLifecycle,
     connections: Vec<std::sync::Weak<LifecycleSink>>,
+    result: Option<Arc<crate::owned_result::OwnedResultSnapshot>>,
 }
 
 impl LifecycleState {
@@ -295,12 +296,23 @@ impl CompilerWorkTicket {
     ) -> T {
         let mut close = outcome.close;
         for observed in self.receipt.attempts.lock().drain(..) {
-            if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) = observed
-            {
-                if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(previous) = close {
-                    evidence.earlier.push(previous);
+            match observed {
+                tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) => {
+                    if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(previous) = close
+                    {
+                        evidence.earlier.push(previous);
+                    }
+                    close = tidepool_runtime::CompilerTransactionClose::Unconfirmed(evidence);
                 }
-                close = tidepool_runtime::CompilerTransactionClose::Unconfirmed(evidence);
+                tidepool_runtime::CompilerTransactionClose::Clean
+                    if matches!(
+                        close,
+                        tidepool_runtime::CompilerTransactionClose::NotStarted
+                    ) =>
+                {
+                    close = tidepool_runtime::CompilerTransactionClose::Clean;
+                }
+                _ => {}
             }
         }
         *self.receipt.close.lock() = CompilerWorkClose::Settled(close);
@@ -736,6 +748,7 @@ impl RetainedActorExit {
                 lifecycle: Mutex::new(LifecycleState {
                     current: ActorLifecycle::Live,
                     connections: Vec::new(),
+                    result: None,
                 }),
                 cleanup: Mutex::new(RetainedCleanupState::default()),
                 requested_shutdown: Mutex::new(None),
@@ -761,12 +774,37 @@ impl RetainedActorExit {
                     existing: existing.clone(),
                 });
             }
+            if terminal.kind != ActorExitKind::Completed {
+                retained.result.take();
+            }
             retained.publish(ActorLifecycle::Exited(terminal));
         }
         self.state
             .changed
             .send_modify(|generation| *generation += 1);
         Ok(())
+    }
+
+    pub(crate) fn retain_result(
+        &self,
+        result: Arc<crate::owned_result::OwnedResultSnapshot>,
+    ) -> Result<(), &'static str> {
+        let mut retained = self.state.lifecycle.lock();
+        if matches!(retained.current, ActorLifecycle::Exited(_)) || retained.result.is_some() {
+            return Err("actor exit result was already settled");
+        }
+        retained.result = Some(result);
+        Ok(())
+    }
+
+    pub(crate) fn result(&self) -> Option<Arc<crate::owned_result::OwnedResultSnapshot>> {
+        let retained = self.state.lifecycle.lock();
+        match &retained.current {
+            ActorLifecycle::Exited(terminal) if terminal.kind == ActorExitKind::Completed => {
+                retained.result.clone()
+            }
+            _ => None,
+        }
     }
 
     /// Return the immutable result without consuming it.

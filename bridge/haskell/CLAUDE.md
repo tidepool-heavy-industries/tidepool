@@ -55,9 +55,10 @@ through the normal compiler; canonical catalog and durable module-cache
 acceptance remain separate obligations. See
 [the package guide](../../build/package/README.md) for freeze and qualification.
 
-`just exomonad-run BUNDLE DESCRIPTOR REPORT ...` and
-`just exomonad-init BUNDLE DESCRIPTOR REPORT ...` select that verified artifact
-environment. `just doctor BUNDLE DESCRIPTOR` verifies and prints the selection.
+`just exomonad-run DESCRIPTOR REPORT ...` and
+`just exomonad-init DESCRIPTOR REPORT ...` select the verified artifact
+environment from the descriptor's sibling owner. `just doctor DESCRIPTOR`
+verifies and prints the selection.
 `scripts/redeploy.sh` delegates to the same freeze owner and preserves existing
 installations and live hosts. Standalone toolchain APIs retain their resolution
 contract in `tidepool/toolchain/src/toolchain.rs`; they do not issue deployment
@@ -402,7 +403,7 @@ through their owning producers.
 
 ## Native constructor replies
 
-Prepared schema 16 / execution ABI 9 carries the constructor reply table and
+Prepared schema 17 / execution ABI 9 carries the constructor reply table and
 one finite reply-type graph. Earlier prepared schemas are rejected; registered
 prepared artifacts must be regenerated through their original compiler producers.
 The graph stores scoped expressions, nominal declarations, original constructor
@@ -411,7 +412,10 @@ eta-prefix scope. Recursive and nonregular recursive fields link declarations
 without instantiating an expanding field tree.
 
 An intrinsic static reply uses the complete source `DataCon` binder telescope;
-only the exact compiler-issued request-site carrier selects `AtSite`. Open
+only the exact compiler-issued request-site carrier selects `AtSite`. A non-leading
+carrier separately seals its original site and retained payload field while
+preserving the closed reply type. Capture authority requires the payload type
+to equal the carrier's final closed input. Open
 parameters, functions and opaque families retain structural identity without
 acquiring host construction authority. Original field kinds and worker layouts
 must agree with the existing physical constructor inventory. Fieldless branches

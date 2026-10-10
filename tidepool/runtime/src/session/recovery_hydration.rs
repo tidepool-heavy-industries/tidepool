@@ -658,20 +658,15 @@ pub(super) fn materialize_public_compiler_context(
         detail,
     };
     let mut candidate = graph.candidate();
-    let products = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
-        root,
-        context.toolchain_identity_sha256(),
-        &context.recovery_products(),
-    )
-    .map_err(|error| invalid(error.to_string()))?;
+    let (products, interfaces) = context
+        .materialize_recovery_products_and_interfaces(root)
+        .map_err(|error| invalid(error.to_string()))?;
     let mut artifacts = products
         .into_iter()
         .map(recovery::RecoveryArtifactClosure::Home)
         .collect::<Vec<_>>();
     artifacts.extend(
-        context
-            .materialize_module_interfaces(root)
-            .map_err(|error| invalid(error.to_string()))?
+        interfaces
             .into_iter()
             .map(recovery::RecoveryArtifactClosure::ModuleInterface),
     );

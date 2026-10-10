@@ -4766,6 +4766,61 @@ impl ExactDeclarationContext {
             .collect()
     }
 
+    /// Materialize owned native products once and reuse their exact canonical
+    /// references when publishing the same immutable compiler context.
+    pub fn materialize_recovery_products_and_interfaces(
+        &self,
+        root: &Path,
+    ) -> Result<
+        (
+            Vec<RecoveryArtifactRef>,
+            Vec<recovery_artifacts::RecoveryModuleInterfaceRef>,
+        ),
+        CompileError,
+    > {
+        let products = recovery_artifacts::materialize_certified_products(
+            root,
+            self.toolchain_identity_sha256(),
+            &self.recovery_products(),
+        )
+        .map_err(failure)?;
+        let emitted = products
+            .iter()
+            .filter_map(|product| product.module_interface.as_ref())
+            .map(|reference| {
+                (
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(
+                        reference,
+                    )
+                    .id,
+                    reference,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut validation = PackageInterfaceValidation::default();
+        let interfaces = self
+            .inventory
+            .entries()
+            .iter()
+            .filter_map(|entry| {
+                let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                    return None;
+                };
+                Some(match emitted.get(&entry.descriptor.id) {
+                    Some(reference) => Ok((*reference).clone()),
+                    None => recovery_artifacts::materialize_module_interface(
+                        root,
+                        interface,
+                        &mut validation,
+                        MaterializationMode::Durable,
+                    )
+                    .map_err(failure),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((products, interfaces))
+    }
+
     /// Select the original native owner from its compiler-issued origin. A
     /// lexical projection may have a different owner and grants no native root.
     pub fn authored_native_root(

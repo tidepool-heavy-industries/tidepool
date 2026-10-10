@@ -54,7 +54,6 @@ import Tidepool.Effects.Core
   )
 import qualified Tidepool.Effects.Core as Core
 import Tidepool.Internal.ActorRef (ActorRef (..))
-import Tidepool.Internal.ExitCell (newExitCell)
 
 -- | Runtime-issued exact provider and Haskell capture, never a source string.
 newtype ContextCheckpoint = ContextCheckpoint Text
@@ -158,7 +157,7 @@ spawnSubagent context workspace options = do
 -- These identities come only from the interpreter's admission receipt.
 admittedAgent :: Int -> Int -> Maybe Core.WorktreeHandle -> AgentRef
 admittedAgent actor incarnation tree =
-  AgentRef (ActorRef actor incarnation (newExitCell ())) tree
+  AgentRef (ActorRef actor incarnation) tree
 
 spawnError :: Core.SpawnErrorWire -> SpawnError
 spawnError (Core.SpawnRefused cause) = SpawnRefused cause

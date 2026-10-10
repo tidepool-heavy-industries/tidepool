@@ -18,12 +18,27 @@ fn emitted_prefixes(source: &str) -> BTreeSet<String> {
         let quote = tail.find('"');
         if let (Some(space), Some(quote)) = (space, quote) {
             if space < quote {
-                found.insert(format!("{} ", &tail[..space]));
+                let prefix = &tail[..space];
+                if prefix
+                    .chars()
+                    .all(|character| character.is_ascii_lowercase() || character == '-')
+                {
+                    found.insert(format!("{prefix} "));
+                }
             }
         }
         cursor = word_start;
     }
     found
+}
+
+#[test]
+fn prefix_scanner_does_not_admit_rendered_source_errors() {
+    assert!(emitted_prefixes("\"tidepool-reuse-error: witness failed\"").is_empty());
+    assert_eq!(
+        emitted_prefixes("\"tidepool-validation {}\""),
+        BTreeSet::from(["tidepool-validation ".to_string()])
+    );
 }
 
 /// The daemon's and the human-facing renderer's shared prefix list must

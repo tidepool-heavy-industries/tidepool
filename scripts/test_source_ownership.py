@@ -11,6 +11,7 @@ import re
 
 TEST_ONLY_MODULES = {
     'exomonad-node': frozenset({
+        'exomonad/node/src/command_resources/custody_tests.rs',
         'exomonad/node/src/inbox/history_properties.rs',
     }),
     'exomonad-worktree': frozenset({
@@ -52,7 +53,9 @@ TEST_ONLY_MODULES = {
     'exomonad-actor': frozenset({
         'exomonad/actor/src/local_actor/reply_settlement_history.rs',
         'exomonad/actor/src/request/readiness/tests.rs',
+        'exomonad/actor/src/request/result_tests.rs',
         'exomonad/actor/src/request/sequence_tests.rs',
+        'exomonad/actor/src/request/test_support.rs',
         'exomonad/actor/src/resident_actor/capture_workspace_tests.rs',
         'exomonad/actor/src/resident_actor/forest_shutdown_tests.rs',
         'exomonad/actor/src/resident_actor/green_runtime_tests.rs',
@@ -92,11 +95,22 @@ TEST_ONLY_MODULES = {
 }
 
 TEST_ONLY_FIXTURES = {
+    'exomonad-actor': frozenset({
+        'exomonad/actor/src/request/fixtures/result-receiver.hs',
+        'exomonad/actor/src/request/fixtures/result-request.hs',
+    }),
     'tidepool-extract-cmd': frozenset({
         'tidepool/extract-cmd/src/fixtures/build_products_worker.rs',
     }),
     'tidepool': frozenset({
         'bridge/facade/src/actor_host/cargo_report_contract.hs',
+        'bridge/facade/src/actor_host/fresh_callable_result_setup.hs',
+        'bridge/facade/src/actor_host/fresh_callable_result_read.hs',
+        'bridge/facade/src/actor_host/fresh_callable_result_release.hs',
+        'bridge/facade/src/actor_host/fresh_callable_exit_setup.hs',
+        'bridge/facade/src/actor_host/fresh_callable_exit_read.hs',
+        'bridge/facade/src/actor_host/fresh_result_source_actor.hs',
+        'bridge/facade/src/actor_host/fresh_inherited_response_observer.hs',
         'bridge/facade/src/actor_host/command_tool_facts_gate.hs',
         'bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs',
         'bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs',

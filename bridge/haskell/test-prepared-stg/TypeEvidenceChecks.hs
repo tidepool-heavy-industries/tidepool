@@ -170,6 +170,26 @@ runTypeEvidenceChecks directory = do
   carrier <- program "genuineCarrier"
   assert (replyFor carrier "TypeEvidence" "GenuineCarrier" == [ReplyAtSite])
     "genuine request-site carrier lost AtSite selection"
+  provenLeading <- program "provenLeading"
+  assert (replyFor provenLeading "TypeEvidence" "ProvenLeading" == [ReplyAtSite])
+    "erased GADT equality shifted the leading original site"
+  forM_ [("provenSubmit", "ProvenSubmit", 1, 2, Nothing),
+         ("provenPublication", "ProvenPublication", 1, 2, Just 1),
+         ("provenProgressPublication", "ProvenProgressPublication", 1, 2, Just 2),
+         ("provenExit", "ProvenExit", 1, 0, Just 0)] $ \(entry, occurrence, field, payload, capture) -> do
+    wire <- program entry
+    case replyFor wire "TypeEvidence" occurrence of
+      [StaticReplyWithSite root actualField actualPayload actualCapture] -> do
+        assert (actualField == field && actualPayload == payload && actualCapture == capture)
+          "erased GADT evidence shifted original site/payload/capture positions"
+        assert (headName (programTypes wire) (rootBody (programTypes wire) root) `elem` ["Unit", "()"])
+          "original site changed the closed unit reply representation"
+      replies -> fail ("GADT original site lost exact carrier evidence: " ++ show (occurrence, replies))
+  forM_ [("dictionaryNonLeading", "DictionaryNonLeading"), ("splitCarrier", "SplitCarrier")] $
+    \(entry, occurrence) -> do
+      wire <- program entry
+      assert (case replyFor wire "TypeEvidence" occurrence of [StaticReply _] -> True; _ -> False)
+        "retained dictionary or split payload authorized a guessed original site position"
   forM_ [("mismatchedCarrier", "MismatchedCarrier"), ("strictCarrier", "StrictCarrier"),
          ("dictionaryCarrier", "DictionaryCarrier"), ("integerPayload", "IntegerPayload")] $
     \(entry, occurrence) -> do

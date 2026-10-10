@@ -29,7 +29,7 @@ import GHC.Data.FastString (unpackFS)
 import GHC (HsBang(..), HsSrcBang(..), SrcStrictness(..), SrcUnpackedness(..))
 import GHC.Types.FieldLabel (flLabel)
 import GHC.Types.Id (idName, idType)
-import GHC.Types.Name (nameOccName, nameModule_maybe)
+import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Unique (getKey)
 import GHC.Types.Var.Env (emptyTidyEnv)
@@ -37,10 +37,12 @@ import GHC.Utils.Outputable
   (SDoc, defaultSDocContext, ppr, renderWithContext, sdocSuppressUniques)
 import Language.Haskell.Syntax.Basic (Boxity(..), FieldLabelString(..))
 
-import Tidepool.Identity (qualifiedName, varId)
+import Tidepool.Identity (nameSymbolIdentity, qualifiedName, varId)
+import Tidepool.ExecutionSchema (SymbolIdentity(..))
 
 data DCMeta = DCMeta
-  { dcmId          :: !Word64
+  { dcmIdentity    :: !SymbolIdentity
+  , dcmId          :: !Word64
   , dcmName        :: !Text
   , dcmTag         :: !Int
   , dcmArity       :: !Int
@@ -52,13 +54,19 @@ data DCMeta = DCMeta
   } deriving (Eq, Show)
 
 data MetadataConflict
-  = MetadataNominalConflict Word64 Text Text
+  = MetadataNominalConflict Word64 SymbolIdentity SymbolIdentity
+  | MetadataMissingOwner Word64 Text
   | MetadataFieldConflict DCMeta DCMeta
   deriving (Eq, Show)
 
-dcToMeta :: DataCon -> DCMeta
-dcToMeta dc = DCMeta
-  { dcmId = varId (dataConWorkId dc)
+dcToMeta :: DataCon -> Either MetadataConflict DCMeta
+dcToMeta dc = do
+  identity <- maybe
+    (Left (MetadataMissingOwner (varId (dataConWorkId dc)) (qualifiedName (dataConName dc))))
+    Right (nameSymbolIdentity "constructor" (dataConName dc))
+  pure DCMeta
+   { dcmIdentity = identity
+   , dcmId = varId (dataConWorkId dc)
   , dcmName = T.pack (occNameString (nameOccName (dataConName dc)))
   , dcmTag = dataConTag dc
   , dcmArity = valueRepArity dc
@@ -110,18 +118,16 @@ renderFieldType ft = renderMetaType (ppr (tidyOpenType emptyTidyEnv ft))
 -- projection. Distinct nominal owners or conflicting rows never overwrite one
 -- another, even when their runtime id or public qualified spelling collides.
 metadataForConstructors :: [TyCon] -> [DataCon] -> Either MetadataConflict [DCMeta]
-metadataForConstructors tycons native = map snd . Map.elems <$> foldM step Map.empty allConstructors
+metadataForConstructors tycons native = Map.elems <$> foldM step Map.empty allConstructors
  where
   allConstructors = wiredInConstructors ++ [dc | tc <- tycons, isAlgTyCon tc, dc <- tyConDataCons tc] ++ native
-  step known dc =
-    let row = dcToMeta dc
-        name = dataConName dc
-        nominal = (nameModule_maybe name, nameOccName name)
-    in case Map.lookup (dcmId row) known of
-      Just (oldNominal,_) | oldNominal /= nominal ->
-        Left (MetadataNominalConflict (dcmId row) (renderMetaType (ppr oldNominal)) (renderMetaType (ppr nominal)))
-      Just (_,old) | old /= row -> Left (MetadataFieldConflict old row)
-      _ -> Right (Map.insert (dcmId row) (nominal,row) known)
+  step known dc = do
+    row <- dcToMeta dc
+    case Map.lookup (dcmId row) known of
+      Just old | dcmIdentity old /= dcmIdentity row ->
+        Left (MetadataNominalConflict (dcmId row) (dcmIdentity old) (dcmIdentity row))
+      Just old | old /= row -> Left (MetadataFieldConflict old row)
+      _ -> Right (Map.insert (dcmId row) row known)
 
 targetBindingHasIO :: [CoreBind] -> String -> Bool
 targetBindingHasIO binds name = case filter isTarget (concatMap binders binds) of
@@ -135,8 +141,8 @@ targetBindingHasIO binds name = case filter isTarget (concatMap binders binds) o
       Just (tc, _) | getKey (tyConUnique tc) == getKey ioTyConKey -> True
       _ -> maybe False (\(_, _, _, result) -> hasIOType result) (splitFunTy_maybe ty)
 
-wiredInDataCons :: [DCMeta]
-wiredInDataCons = map dcToMeta wiredInConstructors
+wiredInDataCons :: Either MetadataConflict [DCMeta]
+wiredInDataCons = traverse dcToMeta wiredInConstructors
 
 wiredInConstructors :: [DataCon]
 wiredInConstructors =

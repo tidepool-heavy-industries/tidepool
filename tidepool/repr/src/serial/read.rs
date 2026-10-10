@@ -48,8 +48,8 @@ pub struct MetaWarnings {
 /// Reads a DataConTable and warnings from CBOR-encoded metadata bytes (meta.cbor format).
 ///
 /// The one accepted shape: 2-element array `[entries_array, warnings_map]`,
-/// every entry a 9-element array (id, name, tag, arity, bangs, qualified-name,
-/// field-labels, parent-type-name, field-types) — the shape
+/// every entry a 10-element array (id, name, tag, arity, bangs, qualified-name,
+/// field-labels, parent-type-name, field-types, symbol) — the shape
 /// `Tidepool.CborEncode.encodeMetadata` emits.
 pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings), ReadError> {
     use crate::datacon::{DataCon, SrcBang};
@@ -82,10 +82,10 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
     let mut table = DataConTable::new();
     for entry in &entries {
         let arr = match entry {
-            Value::Array(a) if a.len() == 9 => a,
+            Value::Array(a) if a.len() == 10 => a,
             _ => {
                 return Err(ReadError::InvalidStructure(
-                    "Metadata entry must be an array of exactly 9".to_string(),
+                    "Metadata entry must be an array of exactly 10".to_string(),
                 ))
             }
         };
@@ -199,8 +199,35 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             }
         };
 
+        let identity =
+            crate::execution_schema::symbol::decode(&arr[9], |value, what| match value {
+                Value::Text(text) => Ok(text.clone()),
+                _ => Err(crate::execution_schema::ParseError::Malformed(format!(
+                    "{what} must be text"
+                ))),
+            })
+            .map_err(|error| ReadError::MalformedMetadataField {
+                field: "identity",
+                detail: error.to_string(),
+            })?;
+        if identity.unit.is_empty()
+            || identity.module.is_empty()
+            || identity.occurrence.is_empty()
+            || identity.namespace != "constructor"
+            || identity.occurrence != name
+            || identity
+                .record_parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_empty())
+        {
+            return Err(ReadError::MalformedMetadataField {
+                field: "identity",
+                detail: "expected a complete constructor symbol agreeing with its name".into(),
+            });
+        }
         let id = DataConId(dcid);
         table.insert_checked(DataCon {
+            identity,
             id,
             name,
             tag,
@@ -213,6 +240,26 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
         table.set_field_types(id, field_types);
     }
 
+    Ok((table, warnings))
+}
+
+/// Decode a complete joint artifact at the owning nominal-admission boundary.
+pub fn read_metadata_for_program(
+    bytes: &[u8],
+    program: &crate::execution_schema::PreparedProgram,
+) -> Result<(crate::DataConTable, MetaWarnings), ReadError> {
+    read_metadata_for_programs(bytes, &[program])
+}
+
+/// One metadata transaction may cover several independently emitted targets.
+pub fn read_metadata_for_programs(
+    bytes: &[u8],
+    programs: &[&crate::execution_schema::PreparedProgram],
+) -> Result<(crate::DataConTable, MetaWarnings), ReadError> {
+    let (table, warnings) = read_metadata(bytes)?;
+    for program in programs {
+        table.validate_program(program)?;
+    }
     Ok((table, warnings))
 }
 

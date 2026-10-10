@@ -84,8 +84,8 @@ import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
-  ( InspectionRequest(..), RequestField(..), RequestShapeError(..), WorkerRequest(..)
-  , validateRequestShape, workerArgv, workerRequestFromArgv )
+  ( InspectionRequest(..), RequestField(..), RequestShapeError(..), RequestOperation(..), WorkerRequest(..)
+  , admitRequestOperation, validateRequestShape, workerArgv, workerRequestFromArgv )
 import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
 import Tidepool.DependencyEvidence
 import Tidepool.Session
@@ -109,8 +109,9 @@ requestValidationChecks = do
   certificationRequestValidation
   checkingSourceRequestRoundTrip
   requestShapeValidation
+  requestOperationAdmission
   requestFieldOrdering
-  putStrLn "request validation: 4 groups passed (certification, source-check round-trip, mode shapes, field ordering)"
+  putStrLn "request validation: 5 groups passed (certification, source-check round-trip, mode shapes, operation admission, field ordering)"
 
 generatedScaffoldIdentityChecks :: IO ()
 generatedScaffoldIdentityChecks = do
@@ -900,7 +901,7 @@ requestShapeValidation = do
            | (label, field) <- cellPlanExcludedFields]
         ++ [ ("source check rejects multiple inputs", [Input "A.hs", Input "B.hs", CheckSource], Left InvalidSourceCheckShape)
            , ("cell plan rejects multiple inputs", [Input "A.hs", Input "B.hs", CellPlan], Left InvalidCellPlanShape)
-           , ("source-check error precedence is retained", [Input "Cell.hs", CheckSource, CellPlan], Left InvalidSourceCheckShape)
+           , ("source check rejects a conflicting cell plan", [Input "Cell.hs", CheckSource, CellPlan], Left InvalidSourceCheckShape)
            ]
   forM_ cases $ \(label, fields, expected) -> do
     decoded <- request fields
@@ -931,6 +932,60 @@ requestShapeValidation = do
       , ("binding generation", BindGen 1)
       , ("retained generation", RetainedGeneration (SymbolIdentity "main" "M" "value" "x" Nothing) 1)
       ]
+
+requestOperationAdmission :: IO ()
+requestOperationAdmission = do
+  let admit fields = case workerRequestFromArgv (workerArgv fields) of
+        Right (Just request) -> admitRequestOperation request
+        Left _ -> Left ConflictingRequestOperations
+        Right Nothing -> Left ConflictingRequestOperations
+      recipes =
+        [ ([], SourceOperation)
+        , ([Turn], TurnOperation)
+        , ([Turn, ActivationPreview], ActivationPreviewOperation)
+        , ([Classify], ClassificationOperation)
+        , ([Cell], CellOperation)
+        , ([CellPlan], CellPlanOperation)
+        , ([CheckSource], SourceCheckOperation)
+        , ([InspectType "Int", InspectInfo "Maybe"], InspectionOperation)
+        , ([DeclarationJoin "join", DeclarationJoinOut "receipt"], DeclarationOperation "join" "receipt")
+        ]
+      context = [Input "Input.hs", Include "lib", BuildProductsDir "products"]
+  forM_ recipes $ \(fields, expected) ->
+    forM_ [context ++ fields ++ fields, reverse (context ++ fields), fields ++ context] $ \history ->
+      assertEqual ("operation history " ++ show history) (Right expected) (admit history)
+  -- Every pair of distinct primary recipes conflicts; preview is deliberately
+  -- a refinement of Turn, rather than a second operation.
+  let primary = filter (\(_, operation) -> operation /= SourceOperation && operation /= ActivationPreviewOperation) recipes
+  forM_ (zip [0 :: Int ..] primary) $ \(index, (first, _)) ->
+    forM_ (drop (index + 1) primary) $ \(second, _) ->
+      forM_ [first ++ second, second ++ first] $ \fields ->
+        case admit (context ++ fields) of
+          Left _ -> pure ()
+          Right operation -> fail ("conflicting request admitted as " ++ show operation)
+  forM_ (filter (\(_, operation) -> operation /= TurnOperation) primary) $ \(fields, _) ->
+    case admit (context ++ [Turn, ActivationPreview] ++ fields) of
+      Left _ -> pure ()
+      Right operation -> fail ("preview with another operation admitted as " ++ show operation)
+  assertEqual "output-only declaration is refused before source dispatch"
+    (Left IncompleteDeclarationOperation) (admit (context ++ [DeclarationJoinOut "receipt"]))
+  assertEqual "manifest-only declaration is refused before declaration IO"
+    (Left IncompleteDeclarationOperation) (admit (context ++ [DeclarationJoin "join"]))
+  forM_ [[DeclarationJoin "join"], [DeclarationJoinOut "receipt"], [ActivationPreview]] $ \fields ->
+    case admit (context ++ fields) of
+      Left _ -> pure ()
+      Right operation -> fail ("incomplete request admitted as " ++ show operation)
+  forM_ (take 8 recipes) $ \(fields, _) ->
+    forM_ [DeclarationJoin "join", DeclarationJoinOut "receipt"] $ \orphan ->
+      case admit (context ++ fields ++ [orphan]) of
+        Left _ -> pure ()
+        Right operation -> fail ("orphan declaration field admitted as " ++ show operation)
+  assertEqual "inspection queries share one operation" (Right InspectionOperation)
+    (admit (context ++ [InspectType "Int", InspectInfo "Maybe", InspectionStrict, InspectOut "out"]))
+  assertEqual "multi-target stable-value source context is ancillary" (Right SourceOperation)
+    (admit (context ++ [Targets ["a", "b"], SessionRoot "session", InjectVal "Val1"]))
+  assertEqual "cell planning templates and injection are ancillary" (Right CellPlanOperation)
+    (admit (context ++ [CellPlan, CellTemplate "template", TurnTemplate "expr" "turn-template", InjectVal "Val1"]))
 
 requestFieldOrdering :: IO ()
 requestFieldOrdering = do

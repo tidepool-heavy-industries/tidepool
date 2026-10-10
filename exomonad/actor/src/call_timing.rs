@@ -19,7 +19,7 @@
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 #[derive(Default)]
@@ -29,6 +29,7 @@ struct Totals {
     checkout_hold_ms: AtomicU64,
     compile_ms: AtomicU64,
     compile_count: AtomicU64,
+    compile_observations: AtomicU64,
     jev_ms: AtomicU64,
     jev_count: AtomicU64,
     exec_ms: AtomicU64,
@@ -40,6 +41,62 @@ tokio::task_local! {
 
 fn saturating_add(field: &AtomicU64, ms: u128) {
     field.fetch_add(u64::try_from(ms).unwrap_or(u64::MAX), Ordering::Relaxed);
+}
+
+// This origin is local to this process and clock domain. Reporter consumers
+// must not compare it with the compiler worker's CLOCK_MONOTONIC timestamps.
+fn observation_ns() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
+struct CompilerInterval {
+    totals: Option<Arc<Totals>>,
+    caller: &'static std::panic::Location<'static>,
+    started: Instant,
+    start_ns: u64,
+    sequence: u64,
+    completed: bool,
+}
+
+impl CompilerInterval {
+    fn new(totals: Option<Arc<Totals>>, caller: &'static std::panic::Location<'static>) -> Self {
+        let sequence = totals.as_ref().map_or(0, |value| {
+            value.compile_observations.fetch_add(1, Ordering::Relaxed) + 1
+        });
+        Self {
+            totals,
+            caller,
+            started: Instant::now(),
+            start_ns: observation_ns(),
+            sequence,
+            completed: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for CompilerInterval {
+    fn drop(&mut self) {
+        if let Some(totals) = &self.totals {
+            let elapsed = self.started.elapsed();
+            let round = self.completed.then(|| {
+                saturating_add(&totals.compile_ms, elapsed.as_millis());
+                totals.compile_count.fetch_add(1, Ordering::Relaxed) + 1
+            });
+            tracing::info!(target: "exomonad_actor::call_timing",
+                process_id = std::process::id(), clock_domain = "actor_process_monotonic",
+                start_ns = self.start_ns, end_ns = observation_ns(), wall_ns = elapsed.as_nanos() as u64,
+                observation_sequence = self.sequence, compile_round = round,
+                execution = totals.execution.as_ref().map(|id| id.as_str()),
+                compile_ms = elapsed.as_millis(), caller_file = self.caller.file(), caller_line = self.caller.line(),
+                outcome = if self.completed { "returned" } else { "abandoned" },
+                "compiler round timing");
+        }
+    }
 }
 
 /// Add to the open scope's checkout-wait total; a no-op with no open scope.
@@ -82,24 +139,9 @@ pub fn timed_compile<F: Future>(body: F) -> impl Future<Output = F::Output> {
     // identifies its poll machinery instead of the owning compiler operation.
     let caller = std::panic::Location::caller();
     async move {
-        let started = Instant::now();
+        let mut interval = CompilerInterval::new(CURRENT.try_with(Arc::clone).ok(), caller);
         let result = body.await;
-        CURRENT
-            .try_with(|totals| {
-                let elapsed_ms = started.elapsed().as_millis();
-                saturating_add(&totals.compile_ms, elapsed_ms);
-                let round = totals.compile_count.fetch_add(1, Ordering::Relaxed) + 1;
-                tracing::info!(
-                    target: "exomonad_actor::call_timing",
-                    compile_round = round,
-                    execution = totals.execution.as_ref().map(|id| id.as_str()),
-                    compile_ms = elapsed_ms,
-                    caller_file = caller.file(),
-                    caller_line = caller.line(),
-                    "compiler round timing"
-                );
-            })
-            .ok();
+        interval.complete();
         result
     }
 }
@@ -112,6 +154,7 @@ pub struct CallScope {
     actor_id: u64,
     incarnation: u64,
     started: Instant,
+    start_ns: u64,
     totals: Arc<Totals>,
 }
 
@@ -133,20 +176,9 @@ impl CallTimingRegistration {
     #[track_caller]
     pub(crate) fn timed_compile_sync<T>(&self, body: impl FnOnce() -> T) -> T {
         let caller = std::panic::Location::caller();
-        let started = Instant::now();
+        let mut interval = CompilerInterval::new(Some(Arc::clone(&self.0)), caller);
         let result = self.sync_scope(body);
-        let elapsed_ms = started.elapsed().as_millis();
-        saturating_add(&self.0.compile_ms, elapsed_ms);
-        let round = self.0.compile_count.fetch_add(1, Ordering::Relaxed) + 1;
-        tracing::info!(
-            target: "exomonad_actor::call_timing",
-            compile_round = round,
-            execution = self.0.execution.as_ref().map(|id| id.as_str()),
-            compile_ms = elapsed_ms,
-            caller_file = caller.file(),
-            caller_line = caller.line(),
-            "compiler round timing"
-        );
+        interval.complete();
         result
     }
 }
@@ -178,6 +210,7 @@ impl CallScope {
             actor_id,
             incarnation,
             started: Instant::now(),
+            start_ns: observation_ns(),
             totals: Arc::new(Totals {
                 execution,
                 ..Totals::default()
@@ -205,6 +238,9 @@ impl CallScope {
     /// Emit the one summary INFO line for this call and consume the scope.
     pub fn finish(self, outcome: &str) {
         tracing::info!(
+            target: "exomonad_actor::call_timing",
+            process_id = std::process::id(), clock_domain = "actor_process_monotonic",
+            start_ns = self.start_ns, end_ns = observation_ns(), wall_ns = self.started.elapsed().as_nanos() as u64,
             tool = %self.kind,
             actor = self.actor_id,
             incarnation = self.incarnation,
@@ -253,6 +289,26 @@ mod tests {
         assert_eq!(scope.totals.jev_count.load(Ordering::Relaxed), 2);
         assert_eq!(scope.totals.exec_ms.load(Ordering::Relaxed), 50);
         assert_eq!(scope.totals.compile_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_compile_is_observed_without_claiming_completion() {
+        let scope = CallScope::new("cell", 1, 1);
+        scope
+            .run(async {
+                let mut pending = Box::pin(timed_compile(std::future::pending::<()>()));
+                std::future::poll_fn(|context| {
+                    assert!(pending.as_mut().poll(context).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                drop(pending);
+                assert_eq!(scope.compile_count(), 0);
+                timed_compile(async {}).await;
+            })
+            .await;
+        assert_eq!(scope.compile_count(), 1);
+        assert_eq!(scope.totals.compile_observations.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

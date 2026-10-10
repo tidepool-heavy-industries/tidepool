@@ -5,7 +5,7 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
-module PreparedRuntimeSpec (agentSpec) where
+module PreparedRuntimeSpec (agentSpec, NativeInput(..)) where
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
@@ -15,10 +15,22 @@ import GHC.Generics (Generic)
 import Tidepool.Aeson.FromJSON (FromJSON)
 import Tidepool.Agent.Contract
 import Tidepool.Agent.Reply (Replies, currentRequest, requestReplyOf, reply)
+import Tidepool.Inspection.Display (Display(..), WorkbenchDisplay(..))
 import QuotedProvider (capture)
 
 newtype Probe = Probe { topic :: Text }
   deriving (Generic, FromJSON, JsonSchema)
+
+newtype NativeInput = NativeInput Int
+
+instance Display NativeInput where
+  displayWith budget (NativeInput ordinal) =
+    let text = "prepared-preview-" <> Text.pack (show ordinal)
+    in (Text.take budget text, Text.length text > budget)
+
+instance WorkbenchDisplay NativeInput where
+  workbenchDisplay = displayWith 65536
+  workbenchActivationDisplay = displayWith
 
 data Tools effects mode = Tools
   { notebook :: HaskellTools effects mode
@@ -35,7 +47,7 @@ agentSpec = defaultSpec
   { specTools = Tools
       { notebook = haskellTools
       , probe = presentWith id $ tool (Text.pack (show original)) $ \_ -> do
-          scope <- currentRequest @Text @Int
+          scope <- currentRequest @NativeInput @Int
           case requestReplyOf scope of
             Nothing -> pure "no active request"
             Just destination -> absurd <$> reply destination original

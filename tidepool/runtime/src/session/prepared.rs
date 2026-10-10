@@ -81,6 +81,7 @@ pub enum ConstructorReplyObservation {
     Static {
         node: TypeNodeId,
         shape: ReplyTypeObservation,
+        input_site: Option<(u32, u32, Option<u32>)>,
     },
 }
 
@@ -238,7 +239,9 @@ pub enum PreparedRuntimeError {
     #[error("prepared installation failed: {0}")]
     Install(ExecutionError),
     #[error(transparent)]
-    Demand(#[from] DemandError),
+    Demand(DemandError),
+    #[error("Ready renderer lacks the exact prepared native image")]
+    MissingPreparedNativeImage,
     #[error("prepared type evidence refused: {0}")]
     TypeEvidence(#[from] TypeGraphError),
     #[error("request access site {site} type evidence refused: {source}")]
@@ -444,6 +447,15 @@ pub enum PreparedRuntimeError {
     },
 }
 
+impl From<DemandError> for PreparedRuntimeError {
+    fn from(error: DemandError) -> Self {
+        match error {
+            DemandError::MissingPreparedNativeImage => Self::MissingPreparedNativeImage,
+            error => Self::Demand(error),
+        }
+    }
+}
+
 impl PreparedRuntimeError {
     #[must_use]
     pub fn stage(&self) -> PreparedFailureStage {
@@ -453,6 +465,7 @@ impl PreparedRuntimeError {
             | Self::Compile(_)
             | Self::Install(_)
             | Self::Demand(_)
+            | Self::MissingPreparedNativeImage
             | Self::TypeEvidence(_)
             | Self::MissingCertifiedOwner(_)
             | Self::CertifiedPackageOwnerUnavailable { .. }
@@ -552,6 +565,7 @@ impl PreparedRuntimeError {
                 }
                 _ => PreparedFailureKind::Integrity,
             },
+            Self::MissingPreparedNativeImage => PreparedFailureKind::Integrity,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Compile(_) => PreparedFailureKind::Rejected,
             // A handler fault is this turn's own failure, so the machine stays reusable.
@@ -678,6 +692,315 @@ pub(crate) struct CertifiedTargetImage {
     source_plan: Option<super::persistent::ResolvedSourceDomainPlan>,
 }
 
+/// Strong custody of native code and its literal storage, with no installed state.
+pub(crate) struct NativeImageBundle {
+    registry: Arc<ImageRegistry>,
+    images: BTreeMap<usize, Arc<CompiledProgram>>,
+    target: usize,
+}
+
+impl std::fmt::Debug for NativeImageBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeImageBundle")
+            .field("images", &self.images.len())
+            .field(
+                "target",
+                &self
+                    .images
+                    .get(&self.target)
+                    .map(|image| image.image_instance_id()),
+            )
+            .finish()
+    }
+}
+
+impl NativeImageBundle {
+    fn holds(&self, image: &Arc<CompiledProgram>) -> bool {
+        // The strong owner prevents address reuse while this index is live.
+        // Registry equality remains the native selection authority.
+        self.images
+            .get(&(Arc::as_ptr(image) as usize))
+            .is_some_and(|held| Arc::ptr_eq(held, image))
+    }
+
+    pub(crate) fn prepare_activation_renderer(
+        compiled: &super::turn::CompiledTurn,
+        registry: &Arc<ImageRegistry>,
+    ) -> Result<Self, PreparedRuntimeError> {
+        use tidepool_codegen::prepared_program::{PendingGroupInventory, SourceGroupOutline};
+        use tidepool_repr::execution_schema::CertifiedGroupCode;
+        use tidepool_toolchain::certified_products::PendingImportOwner;
+        let certification = compiled
+            .certification
+            .as_ref()
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        let proof = certification
+            .checked_activation_preview()
+            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+        if !proof.matches_target(compiled.prepared()) {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        }
+        proof
+            .validate_table(compiled.table())
+            .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
+        proof
+            .validate_yield_sites(&compiled.asks)
+            .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
+        let target_literals =
+            immutable_literal_owners(compiled.prepared().globals(), &certification.target_owners)?;
+        let outlines = certification
+            .groups
+            .iter()
+            .map(|pending| {
+                immutable_literal_owners(pending.group().globals(), pending.imports())?;
+                let imports = pending
+                    .imports()
+                    .iter()
+                    .filter_map(|owner| match owner {
+                        PendingImportOwner::Source { owner, binder, .. } => Some(SourceBinder {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                SourceGroupOutline::from_projected(
+                    pending.owner().clone(),
+                    pending.group(),
+                    imports,
+                )
+                .map_err(Into::into)
+            })
+            .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
+        let roots = certification
+            .target_owners
+            .iter()
+            .filter_map(|owner| match owner {
+                PendingImportOwner::Source { owner, binder, .. } => Some(SourceBinder {
+                    version: owner.module_version.clone(),
+                    binder: binder.clone(),
+                }),
+                _ => None,
+            });
+        // Close only source edges; historical retained contracts do not select a
+        // group or require a live machine merely to compile its definitions.
+        let selected = PendingGroupInventory::new(outlines)?.seal_with_inherited(
+            roots,
+            &BTreeMap::new(),
+            &HashMap::new(),
+        )?;
+        let groups = selected
+            .new_group_indices()
+            .iter()
+            .map(|index| {
+                let pending = &certification.groups[*index];
+                CertifiedGroupCode::admit(pending.owner().clone(), pending.group().clone())
+                    .map(|code| (code, pending.imports()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Native custody must correspond to the exact original owner/ordinal,
+        // not just a binder with the same module-version spelling.
+        for owner in certification
+            .target_owners
+            .iter()
+            .chain(groups.iter().flat_map(|(_, imports)| imports.iter()))
+        {
+            if let PendingImportOwner::Source {
+                owner,
+                original_ordinal,
+                binder,
+            } = owner
+            {
+                if !groups.iter().any(|(code, _)| {
+                    code.owner() == owner
+                        && code.original_ordinal() == *original_ordinal
+                        && code.binders().contains(binder)
+                }) {
+                    return Err(PreparedRuntimeError::InvalidCertifiedSourceOwner(
+                        SourceBinder {
+                            version: owner.module_version.clone(),
+                            binder: binder.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+        let mut images = Vec::with_capacity(groups.len() + 1);
+        let mut literals = BTreeMap::new();
+        let mut byte_images = HashMap::new();
+        for (index, (group, imports)) in groups.iter().enumerate() {
+            let definitions = group.definitions();
+            if imports.is_empty()
+                && definitions.globals().is_empty()
+                && matches!(definitions.bindings(), [Group::NonRecursive(top)] if matches!(top.binding.rhs, HeapRhs::Bytes(_)))
+            {
+                let image = CompiledProgram::prepare_group_code(
+                    group,
+                    &[],
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    registry,
+                )
+                .map_err(PreparedRuntimeError::Compile)?;
+                for (binder, literal) in image.source_literals() {
+                    if literals
+                        .insert(binder.clone(), literal.clone())
+                        .is_some_and(|prior| prior != literal)
+                    {
+                        return Err(DemandError::DuplicateBinder(binder).into());
+                    }
+                }
+                byte_images.insert(index, image);
+            }
+        }
+        let target = CompiledProgram::prepare_target_code(
+            compiled.prepared(),
+            &target_literals,
+            &literals,
+            registry,
+        )
+        .map_err(PreparedRuntimeError::Compile)?;
+        let packages = if certification
+            .package_interfaces
+            .matches_target(compiled.prepared())
+        {
+            target.package_literals(|unit, module| {
+                certification
+                    .package_interfaces
+                    .interface_digest(unit, module)
+            })
+        } else {
+            BTreeMap::new()
+        };
+        let target_key = Arc::as_ptr(&target) as usize;
+        images.push(target);
+        for (index, (group, imports)) in groups.iter().enumerate() {
+            let image = match byte_images.remove(&index) {
+                Some(image) => image,
+                None => CompiledProgram::prepare_group_code(
+                    group,
+                    &immutable_literal_owners(group.definitions().globals(), imports)?,
+                    &packages,
+                    &literals,
+                    registry,
+                )
+                .map_err(PreparedRuntimeError::Compile)?,
+            };
+            images.push(image);
+        }
+        tracing::info!(target: "tidepool_runtime::activation_renderer", image_instance = images[0].image_instance_id(), images = images.len(), outcome = "prepared", "activation renderer native custody");
+        for (index, image) in images.iter().enumerate() {
+            tracing::info!(target: "tidepool_runtime::activation_renderer", bundle_target = images[0].image_instance_id(), image_instance = image.image_instance_id(), role = if index == 0 { "target" } else { "source" }, literal_producer = !image.source_literals().is_empty(), outcome = "native_image", "activation renderer native custody");
+        }
+        Ok(Self {
+            registry: registry.clone(),
+            images: images
+                .into_iter()
+                .map(|image| (Arc::as_ptr(&image) as usize, image))
+                .collect(),
+            target: target_key,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn omitting_image(&self, key: usize) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            images: self
+                .images
+                .iter()
+                .filter(|(address, _)| **address != key)
+                .map(|(address, image)| (*address, image.clone()))
+                .collect(),
+            target: self.target,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn omitting_target_image(&self) -> Self {
+        self.omitting_image(self.target)
+    }
+
+    #[cfg(test)]
+    pub(super) fn image_owners(&self) -> impl ExactSizeIterator<Item = &Arc<CompiledProgram>> {
+        self.images.values()
+    }
+
+    pub(super) fn image_instances(&self) -> impl Iterator<Item = u64> + '_ {
+        self.images.iter().map(|image| image.image_instance_id())
+    }
+}
+
+fn immutable_literal_owners(
+    globals: &[tidepool_repr::execution_schema::GlobalDecl],
+    pending: &[tidepool_toolchain::certified_products::PendingImportOwner],
+) -> Result<Vec<Option<tidepool_codegen::prepared_program::LiteralOwner>>, PreparedRuntimeError> {
+    use tidepool_codegen::prepared_program::LiteralOwner;
+    use tidepool_toolchain::certified_products::PendingImportOwner;
+    if globals.len() != pending.len() {
+        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+    }
+    globals
+        .iter()
+        .zip(pending)
+        .map(|(global, owner)| {
+            let literal = match owner {
+                PendingImportOwner::Source { owner, binder, .. }
+                    if binder == &global.identity
+                        && global.required_generation.is_none()
+                        && binder.unit == owner.unit
+                        && binder.module == owner.module =>
+                {
+                    Some(LiteralOwner::Source {
+                        version: owner.module_version.clone(),
+                        binder: binder.clone(),
+                    })
+                }
+                PendingImportOwner::Package {
+                    unit,
+                    module,
+                    binder,
+                    interface_digest,
+                } if binder == &global.identity
+                    && &binder.unit == unit
+                    && &binder.module == module
+                    && global.required_generation.is_none() =>
+                {
+                    Some(LiteralOwner::Package {
+                        unit: unit.clone(),
+                        module: module.clone(),
+                        binder: binder.clone(),
+                        interface_digest: *interface_digest,
+                    })
+                }
+                PendingImportOwner::Retained {
+                    identity,
+                    generation,
+                } if identity == &global.identity
+                    && global.required_generation == Some(*generation) =>
+                {
+                    None
+                }
+                PendingImportOwner::RetainedPackage {
+                    unit,
+                    module,
+                    binder,
+                    generation,
+                    ..
+                } if binder == &global.identity
+                    && &binder.unit == unit
+                    && &binder.module == module
+                    && global.required_generation == Some(*generation) =>
+                {
+                    None
+                }
+                _ => return Err(PreparedRuntimeError::CertifiedTargetOwners),
+            };
+            Ok(literal)
+        })
+        .collect()
+}
+
 /// An immutable source-produced entry and the native images needed to install it.
 /// This owns no heap, lexical scope, dispatcher, or actor resource grants.
 pub struct PreparedSourceEntry {
@@ -703,11 +1026,11 @@ impl PreparedSourceEntry {
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
         if !matches!(certification.purpose(), super::turn::TurnPurpose::Ordinary)
             || !proof.matches_bundle(
-                &compiled.prepared,
+                &compiled.prepared(),
                 &certification.groups,
                 &certification.target_owners,
                 &certification.package_interfaces,
-                &compiled.table,
+                &compiled.table(),
                 &compiled.asks,
             )
         {
@@ -718,11 +1041,11 @@ impl PreparedSourceEntry {
         let state = super::persistent::PersistentSession::new(None, 0);
         let resolved = state.resolve_certification_in(
             tidepool_codegen::scope::ScopeId::ROOT,
-            &compiled.prepared,
+            &compiled.prepared(),
             certification,
         )?;
         let (target, demanded) = CertifiedTargetImage::compile_scoped(
-            compiled.prepared.as_ref().clone(),
+            compiled.prepared().as_ref().clone(),
             &resolved,
             &registry,
         )?;
@@ -778,6 +1101,67 @@ fn target_owners_match(prepared: &PreparedProgram, owners: &[ImportOwner]) -> bo
             })
 }
 
+/// Ready installation can only consume the bundle's prepared custody. Ordinary
+/// compilation retains its existing producer route through the same selectors.
+#[derive(Clone, Copy)]
+enum NativeImageAcquisition<'a> {
+    Compile(&'a ImageRegistry),
+    Ready(&'a NativeImageBundle),
+}
+
+impl NativeImageAcquisition<'_> {
+    fn group(
+        self,
+        group: CertifiedGroup,
+        packages: &BTreeMap<SymbolIdentity, PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+    ) -> Result<DemandedImage, DemandError> {
+        match self {
+            Self::Compile(registry) => {
+                DemandedImage::compile_with_literals(group, registry, packages, sources)
+            }
+            Self::Ready(bundle) => {
+                let image = DemandedImage::lookup_with_literals(
+                    group,
+                    &bundle.registry,
+                    packages,
+                    sources,
+                )?;
+                if !bundle.holds(image.image()) {
+                    return Err(DemandError::MissingPreparedNativeImage);
+                }
+                Ok(image)
+            }
+        }
+    }
+
+    fn target(
+        self,
+        prepared: &PreparedProgram,
+        owners: &[ImportOwner],
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+    ) -> Result<Arc<CompiledProgram>, PreparedRuntimeError> {
+        match self {
+            Self::Compile(registry) => CompiledProgram::compile_prepared_with_source_literals(
+                prepared, owners, sources, registry,
+            )
+            .map_err(PreparedRuntimeError::Compile),
+            Self::Ready(bundle) => {
+                let image = CompiledProgram::lookup_prepared_with_source_literals(
+                    prepared,
+                    owners,
+                    sources,
+                    &bundle.registry,
+                )
+                .map_err(PreparedRuntimeError::Compile)?
+                .filter(|image| bundle.holds(image))
+                .ok_or(PreparedRuntimeError::MissingPreparedNativeImage)?;
+                Ok(image)
+            }
+        }
+    }
+}
+
 impl CertifiedTargetImage {
     #[cfg(test)]
     pub(crate) fn compile(
@@ -819,15 +1203,35 @@ impl CertifiedTargetImage {
         resolved: &super::persistent::ResolvedCertifiedTurn,
         registry: &ImageRegistry,
     ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+        Self::acquire_scoped(
+            prepared,
+            resolved,
+            NativeImageAcquisition::Compile(registry),
+        )
+    }
+
+    pub(crate) fn lookup_scoped(
+        prepared: PreparedProgram,
+        resolved: &super::persistent::ResolvedCertifiedTurn,
+        bundle: &NativeImageBundle,
+    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+        Self::acquire_scoped(prepared, resolved, NativeImageAcquisition::Ready(bundle))
+    }
+
+    fn acquire_scoped(
+        prepared: PreparedProgram,
+        resolved: &super::persistent::ResolvedCertifiedTurn,
+        images: NativeImageAcquisition<'_>,
+    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
         let groups = resolved
             .groups
             .iter()
             .map(|group| group.original().clone())
             .collect();
-        let (target, compiled) = Self::compile_originals(
+        let (target, compiled) = Self::acquire_originals(
             prepared,
             &resolved.target_owners,
-            registry,
+            images,
             resolved.package_interfaces.clone(),
             groups,
         )?;
@@ -844,6 +1248,7 @@ impl CertifiedTargetImage {
         ))
     }
 
+    #[cfg(test)]
     fn compile_originals(
         prepared: PreparedProgram,
         owners: &[ImportOwner],
@@ -851,17 +1256,27 @@ impl CertifiedTargetImage {
         package_interfaces: CertifiedTargetPackageInterfaces,
         groups: Vec<CertifiedGroup>,
     ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+        Self::acquire_originals(
+            prepared,
+            owners,
+            NativeImageAcquisition::Compile(registry),
+            package_interfaces,
+            groups,
+        )
+    }
+
+    fn acquire_originals(
+        prepared: PreparedProgram,
+        owners: &[ImportOwner],
+        images: NativeImageAcquisition<'_>,
+        package_interfaces: CertifiedTargetPackageInterfaces,
+        groups: Vec<CertifiedGroup>,
+    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
         if !target_owners_match(&prepared, owners) {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
-        let (compiled, source_literals) = Self::compile_literal_producers(&groups, registry)?;
-        let image = CompiledProgram::compile_prepared_with_source_literals(
-            &prepared,
-            owners,
-            &source_literals,
-            registry,
-        )
-        .map_err(PreparedRuntimeError::Compile)?;
+        let (compiled, source_literals) = Self::compile_literal_producers(&groups, images)?;
+        let image = images.target(&prepared, owners, &source_literals)?;
         let package_literals = if package_interfaces.matches_target(&prepared) {
             image.package_literals(|unit, module| package_interfaces.interface_digest(unit, module))
         } else {
@@ -874,13 +1289,13 @@ impl CertifiedTargetImage {
             package_literals,
             source_plan: None,
         };
-        let demanded = target.finish_demanded(groups, compiled, &source_literals, registry)?;
+        let demanded = target.finish_demanded(groups, compiled, &source_literals, images)?;
         Ok((target, demanded))
     }
 
     fn compile_literal_producers(
         groups: &[CertifiedGroup],
-        registry: &ImageRegistry,
+        images: NativeImageAcquisition<'_>,
     ) -> Result<
         (
             Vec<Option<DemandedImage>>,
@@ -902,7 +1317,7 @@ impl CertifiedTargetImage {
             if !matches!(top.binding.rhs, HeapRhs::Bytes(_)) {
                 continue;
             }
-            let image = DemandedImage::compile(group.clone(), registry)?;
+            let image = images.group(group.clone(), &BTreeMap::new(), &BTreeMap::new())?;
             for (binder, literal) in image.source_literals() {
                 if let Some(previous) = source_literals.get(&binder) {
                     if previous != &literal {
@@ -922,19 +1337,14 @@ impl CertifiedTargetImage {
         groups: Vec<CertifiedGroup>,
         compiled: Vec<Option<DemandedImage>>,
         source_literals: &BTreeMap<SourceBinder, SourceLiteral>,
-        registry: &ImageRegistry,
+        images: NativeImageAcquisition<'_>,
     ) -> Result<Vec<DemandedImage>, DemandError> {
         groups
             .into_iter()
             .zip(compiled)
             .map(|(group, compiled)| match compiled {
                 Some(image) => Ok(image),
-                None => DemandedImage::compile_with_literals(
-                    group,
-                    registry,
-                    &self.package_literals,
-                    source_literals,
-                ),
+                None => images.group(group, &self.package_literals, source_literals),
             })
             .collect()
     }
@@ -947,8 +1357,14 @@ impl CertifiedTargetImage {
     ) -> Result<Vec<DemandedImage>, DemandError> {
         let groups = groups.into_iter().collect::<Vec<_>>();
         tidepool_codegen::prepared_program::GroupInventory::new(&groups)?;
-        let (compiled, literals) = Self::compile_literal_producers(&groups, registry)?;
-        self.finish_demanded(groups, compiled, &literals, registry)
+        let (compiled, literals) =
+            Self::compile_literal_producers(&groups, NativeImageAcquisition::Compile(registry))?;
+        self.finish_demanded(
+            groups,
+            compiled,
+            &literals,
+            NativeImageAcquisition::Compile(registry),
+        )
     }
 
     pub(crate) fn with_source_plan(
@@ -985,8 +1401,14 @@ impl CertifiedTargetImage {
             .iter()
             .map(|group| group.original().clone())
             .collect::<Vec<_>>();
-        let (compiled, literals) = Self::compile_literal_producers(&originals, registry)?;
-        let compiled = self.finish_demanded(originals, compiled, &literals, registry)?;
+        let (compiled, literals) =
+            Self::compile_literal_producers(&originals, NativeImageAcquisition::Compile(registry))?;
+        let compiled = self.finish_demanded(
+            originals,
+            compiled,
+            &literals,
+            NativeImageAcquisition::Compile(registry),
+        )?;
         compiled
             .into_iter()
             .zip(groups)
@@ -2228,6 +2650,23 @@ fn constructor_replies_equivalent(
 ) -> Result<bool, TypeGraphError> {
     match (x, y) {
         (ConstructorReply::AtSite, ConstructorReply::AtSite) => Ok(true),
+        (
+            ConstructorReply::StaticWithSite {
+                reply: x,
+                field: xf,
+                payload_field: xp,
+                capture_input: xc,
+            },
+            ConstructorReply::StaticWithSite {
+                reply: y,
+                field: yf,
+                payload_field: yp,
+                capture_input: yc,
+            },
+        ) if (xf, xp, xc) == (yf, yp, yc) => {
+            let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+            a.types.rooted_compatible(x, &b.types, y, &mut budget)
+        }
         (ConstructorReply::Static(x), ConstructorReply::Static(y)) => {
             let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
             a.types.rooted_compatible(x, &b.types, y, &mut budget)
@@ -2266,7 +2705,17 @@ fn reply_conflict_evidence(
     fn observe(facts: &ProgramFacts, reply: ConstructorReply) -> ConstructorReplyObservation {
         match reply {
             ConstructorReply::AtSite => ConstructorReplyObservation::AtSite,
-            ConstructorReply::Static(node) => {
+            ConstructorReply::Static(node)
+            | ConstructorReply::StaticWithSite { reply: node, .. } => {
+                let input_site = match reply {
+                    ConstructorReply::StaticWithSite {
+                        field,
+                        payload_field,
+                        capture_input,
+                        ..
+                    } => Some((field, payload_field, capture_input)),
+                    _ => None,
+                };
                 let mut budget = TypeWorkBudget::new(256);
                 let shape = match facts.types.open_root(node, &mut budget) {
                     Err(source) => ReplyTypeObservation::Refused(source),
@@ -2289,7 +2738,11 @@ fn reply_conflict_evidence(
                         }
                     },
                 };
-                ConstructorReplyObservation::Static { node, shape }
+                ConstructorReplyObservation::Static {
+                    node,
+                    shape,
+                    input_site,
+                }
             }
         }
     }
@@ -4941,6 +5394,38 @@ impl PreparedEngine {
                 constructor: *constructor,
                 node,
             }),
+            ConstructorReply::StaticWithSite {
+                reply: node,
+                field,
+                payload_field,
+                capture_input,
+            } => {
+                let site = fields
+                    .get(field as usize)
+                    .and_then(|field| site_field(field, table))
+                    .ok_or(PreparedRuntimeError::MalformedRequestSite {
+                        constructor: *constructor,
+                    })?;
+                let selected = self
+                    .sites
+                    .get(&site)
+                    .ok_or(PreparedRuntimeError::UnknownSite { site })?;
+                let row = &self.programs[&selected.owner].sites[selected.row];
+                if capture_input.is_some_and(|input| row.inputs.len() != input as usize + 1) {
+                    return Err(PreparedRuntimeError::MalformedRequestSite {
+                        constructor: *constructor,
+                    });
+                }
+                Ok(PreparedReplyEvidence::StaticWithSite {
+                    owner: witness.owner,
+                    constructor: *constructor,
+                    node,
+                    site_owner: selected.owner,
+                    site_row: selected.row,
+                    payload_field,
+                    capture_input,
+                })
+            }
             ConstructorReply::AtSite => {
                 let site = fields
                     .first()
@@ -4971,6 +5456,9 @@ impl PreparedEngine {
         match reply {
             PreparedReplyEvidence::Static {
                 constructor, node, ..
+            }
+            | PreparedReplyEvidence::StaticWithSite {
+                constructor, node, ..
             } => Ok((owner, node, ReplyTarget::Static(constructor))),
             PreparedReplyEvidence::AtSite { row, .. } => {
                 let row = facts
@@ -4991,10 +5479,33 @@ impl PreparedEngine {
     /// Dynamic request site, if this frame carries compiler-attested AtSite evidence.
     pub fn parked_site(&self, id: ContinuationId) -> Option<u64> {
         let (_, evidence) = self.machine.parked(id)?;
-        let PreparedReplyEvidence::AtSite { owner, row } = evidence.reply else {
-            return None;
+        let (owner, row) = match evidence.reply {
+            PreparedReplyEvidence::AtSite { owner, row } => (owner, row),
+            PreparedReplyEvidence::StaticWithSite {
+                site_owner,
+                site_row,
+                ..
+            } => (site_owner, site_row),
+            PreparedReplyEvidence::Static { .. } => return None,
         };
         Some(self.programs.get(&owner)?.sites.get(row)?.site)
+    }
+
+    /// Result capture requires the actual parked constructor's compiler proof
+    /// that its retained payload has the final input's type.
+    pub fn parked_capture_site(&self, id: ContinuationId) -> Option<(u64, usize)> {
+        let (_, evidence) = self.machine.parked(id)?;
+        let PreparedReplyEvidence::StaticWithSite {
+            site_owner,
+            site_row,
+            capture_input: Some(input),
+            ..
+        } = evidence.reply
+        else {
+            return None;
+        };
+        let row = self.programs.get(&site_owner)?.sites.get(site_row)?;
+        (row.inputs.len() == input as usize + 1).then_some((row.site, input as usize))
     }
 
     /// Observe and classify a suspension by its exact request constructor.
@@ -5095,8 +5606,19 @@ impl PreparedEngine {
         // newly tenured handle without a frame to own it; then mirror the field
         // before releasing `payload`. `PreparedMachine::park` consumes the
         // handle on both success and refusal.
+        let live_payload = match (park.live_payload, reply) {
+            (
+                LivePayloadPolicy::ValueField(_),
+                PreparedReplyEvidence::StaticWithSite { payload_field, .. },
+            ) => LivePayloadPolicy::ValueField(payload_field as usize),
+            (
+                LivePayloadPolicy::ClosureField(_),
+                PreparedReplyEvidence::StaticWithSite { payload_field, .. },
+            ) => LivePayloadPolicy::ClosureField(payload_field as usize),
+            (policy, _) => policy,
+        };
         let live_payload_root =
-            match self.tenure_live_payload(payload, realm, park.live_payload, &request) {
+            match self.tenure_live_payload(payload, realm, live_payload, &request) {
                 Ok(root) => root,
                 Err(error) => {
                     self.machine.release(payload);
@@ -5105,6 +5627,28 @@ impl PreparedEngine {
                 }
             };
         self.machine.release(payload);
+        let reply = match reply {
+            PreparedReplyEvidence::StaticWithSite {
+                owner,
+                constructor,
+                node,
+                site_owner,
+                site_row,
+                payload_field,
+                capture_input: _,
+            } if live_payload != LivePayloadPolicy::ValueField(payload_field as usize) => {
+                PreparedReplyEvidence::StaticWithSite {
+                    owner,
+                    constructor,
+                    node,
+                    site_owner,
+                    site_row,
+                    payload_field,
+                    capture_input: None,
+                }
+            }
+            reply => reply,
+        };
         let evidence = PreparedFrameEvidence {
             reply,
             runner: program,
@@ -5398,6 +5942,79 @@ impl PreparedEngine {
         )?;
         let built = builder
             .finish(realm, root)
+            .map_err(PreparedRuntimeError::Run)?;
+        self.resume_parked(id, built)
+    }
+
+    /// Borrow a live result under compiler-checked single-field wrappers.
+    /// Construction is transactional; a refused wrapper keeps both the root
+    /// and parked continuation live.
+    pub fn resume_with_nested_handle(
+        &mut self,
+        id: ContinuationId,
+        raw: ValueHandle,
+        constructors: &[DataConId],
+    ) -> Result<PreparedResumed, PreparedRuntimeError> {
+        let handle = self
+            .machine
+            .prepared_handle_of(raw)
+            .ok_or(PreparedRuntimeError::UnknownHandle)?;
+        let (realm, evidence) = self.machine.parked(id).ok_or(PreparedRuntimeError::Run(
+            ExecutionError::UnknownContinuation(id),
+        ))?;
+        let (owner_id, wire, site) = self.structural_reply(evidence.reply)?;
+        if constructors.is_empty() || constructors.len() > MAX_ANSWER_DEPTH {
+            return Err(PreparedRuntimeError::AnswerShape {
+                site,
+                detail: "nested borrowed framing requires a bounded nonempty constructor path",
+            });
+        }
+        let owner = &self.programs[&owner_id];
+        let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+        let mut cursor = owner
+            .types
+            .open_root(wire, &mut budget)
+            .map_err(|source| PreparedRuntimeError::AnswerTypeEvidence { site, source })?;
+        for &constructor in constructors.iter().rev() {
+            let fields = owner
+                .selected_fields(&cursor, constructor, &mut budget)
+                .map_err(|source| PreparedRuntimeError::AnswerTypeEvidence { site, source })?
+                .ok_or(PreparedRuntimeError::AnswerConstructor {
+                    site,
+                    host_id: constructor,
+                })?;
+            let [field] = fields.as_slice() else {
+                return Err(PreparedRuntimeError::AnswerShape {
+                    site,
+                    detail: "nested borrowed framing requires one field per constructor",
+                });
+            };
+            cursor = field.clone();
+        }
+        if self.machine.cancellation_requested(realm) {
+            return Err(PreparedRuntimeError::Cancelled);
+        }
+        let mut builder = self
+            .machine
+            .managed_builder()
+            .map_err(PreparedRuntimeError::Run)?;
+        let mut field = ManagedField::Handle(handle);
+        let mut root = None;
+        for &constructor in constructors {
+            let node = builder
+                .constructor(constructor, &[field])
+                .map_err(PreparedRuntimeError::Run)?;
+            root = Some(node);
+            field = ManagedField::Consume(node);
+        }
+        let built = builder
+            .finish(
+                realm,
+                root.ok_or(PreparedRuntimeError::AnswerShape {
+                    site,
+                    detail: "the nested constructor path produced no root",
+                })?,
+            )
             .map_err(PreparedRuntimeError::Run)?;
         self.resume_parked(id, built)
     }
@@ -6082,6 +6699,29 @@ pub(super) mod tests {
         }
     }
 
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(16))]
+        #[test]
+        fn native_code_custody_is_independent_of_retained_binding_ids(ids in proptest::collection::vec(1u64..10000, 1..8), generation in 1u64..128) {
+            use tidepool_repr::execution_schema::{testing, CertifiedGroupCode, GlobalDecl, ModuleVersion};
+            let mut wire = testing::wire_program();
+            wire.globals.push(GlobalDecl { identity: testing::identity("Fixture", "retained"), rep: RuntimeRep::LiftedRef, entry_signature: None, required_evaluated: false, required_generation: Some(generation) });
+            let owner = CachedHomeOwner { unit: "fixture".into(), module: "Fixture".into(), module_version: ModuleVersion([1; 32]), skinny_iface_sha256: [2; 32], product_sha256: [3; 32] };
+            let group = testing::projected_group(wire, 9).unwrap();
+            let code = CertifiedGroupCode::admit(owner.clone(), group.clone()).unwrap();
+            let registry = ImageRegistry::new();
+            let image = CompiledProgram::prepare_group_code(&code, &[None], &BTreeMap::new(), &BTreeMap::new(), &registry).unwrap();
+            let weak = Arc::downgrade(&image);
+            for id in ids {
+                let scoped = CertifiedGroup::admit(owner.clone(), group.clone(), vec![ImportOwner::Retained { id: SessionVarId::from_extract(id), generation }]).unwrap();
+                let selected = DemandedImage::lookup_with_literals(scoped, &registry, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+                proptest::prop_assert!(Arc::ptr_eq(&image, selected.image()));
+            }
+            drop(image);
+            proptest::prop_assert!(weak.upgrade().is_none(), "registry alone retains no executable or literal owner");
+        }
+    }
+
     fn certified_source_group(
         name: &str,
         ordinal: u32,
@@ -6200,6 +6840,97 @@ pub(super) mod tests {
         .unwrap();
         // Sealed group order need not put literal producers before importers.
         [reader, producer]
+    }
+
+    #[test]
+    fn ready_source_and_target_lookup_refuses_incomplete_custody_without_compilation() {
+        let groups = certified_source_literal_groups();
+        let reader = SourceBinder {
+            version: groups[0].owner().module_version.clone(),
+            binder: testing::identity("Fixture", "reader"),
+        };
+        let owners = vec![ImportOwner::Source {
+            version: reader.version.clone(),
+            binder: reader.binder.clone(),
+        }];
+        let mut wire = testing::wire_program();
+        wire.globals.push(GlobalDecl {
+            identity: reader.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let registry = Arc::new(ImageRegistry::new());
+        let mut scopes = tidepool_codegen::scope::ScopeTree::new();
+        let scope = scopes.mint_isolated();
+        let bindings = BindingTable::new();
+        let selection = bindings.source_domain_selection_in(&scopes, scope).unwrap();
+        let snapshot = bindings.scope_snapshot(&scopes, scope).unwrap();
+        let (selected, inherited, roots) =
+            tidepool_codegen::prepared_program::GroupInventory::new(&groups)
+                .unwrap()
+                .seal_in_domains([reader], &selection)
+                .unwrap();
+        assert!(inherited.is_empty());
+        let resolved = super::super::persistent::ResolvedCertifiedTurn {
+            groups: selected,
+            target_owners: owners,
+            package_interfaces: CertifiedTargetPackageInterfaces::default(),
+            source_evidence: certified_source_evidence(&groups),
+            inherited_needed: vec![],
+            source_plan: super::super::persistent::ResolvedSourceDomainPlan::fixture(
+                roots, selection, snapshot,
+            ),
+        };
+        let absent = NativeImageBundle {
+            registry: registry.clone(),
+            images: BTreeMap::new(),
+            target: 0,
+        };
+        let before = CompiledProgram::successful_image_compilations();
+        assert!(matches!(
+            CertifiedTargetImage::lookup_scoped(prepared.clone(), &resolved, &absent),
+            Err(PreparedRuntimeError::MissingPreparedNativeImage)
+        ));
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
+        let (target, demanded) =
+            CertifiedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap();
+        let complete = NativeImageBundle {
+            registry: registry.clone(),
+            images: std::iter::once(target.image.clone())
+                .chain(demanded.iter().map(|image| image.image().clone()))
+                .map(|image| (Arc::as_ptr(&image) as usize, image))
+                .collect(),
+            target: Arc::as_ptr(&target.image) as usize,
+        };
+        let before = CompiledProgram::successful_image_compilations();
+        for key in complete.images.keys() {
+            let incomplete = complete.omitting_image(*key);
+            assert!(matches!(
+                CertifiedTargetImage::lookup_scoped(prepared.clone(), &resolved, &incomplete),
+                Err(PreparedRuntimeError::MissingPreparedNativeImage)
+            ));
+            assert_eq!(CompiledProgram::successful_image_compilations(), before);
+        }
+        let (looked_up, groups) =
+            CertifiedTargetImage::lookup_scoped(prepared.clone(), &resolved, &complete).unwrap();
+        assert!(Arc::ptr_eq(&looked_up.image, &target.image));
+        assert!(groups
+            .iter()
+            .zip(&demanded)
+            .all(|(a, b)| Arc::ptr_eq(a.image(), b.image())));
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
+        drop((target, demanded, looked_up, groups, complete));
+        assert!(
+            matches!(
+                CertifiedTargetImage::lookup_scoped(prepared, &resolved, &absent),
+                Err(PreparedRuntimeError::MissingPreparedNativeImage)
+            ),
+            "expired keys cannot create a new image"
+        );
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
     }
 
     #[test]
@@ -9813,15 +10544,19 @@ pub(super) mod tests {
         }
     }
 
-    fn mount_table_row(id: u64, name: &str, arity: u32, qualified_name: Option<&str>) -> DataCon {
+    fn mount_table_row(constructor: &ConstructorDecl) -> DataCon {
         DataCon {
-            id: DataConId(id),
-            name: name.into(),
-            tag: 1,
-            rep_arity: arity,
+            identity: constructor.identity.clone(),
+            id: constructor.host_id,
+            name: constructor.identity.occurrence.clone(),
+            tag: constructor.tag,
+            rep_arity: constructor.field_reps.len() as u32,
             field_bangs: Vec::new(),
-            qualified_name: qualified_name.map(str::to_owned),
-            type_name: String::new(),
+            qualified_name: Some(format!(
+                "{}.{}",
+                constructor.identity.module, constructor.identity.occurrence
+            )),
+            type_name: constructor.family.occurrence.clone(),
         }
     }
 
@@ -10241,36 +10976,14 @@ pub(super) mod tests {
 
     fn json_mount_table() -> DataConTable {
         let mut table = DataConTable::new();
-        for (id, name, arity, qualified_name) in [
-            (100, "Object", 1, Some("Tidepool.Aeson.Value.Object")),
-            (101, "Array", 1, Some("Tidepool.Aeson.Value.Array")),
-            (102, "String", 1, Some("Tidepool.Aeson.Value.String")),
-            (103, "Number", 1, Some("Tidepool.Aeson.Value.Number")),
-            (104, "Bool", 1, Some("Tidepool.Aeson.Value.Bool")),
-            (105, "Null", 0, Some("Tidepool.Aeson.Value.Null")),
-            (
-                110,
-                "Scientific",
-                2,
-                Some("Tidepool.Aeson.Scientific.Scientific"),
-            ),
-            (120, "IS", 1, Some("GHC.Num.Integer.IS")),
-            (121, "IP", 1, Some("GHC.Num.Integer.IP")),
-            (122, "IN", 1, Some("GHC.Num.Integer.IN")),
-            (130, "True", 0, Some("GHC.Types.True")),
-            (131, "False", 0, Some("GHC.Types.False")),
-            (140, "Bin", 5, Some("Data.Map.Internal.Bin")),
-            (141, "Tip", 0, Some("Data.Map.Internal.Tip")),
-            (150, "I#", 1, Some("GHC.Types.I#")),
-            (160, "Text", 3, Some("Data.Text.Internal.Text")),
-            (170, ":", 2, Some("GHC.Types.:")),
-            (171, "[]", 0, Some("GHC.Types.[]")),
-            (903, "Framed", 2, Some("Fixture.Mount.Framed")),
-        ] {
-            table
-                .insert_checked(mount_table_row(id, name, arity, qualified_name))
-                .unwrap();
-        }
+        table
+            .extend_checked(
+                json_mount_program()
+                    .constructors()
+                    .iter()
+                    .map(mount_table_row),
+            )
+            .unwrap();
         table
     }
 
@@ -11380,6 +12093,100 @@ pub(super) mod tests {
         }
     }
 
+    fn nonleading_site_program(capture_input: Option<u32>) -> PreparedProgram {
+        let prepared = attested_request_program(ConstructorReply::Static(TypeNodeId(0)));
+        let mut wire = prepared_data::wire_from_prepared(&prepared);
+        wire.constructors[0] = mount_constructor(
+            "Fixture",
+            "Request",
+            "Fixture",
+            "Effect",
+            77,
+            1,
+            1,
+            vec![
+                RuntimeRep::Int(64),
+                RuntimeRep::Int(64),
+                RuntimeRep::LiftedRef,
+            ],
+        );
+        wire.constructor_replies[0].1 = ConstructorReply::StaticWithSite {
+            reply: TypeNodeId(0),
+            field: 1,
+            payload_field: 2,
+            capture_input,
+        };
+        wire.sites[0].inputs = vec![TypeNodeId(0)];
+        testing::prepare(wire).unwrap()
+    }
+
+    #[test]
+    fn nonleading_site_preserves_closed_reply_and_requires_exact_capture_vector() {
+        let (mut engine, owner) =
+            PreparedEngine::bootstrap(nonleading_site_program(Some(0))).unwrap();
+        let table = json_mount_table();
+        let request = |site| {
+            HaskellValue::Con(
+                DataConId(77),
+                vec![
+                    HaskellValue::Lit(Literal::LitInt(999)),
+                    site,
+                    HaskellValue::Con(DataConId(105), vec![]),
+                ],
+            )
+        };
+        for malformed in [
+            HaskellValue::Lit(Literal::LitInt(-1)),
+            HaskellValue::Lit(Literal::LitWord(41)),
+        ] {
+            assert!(matches!(
+                engine.classify_reply(&request(malformed), &table),
+                Err(PreparedRuntimeError::MalformedRequestSite { .. })
+            ));
+        }
+        assert!(matches!(
+            engine.classify_reply(&request(HaskellValue::Lit(Literal::LitInt(42))), &table),
+            Err(PreparedRuntimeError::UnknownSite { site: 42 })
+        ));
+        let valid = request(HaskellValue::Lit(Literal::LitInt(41)));
+        let reply = engine.classify_reply(&valid, &table).unwrap();
+        let (reply_owner, node, target) = engine.structural_reply(reply).unwrap();
+        assert_eq!(reply_owner, owner);
+        assert_eq!(node, TypeNodeId(0));
+        assert!(matches!(target, ReplyTarget::Static(DataConId(77))));
+        let id = park_attested_fixture(&mut engine, owner, reply);
+        assert_eq!(engine.parked_site(id), Some(41));
+        assert_eq!(engine.parked_capture_site(id), Some((41, 0)));
+        engine.abort_parked(id).unwrap();
+        let mut missing = prepared_data::wire_from_prepared(&nonleading_site_program(Some(0)));
+        missing.sites[0].inputs.clear();
+        let (engine, _) = PreparedEngine::bootstrap(testing::prepare(missing).unwrap()).unwrap();
+        assert!(matches!(
+            engine.classify_reply(&valid, &table),
+            Err(PreparedRuntimeError::MalformedRequestSite { .. })
+        ));
+    }
+
+    #[test]
+    fn nonleading_original_site_without_typed_payload_never_issues_capture() {
+        let (mut engine, owner) = PreparedEngine::bootstrap(nonleading_site_program(None)).unwrap();
+        let request = HaskellValue::Con(
+            DataConId(77),
+            vec![
+                HaskellValue::Lit(Literal::LitInt(999)),
+                HaskellValue::Lit(Literal::LitInt(41)),
+                HaskellValue::Con(DataConId(105), vec![]),
+            ],
+        );
+        let reply = engine
+            .classify_reply(&request, &json_mount_table())
+            .unwrap();
+        let id = park_attested_fixture(&mut engine, owner, reply);
+        assert_eq!(engine.parked_site(id), Some(41));
+        assert_eq!(engine.parked_capture_site(id), None);
+        engine.abort_parked(id).unwrap();
+    }
+
     #[test]
     fn at_site_requires_exact_first_carrier_and_checks_delivery() {
         let (mut engine, owner) =
@@ -11628,11 +12435,12 @@ pub(super) mod tests {
         .expect("polymorphic Maybe constructor templates");
         wire.constructor_replies =
             vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
+        let mut table = DataConTable::new();
+        table
+            .extend_checked(wire.constructors[1..].iter().map(mount_table_row))
+            .unwrap();
         let (mut engine, owner) =
             PreparedEngine::bootstrap(testing::prepare(wire).unwrap()).unwrap();
-        let mut table = DataConTable::new();
-        table.insert(mount_table_row(78, "Nothing", 0, Some("GHC.Maybe.Nothing")));
-        table.insert(mount_table_row(79, "Just", 1, Some("GHC.Maybe.Just")));
         let reply = PreparedReplyEvidence::Static {
             owner,
             constructor: DataConId(77),

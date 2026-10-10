@@ -558,6 +558,7 @@ impl PreparedMachine<'_> {
                 self.compiled_functions += candidate.image.pipeline.functions_defined();
                 self.compiled_code_bytes += candidate.image.pipeline.code_bytes();
             }
+            let image_instance = candidate.image.image_instance_id();
             self.programs.insert(
                 id,
                 InstalledProgram {
@@ -569,6 +570,7 @@ impl PreparedMachine<'_> {
                     owned_headers,
                 },
             );
+            tracing::info!(target: "tidepool_codegen::image_install", image_instance, process_id = std::process::id(), machine_owner = self as *const Self as usize, program = id.0, outcome = "machine_published", "native image install");
             ids.push(id);
         }
         let mut source_attachments = Vec::new();

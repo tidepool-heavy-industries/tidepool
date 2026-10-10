@@ -23,15 +23,24 @@ fn table() -> DataConTable {
         (SECOND, "SecondRequest"),
         (UNKNOWN, "UnknownRequest"),
     ] {
-        table.insert(DataCon {
-            id,
-            name: name.into(),
-            tag: id.0 as u32,
-            rep_arity: 1,
-            field_bangs: vec![],
-            qualified_name: Some(format!("Test.{name}")),
-            type_name: "TestRequest".into(),
-        });
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    namespace: "constructor".into(),
+                    occurrence: name.to_owned(),
+                    record_parent: None,
+                },
+                id,
+                name: name.into(),
+                tag: id.0 as u32,
+                rep_arity: 1,
+                field_bangs: vec![],
+                qualified_name: Some(format!("Test.{name}")),
+                type_name: "TestRequest".into(),
+            })
+            .expect("valid fixture metadata");
     }
     table
 }

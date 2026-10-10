@@ -25,12 +25,26 @@ pub enum RfTurnItem {
     TurnToolResult(String, String),
 }
 
-/// One recorded turn in provider order. An unfinished active turn has
-/// no completion timestamp and contains only items recorded so far.
+/// Recorded model-response progress, independent of timestamps.
+/// TurnUnknown means retained history lacks a response observation.
+/// TurnCompleted describes the response; a tool result may still be pending.
+#[derive(ToHaskell, Clone, Debug, PartialEq, Eq)]
+pub enum RfTurnState {
+    TurnInProgress,
+    /// The exact provider response identity, when recorded.
+    TurnCompleted(Option<String>),
+    TurnInterrupted,
+    TurnUnknown,
+}
+
+/// One runtime request in recorded order, with its exact provider response
+/// identity when available. Timestamps may be absent in every state;
+/// only recorded items are returned.
 #[derive(ToHaskell, Clone, Debug, PartialEq, Eq)]
 #[haskell(name = "ConversationTurn")]
 pub struct RfConversationTurn {
     pub identity: String,
+    pub state: RfTurnState,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub items: Vec<RfTurnItem>,

@@ -51,6 +51,7 @@ name = "prepared_control"
 path = "tests/prepared_control.rs"
 
 [dev-dependencies]
+proptest.workspace = true
 tidepool-test-data.workspace = true
 
 [lints]

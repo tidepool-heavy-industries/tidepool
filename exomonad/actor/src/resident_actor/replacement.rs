@@ -10,6 +10,7 @@ struct StagedHandler {
     sources: Vec<crate::request::sources::SourceBinding>,
     dynamic_sources: Vec<crate::request::sources::SourceBinding>,
     session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
+    exit_destination: Option<Arc<crate::owned_result::RequestResultDestination>>,
 }
 
 pub(super) struct PreparedSuccessor {
@@ -74,6 +75,7 @@ where
             .with_supervisor_parent(kernel.supervisor_identity());
         let (transfer, custody) = tokio::sync::oneshot::channel();
         let session_startup = staged.session_startup.take();
+        let exit_destination = staged.exit_destination.take();
         let mut behavior = Self::with_boot(
             descriptor,
             self.environment.clone(),
@@ -81,6 +83,7 @@ where
             self.launch_worktrees.clone(),
         );
         behavior.child_session_startup = session_startup;
+        behavior.exit_destination = exit_destination;
         let (successor, parent_admission) = match kernel.spawn_successor(behavior).await {
             Ok(successor) => successor,
             Err(error) => {
@@ -308,6 +311,7 @@ where
             launch_worktrees,
             record_workspace,
             seed,
+            exit_destination,
         } = definition.child;
         if !launch_worktrees.is_empty() || record_workspace.is_some() {
             return Err(reject(
@@ -479,6 +483,7 @@ where
                 imported
             };
         Ok(StagedHandler {
+            exit_destination,
             descriptor,
             receiver,
             checkpoint: StateCheckpoint {

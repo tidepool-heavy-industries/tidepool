@@ -24,7 +24,7 @@ pub(crate) fn decode_wait_target(
     request: &HaskellValue,
     table: &DataConTable,
 ) -> Result<ActorRef, ActorWaitError> {
-    let ActorReq::ActorWaitWith((actor_id, incarnation)) = ActorReq::from_value(request, table)?
+    let ActorReq::ActorWaitWith(_, (actor_id, incarnation)) = ActorReq::from_value(request, table)?
     else {
         return Err(ActorWaitError::UnexpectedRequest);
     };
@@ -35,7 +35,7 @@ pub(crate) fn decode_poll_target(
     request: &HaskellValue,
     table: &DataConTable,
 ) -> Result<ActorRef, ActorWaitError> {
-    let ActorReq::ActorPollWith((actor_id, incarnation)) = ActorReq::from_value(request, table)?
+    let ActorReq::ActorPollWith(_, (actor_id, incarnation)) = ActorReq::from_value(request, table)?
     else {
         return Err(ActorWaitError::UnexpectedRequest);
     };
@@ -58,8 +58,8 @@ pub(crate) fn decode_address(actor_id: i64, incarnation: i64) -> Result<ActorRef
 
 impl tidepool_bridge::sealed::ToHaskellSealed for ActorTerminal {}
 
-/// Stream immutable terminal metadata. Successful domain data remains in the
-/// shared Haskell exit cell carried by the exact actor reference.
+/// Stream native terminal metadata for generic Rust actors. Typed Haskell exit
+/// observation uses the independently retained result snapshot.
 impl ToHaskell for ActorTerminal {
     fn visit(
         &self,
@@ -82,21 +82,40 @@ impl ToHaskell for ActorTerminal {
     }
 }
 
+#[derive(tidepool_bridge_derive::ToHaskell)]
+pub(crate) enum ExitObservationFailure {
+    #[haskell(module = "Tidepool.Internal.ActorExit", name = "Failed")]
+    Failed(String),
+    #[haskell(module = "Tidepool.Internal.ActorExit", name = "Cancelled")]
+    Cancelled(String),
+    #[haskell(module = "Tidepool.Internal.ActorExit", name = "Unavailable")]
+    Unavailable(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tidepool_repr::{DataCon, DataConId};
 
     fn insert(table: &mut DataConTable, id: u64, qualified_name: &str) {
-        table.insert(DataCon {
-            id: DataConId(id),
-            name: "ActorCompletedStatus".into(),
-            tag: 1,
-            rep_arity: 0,
-            field_bangs: vec![],
-            qualified_name: Some(qualified_name.into()),
-            type_name: "ActorTerminalStatus".into(),
-        });
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "ActorCompletedStatus".into(),
+                    record_parent: None,
+                },
+                id: DataConId(id),
+                name: "ActorCompletedStatus".into(),
+                tag: 1,
+                rep_arity: 0,
+                field_bangs: vec![],
+                qualified_name: Some(qualified_name.into()),
+                type_name: "ActorTerminalStatus".into(),
+            })
+            .expect("valid fixture metadata");
     }
 
     fn completed() -> ActorTerminal {
@@ -136,15 +155,24 @@ mod tests {
             (101, "ActorFailedStatus", 1),
             (102, "ActorCancelledStatus", 1),
         ] {
-            table.insert(DataCon {
-                id: DataConId(id),
-                name: name.into(),
-                tag: (id - 99) as u32,
-                rep_arity: arity,
-                field_bangs: vec![tidepool_repr::datacon::SrcBang::NoSrcBang; arity as usize],
-                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                type_name: "ActorTerminalStatus".into(),
-            });
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: (id - 99) as u32,
+                    rep_arity: arity,
+                    field_bangs: vec![tidepool_repr::datacon::SrcBang::NoSrcBang; arity as usize],
+                    qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                    type_name: "ActorTerminalStatus".into(),
+                })
+                .expect("valid fixture metadata");
         }
         table
     }
@@ -192,15 +220,24 @@ mod tests {
     #[test]
     fn terminal_source_rejects_wrong_representation_arity() {
         let mut table = DataConTable::new();
-        table.insert(DataCon {
-            id: DataConId(103),
-            name: "ActorFailedStatus".into(),
-            tag: 2,
-            rep_arity: 0,
-            field_bangs: vec![],
-            qualified_name: Some("Tidepool.Effects.Core.ActorFailedStatus".into()),
-            type_name: "ActorTerminalStatus".into(),
-        });
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Tidepool.Effects.Core".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "ActorFailedStatus".into(),
+                    record_parent: None,
+                },
+                id: DataConId(103),
+                name: "ActorFailedStatus".into(),
+                tag: 2,
+                rep_arity: 0,
+                field_bangs: vec![],
+                qualified_name: Some("Tidepool.Effects.Core.ActorFailedStatus".into()),
+                type_name: "ActorTerminalStatus".into(),
+            })
+            .expect("valid fixture metadata");
         let terminal = ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "failure".into(),

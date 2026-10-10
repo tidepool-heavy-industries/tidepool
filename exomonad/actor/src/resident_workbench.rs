@@ -2419,6 +2419,7 @@ pub(crate) enum ResidentWorkbenchStep {
         outcome: Box<ResidentWorkbenchSuspension>,
     },
     Replied {
+        claim: crate::request::RequestReplyClaim,
         request: crate::RequestId,
         result: RootCustody,
         preview: Option<String>,
@@ -2992,6 +2993,21 @@ pub(crate) enum ResidentActorBoundary {
     RequestSubmission(RequestSubmission),
     ReplyAttempt(ReplyAttempt),
     ResponsePoll(ResponsePoll),
+    ExitPublication {
+        continuation: ResidentHole,
+        value: tidepool_runtime::session::RuntimeResultPublication,
+    },
+    ResponsePublication {
+        continuation: ResidentHole,
+        request: crate::RequestId,
+        value: tidepool_runtime::session::RuntimeResultPublication,
+    },
+    WatchResponsePoll {
+        continuation: ResidentHole,
+        watch: crate::WatchId,
+        path: Vec<usize>,
+        node: usize,
+    },
     ProgressPublication {
         continuation: ResidentHole,
         request: crate::RequestId,
@@ -3165,6 +3181,9 @@ impl ResidentActorBoundary {
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
             Self::ResponsePoll(_) => "pollResponse",
+            Self::ExitPublication { .. } => "exit publication",
+            Self::ResponsePublication { .. } => "publishResponse",
+            Self::WatchResponsePoll { .. } => "observeWatchResponse",
             Self::ProgressPublication { .. } => "reportProgress",
             Self::ProgressPoll(_) => "pollProgress",
             Self::RequestUpdate { .. } => "updateRequest",
@@ -3473,6 +3492,7 @@ impl ResidentRequest {
             Self::ActorKernel(
                 crate::generated::actor_kernel::ActorKernelReq::ActorCommandInputWith,
             ) => "command source input",
+            Self::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorPublishExitWith(..)) => "exit publication",
             Self::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith) => {
                 "ready"
             }
@@ -3533,6 +3553,9 @@ impl ResidentRequest {
             Self::AgentSession(
                 crate::generated::agent_session::AgentSessionReq::AgentAttachWith(..),
             ) => "agent attachment",
+            Self::AgentSession(crate::generated::agent_session::AgentSessionReq::AgentSessionPublishResponseWith(..)
+                | crate::generated::agent_session::AgentSessionReq::AgentSessionPublishProgressResponseWith(..)) => "response publication",
+            Self::Watches(WatchesReq::ObserveWatchResponseWith(..)) => "watch response observation",
             Self::Replies(RepliesReq::ReserveRequestWith(..)) => "request reservation",
             Self::Replies(RepliesReq::CurrentRequestWith(..)) => "currentRequest",
             Self::Replies(RepliesReq::SubmitRequestWith(..)) => "request submission",
@@ -5416,9 +5439,9 @@ where
                         session.publish_source_originals(pending_originals)?;
                     }
                     if let Some(prepared) = code.prepared() {
-                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, session = %context.placement.session, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
                     } else {
-                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "explicit_toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), install, "actor phase");
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, session = %context.placement.session, phase = "explicit_toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), install, "actor phase");
                     }
                     Ok(PreparedToolInstallation {
                         tools: ResidentWorkbenchTools {
@@ -5815,10 +5838,11 @@ where
                     }
                     Err(failure) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
                 },
-                Err(failure) if matches!(failure.error, CompileError::Diagnostics(_)) => {
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) if matches!(failure.error, CompileError::Diagnostics(_)) => {
                     return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::Language), input_binding, admission));
                 }
-                Err(failure) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error)) => return Err(committed(ResidentActorWorkbenchError::Resident(error.into()))),
             };
             if compiled.proof().disposition() == tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Opaque {
                 return Ok((ActivationPreviewOutcome::Opaque, input_binding, admission));
@@ -6961,12 +6985,7 @@ fn pending_mode_for(
 /// so the single-checkout fallback after a stale split install can still run
 /// the same compiled turn instead of needing a second GHC compile.
 fn cloned_turn_code(turn: &CompiledTurn) -> TurnCode<'static> {
-    TurnCode {
-        table: std::borrow::Cow::Owned(turn.table.clone()),
-        sites: std::borrow::Cow::Owned(turn.asks.clone()),
-        prepared: std::borrow::Cow::Owned(turn.prepared.as_ref().clone()),
-        certification: std::borrow::Cow::Owned(turn.certification.clone()),
-    }
+    turn.code().into_owned()
 }
 
 /// One split-install attempt's outcome: either the session had no machine
@@ -8417,6 +8436,11 @@ where
                         request,
                         table: session.data_con_table().clone(),
                     }),
+                    ResidentRequest::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorPublishExitWith(_, site)) => {
+                        let site = u64::try_from(site).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("invalid exit publication site".into()))?;
+                        let value = session.capture_result_publication(&hole, site, RealmId::ROOT)?;
+                        Ok(ResidentActorBoundary::ExitPublication { continuation: hole, value })
+                    }
                     ResidentRequest::ActorContext(
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),
@@ -8757,6 +8781,18 @@ where
                         .map(ResidentActorBoundary::AgentSession)
                         .map_err(ResidentActorWorkbenchError::InteractiveSessionCapture)
                     }
+                    ResidentRequest::AgentSession(
+                        crate::generated::agent_session::AgentSessionReq::AgentSessionPublishResponseWith(request, site, _)
+                        | crate::generated::agent_session::AgentSessionReq::AgentSessionPublishProgressResponseWith(request, site, _),
+                    ) => {
+                        let site = u64::try_from(site).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
+                            "response publication has a negative site".into()
+                        ))?;
+                        let value = session.capture_result_publication(&hole, site, RealmId::ROOT)?;
+                        Ok(ResidentActorBoundary::ResponsePublication {
+                            continuation: hole, request: crate::request_effect::request_id(request)?, value,
+                        })
+                    }
                     ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeRunWith(site, _)) =>
                         capture_scope_boundary(session, hole, site, actor_realm),
                     ResidentRequest::ResourceScopes(crate::generated::resource_scopes::ResourceScopesReq::ScopeDoneWith(token)) =>
@@ -8778,6 +8814,7 @@ where
                     ),
                     ResidentRequest::Replies(RepliesReq::SubmitRequestWith(
                         request_id,
+                        site,
                         _,
                         address,
                         deadline,
@@ -8789,6 +8826,13 @@ where
                                 error: crate::request_effect::RequestError::RequestInvalidDeadline(detail),
                             }),
                         };
+                        let site = u64::try_from(site).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
+                            "request submission has a negative site".into()
+                        ))?;
+                        let witness = session.request_result_type_witness(site, &hole)?;
+                        let destination = crate::owned_result::RequestResultDestination::new(
+                            context.actor, context.placement.session, witness, session.lease_bindings(&[]),
+                        );
                         let custody = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
                             ?
@@ -8807,6 +8851,7 @@ where
                                     custody,
                                 ),
                                 deadline,
+                                destination,
                             },
                         ))
                     }
@@ -8844,7 +8889,7 @@ where
                             preview: if preview.is_empty() { None } else { Some(preview) },
                         }))
                     }
-                    ResidentRequest::Replies(RepliesReq::ObserveResponseWith(request_id)) => {
+                    ResidentRequest::Replies(RepliesReq::ObserveResponseWith(_, request_id)) => {
                         Ok(ResidentActorBoundary::ResponsePoll(ResponsePoll {
                             continuation: hole,
                             request: crate::request_effect::request_id(request_id)?,
@@ -8956,6 +9001,16 @@ where
                             path: crate::request_effect::projection_path(path)?,
                             request: crate::request_effect::request_id(request)?,
                             after: u64::try_from(after).map_err(|_| ResidentActorWorkbenchError::ActorProtocol("negative progress cursor".into()))?,
+                        })
+                    }
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchResponseWith(_, watch, path, node)) => {
+                        Ok(ResidentActorBoundary::WatchResponsePoll {
+                            continuation: hole,
+                            watch: crate::request_effect::watch_id(watch)?,
+                            path: crate::request_effect::projection_path(path)?,
+                            node: usize::try_from(node).map_err(|_| ResidentActorWorkbenchError::ActorProtocol(
+                                "negative response projection node".into()
+                            ))?,
                         })
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchDecisionWith(watch, path)) => {
@@ -9309,7 +9364,7 @@ where
             ),
             SourceEvent::Settled(_) => matches!(
                 input,
-                ResidentRequest::Replies(RepliesReq::ObserveResponseWith(_))
+                ResidentRequest::Replies(RepliesReq::ObserveResponseWith(..))
             ),
         };
         if !input_matches_event {
@@ -9353,10 +9408,11 @@ where
                 self.resume_response_observation(
                     context.clone(),
                     hole,
-                    Ok(match result {
-                        Ok(()) => crate::ResponseObservation::Ready,
-                        Err(failure) => crate::ResponseObservation::Unavailable(failure),
+                    Ok(match &result {
+                        Ok(_) => crate::ResponseObservation::Ready,
+                        Err(failure) => crate::ResponseObservation::Unavailable(failure.clone()),
                     }),
+                    result.ok(),
                 )
                 .await?
             }
@@ -9434,7 +9490,8 @@ where
                             expected.operation()
                         )));
                     }
-                    crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
+                    crate::generated::actor_kernel::ActorKernelReq::ActorPublishExitWith(..)
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallLifecycleSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallCommandSourceWith(..)
@@ -9502,6 +9559,7 @@ where
                     crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(
                         ..,
                     )
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorPublishExitWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallProgressSourceWith(..)
                     | crate::generated::actor_kernel::ActorKernelReq::ActorInstallSettlementSourceWith(..)
@@ -9857,14 +9915,194 @@ where
         context: crate::ActorSessionContext,
         hole: ResidentHole,
         observation: Result<crate::ResponseObservation, crate::ReplyError>,
+        snapshot: Option<Arc<crate::owned_result::OwnedResultSnapshot>>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let observed = if matches!(observation, Ok(crate::ResponseObservation::Ready)) {
+            match snapshot {
+                Some(snapshot) => self.borrow_result(context.clone(), &hole, snapshot).await,
+                None => Err(crate::ReplyError::ReplyResultUnavailable),
+            }
+        } else {
+            Err(crate::ReplyError::ReplyResultUnavailable)
+        };
         self.access
             .with_compiler_machine(context, move |session, _, _, settlement| {
+                let observation = match (observation, observed) {
+                    (Ok(crate::ResponseObservation::Ready), Ok(value)) => {
+                        let constructor = tidepool_bridge::get_qualified(
+                            session.data_con_table(),
+                            "Tidepool.Agent.Reply.Internal.ResponseReady",
+                            1,
+                        )
+                        .ok_or_else(|| BridgeError::UnknownDataConName("ResponseReady".into()))?;
+                        return session
+                            .resume_framed_custody_sources_classified(
+                                hole,
+                                value.custody(),
+                                constructor,
+                                Vec::<i64>::new(),
+                                settlement,
+                            )
+                            .map_err(classify_resumption);
+                    }
+                    (Ok(crate::ResponseObservation::Ready), Err(error)) => Err(error),
+                    (observation, _) => observation,
+                };
                 let answer = crate::request_effect::RequestAnswer::Response(observation);
                 session
                     .resume_classified(hole, answer, settlement)
                     .map_err(classify_resumption)
             })
+            .await
+    }
+
+    pub(crate) async fn incorporate_result(
+        &self,
+        from: tidepool_repr::SessionId,
+        value: tidepool_runtime::session::RuntimeResultPublication,
+        destination: Arc<crate::owned_result::RequestResultDestination>,
+    ) -> Result<Arc<crate::owned_result::OwnedResultSnapshot>, ResidentActorWorkbenchError> {
+        if value.type_witness() != destination.type_witness() {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "result publication has another canonical response type".into(),
+            ));
+        }
+        let value = if from == destination.session() {
+            value
+        } else {
+            let parcel = self
+                .access
+                .with_host_machine("result-export", from, None, move |session, _| {
+                    session
+                        .export_result(value)
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                })
+                .await?;
+            self.access
+                .with_host_machine(
+                    "result-import",
+                    destination.session(),
+                    None,
+                    move |session, _| {
+                        session
+                            .import_result(parcel)
+                            .map_err(ResidentActorWorkbenchError::Resident)
+                    },
+                )
+                .await?
+        };
+        crate::owned_result::OwnedResultSnapshot::incorporated(value, destination).map_err(
+            |error| {
+                ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "result incorporation refused: {error:?}"
+                ))
+            },
+        )
+    }
+
+    async fn borrow_result(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: &ResidentHole,
+        snapshot: Arc<crate::owned_result::OwnedResultSnapshot>,
+    ) -> Result<Arc<tidepool_runtime::session::RuntimeResultPublication>, crate::ReplyError> {
+        let continuation = hole.cont_id().to_owned();
+        let expected = self
+            .access
+            .with_machine(context.clone(), move |session, _, _| {
+                session
+                    .result_type_witness(&continuation)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "typed result observer evidence unavailable");
+                crate::ReplyError::ReplyResultUnavailable
+            })?;
+        if snapshot.type_witness() != &expected {
+            return Err(crate::ReplyError::ReplyResultTypeMismatch);
+        }
+        if snapshot.session() == context.placement.session {
+            return Ok(snapshot.publication_owner());
+        }
+        let parcel = self
+            .access
+            .with_host_machine(
+                "result-borrow-export",
+                snapshot.session(),
+                None,
+                move |session, _| {
+                    session
+                        .export_result_shared(snapshot.publication())
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                },
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "typed result borrowed export unavailable");
+                crate::ReplyError::ReplyResultUnavailable
+            })?;
+        self.access
+            .with_host_machine(
+                "result-borrow-import",
+                context.placement.session,
+                None,
+                move |session, _| {
+                    session
+                        .import_result(parcel)
+                        .map(Arc::new)
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                },
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "typed result observer incorporation unavailable");
+                crate::ReplyError::ReplyResultUnavailable
+            })
+    }
+
+    pub(crate) async fn resume_watch_response(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        observation: Result<Arc<crate::owned_result::OwnedResultSnapshot>, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let observation = match observation {
+            Ok(snapshot) => self.borrow_result(context.clone(), &hole, snapshot).await,
+            Err(error) => Err(error),
+        };
+        self.access
+            .with_compiler_machine(
+                context,
+                move |session, _, _, settlement| match observation {
+                    Ok(value) => {
+                        let constructor = tidepool_bridge::get_qualified(
+                            session.data_con_table(),
+                            "Data.Either.Right",
+                            1,
+                        )
+                        .ok_or_else(|| {
+                            BridgeError::UnknownDataConName("Data.Either.Right".into())
+                        })?;
+                        session
+                            .resume_framed_custody_sources_classified(
+                                hole,
+                                value.custody(),
+                                constructor,
+                                Vec::<i64>::new(),
+                                settlement,
+                            )
+                            .map_err(classify_resumption)
+                    }
+                    Err(error) => session
+                        .resume_classified(
+                            hole,
+                            crate::request_effect::ReplyResult::<()>(Err(error)),
+                            settlement,
+                        )
+                        .map_err(classify_resumption),
+                },
+            )
             .await
     }
 
@@ -10241,15 +10479,32 @@ where
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
-        terminal: crate::ActorTerminal,
+        retained: crate::RetainedActorExit,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_compiler_machine(context, move |session, _, _, settlement| {
-                session
-                    .resume_classified(hole, terminal, settlement)
-                    .map_err(classify_resumption)
-            })
-            .await
+        let terminal = retained.wait().await;
+        let publication = if terminal.kind == crate::ActorExitKind::Completed {
+            match retained.result() {
+                Some(result) => self.borrow_result(context.clone(), &hole, result).await,
+                None => Err(crate::ReplyError::ReplyResultUnavailable),
+            }
+        } else {
+            Err(crate::ReplyError::ReplyResultUnavailable)
+        };
+        self.access.with_compiler_machine(context, move |session, _, _, settlement| {
+            if let Ok(value) = publication {
+                let constructor = tidepool_bridge::get_qualified(session.data_con_table(), "Tidepool.Internal.ActorExit.Completed", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("Tidepool.Internal.ActorExit.Completed".into()))?;
+                session.resume_framed_custody_sources_classified(hole, value.custody(), constructor, Vec::<i64>::new(), settlement).map_err(classify_resumption)
+            } else {
+                use crate::wait::ExitObservationFailure;
+                let failure = match terminal.kind {
+                    crate::ActorExitKind::Failed => ExitObservationFailure::Failed(terminal.summary),
+                    crate::ActorExitKind::Cancelled => ExitObservationFailure::Cancelled(terminal.summary),
+                    crate::ActorExitKind::Completed => ExitObservationFailure::Unavailable("successful actor exit value is unavailable or has an incompatible type".into()),
+                };
+                session.resume_classified(hole, failure, settlement).map_err(classify_resumption)
+            }
+        }).await
     }
 
     pub(crate) async fn resume_call_status(
@@ -10271,15 +10526,44 @@ where
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
-        terminal: Option<crate::ActorTerminal>,
+        retained: Option<crate::RetainedActorExit>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_compiler_machine(context, move |session, _, _, settlement| {
-                session
-                    .resume_classified(hole, terminal, settlement)
-                    .map_err(classify_resumption)
-            })
-            .await
+        let Some(retained) = retained else {
+            return self
+                .resume_value(
+                    context,
+                    hole,
+                    Option::<crate::wait::ExitObservationFailure>::None,
+                )
+                .await;
+        };
+        let terminal = retained.wait().await;
+        let publication = if terminal.kind == crate::ActorExitKind::Completed {
+            match retained.result() {
+                Some(result) => self.borrow_result(context.clone(), &hole, result).await,
+                None => Err(crate::ReplyError::ReplyResultUnavailable),
+            }
+        } else {
+            Err(crate::ReplyError::ReplyResultUnavailable)
+        };
+        self.access.with_compiler_machine(context, move |session, _, _, settlement| {
+            if let Ok(value) = publication {
+                let table = session.data_con_table();
+                let completed = tidepool_bridge::get_qualified(table, "Tidepool.Internal.ActorExit.Completed", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("Tidepool.Internal.ActorExit.Completed".into()))?;
+                let just = tidepool_bridge::get_qualified(table, "GHC.Maybe.Just", 1)
+                    .ok_or_else(|| BridgeError::UnknownDataConName("GHC.Maybe.Just".into()))?;
+                session.resume_nested_custody_classified(hole, value.custody(), vec![completed, just], settlement).map_err(classify_resumption)
+            } else {
+                use crate::wait::ExitObservationFailure;
+                let failure = match terminal.kind {
+                    crate::ActorExitKind::Failed => ExitObservationFailure::Failed(terminal.summary),
+                    crate::ActorExitKind::Cancelled => ExitObservationFailure::Cancelled(terminal.summary),
+                    crate::ActorExitKind::Completed => ExitObservationFailure::Unavailable("successful actor exit value is unavailable or has an incompatible type".into()),
+                };
+                session.resume_classified(hole, Some(failure), settlement).map_err(classify_resumption)
+            }
+        }).await
     }
 
     pub(crate) async fn rehome_mailbox_value(
@@ -13568,19 +13852,28 @@ pub(crate) mod request_tests {
             (103, "CompilerUnavailable", 1),
             (104, "ScopeChanged", 2),
         ] {
-            table.insert(DataCon {
-                id: DataConId(id),
-                name: name.into(),
-                tag: 1,
-                rep_arity: arity,
-                field_bangs: Vec::new(),
-                qualified_name: Some(if name == "Left" {
-                    "Data.Either.Left".into()
-                } else {
-                    format!("Tidepool.Effects.Core.{name}")
-                }),
-                type_name: String::new(),
-            });
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: Vec::new(),
+                    qualified_name: Some(if name == "Left" {
+                        "Data.Either.Left".into()
+                    } else {
+                        format!("Tidepool.Effects.Core.{name}")
+                    }),
+                    type_name: String::new(),
+                })
+                .expect("valid fixture metadata");
         }
         table
     }
@@ -13605,15 +13898,24 @@ pub(crate) mod request_tests {
             (121, "AgentForgotten", 0),
             (122, "AgentForgetOutputPending", 1),
         ] {
-            table.insert(DataCon {
-                id: DataConId(id),
-                name: name.into(),
-                tag: 1,
-                rep_arity: arity,
-                field_bangs: Vec::new(),
-                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                type_name: String::new(),
-            });
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: Vec::new(),
+                    qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                    type_name: String::new(),
+                })
+                .expect("valid fixture metadata");
         }
         let answer = AgentForgetProjection::Retained {
             requests: vec![crate::RequestId(7), crate::RequestId(9)],
@@ -13708,15 +14010,24 @@ pub(crate) mod request_tests {
             (131, "UsageComplete", 0),
             (132, "ProviderUsageSummary", 8),
         ] {
-            table.insert(DataCon {
-                id: DataConId(id),
-                name: name.into(),
-                tag: 1,
-                rep_arity: arity,
-                field_bangs: Vec::new(),
-                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                type_name: String::new(),
-            });
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: Vec::new(),
+                    qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                    type_name: String::new(),
+                })
+                .expect("valid fixture metadata");
         }
         let summary = exomonad_model::ProviderUsageSummary {
             scope: exomonad_model::ProviderUsageScope::Thread("thread".into()),
@@ -13752,15 +14063,24 @@ pub(crate) mod request_tests {
             (143, "WorkspaceWritableBound", 0),
             (144, "ActivationRootStarted", 0),
         ] {
-            table.insert(DataCon {
-                id: DataConId(id),
-                name: name.into(),
-                tag: 1,
-                rep_arity: arity,
-                field_bangs: Vec::new(),
-                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                type_name: String::new(),
-            });
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: Vec::new(),
+                    qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                    type_name: String::new(),
+                })
+                .expect("valid fixture metadata");
         }
         let placement = crate::ActorPlacement {
             session: SessionId(1),
@@ -13793,15 +14113,24 @@ pub(crate) mod request_tests {
     fn collected_introspection_projection_rejects_missing_nominal_constructor() {
         use tidepool_repr::{DataCon, DataConId};
         let mut table = tidepool_test_data::standard_datacon_table();
-        table.insert(DataCon {
-            id: DataConId(100),
-            name: "Left".into(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: Vec::new(),
-            qualified_name: Some("Data.Either.Left".into()),
-            type_name: String::new(),
-        });
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Data.Either".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Left".into(),
+                    record_parent: None,
+                },
+                id: DataConId(100),
+                name: "Left".into(),
+                tag: 1,
+                rep_arity: 1,
+                field_bangs: Vec::new(),
+                qualified_name: Some("Data.Either.Left".into()),
+                type_name: String::new(),
+            })
+            .expect("valid fixture metadata");
         let provenance = current_provenance(1, "same");
         let error = structured_introspection_answer(
             StructuredInspectionKind::Info,
@@ -13863,15 +14192,24 @@ pub(crate) mod request_tests {
         use tidepool_repr::{DataCon, DataConId};
         let mut table = tidepool_test_data::standard_datacon_table();
         let submit = DataConId(100);
-        table.insert(DataCon {
-            id: submit,
-            name: "SubmitRequestWith".into(),
-            tag: 1,
-            rep_arity: 4,
-            field_bangs: Vec::new(),
-            qualified_name: Some("Tidepool.Agent.Reply.Internal.SubmitRequestWith".into()),
-            type_name: "Replies".into(),
-        });
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Tidepool.Agent.Reply.Internal".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "SubmitRequestWith".into(),
+                    record_parent: None,
+                },
+                id: submit,
+                name: "SubmitRequestWith".into(),
+                tag: 1,
+                rep_arity: 4,
+                field_bangs: Vec::new(),
+                qualified_name: Some("Tidepool.Agent.Reply.Internal.SubmitRequestWith".into()),
+                type_name: "Replies".into(),
+            })
+            .expect("valid fixture metadata");
         let request = HaskellValue::Con(
             submit,
             vec![
@@ -14050,17 +14388,13 @@ pub(crate) mod request_tests {
                         let residency = session.residency();
                         assert!(carrier
                             .code()
-                            .certification
-                            .as_ref()
-                            .as_ref()
+                            .certification()
                             .unwrap()
                             .checked_execution()
                             .is_none());
                         assert!(carrier
                             .code()
-                            .certification
-                            .as_ref()
-                            .as_ref()
+                            .certification()
                             .unwrap()
                             .checked_prefix()
                             .is_none());
@@ -14101,8 +14435,15 @@ pub(crate) mod request_tests {
                         HostBindingAuthority::Text => HostBindingType::TEXT,
                         HostBindingAuthority::CommandJob => HostBindingType::COMMAND_JOB,
                     };
-                    let mut missing = carrier.code();
-                    missing.certification = std::borrow::Cow::Owned(None);
+                    let original = carrier.code();
+                    let missing = tidepool_runtime::session::CompiledTurn::from_prepared(
+                        Arc::new(original.prepared().clone()),
+                        original.table().clone(),
+                        Default::default(),
+                        original.sites().to_vec(),
+                    )
+                    .unwrap()
+                    .into_code();
                     assert!(matches!(
                         HostCarrier::from_checked(
                             reservation.clone(),
@@ -16289,8 +16630,8 @@ pub(crate) mod request_tests {
         ));
         assert!(!Arc::ptr_eq(&fresh.prepared, &loaded.prepared));
         assert_eq!(
-            fresh.prepared.entry.compiled().prepared,
-            loaded.prepared.entry.compiled().prepared
+            fresh.prepared.entry.compiled().prepared(),
+            loaded.prepared.entry.compiled().prepared()
         );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
 
@@ -16345,8 +16686,8 @@ pub(crate) mod request_tests {
             (recipe, original)
         );
         assert_eq!(
-            retried.prepared.entry.compiled().prepared,
-            fresh.prepared.entry.compiled().prepared
+            retried.prepared.entry.compiled().prepared(),
+            fresh.prepared.entry.compiled().prepared()
         );
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
         assert_eq!(
@@ -18109,26 +18450,31 @@ pub(crate) mod request_tests {
         *body = 1;
         let mut table = DataConTable::new();
         for constructor in &wire.constructors {
-            table.insert(tidepool_repr::DataCon {
-                id: constructor.host_id,
-                name: constructor.identity.occurrence.clone(),
-                tag: constructor.tag,
-                rep_arity: constructor.field_reps.len() as u32,
-                field_bangs: vec![],
-                qualified_name: Some(format!(
-                    "{}.{}",
-                    constructor.identity.module, constructor.identity.occurrence
-                )),
-                type_name: constructor.family.occurrence.clone(),
-            });
+            table
+                .insert_checked(tidepool_repr::DataCon {
+                    identity: constructor.identity.clone(),
+                    id: constructor.host_id,
+                    name: constructor.identity.occurrence.clone(),
+                    tag: constructor.tag,
+                    rep_arity: constructor.field_reps.len() as u32,
+                    field_bangs: vec![],
+                    qualified_name: Some(format!(
+                        "{}.{}",
+                        constructor.identity.module, constructor.identity.occurrence
+                    )),
+                    type_name: constructor.family.occurrence.clone(),
+                })
+                .expect("valid fixture metadata");
         }
-        Arc::new(tidepool_runtime::session::CompiledTurn {
-            prepared: Arc::new(testing::prepare(wire).unwrap()),
-            table,
-            asks: Vec::new(),
-            warnings: Default::default(),
-            certification: None,
-        })
+        Arc::new(
+            tidepool_runtime::session::CompiledTurn::from_prepared(
+                Arc::new(testing::prepare(wire).unwrap()),
+                table,
+                Default::default(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
     }
 
     struct ChildOutputLifetime(Arc<tokio::sync::Notify>);
@@ -19024,7 +19370,7 @@ pub(crate) mod request_tests {
             .unwrap()
             .unwrap();
         let expected = Arc::new(
-            note.asks
+            note.sites()
                 .iter()
                 .find_map(|site| site.input_type_witnesses.first().and_then(Option::as_ref))
                 .unwrap()
@@ -19465,8 +19811,8 @@ pub(crate) mod request_tests {
             verify_message(later_message).await.unwrap(),
             ResidentOutcome::Completed { .. }
         ));
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let claim = registry.begin_reply(target, request).unwrap();
+        crate::request::test_support::complete_reply(&registry, claim, None);
         let closed = tokio::time::timeout(Duration::from_secs(2), source_events.recv())
             .await
             .unwrap()
@@ -19516,7 +19862,10 @@ pub(crate) mod request_tests {
                 .unwrap();
         }
         drop(sources);
-        assert!(registry.finish_reply(request, None).is_empty());
+        assert!(matches!(
+            registry.begin_reply(target, request),
+            Err(crate::ReplyError::Stale | crate::ReplyError::AlreadySettled)
+        ));
         assert_eq!(
             registry.forget_watch(owner, watch).unwrap(),
             crate::request::ForgetWatchOutcome::Forgotten
@@ -20855,7 +21204,7 @@ pub(crate) mod request_tests {
         };
         let compiled = &ready.compiled;
         assert!(
-            compiled.asks.iter().any(|site| site.inputs.len() == 3),
+            compiled.sites().iter().any(|site| site.inputs.len() == 3),
             "currentRequest carries input, result, and ResponseResult result evidence"
         );
     }
@@ -21147,8 +21496,7 @@ pub(crate) mod request_tests {
         };
         assert_eq!(bound.len(), 2, "receiver and original native Unit reply");
         let receiver_interface = receiver
-            .certification
-            .as_ref()
+            .certification()
             .unwrap()
             .checked_execution()
             .unwrap()
@@ -21254,7 +21602,7 @@ pub(crate) mod request_tests {
                 .unwrap(),
             );
             let input = producer
-                .asks
+                .sites()
                 .iter()
                 .filter(|site| !site.inputs.is_empty())
                 .find_map(|site| {
@@ -21881,14 +22229,31 @@ pub(crate) mod request_tests {
             let mut generations = std::collections::BTreeSet::new();
             let mut scopes = std::collections::BTreeSet::new();
             let producers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let native_at_selection = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let preparation_start = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let prepared_images = Arc::new(std::sync::atomic::AtomicU64::new(0));
             for (index, input) in inputs.into_iter().enumerate() {
                 let (mut activation, private_context) =
                     renderer_activation_workbench(&workbench, &context).await;
                 assert!(scopes.insert(private_context.placement.lexical_scope));
                 let observed = producers.clone();
+                let selected = native_at_selection.clone();
+                let started = preparation_start.clone();
+                let prepared = prepared_images.clone();
                 activation.activation_preview_observer = Some(Arc::new(move |event| {
-                    if matches!(event, ActivationPublicationObservation::RendererProducer) {
-                        observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    use tidepool_codegen::prepared_program::CompiledProgram;
+                    match event {
+                        ActivationPublicationObservation::RendererProducer => {
+                            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            started.store(CompiledProgram::successful_image_compilations(), std::sync::atomic::Ordering::SeqCst);
+                        }
+                        ActivationPublicationObservation::RendererSealed => {
+                            prepared.store(CompiledProgram::successful_image_compilations() - started.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
+                        }
+                        ActivationPublicationObservation::RendererSelected(_) => {
+                            selected.store(CompiledProgram::successful_image_compilations(), std::sync::atomic::Ordering::SeqCst);
+                        }
+                        _ => {}
                     }
                     Ok(())
                 }));
@@ -21904,6 +22269,7 @@ pub(crate) mod request_tests {
                     .await
                     .unwrap();
                 assert_eq!(prepared.input_preview.trim(), (index + 1).to_string());
+                assert_eq!(tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(), native_at_selection.load(std::sync::atomic::Ordering::SeqCst), "fresh preview installation must compile no native images");
                 assert!(bindings.insert(prepared.binding.raw()));
                 assert!(generations.insert(prepared.admission.generation()));
                 // Exactly one fresh interface request each; only the first
@@ -21924,11 +22290,51 @@ pub(crate) mod request_tests {
                     .unwrap();
             }
             assert_eq!(producers.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(prepared_images.load(std::sync::atomic::Ordering::SeqCst) > 0, "the shared producer must complete actual native preparation");
             assert_eq!(bindings.len(), 20);
             assert_eq!(generations.len(), 20);
             assert_eq!(scopes.len(), 20);
         })
         .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn four_concurrent_distinct_values_share_prepared_native_renderer() {
+        with_test_compiler_owner(async {
+            let (session, context, source, inputs, _root) = distinct_renderer_input_fixture();
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let producers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let sealed_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let mut tasks = Vec::new();
+            for input in inputs.into_iter().take(4) {
+                let (mut activation, context) = renderer_activation_workbench(&workbench, &context).await;
+                let produced = producers.clone();
+                let sealed = sealed_count.clone();
+                activation.activation_preview_observer = Some(Arc::new(move |event| {
+                    match event {
+                        ActivationPublicationObservation::RendererProducer => { produced.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+                        ActivationPublicationObservation::RendererSealed => { sealed.store(tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(), std::sync::atomic::Ordering::SeqCst); }
+                        _ => {}
+                    }
+                    Ok(())
+                }));
+                tasks.push(tokio::spawn(with_test_compiler_owner(async move {
+                    activation.mount_activation_input(context, input, None, "()".into(), None, Vec::new()).await
+                })));
+            }
+            let mut bindings = std::collections::BTreeSet::new();
+            let mut generations = std::collections::BTreeSet::new();
+            for (index, task) in tasks.into_iter().enumerate() {
+                let prepared = task.await.unwrap().unwrap();
+                assert_eq!(prepared.input_preview.trim(), (index + 1).to_string());
+                assert!(bindings.insert(prepared.binding.raw()));
+                assert!(generations.insert(prepared.admission.generation()));
+            }
+            assert_eq!(producers.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(), sealed_count.load(std::sync::atomic::Ordering::SeqCst), "four installations compile no images after the producer publishes complete native custody");
+        }).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

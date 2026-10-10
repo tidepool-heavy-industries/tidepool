@@ -29,18 +29,6 @@
         }
       }
     },
-    "exomonad-model-output": {
-      "binaries": {},
-      "directory": "exomonad/model-output",
-      "integration": {},
-      "libraries": {
-        "exomonad_model_output": {
-          "build": "//exomonad/model-output:exomonad_model_output",
-          "test": "//exomonad/model-output:exomonad_model_output_unit_tests",
-          "test_build": "//exomonad/model-output:exomonad_model_output_unit_tests_binary"
-        }
-      }
-    },
     "exomonad-node": {
       "binaries": {},
       "directory": "exomonad/node",

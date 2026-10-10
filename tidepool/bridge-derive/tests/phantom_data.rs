@@ -51,7 +51,14 @@ enum WithPhantom {
 
 fn build_enum_table() -> DataConTable {
     let mut t = standard_datacon_table();
-    t.insert(DataCon {
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "Tagged".into(),
+            record_parent: None,
+        },
         id: DataConId(1000),
         name: "Tagged".into(),
         tag: 1,
@@ -59,8 +66,16 @@ fn build_enum_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    });
-    t.insert(DataCon {
+    })
+    .expect("valid fixture metadata");
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "Mixed".into(),
+            record_parent: None,
+        },
         id: DataConId(1001),
         name: "Mixed".into(),
         tag: 2,
@@ -68,8 +83,16 @@ fn build_enum_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    });
-    t.insert(DataCon {
+    })
+    .expect("valid fixture metadata");
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "Plain".into(),
+            record_parent: None,
+        },
         id: DataConId(1002),
         name: "Plain".into(),
         tag: 3,
@@ -77,7 +100,8 @@ fn build_enum_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    });
+    })
+    .expect("valid fixture metadata");
     t
 }
 
@@ -159,7 +183,14 @@ struct PhantomStruct {
 
 fn build_struct_table() -> DataConTable {
     let mut t = standard_datacon_table();
-    t.insert(DataCon {
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "MixStruct".into(),
+            record_parent: None,
+        },
         id: DataConId(2000),
         name: "MixStruct".into(),
         tag: 1,
@@ -167,8 +198,16 @@ fn build_struct_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    });
-    t.insert(DataCon {
+    })
+    .expect("valid fixture metadata");
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "PhantomStruct".into(),
+            record_parent: None,
+        },
         id: DataConId(2001),
         name: "PhantomStruct".into(),
         tag: 1,
@@ -176,7 +215,8 @@ fn build_struct_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    });
+    })
+    .expect("valid fixture metadata");
     t
 }
 

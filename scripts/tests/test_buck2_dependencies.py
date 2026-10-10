@@ -19,7 +19,7 @@ ROOT_NAMES = (
     "tidepool-extract-cmd", "tidepool-extract-report", "tidepool-toolchain",
     "tidepool-bridge-derive", "tidepool-runtime",
     "exomonad-model", "exomonad-tool", "tidepool-bridge-effects",
-    "exomonad-node", "exomonad-worktree", "exomonad-actor", "exomonad-model-output", "jev-integration",
+    "exomonad-node", "exomonad-worktree", "exomonad-actor", "jev-integration",
     "tidepool-mcp", "tidepool-handlers", "tidepool", "tidepool-testing",
     "tidepool-test-data", "tidepool-prepared-corpus", "tidepool-protocol",
 )

@@ -2616,11 +2616,12 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
       check label products = do
         cons <- either (fail . show) pure (preparedModuleProductConstructors products)
         rows <- either (fail . show) pure (metadataForConstructors [] cons)
+        wired <- either (fail . show) pure wiredInDataCons
         let declared = Set.fromList [constructorHostId con
               | (_,Right groups) <- preparedModuleProductOutcomes products
               , group <- groups, con <- projectedConstructors (projectedBody group)]
             issued = Set.fromList (map dcmId rows)
-        unless (Set.union declared (Set.fromList (map dcmId wiredInDataCons)) == issued) $
+        unless (Set.union declared (Set.fromList (map dcmId wired)) == issued) $
           fail (label ++ " metadata omitted an actual executable original constructor")
         pure (cons,rows)
   target <- either (fail . show) pure (projectPrepared context (filter ((== entryOwner) . pmModule) modules))
@@ -5700,7 +5701,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
   case classifySiteOccurrence siblings spec surface arguments of
     Right _ -> pure ()
     Left _ -> fail "genuine cold HPT request/sibling pair was refused"
-  sibling <- maybe (fail "cold HPT lacks its genuine request sibling Id") pure (Map.lookup "request" siblings)
+  sibling <- maybe (fail "cold HPT lacks its genuine request sibling Id") pure (Map.lookup "Tidepool.Actors.Internal.Agent.request" siblings)
   uniqueSupply <- mkSplitUniqSupply 's'
   let (foreignUnique,remaining) = takeUniqFromSupply uniqueSupply
       (surfaceUnique,remaining') = takeUniqFromSupply remaining

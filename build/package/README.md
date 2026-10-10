@@ -300,13 +300,40 @@ The M2 roster also checks host shutdown and coordinator failure after child
 failure. The `unified-regressions` cohort runs the published lookup/form examples
 and all three operation-settlement controls through the same frozen libtest.
 
+Every new release also requires `result-delivery` from the same descriptor.
+Its six model-free resident cluster cases assert actual session placement and
+force real Haskell values: a dedicated nominal scalar reply, a dedicated callable
+reply after the child machine is gone, shared and dedicated pending-request
+custody histories, a dedicated callable typed exit and replacement, and a
+dedicated collector of real progress and settlement publications. Callable
+reads check repeated observation, receipt execution/worktree equality, stale
+request refusal and saved watch values after forgetting the request and watch.
+The shared custody control retires the producer actor while retaining its shared
+machine; the dedicated control requires the producer machine to be gone before
+late forcing. These cases use genuine compiler-issued sites and typed inputs.
+They establish resident result delivery; M1 and M3 retain their browser and
+scripted-provider acceptance contracts.
+
+The descriptor seals each case's placement, input path and forced-value premises.
+The existing cohort report marks those premises verified only for one passing,
+executed receipt with confirmed process, campaign and compiler cleanup. Missing,
+duplicate, zero-count, unknown, failed or unconfirmed receipts keep the cohort
+unqualified and remain in its reports. The cohort retains diagnostic artifacts,
+uses a 1200-second watchdog per case, and permits at most two bounded processes.
+Historical M2 acceptance keeps its original roster and meaning. The separate
+ignored shared/dedicated native-renderer controls remain focused diagnostics;
+they cannot share a selection with the nonignored result-delivery roster.
+
 ```sh
 DESCRIPTOR="$FINAL_BUNDLE/share/exomonad/qualification.json"
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort m2 --output "$M2_EVIDENCE" --jobs 3 \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort m1 --output "$M1_EVIDENCE"
+python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+  --cohort result-delivery --output "$RESULT_DELIVERY_EVIDENCE" --jobs 2 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
 
 For the parallel command, `ADMITTED_USER_SLICE` names an existing user slice
@@ -321,7 +348,7 @@ the wrapper so both the qualification owner and runner retain the cancellation
 and cleanup evidence.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" cancel \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" cancel \
   "$M2_EVIDENCE/run-owner.json"
 ```
 
@@ -343,7 +370,7 @@ and parameterized child program. This release gate is separate from the nine
 M2 cases and is not part of routine focused spot checks.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort prepared-child --output "$PREPARED_CHILD_EVIDENCE" --jobs 1 \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
@@ -363,7 +390,20 @@ acquisition receipt, and return typed answers of 41 through its native probe.
 External-quoter execution bytes must remain unchanged from preparation before
 its input changes from 41 to 42 through the parent's public spec import, every
 child installation and every native reply. Each child setup and its attributed
-compiled installer phase must submit zero compiler requests. Partial progress
+compiled installer phase must submit zero compiler requests. Each child's
+provider-visible preview must match its distinct `NativeInput` ordinal.
+The home-module `Display`/`WorkbenchDisplay` instances exercise original
+source and literal images: one complete retained image bundle serves every child,
+and each renderer invocation must install its target with zero successful native
+image constructions. The ordinary one/twenty-child gate retains the production
+shared-machine placement. The separate
+`production_prepared_toolset_twenty_distinct_machines_execute_original_native_probe`
+gate selects the existing dedicated-machine capability using the owner's root
+bootstrap, and requires a separately issued machine session for every child.
+The focused
+`source_prepared_toolset_two_children_share_distinct_native_renderer_inputs`
+control uses the same scenario with source preparation; it does not qualify a
+frozen release. Partial progress
 and per-child rows retain observed counts on failure. The existing hosted
 outcome records scenario and cleanup separately;
 scenario completion alone does not establish confirmed host cleanup.
@@ -396,7 +436,7 @@ their own readers and rosters; rebuild and freeze the candidate that adds this
 cohort.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort m3-recursive --output "$M3_RECURSIVE_EVIDENCE" --jobs 1 \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
@@ -409,6 +449,24 @@ isolated owned resident compiler, one test process, and retained artifacts. Only
 provider replies are scripted. The frozen owner runs its bundled
 `harness-usecase-perf-report.py` after the counted test and writes
 `harness-usecase-perf-report.json` beside `report.json`.
+
+Performance cohorts default to `--trace-profile minimal`: phase outcomes,
+exact compiler request/service joins, per-call timing, validation summaries,
+native-image decisions, successful Cranelift compile summaries and machine
+publication records remain enabled. `TIDEPOOL_TIMING_SUMMARY=1` is forwarded
+through the owned compiler; per-file/module timing and host span lifecycle events
+remain disabled. `--trace-profile full` is an explicit diagnostic control for a
+bounded selected cohort, with detailed attribution enabled. Primary paired
+latency repetitions use minimal; detailed captures do not replace those results.
+
+`owned_artifact_observations` separates GHC frontend summaries, native image
+production and machine publication. Image IDs are process-local, registry entry
+IDs identify exact equal keys while retained, and expired weak images may be
+compiled again. After a key is pruned, a new entry cannot prove equality with an
+older entry. Validation intervals are joined by physical request identity;
+buffered logger arrival order is not an execution boundary. RTS deltas measure
+process allocation, not retained heap; overlapping allocation deltas are not
+summed. Absent summaries remain unknown rather than zero work.
 
 Behavioral and measurement outcomes remain separate. `behavioral_completed`
 requires the one executed passing case and controls the cohort exit status.
@@ -433,7 +491,7 @@ does not establish provider network performance. These supplementary cohorts do
 not block M2 acceptance.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort harness-performance --output "$HARNESS_PERFORMANCE_EVIDENCE" --jobs 1 \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
@@ -451,7 +509,7 @@ those declarations and clears ambient compiler selections. Keep this policy in
 the bundle owner; a source helper cannot replace an older frozen bundle's policy.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" catalog-gate \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" catalog-gate \
   "$DESCRIPTOR" --output "$CATALOG_GATE_EVIDENCE"
 ```
 
@@ -468,7 +526,7 @@ a process exit alone does not establish those outcomes. Help/version requests
 are rejected by this entrypoint.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" exec \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" exec \
   --report "$LIVE_PROCESS_REPORT" "$DESCRIPTOR" -- \
   init --workspace "$LIVE_WORKSPACE" --session "$LIVE_SESSION" --no-attach
 ```

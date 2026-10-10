@@ -35,7 +35,14 @@ fn ambiguous_table() -> (DataConTable, DataConId, DataConId) {
     let mut t = standard_datacon_table();
     let alpha_id = DataConId(100);
     let beta_id = DataConId(101);
-    t.insert(DataCon {
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Pattern.Memory".into(),
+            namespace: "constructor".into(),
+            occurrence: "Read".into(),
+            record_parent: None,
+        },
         id: alpha_id,
         name: "Read".into(),
         tag: 1,
@@ -43,8 +50,16 @@ fn ambiguous_table() -> (DataConTable, DataConId, DataConId) {
         field_bangs: vec![],
         qualified_name: Some("Pattern.Memory.Read".into()),
         type_name: String::new(),
-    });
-    t.insert(DataCon {
+    })
+    .expect("valid fixture metadata");
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Pattern.File".into(),
+            namespace: "constructor".into(),
+            occurrence: "Read".into(),
+            record_parent: None,
+        },
         id: beta_id,
         name: "Read".into(),
         tag: 1,
@@ -52,7 +67,8 @@ fn ambiguous_table() -> (DataConTable, DataConId, DataConId) {
         field_bangs: vec![],
         qualified_name: Some("Pattern.File.Read".into()),
         type_name: String::new(),
-    });
+    })
+    .expect("valid fixture metadata");
     (t, alpha_id, beta_id)
 }
 
@@ -128,7 +144,14 @@ fn true_ambiguity_reports_both_candidates_instead_of_picking_last() {
     let mut t = standard_datacon_table();
     // Two distinct arity-1 "Read" constructors — genuinely ambiguous, unlike
     // `ambiguous_table()` above where arity itself disambiguates Alpha/Beta.
-    t.insert(DataCon {
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Pattern.Memory".into(),
+            namespace: "constructor".into(),
+            occurrence: "Read".into(),
+            record_parent: None,
+        },
         id: DataConId(300),
         name: "Read".into(),
         tag: 1,
@@ -136,8 +159,16 @@ fn true_ambiguity_reports_both_candidates_instead_of_picking_last() {
         field_bangs: vec![],
         qualified_name: Some("Pattern.Memory.Read".into()),
         type_name: String::new(),
-    });
-    t.insert(DataCon {
+    })
+    .expect("valid fixture metadata");
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Pattern.File".into(),
+            namespace: "constructor".into(),
+            occurrence: "Read".into(),
+            record_parent: None,
+        },
         id: DataConId(301),
         name: "Read".into(),
         tag: 1,
@@ -145,7 +176,8 @@ fn true_ambiguity_reports_both_candidates_instead_of_picking_last() {
         field_bangs: vec![],
         qualified_name: Some("Pattern.File.Read".into()),
         type_name: String::new(),
-    });
+    })
+    .expect("valid fixture metadata");
 
     let err = Alpha::Read(17)
         .to_value(&t)
@@ -159,8 +191,14 @@ fn true_ambiguity_reports_both_candidates_instead_of_picking_last() {
             assert_eq!(name, "Read");
             assert_eq!(arity, 1);
             assert_eq!(candidates.len(), 2);
-            assert!(candidates.contains(&"Pattern.Memory.Read".to_string()));
-            assert!(candidates.contains(&"Pattern.File.Read".to_string()));
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.module == "Pattern.Memory"
+                    && candidate.occurrence == "Read"));
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.module == "Pattern.File"
+                    && candidate.occurrence == "Read"));
         }
         other => panic!("expected AmbiguousDataConNameArity, got {other:?}"),
     }
@@ -171,7 +209,14 @@ fn unknown_name_reports_arity() {
     // When a constructor name exists but not at the requested arity, we should
     // get UnknownDataConNameArity identifying the name and the expected arity.
     let mut t = standard_datacon_table();
-    t.insert(DataCon {
+    t.insert_checked(DataCon {
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "Read".into(),
+            record_parent: None,
+        },
         id: DataConId(200),
         name: "Read".into(),
         tag: 1,
@@ -179,7 +224,8 @@ fn unknown_name_reports_arity() {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    });
+    })
+    .expect("valid fixture metadata");
 
     let val = Alpha::Read(1);
     let err = val.to_value(&t).expect_err("no arity-1 Read present");

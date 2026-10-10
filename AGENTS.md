@@ -23,8 +23,8 @@ providers, scheduling, resources, persistence, and argument parsing.
    do not run it as a routine spot check.
 4. To run it, follow `exomonad/docs/getting-started.md`: `exomonad new` creates a
    project workspace with a pinned shared-source submodule, while `exomonad init`
-   starts a run. In this repository `just exomonad-init BUNDLE DESCRIPTOR REPORT`
-   uses an explicit frozen native bundle and records the operation. Build,
+   starts a run. In this repository `just exomonad-init DESCRIPTOR REPORT`
+   uses the descriptor's frozen native bundle and records the operation. Build,
    freeze and qualify it through `build/package/README.md` before delivery.
    To see the system from the model's side, read `exomonad/prompts/base.md`
    and the skills under `exomonad/examples/workspace/.exomonad/skills/`, and
@@ -33,10 +33,10 @@ providers, scheduling, resources, persistence, and argument parsing.
 
 `just exomonad-build` builds the native runtime bundle without starting a run.
 Freeze and qualify that exact bundle through `build/package/qualification.py`;
-see `build/package/README.md`. Run with explicit bundle, descriptor and report
-paths. The bundle owns the host, libtest, compiler, stdlib, assets and build
-source/profile contract. Independently supplied compiler or libtest paths do
-not establish matched release evidence.
+see `build/package/README.md`. Run with an explicit frozen descriptor and report
+path. The descriptor selects the bundle that owns the host, libtest, compiler,
+stdlib, assets and build source/profile contract. Independently supplied
+compiler or libtest paths do not establish matched release evidence.
 
 Most changes touch one of three layers, and it helps to know which:
 
@@ -188,8 +188,8 @@ redesigns, and distinguish structural savings from measured speedups.
   machine/session substrate.
 - `tidepool-protocol`, `tidepool-mcp`, `tidepool-handlers`: effect schemas,
   generated bridge, and concrete interpreters.
-- `exomonad-model`, `exomonad-model-output`: provider-neutral conversations
-  and model-output parsing.
+- `exomonad-model`: provider-neutral conversations. Provider tool-call parsing
+  belongs to the pinned Harness runtime.
 - `exomonad-actor`: actor identity, lifecycle, mailbox, and resident workbench.
 - `tidepool`: the public facade and the Exomonad runtime and binaries.
 - `exomonad-worktree`: managed coding checkouts and repository observation.
@@ -243,7 +243,7 @@ Keep detailed design references out of always-loaded instructions.
 | Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.exomonad/Jev/Operators.hs` |
 | Run trace (structured JSONL under `.exomonad/logs/`) | `bridge/facade/src/exomonad.rs` |
 | Actor identity, lifecycle, mailbox, resident actor workbench | `exomonad-actor` |
-| Native provider transport and actor attachment | `bridge/facade/src/actor_host/{embedded_service,embedded_harness,provider_attachment}.rs`; provider transport in pinned Harness |
+| Native provider transport and actor attachment | `bridge/facade/src/actor_host/{embedded_service,embedded_harness,provider_attachment}.rs`; provider transport and tool-call parsing in pinned Harness |
 | Process mount boundary and durable inbox | `exomonad/node/src/process_boundary.rs`, `exomonad/node/src/inbox.rs` |
 | Git invocation and managed checkout registry | `exomonad/worktree/src/git.rs`, `exomonad/worktree/src/registry.rs` |
 | Discovery, artifact cache, paths and toolchain fingerprints | `tidepool-toolchain`; extractor process/daemon invocation: `tidepool-extract-cmd` |

@@ -73,6 +73,7 @@ rust_filegroup(
     mapped_srcs = {
         "Cargo.toml": "exomonad/node/Cargo.toml",
         "src/command_resources.rs": "exomonad/node/src/command_resources.rs",
+        "src/command_resources/custody_tests.rs": "exomonad/node/src/command_resources/custody_tests.rs",
         "src/command_resources/journal.rs": "exomonad/node/src/command_resources/journal.rs",
         "src/command_resources/queue.rs": "exomonad/node/src/command_resources/queue.rs",
         "src/command_resources/queue_tests.rs": "exomonad/node/src/command_resources/queue_tests.rs",
@@ -131,6 +132,7 @@ tidepool_rust_isolated_test(
         "//tidepool/repr:tidepool_repr",
     ],
     required_test_modules = [
+        "exomonad/node/src/command_resources/custody_tests.rs",
         "exomonad/node/src/inbox/history_properties.rs",
         "exomonad/node/src/lib.rs",
     ],
@@ -279,6 +281,7 @@ filegroup(
         "exomonad/node/BUCK": "BUCK",
         "exomonad/node/Cargo.toml": "Cargo.toml",
         "exomonad/node/src/command_resources.rs": "src/command_resources.rs",
+        "exomonad/node/src/command_resources/custody_tests.rs": "src/command_resources/custody_tests.rs",
         "exomonad/node/src/command_resources/journal.rs": "src/command_resources/journal.rs",
         "exomonad/node/src/command_resources/queue.rs": "src/command_resources/queue.rs",
         "exomonad/node/src/command_resources/queue_tests.rs": "src/command_resources/queue_tests.rs",

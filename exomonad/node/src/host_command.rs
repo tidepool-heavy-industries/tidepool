@@ -290,13 +290,16 @@ impl HostCommand {
     }
 
     /// Wait for exit, then for both captures to reach end of file, so a
-    /// finished command's output is whole before anyone reads it.
+    /// finished command's output is whole before anyone reads it. Cancelling
+    /// observation retains unfinished captures for a later wait.
     pub async fn wait(&self) -> std::io::Result<HostExit> {
         let status = self.child.lock().await.wait().await?;
-        for reader in self.readers.lock().await.drain(..) {
-            // best-effort: the drain task's own join error carries nothing we
-            // act on; the captured buffers are what callers read.
+        let mut readers = self.readers.lock().await;
+        while let Some(reader) = readers.first_mut() {
+            // Borrow the owned handle until join completes: a cancelled wait
+            // must leave every unfinished capture available to the next wait.
             reader.await.ok();
+            drop(readers.remove(0));
         }
         use std::os::unix::process::ExitStatusExt;
         Ok(match (status.code(), status.signal()) {
@@ -453,6 +456,260 @@ mod tests {
         assert_eq!(capture.bytes.len(), RETAINED_STREAM_BYTES);
         assert_eq!(capture.bytes.back(), Some(&b'z'));
         assert_eq!(capture.dropped, RETAINED_STREAM_BYTES as u64 + 23);
+    }
+
+    struct GatedCaptures {
+        command: HostCommand,
+        stdout: Option<tokio::io::DuplexStream>,
+        stderr: Option<tokio::io::DuplexStream>,
+    }
+
+    impl GatedCaptures {
+        async fn new() -> Self {
+            let command = HostCommand::spawn(HostCommandSpec {
+                argv: &["sh".into(), "-c".into(), "exit 3".into()],
+                directory: Path::new("/tmp"),
+                environment: &[],
+                stdin: HostStdin::Closed,
+                cgroup: None,
+                boundary: None,
+                bubblewrap: None,
+            })
+            .unwrap();
+            assert_eq!(command.wait().await.unwrap(), HostExit::Exited(3));
+            *command.stdout.lock() = StreamBuffer::default();
+            *command.stderr.lock() = StreamBuffer::default();
+            let (stdout, stdout_pipe) = tokio::io::duplex(32);
+            let (stderr, stderr_pipe) = tokio::io::duplex(32);
+            *command.readers.lock().await = vec![
+                drain(stdout_pipe, Arc::clone(&command.stdout)),
+                drain(stderr_pipe, Arc::clone(&command.stderr)),
+            ];
+            Self {
+                command,
+                stdout: Some(stdout),
+                stderr: Some(stderr),
+            }
+        }
+
+        async fn finish(&mut self, stream: HostStream) {
+            let writer = match stream {
+                HostStream::Stdout => &mut self.stdout,
+                HostStream::Stderr => &mut self.stderr,
+            };
+            if let Some(mut writer) = writer.take() {
+                writer
+                    .write_all(match stream {
+                        HostStream::Stdout => b"stdout",
+                        HostStream::Stderr => b"stderr",
+                    })
+                    .await
+                    .unwrap();
+                drop(writer);
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !self.command.page(stream, 0, u64::MAX).finished {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("gated capture must reach EOF");
+        }
+
+        // Poll exactly once, then drop this observation. Readiness depends on
+        // the independently held pipe writers, not the command's handle list.
+        async fn observe_and_cancel(&self) {
+            let mut wait = std::pin::pin!(self.command.wait());
+            let observed = std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll(wait.as_mut(), cx))
+            })
+            .await;
+            if self.stdout.is_some() || self.stderr.is_some() {
+                assert!(observed.is_pending(), "capture is still open: {observed:?}");
+            } else {
+                assert!(matches!(
+                    observed,
+                    std::task::Poll::Ready(Ok(HostExit::Exited(3)))
+                ));
+                assert_eq!(
+                    self.command.page(HostStream::Stdout, 0, u64::MAX).text,
+                    "stdout"
+                );
+                assert_eq!(
+                    self.command.page(HostStream::Stderr, 0, u64::MAX).text,
+                    "stderr"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_wait_retains_pending_output_readers() {
+        let mut captures = GatedCaptures::new().await;
+        for _ in 0..3 {
+            captures.observe_and_cancel().await;
+        }
+        captures.finish(HostStream::Stdout).await;
+        for _ in 0..3 {
+            captures.observe_and_cancel().await;
+        }
+        captures.finish(HostStream::Stderr).await;
+        for _ in 0..3 {
+            captures.observe_and_cancel().await;
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum CaptureOperation {
+        ObserveAndCancel,
+        Finish(HostStream),
+    }
+
+    #[tokio::test]
+    async fn cancelled_wait_before_exit_still_collects_complete_output() {
+        let command = HostCommand::spawn(HostCommandSpec {
+            argv: &["cat".into()],
+            directory: Path::new("/tmp"),
+            environment: &[],
+            stdin: HostStdin::Piped,
+            cgroup: None,
+            boundary: None,
+            bubblewrap: None,
+        })
+        .unwrap();
+        {
+            let mut wait = std::pin::pin!(command.wait());
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(wait.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+        command.write_stdin("after cancellation").await.unwrap();
+        command.close_stdin().await;
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(5), command.wait())
+            .await
+            .expect("closed input permits command completion")
+            .unwrap();
+        assert_eq!(exit, HostExit::Exited(0));
+        let output = command.page(HostStream::Stdout, 0, u64::MAX);
+        assert_eq!(output.text, "after cancellation");
+        assert!(output.finished);
+        assert!(command.page(HostStream::Stderr, 0, u64::MAX).finished);
+    }
+
+    #[tokio::test]
+    async fn concurrent_waiter_cancellation_preserves_capture_owner() {
+        let mut captures = GatedCaptures::new().await;
+        for stream in [HostStream::Stdout, HostStream::Stderr] {
+            let mut first = Box::pin(captures.command.wait());
+            let mut second = Box::pin(captures.command.wait());
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(first.as_mut(), cx).is_pending());
+                assert!(std::future::Future::poll(second.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            drop(first);
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(second.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            drop(second);
+            captures.finish(stream).await;
+        }
+        captures.observe_and_cancel().await;
+    }
+
+    #[test]
+    fn capture_wait_histories_preserve_eof_before_terminal() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{
+            contextualize_config, Config, FileFailurePersistence, TestRunner,
+        };
+
+        let mut config = Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::capture_wait_histories_preserve_eof_before_terminal"
+        ));
+        let mut runner = TestRunner::new(contextualize_config(config));
+        let strategy = (
+            proptest::collection::vec(
+                prop_oneof![
+                    Just(CaptureOperation::ObserveAndCancel),
+                    Just(CaptureOperation::Finish(HostStream::Stdout)),
+                    Just(CaptureOperation::Finish(HostStream::Stderr)),
+                ],
+                0..48,
+            ),
+            any::<bool>(),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let callbacks = std::cell::Cell::new(0_usize);
+        let observations = std::cell::Cell::new([0_usize; 3]);
+        let result = runner.run(&strategy, |(operations, stderr_first)| {
+            callbacks.set(callbacks.get() + 1);
+            runtime.block_on(async {
+                let mut captures = GatedCaptures::new().await;
+                let observe = |captures: &GatedCaptures| {
+                    let mut counts = observations.get();
+                    counts[if captures.stdout.is_some() {
+                        0
+                    } else if captures.stderr.is_some() {
+                        1
+                    } else {
+                        2
+                    }] += 1;
+                    observations.set(counts);
+                };
+                for operation in operations {
+                    match operation {
+                        CaptureOperation::ObserveAndCancel => {
+                            observe(&captures);
+                            captures.observe_and_cancel().await;
+                        }
+                        CaptureOperation::Finish(stream) => captures.finish(stream).await,
+                    }
+                }
+                // Every generated prefix finishes both captures and repeats
+                // observation of their complete terminal output.
+                observe(&captures);
+                captures.observe_and_cancel().await;
+                captures
+                    .finish(if stderr_first {
+                        HostStream::Stderr
+                    } else {
+                        HostStream::Stdout
+                    })
+                    .await;
+                observe(&captures);
+                captures.observe_and_cancel().await;
+                captures
+                    .finish(if stderr_first {
+                        HostStream::Stdout
+                    } else {
+                        HostStream::Stderr
+                    })
+                    .await;
+                observe(&captures);
+                captures.observe_and_cancel().await;
+                observe(&captures);
+                captures.observe_and_cancel().await;
+            });
+            Ok(())
+        });
+        let [stdout_pending, stderr_pending, completed] = observations.get();
+        eprintln!("capture_wait_histories callbacks={} stdout_pending={stdout_pending} stderr_pending={stderr_pending} completed={completed}", callbacks.get());
+        result.unwrap();
     }
 
     #[tokio::test]

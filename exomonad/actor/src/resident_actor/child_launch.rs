@@ -332,6 +332,7 @@ where
             mut launch_worktrees,
             record_workspace,
             seed,
+            exit_destination,
         } = child;
         let checkpoint_lease = checkpoint_admission
             .as_ref()
@@ -380,7 +381,7 @@ where
             None => {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
                     "workspace admission is unavailable".into(),
-                ))
+                ));
             }
         };
         // The child may carry declarations that import a helper published by
@@ -504,6 +505,7 @@ where
         } else {
             ResidentKernelBehavior::child(descriptor, environment.clone(), entry, launch_worktrees)
         };
+        behavior.exit_destination = exit_destination;
         behavior.child_placement_custody = Some(continuation.placement_custody.clone());
         behavior.admitted_checkpoint = checkpoint_admission.clone();
         behavior.prepared_workspace = prepared_workspace;
@@ -1338,25 +1340,30 @@ mod tests {
         *body = 1;
         let mut table = DataConTable::new();
         for constructor in &wire.constructors {
-            table.insert(tidepool_repr::DataCon {
-                id: constructor.host_id,
-                name: constructor.identity.occurrence.clone(),
-                tag: constructor.tag,
-                rep_arity: constructor.field_reps.len() as u32,
-                field_bangs: vec![],
-                qualified_name: Some(format!(
-                    "{}.{}",
-                    constructor.identity.module, constructor.identity.occurrence
-                )),
-                type_name: constructor.family.occurrence.clone(),
-            });
+            table
+                .insert_checked(tidepool_repr::DataCon {
+                    identity: constructor.identity.clone(),
+                    id: constructor.host_id,
+                    name: constructor.identity.occurrence.clone(),
+                    tag: constructor.tag,
+                    rep_arity: constructor.field_reps.len() as u32,
+                    field_bangs: vec![],
+                    qualified_name: Some(format!(
+                        "{}.{}",
+                        constructor.identity.module, constructor.identity.occurrence
+                    )),
+                    type_name: constructor.family.occurrence.clone(),
+                })
+                .expect("valid fixture metadata");
         }
-        Arc::new(tidepool_runtime::session::CompiledTurn {
-            prepared: Arc::new(testing::prepare(wire).unwrap()),
-            table,
-            asks: Vec::new(),
-            warnings: Default::default(),
-            certification: None,
-        })
+        Arc::new(
+            tidepool_runtime::session::CompiledTurn::from_prepared(
+                Arc::new(testing::prepare(wire).unwrap()),
+                table,
+                Default::default(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
     }
 }
