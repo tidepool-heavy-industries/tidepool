@@ -117,6 +117,27 @@ impl WorkbenchReservationAttempt {
     }
 }
 
+/// Submission causality is telemetry, independent of reservation and cleanup custody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RequestActivationOrigin {
+    pub(crate) request: RequestId,
+    pub(crate) parent_actor: ActorRef,
+    pub(crate) target: ActorRef,
+    pub(crate) execution: tidepool_runtime::session::WorkbenchExecutionId,
+    pub(crate) attempt: WorkbenchReservationAttempt,
+}
+
+pub(crate) struct RequestPresentation {
+    pub(crate) cancellation: Option<CancellationReason>,
+    pub(crate) origin: Option<RequestActivationOrigin>,
+}
+
+impl std::fmt::Display for WorkbenchReservationAttempt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        uuid::Uuid::from_bytes(self.0).fmt(formatter)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ActorEventSequence(pub u64);
@@ -368,6 +389,7 @@ struct RequestRecord {
     activation: Option<activation::ActivationRecord>,
     owner: ActorRef,
     reservation_owner: Option<RequestReservationOwner>,
+    submission_origin: Option<RequestActivationOrigin>,
     cleanup_owner: ResourceCleanupOwner,
     target: ActorRef,
     label: String,
@@ -651,6 +673,7 @@ impl RequestStateTable {
                 activation: None,
                 owner,
                 reservation_owner,
+                submission_origin: None,
                 cleanup_owner,
                 target,
                 label,
@@ -1659,7 +1682,7 @@ impl RequestRegistry {
         target: ActorRef,
         request: RequestId,
     ) -> Result<(), ReplyError> {
-        self.mark_queued_with_deadline(owner, target, request, None)
+        self.mark_queued_with_deadline(owner, target, request, None, None)
     }
 
     pub(crate) fn mark_queued_with_deadline(
@@ -1668,6 +1691,7 @@ impl RequestRegistry {
         target: ActorRef,
         request: RequestId,
         deadline: Option<ActiveRequestDeadline>,
+        submission_owner: Option<RequestReservationOwner>,
     ) -> Result<(), ReplyError> {
         let mut state = self.state.lock();
         if state.cleaning.contains(&owner) || state.cleaning.contains(&target) {
@@ -1682,6 +1706,21 @@ impl RequestRegistry {
             TargetState::Reserved => {
                 record.target_state = TargetState::Queued;
                 record.deadline = deadline;
+                if let Some(RequestReservationOwner::Workbench { execution, attempt }) =
+                    submission_owner
+                {
+                    tracing::info!(target: "exomonad_actor::request",
+                        request = request.0, parent_actor = %owner, activation_actor = %target,
+                        parent_execution = %execution, parent_attempt = %attempt,
+                        "request activation origin issued");
+                    record.submission_origin = Some(RequestActivationOrigin {
+                        request,
+                        parent_actor: owner,
+                        target,
+                        execution,
+                        attempt,
+                    });
+                }
                 let received = state.received_requests.entry(target).or_default();
                 *received = received.saturating_add(1);
                 *state.cleanup_revision.entry(target).or_default() += 1;
@@ -1699,6 +1738,7 @@ impl RequestRegistry {
         request: RequestId,
     ) -> Result<Option<CancellationReason>, ReplyError> {
         self.present_with_progress_type(target, request, None)
+            .map(|presentation| presentation.cancellation)
     }
 
     pub(crate) fn present_with_progress_type(
@@ -1708,7 +1748,7 @@ impl RequestRegistry {
         progress_type: Option<
             std::sync::Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
         >,
-    ) -> Result<Option<CancellationReason>, ReplyError> {
+    ) -> Result<RequestPresentation, ReplyError> {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_target(record, target)?;
@@ -1716,7 +1756,10 @@ impl RequestRegistry {
             TargetState::Queued => {
                 record.progress_type = progress_type.into();
                 record.target_state = TargetState::Presented;
-                Ok(None)
+                Ok(RequestPresentation {
+                    cancellation: None,
+                    origin: record.submission_origin.clone(),
+                })
             }
             TargetState::CancellationRequested {
                 presented: false,
@@ -1727,7 +1770,10 @@ impl RequestRegistry {
                     presented: true,
                     reason,
                 };
-                Ok(Some(reason))
+                Ok(RequestPresentation {
+                    cancellation: Some(reason),
+                    origin: record.submission_origin.clone(),
+                })
             }
             TargetState::Closed => Err(ReplyError::AlreadySettled),
             TargetState::Reserved
@@ -4329,6 +4375,147 @@ mod tests {
         );
     }
 
+    #[test]
+    fn submission_origin_preserves_reservation_custody_and_first_successful_submission() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let reservation = RequestReservationOwner::Workbench {
+            execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest([1; 16]),
+            attempt: WorkbenchReservationAttempt::fresh(),
+        };
+        let submission = RequestReservationOwner::Workbench {
+            execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest([2; 16]),
+            attempt: WorkbenchReservationAttempt::fresh(),
+        };
+        let request = registry.reserve_for_operation(
+            owner,
+            target,
+            "input".into(),
+            true,
+            Some(reservation.clone()),
+        );
+        let wrong_target = ActorRef {
+            incarnation: Incarnation(2),
+            ..target
+        };
+        assert!(registry
+            .mark_queued_with_deadline(owner, wrong_target, request, None, Some(submission.clone()))
+            .is_err());
+        assert!(registry
+            .mark_queued_with_deadline(actor(3), target, request, None, Some(submission.clone()))
+            .is_err());
+        assert!(registry.state.lock().requests[&request]
+            .submission_origin
+            .is_none());
+        registry
+            .mark_queued_with_deadline(owner, target, request, None, Some(submission.clone()))
+            .unwrap();
+        let expected = registry.state.lock().requests[&request]
+            .submission_origin
+            .clone()
+            .unwrap();
+        assert_eq!(
+            registry.state.lock().requests[&request].reservation_owner,
+            Some(reservation.clone())
+        );
+        assert!(registry
+            .mark_queued_with_deadline(owner, target, request, None, Some(reservation))
+            .is_err());
+        assert_eq!(
+            registry.state.lock().requests[&request].submission_origin,
+            Some(expected.clone())
+        );
+        assert!(registry
+            .present_with_progress_type(wrong_target, request, None)
+            .is_err());
+        let presentation = registry
+            .present_with_progress_type(target, request, None)
+            .unwrap();
+        assert_eq!(presentation.origin, Some(expected.clone()));
+        assert_eq!(presentation.cancellation, None);
+        assert_eq!(expected.request, request);
+        assert_eq!(expected.target, target);
+        assert_eq!(expected.parent_actor, owner);
+        if let RequestReservationOwner::Workbench { execution, attempt } = submission {
+            assert_eq!(expected.execution, execution);
+            assert_eq!(expected.attempt, attempt);
+        }
+        assert!(registry
+            .present_with_progress_type(target, request, None)
+            .is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn submission_origin_operation_histories(
+            original in proptest::array::uniform16(proptest::num::u8::ANY),
+            submitted in proptest::array::uniform16(proptest::num::u8::ANY),
+            retries in 0usize..12,
+            cancel in proptest::bool::ANY,
+            workbench in proptest::bool::ANY,
+        ) {
+            let registry = RequestRegistry::default();
+            let owner = actor(1);
+            let target = actor(2);
+            let original = RequestReservationOwner::Workbench {
+                execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest(original),
+                attempt: WorkbenchReservationAttempt::fresh(),
+            };
+            let submitted = workbench.then(|| RequestReservationOwner::Workbench {
+                execution: tidepool_runtime::session::WorkbenchExecutionId::from_digest(submitted),
+                attempt: WorkbenchReservationAttempt::fresh(),
+            });
+            let request = registry.reserve_for_operation(owner, target, "generated".into(), true,
+                                                         Some(original.clone()));
+            registry.mark_queued_with_deadline(owner, target, request, None, submitted.clone()).unwrap();
+            let expected = registry.state.lock().requests[&request].submission_origin.clone();
+            for _ in 0..retries {
+                proptest::prop_assert!(registry.mark_queued_with_deadline(owner, target, request, None,
+                                                                         Some(original.clone())).is_err());
+                proptest::prop_assert_eq!(&registry.state.lock().requests[&request].submission_origin, &expected);
+            }
+            if cancel {
+                registry.cancel_request(owner, request, CancellationReason::RequesterCancelled).unwrap();
+            }
+            let presentation = registry.present_with_progress_type(target, request, None).unwrap();
+            proptest::prop_assert_eq!(presentation.cancellation, cancel.then_some(CancellationReason::RequesterCancelled));
+            proptest::prop_assert_eq!(presentation.origin.as_ref(), expected.as_ref());
+            proptest::prop_assert_eq!(&registry.state.lock().requests[&request].reservation_owner, &Some(original));
+            match submitted {
+                Some(RequestReservationOwner::Workbench { execution, attempt }) => {
+                    let origin = presentation.origin.unwrap();
+                    proptest::prop_assert_eq!((origin.request, origin.parent_actor, origin.target), (request, owner, target));
+                    proptest::prop_assert_eq!((origin.execution, origin.attempt), (execution, attempt));
+                }
+                None => proptest::prop_assert!(presentation.origin.is_none()),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn non_workbench_submissions_do_not_invent_activation_origin() {
+        for submission in [
+            None,
+            Some(RequestReservationOwner::Route(WatchId(7))),
+            Some(RequestReservationOwner::Scope(8)),
+        ] {
+            let registry = RequestRegistry::default();
+            let owner = actor(1);
+            let target = actor(2);
+            let request = registry.reserve(owner, target);
+            registry
+                .mark_queued_with_deadline(owner, target, request, None, submission)
+                .unwrap();
+            assert!(registry
+                .present_with_progress_type(target, request, None)
+                .unwrap()
+                .origin
+                .is_none());
+        }
+    }
+
     #[tokio::test]
     async fn status_preserves_authored_deadline_units_and_hides_terminal_deadlines() {
         let registry = RequestRegistry::default();
@@ -4342,6 +4529,7 @@ mod tests {
                 target,
                 request,
                 Some(ActiveRequestDeadline::start(deadline).expect("active deadline")),
+                None,
             )
             .unwrap();
 

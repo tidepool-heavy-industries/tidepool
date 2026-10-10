@@ -3382,6 +3382,13 @@ impl CurrentEffectOwner<'_> {
         }
     }
 
+    fn submission_owner(&self) -> Option<RequestReservationOwner> {
+        match self {
+            Self::Scoped { base, .. } => base.submission_owner(),
+            _ => self.reservation_owner(),
+        }
+    }
+
     fn after_tool_active(&self) -> bool {
         match self {
             Self::Scoped { base, .. } => base.after_tool_active(),
@@ -6706,6 +6713,7 @@ where
                         submission.target,
                         submission.request,
                         request_deadline.clone(),
+                        effect_owner.submission_owner(),
                     ) {
                         return self
                             .environment
@@ -7171,7 +7179,7 @@ where
         prepared: Option<PreparedInteractivePublication>,
     ) -> Result<InteractivePark, ResidentActorWorkbenchError> {
         let (request, hole, input) = session.into_parts();
-        let cancellation = self
+        let presentation = self
             .environment
             .requests
             .present_with_progress_type(
@@ -7205,7 +7213,7 @@ where
         // preparation begins only after that exact durable owner is admissible.
         self.publish_application_surface(kernel, context, owner.clone(), bootstrap)
             .await?;
-        if cancellation.is_some() {
+        if presentation.cancellation.is_some() {
             drop(hole);
             drop(input);
             return Ok(InteractivePark::Cancelled(request.request));
@@ -7257,6 +7265,7 @@ where
             .mount_activation_input(
                 compile_context,
                 input,
+                presentation.origin.as_ref(),
                 request.response.expected_type().to_owned(),
                 request.response.declaration.clone(),
                 request.response.declaration_modules.clone(),

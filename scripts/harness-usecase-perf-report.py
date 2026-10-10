@@ -58,6 +58,9 @@ def assign_submission_phases(submissions, dispatches, phases, roster):
             candidates.update(phases_by_execution.get(execution, set()))
         if request["startup_owner_spans"]:
             candidates.add("activation")
+        if (request.get("activation_input_origin") is not None
+                and request["activation_input_origin"]["status"] != "verified"):
+            candidates.clear()
         request["owner_candidates"] = sorted(candidates)
         request["phase_attribution"] = (
             "ambiguous" if len(candidates) > 1 else
@@ -172,6 +175,57 @@ def admission_identity(row):
     return str(epoch), admission
 
 
+def activation_origin_key(value, *, issued=False):
+    request = value.get("request" if issued else "source_request")
+    child = value.get("activation_actor" if issued else "actor")
+    parent = value.get("parent_actor")
+    execution = value.get("parent_execution")
+    attempt = value.get("parent_attempt")
+    if (type(request) is not int or request < 0
+            or not all(isinstance(item, str) and item.strip()
+                       for item in (child, parent, execution, attempt))):
+        return None
+    return request, child, parent, execution, attempt
+
+
+def activation_origins(host_rows):
+    """Index registry-issued receipts and their exact parent dispatch witnesses."""
+    issued = {}
+    dispatch_actors = {}
+    for row in host_rows:
+        value = fields(row)
+        if value.get("message") == "workbench cell dispatched to its actor":
+            if isinstance(value.get("execution"), str):
+                dispatch_actors.setdefault(value["execution"], []).append(value.get("actor"))
+        if (row.get("target") == "exomonad_actor::request"
+                and value.get("message") == "request activation origin issued"):
+            key = activation_origin_key(value, issued=True)
+            parent_cells = {(span.get("actor"), span.get("execution"))
+                            for span in span_fields(row) if span.get("name") == "cell"}
+            if type(value.get("request")) is int:
+                issued.setdefault(value["request"], []).append((key, parent_cells))
+    return issued, dispatch_actors
+
+
+def joined_activation_origin(row, issued, dispatch_actors):
+    spans = [span for span in span_fields(row) if span.get("name") == "activation_input_prepare"]
+    if not spans:
+        return None
+    keys = {activation_origin_key(span) for span in spans}
+    if len(keys) != 1 or None in keys:
+        return {"status": "missing_or_ambiguous_receipt"}
+    key = next(iter(keys))
+    request, child, parent, execution, attempt = key
+    claims = issued.get(request, [])
+    result = {"source_request": request, "actor": child, "parent_actor": parent,
+              "parent_execution": execution, "parent_attempt": attempt}
+    if (len(claims) != 1 or claims[0][0] != key
+            or claims[0][1] != {(parent, execution)}
+            or dispatch_actors.get(execution) != [parent]):
+        return {**result, "status": "unmatched_or_ambiguous_issuance"}
+    return {**result, "status": "verified"}
+
+
 def compiler_events(host_rows, daemon_rows):
     dispatches = {}
     for row in host_rows:
@@ -190,6 +244,7 @@ def compiler_events(host_rows, daemon_rows):
             if execution:
                 calls.setdefault(str(execution), []).append(fields(row))
 
+    issued_origins, dispatch_actors = activation_origins(host_rows)
     submissions = []
     for event_index, row in enumerate(host_rows):
         if (row.get("target") != "tidepool_extract_cmd::endpoint"
@@ -198,6 +253,9 @@ def compiler_events(host_rows, daemon_rows):
         identity = request_identity(row)
         executions = {str(span.get("execution")) for span in span_fields(row)
                       if span.get("name") == "cell" and span.get("execution") is not None}
+        activation_origin = joined_activation_origin(row, issued_origins, dispatch_actors)
+        if activation_origin is not None and activation_origin["status"] == "verified":
+            executions.add(activation_origin["parent_execution"])
         owners = {
             str(owner)
             for span in span_fields(row)
@@ -210,7 +268,8 @@ def compiler_events(host_rows, daemon_rows):
         startup_owners = sorted({owner for span in span_fields(row)
                                  if (owner := startup_owner(span)) is not None})
         submissions.append({"event_index": event_index, "identity": identity, "executions": sorted(executions),
-                            "phase_owners": sorted(owners), "startup_owner_spans": startup_owners})
+                            "phase_owners": sorted(owners), "startup_owner_spans": startup_owners,
+                            "activation_input_origin": activation_origin})
 
     services = []
     queues = {}
@@ -598,6 +657,7 @@ def analyze(record_path):
                 "identity": identity, "executions": request["executions"],
                 "phase_owners": request["phase_owners"],
                 "startup_owner_spans": request["startup_owner_spans"],
+                "activation_input_origin": request["activation_input_origin"],
                 "owner_candidates": request["owner_candidates"],
                 "phase_attribution": request["phase_attribution"],
                 "daemon_service_records": matched,
@@ -774,6 +834,11 @@ def analyze(record_path):
             "runner_diagnostic_sample_status": "complete" if execution.get("diagnostic_evidence_complete") is True
                                                else "incomplete_or_unknown",
         },
+        "activation_input_origins": [
+            {"identity": request["identity"], "phase_attribution": request["phase_attribution"],
+             **request["activation_input_origin"]}
+            for request in submissions if request["activation_input_origin"] is not None
+        ],
         "startup_scope": {
             "owner_status": startup_owner_status,
             "unowned_host_submission_count": len(startup_unowned),
@@ -792,7 +857,7 @@ def analyze(record_path):
             "ambiguous_startup_span_requests": ambiguous_startup_owner_requests,
             "ambiguous_requests": ambiguous_owner_submissions,
             "unknown_owner_requests": unknown_owner_submissions,
-            "assignment_policy": "exact_declared_phase_or_root_startup_owner; no count or timestamp assignment",
+            "assignment_policy": "exact_declared_phase_or_issued_child_origin_or_root_startup_owner; no count or timestamp assignment",
         },
         "compiler_allowances": requested_allowances,
         "compiler_job_grants": {

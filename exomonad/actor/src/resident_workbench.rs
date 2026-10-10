@@ -43,9 +43,7 @@ use tidepool_runtime::session::{
     ResidentHole, ResidentOutcome, ResidentResumeError, ResidentSession, RootCustody,
     SourceImports, TurnClassification, TurnCode, TurnKind, TurnRequest, TurnResult,
 };
-use tidepool_runtime::{
-    classify_compile, classify_session, spawn_blocking_in_span, CompileError, FailureClass,
-};
+use tidepool_runtime::{classify_compile, spawn_blocking_in_span, CompileError, FailureClass};
 use tracing::Instrument;
 
 use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound, ResidentWaitRequest};
@@ -5463,15 +5461,33 @@ where
 
     /// Commit the original input through a fresh thin interface, then prepare
     /// its pure display against the original executable owners.
-    #[tracing::instrument(target = "exomonad_actor::workbench_phase", name = "activation_input_prepare", skip_all, fields(actor = %context.actor))]
+    #[tracing::instrument(target = "exomonad_actor::workbench_phase", name = "activation_input_prepare", skip_all, fields(actor = %context.actor, source_request = tracing::field::Empty, parent_actor = tracing::field::Empty, parent_execution = tracing::field::Empty, parent_attempt = tracing::field::Empty))]
     pub(crate) async fn mount_activation_input(
         &self,
         context: crate::ActorSessionContext,
         input: tidepool_runtime::session::RuntimeActivationInput,
+        origin: Option<&crate::request::RequestActivationOrigin>,
         reply_type: String,
         reply_declaration: Option<String>,
         reply_declaration_modules: Vec<String>,
     ) -> Result<PreparedActivationInput, ResidentActorWorkbenchError> {
+        if let Some(origin) = origin {
+            if origin.target != context.actor
+                || self.request_scope.as_ref().map(|scope| scope.request) != Some(origin.request)
+            {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "activation origin differs from its exact request target".into(),
+                ));
+            }
+            let span = tracing::Span::current();
+            span.record("source_request", origin.request.0);
+            span.record("parent_actor", tracing::field::display(origin.parent_actor));
+            span.record(
+                "parent_execution",
+                tracing::field::display(&origin.execution),
+            );
+            span.record("parent_attempt", tracing::field::display(&origin.attempt));
+        }
         let private_owner = self.private_execution.clone().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "activation input requires its original private execution".into(),
@@ -20881,6 +20897,7 @@ pub(crate) mod request_tests {
             .mount_activation_input(
                 private_context,
                 inputs.remove(0),
+                None,
                 "()".into(),
                 None,
                 Vec::new(),
@@ -21065,7 +21082,14 @@ pub(crate) mod request_tests {
             )
             .with_private_execution(execution);
             let prepared = private_workbench
-                .mount_activation_input(private_context.clone(), input, "()".into(), None, vec![])
+                .mount_activation_input(
+                    private_context.clone(),
+                    input,
+                    None,
+                    "()".into(),
+                    None,
+                    vec![],
+                )
                 .await
                 .unwrap();
             let binding = prepared.binding;
@@ -21186,7 +21210,14 @@ pub(crate) mod request_tests {
         private_context.placement.lexical_scope = execution.private_scope;
         let workbench = workbench.with_private_execution(execution);
         let error = workbench
-            .mount_activation_input(private_context, inputs.remove(0), "()".into(), None, vec![])
+            .mount_activation_input(
+                private_context,
+                inputs.remove(0),
+                None,
+                "()".into(),
+                None,
+                vec![],
+            )
             .await
             .unwrap_err();
         assert!(

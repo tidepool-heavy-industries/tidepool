@@ -95,6 +95,68 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         })
         return record_path
 
+    def make_child_activation_case(self):
+        record = self.make_complete_case("three-actor-capture")
+        trace = self.root / "artifacts/host.jsonl"
+        rows = reporter.read_jsonl(trace)
+        rows[0]["fields"]["actor"] = "1@1"
+        origin = {"request": 11, "activation_actor": "2@1", "parent_actor": "1@1",
+                  "parent_execution": "exec-3", "parent_attempt": "attempt-3"}
+        rows.append({"target": "exomonad_actor::request", "fields": {
+            "message": "request activation origin issued", **origin},
+            "span": {"name": "cell", "actor": "1@1", "execution": "exec-3"}})
+        rows[2]["span"] = {"name": "activation_input_prepare", "actor": "2@1",
+                           "source_request": 11, "parent_actor": "1@1",
+                           "parent_execution": "exec-3", "parent_attempt": "attempt-3"}
+        self.write_jsonl(trace, rows)
+        return record, trace, rows
+
+    def test_child_activation_exact_origin_is_order_independent(self):
+        record, trace, rows = self.make_child_activation_case()
+        for permutation in itertools.permutations(rows):
+            self.write_jsonl(trace, permutation)
+            report = reporter.analyze(record)
+            self.assertEqual(report["workload_request_service_joins"]["status"], "complete")
+            self.assertEqual(report["startup_scope"]["owner_status"], "complete")
+            self.assertEqual(report["activation_input_origins"][0]["status"], "verified")
+            self.assertEqual(report["activation_input_origins"][0]["phase_attribution"],
+                             "root-fork-capture")
+            self.assertEqual(report["startup_scope"]["explicit_startup_span_owner_request_count"], 0)
+
+    def test_child_activation_missing_mismatched_and_ambiguous_origins_refused(self):
+        record, trace, original = self.make_child_activation_case()
+        mutations = [
+            ("missing issuance", lambda rows: rows.pop()),
+            ("duplicate issuance", lambda rows: rows.append(rows[-1])),
+            ("duplicate dispatch", lambda rows: rows.append(rows[0])),
+            ("wrong child", lambda rows: rows[2]["span"].update(actor="3@1")),
+            ("wrong incarnation", lambda rows: rows[2]["span"].update(actor="2@2")),
+            ("wrong request", lambda rows: rows[2]["span"].update(source_request=12)),
+            ("wrong parent", lambda rows: rows[2]["span"].update(parent_actor="4@1")),
+            ("wrong execution", lambda rows: rows[2]["span"].update(parent_execution="exec-other")),
+            ("wrong attempt", lambda rows: rows[2]["span"].update(parent_attempt="retry")),
+            ("wrong issuer cell", lambda rows: rows[-1]["span"].update(execution="exec-other")),
+            ("wrong dispatch actor", lambda rows: rows[0]["fields"].update(actor="4@1")),
+            ("competing child receipt", lambda rows: rows[2].update(spans=[{
+                **rows[2]["span"], "actor": "3@1"}])),
+            ("competing issuer cell", lambda rows: rows[-1].update(spans=[{
+                **rows[-1]["span"], "execution": "exec-other"}])),
+            ("explicit phase cannot hide missing origin", lambda rows: rows[2]["span"].update(
+                source_request=12, workload_phase="root-fork-capture")),
+        ]
+        mutations += [(f"absent {field}", lambda rows, field=field: rows[2]["span"].pop(field))
+                      for field in ("source_request", "parent_actor", "parent_execution", "parent_attempt")]
+        for label, mutation in mutations:
+            with self.subTest(label=label):
+                rows = json.loads(json.dumps(original))
+                mutation(rows)
+                self.write_jsonl(trace, rows)
+                report = reporter.analyze(record)
+                self.assertEqual(report["workload_request_service_joins"]["status"], "partial_or_unknown")
+                self.assertEqual(report["startup_scope"]["owner_status"], "unknown_unowned_or_unmatched_requests")
+                self.assertNotEqual(report["activation_input_origins"][0]["status"], "verified")
+                self.assertEqual(report["activation_input_origins"][0]["phase_attribution"], "unknown")
+
     def test_report_preserves_requested_width_and_capacity_capped_admission(self):
         path = self.make_case()
         record = reporter.read_json(path)
@@ -273,7 +335,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual(report["startup_scope"]["unowned_host_submission_count"], 1)
         self.assertEqual(report["queue_evidence"]["status"], "complete")
         self.assertEqual(report["startup_scope"]["assignment_policy"],
-                         "exact_declared_phase_or_root_startup_owner; no count or timestamp assignment")
+                         "exact_declared_phase_or_issued_child_origin_or_root_startup_owner; no count or timestamp assignment")
 
     def test_startup_owner_requires_and_accepts_explicit_phase_span(self):
         record = self.make_case()
