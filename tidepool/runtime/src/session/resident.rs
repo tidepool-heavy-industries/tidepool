@@ -10761,7 +10761,7 @@ mod authored_publication_tests {
             )
         })
         .unwrap_err();
-        assert!(refused.published_declaration_commit().is_none());
+        assert!(matches!(refused, SessionError::RecoveryStoreRefused(_)));
         assert_eq!(
             session.public_visibility_snapshot_in(ScopeId::ROOT),
             Some(before)

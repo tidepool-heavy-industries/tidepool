@@ -2113,20 +2113,33 @@ impl PersistentSession {
         public_scope: ScopeId,
     ) -> Result<Arc<RuntimeDurablePublicReadiness>, SessionError> {
         self.validate_durable_public_admission(owner, public_scope)?;
+        Ok(self.prepare_durable_public_readiness(
+            owner,
+            public_scope,
+            self.admission_owner().epoch(),
+        ))
+    }
+
+    pub(super) fn prepare_durable_public_readiness(
+        &self,
+        owner: &super::RecoveryPublicOwner,
+        public_scope: ScopeId,
+        owner_epoch: u64,
+    ) -> Arc<RuntimeDurablePublicReadiness> {
         let state = self
             .lib()
             .durable_graph
             .as_ref()
             .expect("validated durable graph");
-        Ok(Arc::new(RuntimeDurablePublicReadiness {
+        Arc::new(RuntimeDurablePublicReadiness {
             owner: self.admission_owner().clone(),
-            owner_epoch: self.admission_owner().epoch(),
+            owner_epoch,
             session: self.lib().session_id(),
             durable: owner.clone(),
             scope: public_scope,
             store: Arc::downgrade(&state.store),
             attachment: Arc::downgrade(&state.readiness_lifetime),
-        }))
+        })
     }
 
     pub(super) fn validate_durable_public_admission(
