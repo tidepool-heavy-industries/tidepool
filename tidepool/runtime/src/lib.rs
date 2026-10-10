@@ -103,6 +103,7 @@ pub fn compile_haskell(
     source: &str,
     target: &str,
     include: &[&Path],
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<CompileResult, CompileError> {
     let include_owned: Vec<PathBuf> = include.iter().map(|p| p.to_path_buf()).collect();
     let inv = artifacts::CompileInvocation {
@@ -111,7 +112,7 @@ pub fn compile_haskell(
         include: &include_owned,
         fallback_module_name: "Input",
     };
-    let mut bundle = artifacts::compile_invocation(&inv, |_, _, _| {})?;
+    let mut bundle = artifacts::compile_invocation(&inv, |_, _, _| {}, settlement)?;
     #[allow(
         clippy::expect_used,
         reason = "compile_invocation compiled exactly this target"
@@ -191,6 +192,7 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
     handlers: &mut H,
     user: &U,
     nursery_size: usize,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<EvalResult, RuntimeError> {
     compile_and_run_cancellable(
         source,
@@ -200,6 +202,7 @@ pub fn compile_and_run_with_nursery_size<U, H: DispatchEffect<U>>(
         user,
         nursery_size,
         |_| {},
+        settlement,
     )
 }
 
@@ -234,6 +237,7 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
     user: &U,
     nursery_size: usize,
     on_ready: impl FnOnce(CancelHandle),
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<EvalResult, RuntimeError> {
     let _ = target;
     let include_owned = include
@@ -245,6 +249,7 @@ pub fn compile_and_run_cancellable<U, H: DispatchEffect<U>>(
         &[session::PREPARED_SCAFFOLD_TARGET],
         &include_owned,
         |_, _, _| {},
+        settlement,
     )?;
     let value = run_compiled_target(
         &artifacts,
@@ -466,6 +471,7 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
     include: &[&Path],
     handlers: &mut H,
     user: &U,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<EvalResult, RuntimeError> {
     compile_and_run_with_nursery_size(
         source,
@@ -474,6 +480,7 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
         handlers,
         user,
         DEFAULT_NURSERY_SIZE,
+        settlement,
     )
 }
 
